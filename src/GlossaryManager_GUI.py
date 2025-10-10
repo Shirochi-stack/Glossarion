@@ -413,262 +413,42 @@ class GlossaryManagerMixin:
         
         def save_glossary_settings():
             try:
-                debug_enabled = getattr(self, 'config', {}).get('show_debug_buttons', False)
-                
-                def debug_log(message):
-                    """Helper function to conditionally log debug messages"""
-                    if debug_enabled:
-                        self.append_log(message)
-                
-                debug_log("🔍 [DEBUG] Starting glossary settings save process...")
-                
-                # Update prompts from text widgets
+                # Update prompts from text widgets to instance variables
                 self.update_glossary_prompts()
                 
-                # Save custom fields
-                self.config['custom_glossary_fields'] = self.custom_glossary_fields
-                
-                # Update enabled status from checkboxes
-                if hasattr(self, 'type_enabled_checks'):
+                # Check if any types are enabled before saving
+                # Note: save_config will update enabled status from checkboxes automatically
+                enabled_types = []
+                if hasattr(self, 'type_enabled_checks') and hasattr(self, 'custom_entry_types'):
+                    # Check from UI checkboxes
                     for type_name, checkbox in self.type_enabled_checks.items():
-                        if type_name in self.custom_entry_types:
-                            self.custom_entry_types[type_name]['enabled'] = checkbox.isChecked()
+                        if checkbox.isChecked():
+                            enabled_types.append(type_name)
+                elif hasattr(self, 'custom_entry_types'):
+                    # Fallback: check from custom_entry_types dict
+                    enabled_types = [t for t, cfg in self.custom_entry_types.items() if cfg.get('enabled', True)]
                 
-                # Save custom entry types
-                self.config['custom_entry_types'] = self.custom_entry_types
+                # Only show warning if we have custom_entry_types and none are enabled
+                if hasattr(self, 'custom_entry_types') and not enabled_types:
+                    QMessageBox.warning(dialog, "Warning", "No entry types selected! The glossary extraction will not find any entries.")
                 
-                # Save all glossary-related settings with validation
-                settings_to_save = {
-                    'enable_auto_glossary': ('enable_auto_glossary_checkbox', lambda x: x.isChecked()),
-                    'append_glossary': ('append_glossary_checkbox', lambda x: x.isChecked()),
-                    'glossary_min_frequency': ('glossary_min_frequency_entry', lambda x: int(x.text())),
-                    'glossary_max_names': ('glossary_max_names_entry', lambda x: int(x.text())),
-                    'glossary_max_titles': ('glossary_max_titles_entry', lambda x: int(x.text())),
-                    'glossary_batch_size': ('glossary_batch_size_entry', lambda x: int(x.text())),
-                    'glossary_max_text_size': ('glossary_max_text_size_entry', lambda x: int(x.text())),
-                    'glossary_chapter_split_threshold': ('glossary_chapter_split_threshold_entry', lambda x: int(x.text())),
-                    'glossary_max_sentences': ('glossary_max_sentences_entry', lambda x: int(x.text())),
-                }
-                
-                failed_settings = []
-                for setting_name, (var_name, converter) in settings_to_save.items():
-                    try:
-                        if hasattr(self, var_name):
-                            var_obj = getattr(self, var_name)
-                            self.config[setting_name] = converter(var_obj)
-                            debug_log(f"🔍 [DEBUG] Saved {setting_name}: {self.config[setting_name]}")
-                        else:
-                            failed_settings.append(f"{setting_name} (variable {var_name} not found)")
-                    except Exception as e:
-                        failed_settings.append(f"{setting_name} ({str(e)})")
-                
-                if failed_settings and debug_enabled:
-                    debug_log(f"⚠️ [DEBUG] Failed to save settings: {', '.join(failed_settings)}")
-                
-                # Save additional settings with error handling
-                self.config['glossary_format_instructions'] = getattr(self, 'glossary_format_instructions', '')
-                
-                # Honorifics and other settings
-                if hasattr(self, 'strip_honorifics_checkbox'):
-                    self.config['strip_honorifics'] = self.strip_honorifics_checkbox.isChecked()
-                    debug_log(f"🔍 [DEBUG] Saved strip_honorifics: {self.config['strip_honorifics']}")
-                else:
-                    debug_log("⚠️ [DEBUG] strip_honorifics_checkbox not found")
-                    
-                if hasattr(self, 'disable_honorifics_checkbox'):
-                    self.config['glossary_disable_honorifics_filter'] = self.disable_honorifics_checkbox.isChecked()
-                    debug_log(f"🔍 [DEBUG] Saved glossary_disable_honorifics_filter: {self.config['glossary_disable_honorifics_filter']}")
-                else:
-                    debug_log("⚠️ [DEBUG] disable_honorifics_checkbox not found")
-                
-                # Save format preference
-                if hasattr(self, 'use_legacy_csv_checkbox'):
-                    self.config['glossary_use_legacy_csv'] = self.use_legacy_csv_checkbox.isChecked()
-                    debug_log(f"🔍 [DEBUG] Saved glossary_use_legacy_csv: {self.config['glossary_use_legacy_csv']}")
-                else:
-                    debug_log("⚠️ [DEBUG] use_legacy_csv_checkbox not found")
-                
-                # Save glossary history rolling (keep recent context)
-                if hasattr(self, 'glossary_history_rolling_checkbox'):
-                    self.config['glossary_history_rolling'] = self.glossary_history_rolling_checkbox.isChecked()
-                    debug_log(f"🔍 [DEBUG] Saved glossary_history_rolling: {self.config['glossary_history_rolling']}")
-                else:
-                    debug_log("⚠️ [DEBUG] glossary_history_rolling_checkbox not found")
-                    
-                # Temperature and context limit
-                try:
-                    self.config['manual_glossary_temperature'] = float(self.manual_temp_entry.text())
-                    self.config['manual_context_limit'] = int(self.manual_context_entry.text())
-                    debug_log(f"🔍 [DEBUG] Saved temperature: {self.config['manual_glossary_temperature']}, context: {self.config['manual_context_limit']}")
-                except ValueError as e:
-                    debug_log(f"❌ [DEBUG] Temperature/context validation failed: {e}")
-                    QMessageBox.warning(dialog, "Invalid Input", 
-                        "Please enter valid numbers for temperature and context limit")
-                    return
-                except Exception as e:
-                    debug_log(f"❌ [DEBUG] Temperature/context error: {e}")
-                
-                # Fuzzy matching threshold (save from auto slider, sync with manual slider)
-                try:
-                    if hasattr(self, 'fuzzy_threshold_slider'):
-                        self.config['glossary_fuzzy_threshold'] = self.fuzzy_threshold_slider.value() / 100.0
-                    elif hasattr(self, 'manual_fuzzy_slider'):
-                        self.config['glossary_fuzzy_threshold'] = self.manual_fuzzy_slider.value() / 100.0
-                    else:
-                        self.config['glossary_fuzzy_threshold'] = self.fuzzy_threshold_value
-                    debug_log(f"🔍 [DEBUG] Saved fuzzy_threshold: {self.config['glossary_fuzzy_threshold']}")
-                except Exception as e:
-                    debug_log(f"❌ [DEBUG] Fuzzy threshold error: {e}")
-                
-                # Save duplicate detection algorithm
-                try:
-                    if hasattr(self, 'duplicate_algo_combo'):
-                        algo_reverse_map = {
-                            0: 'auto',
-                            1: 'strict',
-                            2: 'balanced',
-                            3: 'aggressive',
-                            4: 'basic'
-                        }
-                        selected_algo = algo_reverse_map.get(self.duplicate_algo_combo.currentIndex(), 'auto')
-                        self.config['glossary_duplicate_algorithm'] = selected_algo
-                        debug_log(f"🔍 [DEBUG] Saved duplicate_algorithm: {selected_algo}")
-                    else:
-                        debug_log("⚠️ [DEBUG] duplicate_algo_combo not found, using default 'auto'")
-                        self.config['glossary_duplicate_algorithm'] = 'auto'
-                except Exception as e:
-                    debug_log(f"❌ [DEBUG] Duplicate algorithm error: {e}")
-                
-                # Save filter mode from radio buttons
-                if hasattr(self, 'glossary_filter_mode_buttons'):
-                    for mode_key, radio_button in self.glossary_filter_mode_buttons.items():
-                        if radio_button.isChecked():
-                            self.config['glossary_filter_mode'] = mode_key
-                            debug_log(f"🔍 [DEBUG] Saved glossary_filter_mode: {mode_key}")
-                            break
-                else:
-                    debug_log("⚠️ [DEBUG] glossary_filter_mode_buttons not found")
-                
-                # Save prompts with validation
-                prompts_to_save = {
-                    'manual_glossary_prompt': 'manual_glossary_prompt',
-                    'auto_glossary_prompt': 'auto_glossary_prompt', 
-                    'append_glossary_prompt': 'append_glossary_prompt',
-                    'glossary_translation_prompt': 'glossary_translation_prompt'
-                }
-                
-                for config_key, attr_name in prompts_to_save.items():
-                    try:
-                        prompt_value = getattr(self, attr_name, '')
-                        self.config[config_key] = prompt_value
-                        debug_log(f"🔍 [DEBUG] Saved {config_key}: {len(prompt_value)} chars")
-                    except Exception as e:
-                        debug_log(f"❌ [DEBUG] Failed to save {config_key}: {e}")
-                
-                # Environment variables setup with comprehensive debugging
-                debug_log("🔍 [DEBUG] Setting environment variables...")
-                env_vars_to_set = []
-                
-                try:
-                    # Core environment variables
-                    env_mappings = [
-                        ('GLOSSARY_SYSTEM_PROMPT', self.manual_glossary_prompt),
-                        ('AUTO_GLOSSARY_PROMPT', self.auto_glossary_prompt),
-                        ('APPEND_GLOSSARY_PROMPT', getattr(self, 'append_glossary_prompt', '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n')),
-                        ('GLOSSARY_DISABLE_HONORIFICS_FILTER', '1' if hasattr(self, 'disable_honorifics_checkbox') and self.disable_honorifics_checkbox.isChecked() else '0'),
-                        ('GLOSSARY_STRIP_HONORIFICS', '1' if hasattr(self, 'strip_honorifics_checkbox') and self.strip_honorifics_checkbox.isChecked() else '0'),
-                        ('GLOSSARY_FUZZY_THRESHOLD', str(self.fuzzy_threshold_slider.value() / 100.0) if hasattr(self, 'fuzzy_threshold_slider') else '0.90'),
-                        ('GLOSSARY_DUPLICATE_ALGORITHM', self.config.get('glossary_duplicate_algorithm', 'auto')),
-                        ('GLOSSARY_TRANSLATION_PROMPT', getattr(self, 'glossary_translation_prompt', '')),
-                        ('GLOSSARY_FORMAT_INSTRUCTIONS', getattr(self, 'glossary_format_instructions', '')),
-                        ('GLOSSARY_USE_LEGACY_CSV', '1' if hasattr(self, 'use_legacy_csv_checkbox') and self.use_legacy_csv_checkbox.isChecked() else '0'),
-                        ('GLOSSARY_CHAPTER_SPLIT_THRESHOLD', str(int(self.glossary_chapter_split_threshold_entry.text())) if hasattr(self, 'glossary_chapter_split_threshold_entry') else '0'),
-                        ('GLOSSARY_MAX_SENTENCES', str(int(self.glossary_max_sentences_entry.text())) if hasattr(self, 'glossary_max_sentences_entry') else '10'),
-                    ]
-                    
-                    for env_key, env_value in env_mappings:
-                        try:
-                            old_value = os.environ.get(env_key, '<NOT SET>')
-                            os.environ[env_key] = str(env_value)
-                            new_value = os.environ[env_key]
-                            env_vars_to_set.append(env_key)
-                            
-                            if old_value != new_value:
-                                debug_log(f"🔍 [DEBUG] ENV {env_key}: '{old_value}' → '{new_value[:100]}{'...' if len(str(new_value)) > 100 else ''}'")
-                            else:
-                                debug_log(f"🔍 [DEBUG] ENV {env_key}: unchanged ('{str(new_value)[:50]}{'...' if len(str(new_value)) > 50 else ''}')") 
-                                
-                        except Exception as e:
-                            debug_log(f"❌ [DEBUG] Failed to set {env_key}: {e}")
-                    
-                    # JSON environment variables
-                    try:
-                        custom_types_json = json.dumps(self.custom_entry_types)
-                        old_types = os.environ.get('GLOSSARY_CUSTOM_ENTRY_TYPES', '<NOT SET>')
-                        os.environ['GLOSSARY_CUSTOM_ENTRY_TYPES'] = custom_types_json
-                        env_vars_to_set.append('GLOSSARY_CUSTOM_ENTRY_TYPES')
-                        debug_log(f"🔍 [DEBUG] ENV GLOSSARY_CUSTOM_ENTRY_TYPES: {len(custom_types_json)} chars")
-                        if old_types != custom_types_json:
-                            debug_log(f"🔍 [DEBUG] Custom entry types changed")
-                    except Exception as e:
-                        debug_log(f"❌ [DEBUG] Failed to set GLOSSARY_CUSTOM_ENTRY_TYPES: {e}")
-                    
-                    if self.custom_glossary_fields:
-                        try:
-                            custom_fields_json = json.dumps(self.custom_glossary_fields)
-                            os.environ['GLOSSARY_CUSTOM_FIELDS'] = custom_fields_json
-                            env_vars_to_set.append('GLOSSARY_CUSTOM_FIELDS')
-                            debug_log(f"🔍 [DEBUG] ENV GLOSSARY_CUSTOM_FIELDS: {len(custom_fields_json)} chars")
-                        except Exception as e:
-                            debug_log(f"❌ [DEBUG] Failed to set GLOSSARY_CUSTOM_FIELDS: {e}")
-                    else:
-                        debug_log("🔍 [DEBUG] No custom glossary fields to set")
-                
-                    debug_log(f"🔍 [DEBUG] Successfully set {len(env_vars_to_set)} environment variables: {', '.join(env_vars_to_set)}")
-                    
-                except Exception as e:
-                    debug_log(f"❌ [DEBUG] Environment variable setup failed: {e}")
-                    import traceback
-                    debug_log(f"❌ [DEBUG] Traceback: {traceback.format_exc()}")
-                
-                # Save config using the main save_config method to ensure encryption
-                debug_log("🔍 [DEBUG] Calling main save_config method...")
-                try:
-                    self.save_config(show_message=False)
-                    debug_log("🔍 [DEBUG] Main save_config completed successfully")
-                except Exception as e:
-                    debug_log(f"❌ [DEBUG] Main save_config failed: {e}")
-                    raise
+                # Call main save_config - it will:
+                # 1. Update custom_entry_types from checkboxes
+                # 2. Read from all UI widgets and instance variables
+                # 3. Write everything to config.json
+                # 4. Set environment variables
+                self.save_config(show_message=False)
                 
                 self.append_log("✅ Glossary settings saved successfully")
-                
-                # Check if any types are enabled
-                enabled_types = [t for t, cfg in self.custom_entry_types.items() if cfg.get('enabled', True)]
-                if not enabled_types:
-                    QMessageBox.warning(dialog, "Warning", "No entry types selected! The glossary extraction will not find any entries.")
-                    debug_log("⚠️ [DEBUG] No enabled types found!")
-                else:
-                    debug_log(f"📑 Enabled types: {', '.join(enabled_types)}")
-                
-                # Final environment variable verification
-                debug_log("🔍 [DEBUG] Final environment variable check:")
-                critical_vars = ['GLOSSARY_SYSTEM_PROMPT', 'AUTO_GLOSSARY_PROMPT', 'GLOSSARY_CUSTOM_ENTRY_TYPES']
-                for var in critical_vars:
-                    value = os.environ.get(var, '<NOT SET>')
-                    if value == '<NOT SET>' or not value:
-                        debug_log(f"❌ [DEBUG] CRITICAL: {var} is not set or empty!")
-                    else:
-                        debug_log(f"✅ [DEBUG] {var}: {len(str(value))} chars")
-                
                 QMessageBox.information(dialog, "Success", "Glossary settings saved!")
                 dialog.accept()
                 
             except Exception as e:
-                debug_log(f"❌ [DEBUG] Full exception details: {str(e)}")
                 import traceback
-                debug_log(f"❌ [DEBUG] Traceback: {traceback.format_exc()}")
+                error_msg = f"Failed to save settings: {e}\n{traceback.format_exc()}"
                 QMessageBox.critical(dialog, "Error", f"Failed to save settings: {e}")
                 self.append_log(f"❌ Failed to save glossary settings: {e}")
+                print(error_msg)
                 
         # Add buttons
         save_button = QPushButton("Save All Settings")

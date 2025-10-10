@@ -891,6 +891,32 @@ Text to analyze:
         
         # Retain exact source extension and disable 'response_' prefix
         self.retain_source_extension_var = self.config.get('retain_source_extension', False)
+        
+        # Initialize extraction settings (from Other Settings)
+        self.force_bs_for_traditional_var = self.config.get('force_bs_for_traditional', False)
+        
+        # Initialize HTTP/Network tuning variables (from Other Settings)
+        self.enable_http_tuning_var = self.config.get('enable_http_tuning', False)
+        self.connect_timeout_var = str(self.config.get('connect_timeout', 10))
+        self.read_timeout_var = str(self.config.get('read_timeout', 180))
+        self.http_pool_connections_var = str(self.config.get('http_pool_connections', 20))
+        self.http_pool_maxsize_var = str(self.config.get('http_pool_maxsize', 50))
+        self.ignore_retry_after_var = self.config.get('ignore_retry_after', False)
+        self.max_retries_var = str(self.config.get('max_retries', 7))
+        
+        # Initialize anti-duplicate parameters (from Other Settings)
+        self.enable_anti_duplicate_var = self.config.get('enable_anti_duplicate', False)
+        self.top_p_var = self.config.get('top_p', 1.0)
+        self.top_k_var = self.config.get('top_k', 0)
+        self.frequency_penalty_var = self.config.get('frequency_penalty', 0.0)
+        self.presence_penalty_var = self.config.get('presence_penalty', 0.0)
+        self.repetition_penalty_var = self.config.get('repetition_penalty', 1.0)
+        self.candidate_count_var = self.config.get('candidate_count', 1)
+        self.custom_stop_sequences_var = self.config.get('custom_stop_sequences', '')
+        self.logit_bias_enabled_var = self.config.get('logit_bias_enabled', False)
+        self.logit_bias_strength_var = self.config.get('logit_bias_strength', 1.0)
+        self.bias_common_words_var = self.config.get('bias_common_words', False)
+        self.bias_repetitive_phrases_var = self.config.get('bias_repetitive_phrases', False)
 
         
         self.max_output_tokens = self.config.get('max_output_tokens', self.max_output_tokens)
@@ -1913,7 +1939,7 @@ Recent translations to summarize:
         options_layout.setContentsMargins(0, 0, 0, 0)
         
         # Deep scan option for folders
-        self.deep_scan_var = False
+        self.deep_scan_var = self.config.get('deep_scan', False)
         self.deep_scan_check = self._create_styled_checkbox("include subfolders")
         self.deep_scan_check.setChecked(self.deep_scan_var)
         self.deep_scan_check.stateChanged.connect(self._on_deep_scan_changed)
@@ -5031,7 +5057,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'MODEL': self.model_var,
             'CONTEXTUAL': '1' if self.contextual_var else '0',
             'SEND_INTERVAL_SECONDS': str(self.delay_entry.text()),
-            'THREAD_SUBMISSION_DELAY_SECONDS': self.thread_delay_var.strip() or '0.5',
+            'THREAD_SUBMISSION_DELAY_SECONDS': self.thread_delay_entry.text().strip() or '0.5',
             'MAX_OUTPUT_TOKENS': str(self.max_output_tokens),
             'API_KEY': api_key,
             'OPENAI_API_KEY': api_key,
@@ -6112,7 +6138,7 @@ Important rules:
                     'OPENROUTER_USE_HTTP_ONLY': '1' if self.openrouter_http_only_var else '0',
                     'GLOSSARY_DUPLICATE_KEY_MODE': 'skip',  # Always use skip mode for new format
                     'SEND_INTERVAL_SECONDS': str(self.delay_entry.text()),
-                    'THREAD_SUBMISSION_DELAY_SECONDS': self.thread_delay_var.strip() or '0.5',
+                    'THREAD_SUBMISSION_DELAY_SECONDS': self.thread_delay_entry.text().strip() or '0.5',
                     'CONTEXTUAL': '1' if self.contextual_var else '0',
                     'GOOGLE_APPLICATION_CREDENTIALS': os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', ''),
                     
@@ -7979,9 +8005,11 @@ Important rules:
             debug_enabled = getattr(self, 'config', {}).get('show_debug_buttons', False)
             if show_message and debug_enabled:
                 self.append_log("🔍 [SAVE_CONFIG] Starting comprehensive config save with environment variable debugging...")
-            
+
             # Create backup of existing config before saving
             self._backup_config_file()
+
+            # Helper functions for safe type conversion
             def safe_int(value, default):
                 try: return int(value)
                 except (ValueError, TypeError): return default
@@ -7989,426 +8017,359 @@ Important rules:
             def safe_float(value, default):
                 try: return float(value)
                 except (ValueError, TypeError): return default
-            
-            # Basic settings
-            self.config['model'] = self.model_var
-            self.config['active_profile'] = self.profile_var
-            self.config['prompt_profiles'] = self.prompt_profiles
-            self.config['contextual'] = self.contextual_var
-            
-            # Validate numeric fields (skip validation if called from manga integration with show_message=False)
-            if show_message:
-                delay_val = self.delay_entry.text().strip()
-                if delay_val and not delay_val.replace('.', '', 1).isdigit():
-                    from PySide6.QtWidgets import QMessageBox
-                    QMessageBox.critical(None, "Invalid Input", "Please enter a valid number for API call delay")
-                    return
-            self.config['delay'] = safe_float(self.delay_entry.text().strip(), 2)
 
+            # --- 1. Input Validation ---
+            # Validate numeric fields before saving (skip if called silently)
             if show_message:
-                thread_delay_val = self.thread_delay_var.strip()
-                if not thread_delay_val.replace('.', '', 1).isdigit():
-                    from PySide6.QtWidgets import QMessageBox
-                    QMessageBox.critical(None, "Invalid Input", "Please enter a valid number for Threading Delay")
-                    return
-            self.config['thread_submission_delay'] = safe_float(self.thread_delay_var.strip(), 0.5)
-            
-            if show_message:
-                trans_temp_val = self.trans_temp.text().strip()
-                if trans_temp_val:
-                    try: float(trans_temp_val)
-                    except ValueError:
-                        from PySide6.QtWidgets import QMessageBox
-                        QMessageBox.critical(None, "Invalid Input", "Please enter a valid number for Temperature")
+                validation_map = [
+                    (self.delay_entry, "API call delay", lambda v: v.replace('.', '', 1).isdigit() or v == ""),
+                    (self.thread_delay_entry, "Threading Delay", lambda v: v.replace('.', '', 1).isdigit()),
+                    (self.trans_temp, "Temperature", lambda v: v == "" or v.replace('.', '', 1).replace('-', '', 1).isdigit()),
+                    (self.trans_history, "Translation History Limit", lambda v: v.isdigit() or v == ""),
+                ]
+                from PySide6.QtWidgets import QMessageBox
+                for source, name, is_valid_func in validation_map:
+                    try:
+                        value = source.text().strip() if hasattr(source, 'text') else source.strip()
+                        if not is_valid_func(value):
+                            QMessageBox.critical(None, "Invalid Input", f"Please enter a valid number for {name}")
+                            return
+                    except (AttributeError, ValueError):
+                        QMessageBox.critical(None, "Invalid Input", f"Please enter a valid number for {name}")
                         return
-            self.config['translation_temperature'] = safe_float(self.trans_temp.text().strip(), 0.3)
-            
-            if show_message:
-                trans_history_val = self.trans_history.text().strip()
-                if trans_history_val and not trans_history_val.isdigit():
-                    from PySide6.QtWidgets import QMessageBox
-                    QMessageBox.critical(None, "Invalid Input", "Please enter a valid number for Translation History Limit")
-                    return
-            self.config['translation_history_limit'] = safe_int(self.trans_history.text().strip(), 2)
-            
-            # Add fuzzy matching threshold
-            if hasattr(self, 'fuzzy_threshold_var'):
-                fuzzy_val = self.fuzzy_threshold_var
-                if 0.5 <= fuzzy_val <= 1.0:
-                    self.config['glossary_fuzzy_threshold'] = fuzzy_val
-                else:
-                    self.config['glossary_fuzzy_threshold'] = 0.90  # default
 
-            # Add glossary format preference
-            if hasattr(self, 'use_legacy_csv_var'):
-                self.config['glossary_use_legacy_csv'] = self.use_legacy_csv_var
-    
-             # Add after saving translation_prompt_text:
-            if hasattr(self, 'format_instructions_text'):
-                try:
-                    self.config['glossary_format_instructions'] = self.format_instructions_text.toPlainText().strip()
-                except:
-                    pass
- 
-            if hasattr(self, 'azure_api_version_var'):
-                self.config['azure_api_version'] = self.azure_api_version_var
-    
-            # Save all other settings
-            self.config['api_key'] = self.api_key_entry.text()
-            self.config['REMOVE_AI_ARTIFACTS'] = self.REMOVE_AI_ARTIFACTS_var
-            self.config['attach_css_to_chapters'] = self.attach_css_to_chapters_var
-            self.config['chapter_range'] = self.chapter_range_entry.text().strip()
-            self.config['use_rolling_summary'] = self.rolling_summary_var
-            self.config['summary_role'] = self.summary_role_var
-            self.config['max_output_tokens'] = self.max_output_tokens
-            self.config['translate_book_title'] = self.translate_book_title_var
-            self.config['book_title_prompt'] = self.book_title_prompt
-            self.config['append_glossary'] = self.append_glossary_var
-            self.config['emergency_paragraph_restore'] = self.emergency_restore_var
-            self.config['reinforcement_frequency'] = safe_int(self.reinforcement_freq_var, 10)
-            self.config['retry_duplicate_bodies'] = self.retry_duplicate_var
-            self.config['duplicate_lookback_chapters'] = safe_int(self.duplicate_lookback_var, 5)
-            self.config['token_limit_disabled'] = self.token_limit_disabled
-            self.config['glossary_min_frequency'] = safe_int(self.glossary_min_frequency_var, 2)
-            self.config['glossary_max_names'] = safe_int(self.glossary_max_names_var, 50)
-            self.config['glossary_max_titles'] = safe_int(self.glossary_max_titles_var, 30)
-            self.config['glossary_batch_size'] = safe_int(self.glossary_batch_size_var, 50)
-            self.config['enable_image_translation'] = self.enable_image_translation_var
-            self.config['process_webnovel_images'] = self.process_webnovel_images_var
-            self.config['webnovel_min_height'] = safe_int(self.webnovel_min_height_var, 1000)
-            self.config['max_images_per_chapter'] = safe_int(self.max_images_per_chapter_var, 1)
-            
-            # Save batch translation settings from GUI controls
-            if hasattr(self, 'batch_checkbox'):
-                self.batch_translation_var = self.batch_checkbox.isChecked()
-                self.config['batch_translation'] = self.batch_translation_var
-            else:
-                self.config['batch_translation'] = self.batch_translation_var
-            
-            if hasattr(self, 'batch_size_entry'):
-                self.batch_size_var = self.batch_size_entry.text().strip()
-                self.config['batch_size'] = safe_int(self.batch_size_var, 3)
-            else:
-                self.config['batch_size'] = safe_int(self.batch_size_var, 3)
-            
-            self.config['conservative_batching'] = self.conservative_batching_var
-            self.config['translation_history_rolling'] = self.translation_history_rolling_var
-
-            # OpenRouter transport/compression toggles with debugging
-            if show_message and debug_enabled:  # Only log debug info when debug mode is enabled
-                self.append_log("🔍 [DEBUG] Setting OpenRouter environment variables...")
+            # --- 2. Data-Driven Configuration Mapping ---
+            # Helper to get value from a source (widget or variable)
+            def _get_value(source_attr):
+                if not hasattr(self, source_attr):
+                    return None
                 
-            openrouter_env_vars_set = []
-            if hasattr(self, 'openrouter_http_only_var'):
-                self.config['openrouter_use_http_only'] = bool(self.openrouter_http_only_var)
-                old_val = os.environ.get('OPENROUTER_USE_HTTP_ONLY', '<NOT SET>')
-                new_val = '1' if self.openrouter_http_only_var else '0'
-                os.environ['OPENROUTER_USE_HTTP_ONLY'] = new_val
-                openrouter_env_vars_set.append('OPENROUTER_USE_HTTP_ONLY')
-                if show_message and debug_enabled and old_val != new_val:
-                    self.append_log(f"🔍 [DEBUG] ENV OPENROUTER_USE_HTTP_ONLY: '{old_val}' → '{new_val}'")
-            else:
-                if show_message and debug_enabled:
-                    self.append_log("⚠️ [DEBUG] openrouter_http_only_var not found")
-                    
-            if hasattr(self, 'openrouter_accept_identity_var'):
-                self.config['openrouter_accept_identity'] = bool(self.openrouter_accept_identity_var)
-                old_val = os.environ.get('OPENROUTER_ACCEPT_IDENTITY', '<NOT SET>')
-                new_val = '1' if self.openrouter_accept_identity_var else '0'
-                os.environ['OPENROUTER_ACCEPT_IDENTITY'] = new_val
-                openrouter_env_vars_set.append('OPENROUTER_ACCEPT_IDENTITY')
-                if show_message and debug_enabled and old_val != new_val:
-                    self.append_log(f"🔍 [DEBUG] ENV OPENROUTER_ACCEPT_IDENTITY: '{old_val}' → '{new_val}'")
-            else:
-                if show_message and debug_enabled:
-                    self.append_log("⚠️ [DEBUG] openrouter_accept_identity_var not found")
-                    
-            if hasattr(self, 'openrouter_preferred_provider_var'):
-                self.config['openrouter_preferred_provider'] = self.openrouter_preferred_provider_var
-                old_val = os.environ.get('OPENROUTER_PREFERRED_PROVIDER', '<NOT SET>')
-                new_val = self.openrouter_preferred_provider_var
-                os.environ['OPENROUTER_PREFERRED_PROVIDER'] = new_val
-                openrouter_env_vars_set.append('OPENROUTER_PREFERRED_PROVIDER')
-                if show_message and debug_enabled and old_val != new_val:
-                    self.append_log(f"🔍 [DEBUG] ENV OPENROUTER_PREFERRED_PROVIDER: '{old_val}' → '{new_val}'")
-            else:
-                # Fallback: set from config if variable doesn't exist
-                provider_from_config = self.config.get('openrouter_preferred_provider', '')
-                if provider_from_config:
-                    old_val = os.environ.get('OPENROUTER_PREFERRED_PROVIDER', '<NOT SET>')
-                    os.environ['OPENROUTER_PREFERRED_PROVIDER'] = provider_from_config
-                    openrouter_env_vars_set.append('OPENROUTER_PREFERRED_PROVIDER')
-                    if show_message and debug_enabled:
-                        self.append_log(f"🔍 [DEBUG] ENV OPENROUTER_PREFERRED_PROVIDER (from config): '{old_val}' → '{provider_from_config}'")
-                elif show_message and debug_enabled:
-                    self.append_log("⚠️ [DEBUG] openrouter_preferred_provider_var not found and no config value")
-                    
-            if show_message and debug_enabled and openrouter_env_vars_set:
-                self.append_log(f"🔍 [DEBUG] Set {len(openrouter_env_vars_set)} OpenRouter env vars: {', '.join(openrouter_env_vars_set)}")
+                attr = getattr(self, source_attr)
+                if hasattr(attr, 'isChecked'): return attr.isChecked()
+                if hasattr(attr, 'toPlainText'): return attr.toPlainText().strip()
+                if hasattr(attr, 'text'): return attr.text().strip()
+                if hasattr(attr, 'currentIndex'): return attr.currentIndex()
+                return attr
+
+            # Central mapping of configuration settings
+            # format: (config_key, [source_attributes_in_priority_order], default_value, type_converter_func)
+            settings_map = [
+                # Basic settings
+                ('model', ['model_var'], None, str),
+                ('active_profile', ['profile_var'], None, str),
+                ('prompt_profiles', ['prompt_profiles'], {}, dict),
+                ('contextual', ['contextual_var'], None, bool),
+                ('api_key', ['api_key_entry'], '', str),
+                ('chapter_range', ['chapter_range_entry'], '', str),
+                
+                # Numeric settings
+                ('delay', ['delay_entry'], 2.0, lambda v: safe_float(v, 2.0)),
+                ('thread_submission_delay', ['thread_delay_entry'], 0.5, lambda v: safe_float(v, 0.5)),
+                ('translation_temperature', ['trans_temp'], 0.3, lambda v: safe_float(v, 0.3)),
+                ('translation_history_limit', ['trans_history'], 2, lambda v: safe_int(v, 2)),
+                ('reinforcement_frequency', ['reinforcement_freq_var'], 10, lambda v: safe_int(v, 10)),
+                ('duplicate_lookback_chapters', ['duplicate_lookback_var'], 5, lambda v: safe_int(v, 5)),
+
+                # Boolean toggles - prioritize checkboxes over vars
+                ('REMOVE_AI_ARTIFACTS', ['remove_artifacts_checkbox', 'REMOVE_AI_ARTIFACTS_var'], False, bool),
+                ('attach_css_to_chapters', ['attach_css_to_chapters_var'], False, bool),
+                ('use_rolling_summary', ['rolling_summary_var'], False, bool),
+                ('translate_book_title', ['translate_book_title_var'], False, bool),
+                ('emergency_paragraph_restore', ['emergency_restore_var'], False, bool),
+                ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),
+                ('token_limit_disabled', ['token_limit_disabled'], False, bool),
+                ('conservative_batching', ['conservative_batching_var'], False, bool),
+                ('translation_history_rolling', ['rolling_checkbox', 'translation_history_rolling_var'], False, bool),
+                ('disable_epub_gallery', ['disable_epub_gallery_var'], False, bool),
+                ('disable_automatic_cover_creation', ['disable_automatic_cover_creation_var'], False, bool),
+                ('duplicate_detection_mode', ['duplicate_detection_mode_var'], 'off', str),
+                ('use_header_as_output', ['use_header_as_output_var'], False, bool),
+                ('enable_decimal_chapters', ['enable_decimal_chapters_var'], False, bool),
+                ('force_ncx_only', ['force_ncx_only_var'], False, bool),
+                ('batch_translate_headers', ['batch_translate_headers_var'], False, bool),
+                ('update_html_headers', ['update_html_headers_var'], False, bool),
+                ('save_header_translations', ['save_header_translations_var'], False, bool),
+                ('use_sorted_fallback', ['use_sorted_fallback_var'], False, bool),
+                ('single_api_image_chunks', ['single_api_image_chunks_var'], False, bool),
+                ('use_custom_openai_endpoint', ['use_custom_openai_endpoint_var'], False, bool),
+                ('disable_chapter_merging', ['disable_chapter_merging_var'], False, bool),
+                ('use_gemini_openai_endpoint', ['use_gemini_openai_endpoint_var'], False, bool),
+                ('use_fallback_keys', ['use_fallback_keys_var'], False, bool),
+                ('auto_update_check', ['auto_update_check_var'], True, bool),
+                ('ignore_header', ['ignore_header_var'], False, bool),
+                ('ignore_title', ['ignore_title_var'], False, bool),
+                ('scan_phase_enabled', ['scan_phase_enabled_var'], False, bool),
+
+                # Prompts and text fields
+                ('summary_role', ['summary_role_var'], '', str),
+                ('book_title_prompt', ['book_title_prompt'], '', str),
+                ('translation_chunk_prompt', ['translation_chunk_prompt'], '', str),
+                ('image_chunk_prompt', ['image_chunk_prompt'], '', str),
+                ('vertex_ai_location', ['vertex_location_var'], '', str),
+                ('openai_base_url', ['openai_base_url_var'], '', str),
+                ('groq_base_url', ['groq_base_url_var'], '', str),
+                ('fireworks_base_url', ['fireworks_base_url_var'], '', str),
+                ('gemini_openai_endpoint', ['gemini_openai_endpoint_var'], '', str),
+
+                # Image settings
+                ('enable_image_translation', ['enable_image_translation_var'], False, bool),
+                ('process_webnovel_images', ['process_webnovel_images_var'], False, bool),
+                ('webnovel_min_height', ['webnovel_min_height_var'], 1000, lambda v: safe_int(v, 1000)),
+                ('max_images_per_chapter', ['max_images_per_chapter_var'], 1, lambda v: safe_int(v, 1)),
+                ('enable_watermark_removal', ['enable_watermark_removal_var'], False, bool),
+                ('save_cleaned_images', ['save_cleaned_images_var'], False, bool),
+                ('advanced_watermark_removal', ['advanced_watermark_removal_var'], False, bool),
+                ('compression_factor', ['compression_factor_var'], 1.0, float),
+                ('image_chunk_overlap', ['image_chunk_overlap_var'], 1.0, lambda v: safe_float(v, 1.0)),
+
+                # Batching
+                ('batch_translation', ['batch_checkbox', 'batch_translation_var'], False, bool),
+                ('batch_size', ['batch_size_entry', 'batch_size_var'], 3, lambda v: safe_int(v, 3)),
+                ('headers_per_batch', ['headers_per_batch_var'], 10, int),
+
+                # Gemini/GPT Thinking
+                ('enable_gemini_thinking', ['enable_gemini_thinking_var'], False, bool),
+                ('thinking_budget', ['thinking_budget_var'], 0, lambda v: int(v) if str(v).lstrip('-').isdigit() else 0),
+                ('enable_gpt_thinking', ['enable_gpt_thinking_var'], False, bool),
+                ('gpt_reasoning_tokens', ['gpt_reasoning_tokens_var'], 0, lambda v: int(v) if str(v).lstrip('-').isdigit() else 0),
+                ('gpt_effort', ['gpt_effort_var'], 'auto', str),
+                
+                # Chapter processing
+                ('chapter_number_offset', ['chapter_number_offset_var'], 0, lambda v: safe_int(v, 0)),
+                ('max_output_tokens', ['max_output_tokens'], 8192, int),
+
+                # Glossary Settings
+                ('append_glossary', ['append_glossary_checkbox', 'append_glossary_var'], False, bool),
+                ('glossary_min_frequency', ['glossary_min_frequency_entry', 'glossary_min_frequency_var'], 2, lambda v: safe_int(v, 2)),
+                ('glossary_max_names', ['glossary_max_names_entry', 'glossary_max_names_var'], 50, lambda v: safe_int(v, 50)),
+                ('glossary_max_titles', ['glossary_max_titles_entry', 'glossary_max_titles_var'], 30, lambda v: safe_int(v, 30)),
+                ('glossary_batch_size', ['glossary_batch_size_entry', 'glossary_batch_size_var'], 50, lambda v: safe_int(v, 50)),
+                ('glossary_max_text_size', ['glossary_max_text_size_entry', 'glossary_max_text_size_var'], 50000, lambda v: safe_int(v, 50000)),
+                ('glossary_chapter_split_threshold', ['glossary_chapter_split_threshold_entry', 'glossary_chapter_split_threshold_var'], 8192, lambda v: safe_int(v, 8192)),
+                ('glossary_max_sentences', ['glossary_max_sentences_entry', 'glossary_max_sentences_var'], 200, lambda v: safe_int(v, 200)),
+                ('strip_honorifics', ['strip_honorifics_checkbox', 'strip_honorifics_var'], False, bool),
+                ('glossary_disable_honorifics_filter', ['disable_honorifics_checkbox', 'disable_honorifics_var'], False, bool),
+                ('manual_glossary_temperature', ['manual_temp_entry', 'manual_temp_var'], 0.3, lambda v: safe_float(v, 0.3)),
+                ('manual_context_limit', ['manual_context_entry', 'manual_context_var'], 5, lambda v: safe_int(v, 5)),
+                ('glossary_history_rolling', ['glossary_history_rolling_checkbox', 'glossary_history_rolling_var'], False, bool),
+                ('enable_auto_glossary', ['enable_auto_glossary_checkbox', 'enable_auto_glossary_var'], False, bool),
+                ('glossary_use_legacy_csv', ['use_legacy_csv_checkbox', 'use_legacy_csv_var'], False, bool),
+                ('glossary_filter_mode', ['glossary_filter_mode_var'], 'strict', str),
+                ('scan_phase_mode', ['scan_phase_mode_var'], 'translate', str),
+
+                # Extraction settings - NOTE: these are only created in Other Settings dialog
+                ('enable_parallel_extraction', ['enable_parallel_extraction_var'], False, bool),
+                ('extraction_workers', ['extraction_workers_var'], 1, int),
+                ('text_extraction_method', ['text_extraction_method_var'], 'standard', str),
+                ('file_filtering_level', ['file_filtering_level_var'], 'smart', str),
+                ('enhanced_preserve_structure', ['enhanced_preserve_structure_var'], True, bool),
+                ('enhanced_filtering', ['enhanced_filtering_var'], 'smart', str), # Backwards compatibility
+                ('force_bs_for_traditional', ['force_bs_for_traditional_var'], False, bool),  # Updated by other_settings.py
+                
+                # HTTP/Network tuning - prioritize entry widgets over vars
+                ('chunk_timeout', ['chunk_timeout_var'], 900, lambda v: safe_int(v, 900)),
+                ('enable_http_tuning', ['http_tuning_checkbox', 'enable_http_tuning_var'], False, bool),
+                ('connect_timeout', ['connect_timeout_entry', 'connect_timeout_var'], 10.0, lambda v: safe_float(v, 10.0)),
+                ('read_timeout', ['read_timeout_entry', 'read_timeout_var'], 180.0, lambda v: safe_float(v, 180.0)),
+                ('http_pool_connections', ['http_pool_connections_entry', 'http_pool_connections_var'], 20, lambda v: safe_int(v, 20)),
+                ('http_pool_maxsize', ['http_pool_maxsize_entry', 'http_pool_maxsize_var'], 50, lambda v: safe_int(v, 50)),
+                ('ignore_retry_after', ['ignore_retry_after_checkbox', 'ignore_retry_after_var'], False, bool),
+                ('max_retries', ['max_retries_var'], 7, lambda v: safe_int(v, 7)),
+                ('indefinite_rate_limit_retry', ['indefinite_rate_limit_retry_var'], False, bool),
+
+                # Retry settings
+                ('retry_truncated', ['retry_truncated_var'], False, bool),
+                ('max_retry_tokens', ['max_retry_tokens_var'], 16384, lambda v: safe_int(v, 16384)),
+                ('retry_timeout', ['retry_timeout_var'], False, bool),
+                ('preserve_original_text_on_failure', ['preserve_original_text_var'], False, bool),
+                
+                # Rolling summary
+                ('rolling_summary_exchanges', ['rolling_summary_exchanges_var'], 5, lambda v: safe_int(v, 5)),
+                ('rolling_summary_mode', ['rolling_summary_mode_var'], 'chapter', str),
+                ('rolling_summary_max_entries', ['rolling_summary_max_entries_var'], 10, lambda v: safe_int(v, 10)),
+
+                # QA/Scanning
+                ('qa_auto_search_output', ['qa_auto_search_output_var'], False, bool),
+                ('disable_zero_detection', ['disable_zero_detection_var'], False, bool),
+                ('disable_gemini_safety', ['disable_gemini_safety_var'], False, bool),
+                
+                # Anti-duplicate parameters - all vars updated by other_settings.py callbacks
+                ('enable_anti_duplicate', ['enable_anti_duplicate_var'], False, bool),
+                ('top_p', ['top_p_var'], 1.0, float),
+                ('top_k', ['top_k_var'], 50, int),
+                ('frequency_penalty', ['frequency_penalty_var'], 0.0, float),
+                ('presence_penalty', ['presence_penalty_var'], 0.0, float),
+                ('repetition_penalty', ['repetition_penalty_var'], 1.0, float),
+                ('candidate_count', ['candidate_count_var'], 1, int),
+                ('custom_stop_sequences', ['custom_stop_sequences_var'], '', str),
+                ('logit_bias_enabled', ['logit_bias_enabled_var'], False, bool),
+                ('logit_bias_strength', ['logit_bias_strength_var'], 1.0, float),
+                ('bias_common_words', ['bias_common_words_var'], False, bool),
+                ('bias_repetitive_phrases', ['bias_repetitive_phrases_var'], False, bool),
+
+                # OpenRouter
+                ('openrouter_use_http_only', ['openrouter_http_only_var'], False, bool),
+                ('openrouter_accept_identity', ['openrouter_accept_identity_var'], False, bool),
+                ('openrouter_preferred_provider', ['openrouter_preferred_provider_var', ('config', 'openrouter_preferred_provider')], '', str),
+
+                # Environment-backed settings
+                ('retain_source_extension', ['retain_source_extension_var'], False, bool),
+                ('enable_gui_yield', ['enable_gui_yield_var'], True, bool),
+                
+                # File selection settings
+                ('deep_scan', ['deep_scan_check', 'deep_scan_var'], False, bool),
+            ]
             
-            self.config['glossary_history_rolling'] = self.glossary_history_rolling_var
-            self.config['disable_epub_gallery'] = self.disable_epub_gallery_var
-            self.config['disable_automatic_cover_creation'] = self.disable_automatic_cover_creation_var
-            # Backward compatibility: support both old and new variable names
+            # Process the settings map to populate self.config
+            for key, sources, default, converter in settings_map:
+                final_value = None
+                found = False
+                for source in sources:
+                    if isinstance(source, tuple): # Handle special config source
+                        val = self.config.get(source[1])
+                    else:
+                        val = _get_value(source)
+
+                    if val is not None:
+                        final_value = val
+                        found = True
+                        break
+                
+                if found:
+                    self.config[key] = converter(final_value) if converter else final_value
+                elif default is not None:
+                    self.config[key] = default
+
+            # --- 3. Handle Special Cases and Complex Logic ---
+            
+            # Fuzzy matching threshold with range validation
+            # Check slider first (created in glossary settings dialog), then fallback to var
+            if hasattr(self, 'fuzzy_threshold_slider'):
+                fuzzy_val = self.fuzzy_threshold_slider.value() / 100.0
+                self.config['glossary_fuzzy_threshold'] = fuzzy_val if 0.5 <= fuzzy_val <= 1.0 else 0.90
+            elif hasattr(self, 'fuzzy_threshold_value'):
+                fuzzy_val = self.fuzzy_threshold_value
+                self.config['glossary_fuzzy_threshold'] = fuzzy_val if 0.5 <= fuzzy_val <= 1.0 else 0.90
+            elif hasattr(self, 'fuzzy_threshold_var'):
+                fuzzy_val = self.fuzzy_threshold_var
+                self.config['glossary_fuzzy_threshold'] = fuzzy_val if 0.5 <= fuzzy_val <= 1.0 else 0.90
+
+            # Glossary filter mode from radio buttons
+            if hasattr(self, 'glossary_filter_mode_buttons'):
+                for mode_key, radio_button in self.glossary_filter_mode_buttons.items():
+                    if radio_button.isChecked():
+                        self.config['glossary_filter_mode'] = mode_key
+                        break
+            
+            # Duplicate algorithm from combo box
+            if hasattr(self, 'duplicate_algo_combo'):
+                algo_reverse_map = {0: 'auto', 1: 'strict', 2: 'balanced', 3: 'aggressive', 4: 'basic'}
+                self.config['glossary_duplicate_algorithm'] = algo_reverse_map.get(self.duplicate_algo_combo.currentIndex(), 'auto')
+            elif hasattr(self, 'glossary_duplicate_algorithm_var'):
+                self.config['glossary_duplicate_algorithm'] = self.glossary_duplicate_algorithm_var
+
+            # Custom glossary data structures
+            if hasattr(self, 'custom_glossary_fields'):
+                self.config['custom_glossary_fields'] = self.custom_glossary_fields
+            # Update enabled status from checkboxes (try both possible attribute names)
+            if hasattr(self, 'type_enabled_checks'):
+                for type_name, checkbox in self.type_enabled_checks.items():
+                    if type_name in self.custom_entry_types:
+                        self.custom_entry_types[type_name]['enabled'] = checkbox.isChecked()
+            elif hasattr(self, 'type_enabled_checkboxes'):
+                for type_name, checkbox in self.type_enabled_checkboxes.items():
+                    if type_name in self.custom_entry_types:
+                        self.custom_entry_types[type_name]['enabled'] = checkbox.isChecked()
+            if hasattr(self, 'custom_entry_types'):
+                self.config['custom_entry_types'] = self.custom_entry_types
+
+            # Backward compatibility for translate_special_files
             if hasattr(self, 'translate_special_files_var'):
                 self.config['translate_special_files'] = self.translate_special_files_var
-                # Also set the old key for backward compatibility
                 self.config['translate_cover_html'] = self.translate_special_files_var
             elif hasattr(self, 'translate_cover_html_var'):
-                # Fallback to old variable if new one doesn't exist
                 self.config['translate_cover_html'] = self.translate_cover_html_var
                 self.config['translate_special_files'] = self.translate_cover_html_var
-            self.config['enable_auto_glossary'] = self.enable_auto_glossary_var
-            self.config['duplicate_detection_mode'] = self.duplicate_detection_mode_var
-            self.config['chapter_number_offset'] = safe_int(self.chapter_number_offset_var, 0)
-            self.config['use_header_as_output'] = self.use_header_as_output_var
-            self.config['enable_decimal_chapters'] = self.enable_decimal_chapters_var
-            self.config['enable_watermark_removal'] = self.enable_watermark_removal_var
-            self.config['save_cleaned_images'] = self.save_cleaned_images_var
-            self.config['advanced_watermark_removal'] = self.advanced_watermark_removal_var
-            self.config['compression_factor'] = self.compression_factor_var
-            self.config['translation_chunk_prompt'] = self.translation_chunk_prompt
-            self.config['image_chunk_prompt'] = self.image_chunk_prompt
-            self.config['force_ncx_only'] = self.force_ncx_only_var
-            self.config['vertex_ai_location'] = self.vertex_location_var
-            self.config['batch_translate_headers'] = self.batch_translate_headers_var
-            self.config['headers_per_batch'] = self.headers_per_batch_var
-            self.config['update_html_headers'] = self.update_html_headers_var 
-            self.config['save_header_translations'] = self.save_header_translations_var
-            self.config['single_api_image_chunks'] = self.single_api_image_chunks_var
-            self.config['enable_gemini_thinking'] = self.enable_gemini_thinking_var
-            self.config['thinking_budget'] = int(self.thinking_budget_var) if str(self.thinking_budget_var).lstrip('-').isdigit() else 0
-            self.config['enable_gpt_thinking'] = self.enable_gpt_thinking_var
-            self.config['gpt_reasoning_tokens'] = int(self.gpt_reasoning_tokens_var) if str(self.gpt_reasoning_tokens_var).lstrip('-').isdigit() else 0
-            self.config['gpt_effort'] = self.gpt_effort_var
-            self.config['openai_base_url'] = self.openai_base_url_var
-            self.config['groq_base_url'] = self.groq_base_url_var  # This was missing!
-            self.config['fireworks_base_url'] = self.fireworks_base_url_var
-            self.config['use_custom_openai_endpoint'] = self.use_custom_openai_endpoint_var
-            
-            # Save additional important missing settings with debugging
-            if hasattr(self, 'retain_source_extension_var'):
-                self.config['retain_source_extension'] = self.retain_source_extension_var
-                # Update environment variable with debugging
-                old_val = os.environ.get('RETAIN_SOURCE_EXTENSION', '<NOT SET>')
-                new_val = '1' if self.retain_source_extension_var else '0'
-                os.environ['RETAIN_SOURCE_EXTENSION'] = new_val
-                if show_message and old_val != new_val:
-                    self.append_log(f"🔍 [DEBUG] ENV RETAIN_SOURCE_EXTENSION: '{old_val}' → '{new_val}'")
-            else:
-                if show_message:
-                    self.append_log("⚠️ [DEBUG] retain_source_extension_var not found")
-            
-            if hasattr(self, 'use_fallback_keys_var'):
-                self.config['use_fallback_keys'] = self.use_fallback_keys_var
-            
-            if hasattr(self, 'auto_update_check_var'):
-                self.config['auto_update_check'] = self.auto_update_check_var
-                
-            # Preserve last update check time if it exists
+
+            # Backward compatibility for extraction_mode
+            if hasattr(self, 'text_extraction_method_var') and hasattr(self, 'file_filtering_level_var'):
+                if self.text_extraction_method_var == 'enhanced':
+                    self.config['extraction_mode'] = 'enhanced'
+                    self.config['enhanced_filtering'] = self.file_filtering_level_var
+                else:
+                    self.config['extraction_mode'] = self.file_filtering_level_var
+            elif hasattr(self, 'extraction_mode_var'):
+                self.config['extraction_mode'] = self.extraction_mode_var
+
+            # Token limit
+            _tl = self.token_limit_entry.text().strip()
+            self.config['token_limit'] = int(_tl) if _tl.isdigit() else None
+
+            # Update last update check time
             if hasattr(self, 'update_manager') and self.update_manager:
                 self.config['last_update_check_time'] = self.update_manager._last_check_time
-                
-            # Window manager safe ratios setting - not needed in PySide6
-                
-            # Save metadata-related ignore settings
-            if hasattr(self, 'ignore_header_var'):
-                self.config['ignore_header'] = self.ignore_header_var
-                
-            if hasattr(self, 'ignore_title_var'):
-                self.config['ignore_title'] = self.ignore_title_var
-            self.config['disable_chapter_merging'] = self.disable_chapter_merging_var
-            self.config['use_gemini_openai_endpoint'] = self.use_gemini_openai_endpoint_var
-            self.config['gemini_openai_endpoint'] = self.gemini_openai_endpoint_var
-            # Save extraction worker settings
-            self.config['enable_parallel_extraction'] = self.enable_parallel_extraction_var
-            self.config['extraction_workers'] = self.extraction_workers_var
-            # Save GUI yield setting and set environment variable with debugging
-            if hasattr(self, 'enable_gui_yield_var'):
-                self.config['enable_gui_yield'] = self.enable_gui_yield_var
-                old_val = os.environ.get('ENABLE_GUI_YIELD', '<NOT SET>')
-                new_val = '1' if self.enable_gui_yield_var else '0'
-                os.environ['ENABLE_GUI_YIELD'] = new_val
-                if show_message and old_val != new_val:
-                    self.append_log(f"🔍 [DEBUG] ENV ENABLE_GUI_YIELD: '{old_val}' → '{new_val}'")
-            else:
-                if show_message:
-                    self.append_log("⚠️ [DEBUG] enable_gui_yield_var not found")
-            self.config['glossary_max_text_size'] = self.glossary_max_text_size_var
-            self.config['glossary_chapter_split_threshold'] = self.glossary_chapter_split_threshold_var
-            self.config['glossary_filter_mode'] = self.glossary_filter_mode_var
-            self.config['image_chunk_overlap'] = safe_float(self.image_chunk_overlap_var, 1.0)
 
-            # Save HTTP/Network tuning settings (from Other Settings)
-            if hasattr(self, 'chunk_timeout_var'):
-                self.config['chunk_timeout'] = safe_int(self.chunk_timeout_var, 900)
-            if hasattr(self, 'enable_http_tuning_var'):
-                self.config['enable_http_tuning'] = self.enable_http_tuning_var
-            if hasattr(self, 'connect_timeout_var'):
-                self.config['connect_timeout'] = safe_float(self.connect_timeout_var, 10.0)
-            if hasattr(self, 'read_timeout_var'):
-                self.config['read_timeout'] = safe_float(self.read_timeout_var, 180.0)
-            if hasattr(self, 'http_pool_connections_var'):
-                self.config['http_pool_connections'] = safe_int(self.http_pool_connections_var, 20)
-            if hasattr(self, 'http_pool_maxsize_var'):
-                self.config['http_pool_maxsize'] = safe_int(self.http_pool_maxsize_var, 50)
-            if hasattr(self, 'ignore_retry_after_var'):
-                self.config['ignore_retry_after'] = self.ignore_retry_after_var
-            if hasattr(self, 'max_retries_var'):
-                self.config['max_retries'] = safe_int(self.max_retries_var, 7)
-            if hasattr(self, 'indefinite_rate_limit_retry_var'):
-                self.config['indefinite_rate_limit_retry'] = self.indefinite_rate_limit_retry_var
-            
-            # Save retry settings (from Other Settings)
-            if hasattr(self, 'retry_truncated_var'):
-                self.config['retry_truncated'] = self.retry_truncated_var
-            if hasattr(self, 'max_retry_tokens_var'):
-                self.config['max_retry_tokens'] = safe_int(self.max_retry_tokens_var, 16384)
-            if hasattr(self, 'retry_timeout_var'):
-                self.config['retry_timeout'] = self.retry_timeout_var
-            if hasattr(self, 'preserve_original_text_var'):
-                self.config['preserve_original_text_on_failure'] = self.preserve_original_text_var
-            
-            # Save rolling summary settings (from Other Settings)
-            if hasattr(self, 'rolling_summary_exchanges_var'):
-                self.config['rolling_summary_exchanges'] = safe_int(self.rolling_summary_exchanges_var, 5)
-            if hasattr(self, 'rolling_summary_mode_var'):
-                self.config['rolling_summary_mode'] = self.rolling_summary_mode_var
-            if hasattr(self, 'rolling_summary_max_entries_var'):
-                self.config['rolling_summary_max_entries'] = safe_int(self.rolling_summary_max_entries_var, 10)
-            
-            # Save QA/scanning settings (from Other Settings)
-            if hasattr(self, 'qa_auto_search_output_var'):
-                self.config['qa_auto_search_output'] = self.qa_auto_search_output_var
-            if hasattr(self, 'disable_zero_detection_var'):
-                self.config['disable_zero_detection'] = self.disable_zero_detection_var
-            if hasattr(self, 'disable_gemini_safety_var'):
-                self.config['disable_gemini_safety'] = self.disable_gemini_safety_var
+            # Save prompts from text widgets
+            prompt_widgets = {
+                'auto_glossary_prompt': 'auto_prompt_text',
+                'append_glossary_prompt': 'append_prompt_text',
+                'glossary_translation_prompt': 'translation_prompt_text',
+                'glossary_format_instructions': 'format_instructions_text',
+            }
+            for key, widget_name in prompt_widgets.items():
+                if hasattr(self, widget_name):
+                    try:
+                        self.config[key] = getattr(self, widget_name).toPlainText().strip()
+                    except Exception:
+                        pass
 
-            # NEW: Save strip honorifics setting
-            self.config['strip_honorifics'] = self.strip_honorifics_var
+            # Set defaults for settings that might not exist yet
+            self.config.setdefault('glossary_auto_backup', True)
+            self.config.setdefault('glossary_max_backups', 50)
+            default_qa_settings = {'foreign_char_threshold': 10, 'excluded_characters': '', 'target_language': 'english', 'check_encoding_issues': False, 'check_repetition': True, 'check_translation_artifacts': False, 'check_glossary_leakage': True, 'min_file_length': 0, 'report_format': 'detailed', 'auto_save_report': True, 'check_word_count_ratio': False, 'check_multiple_headers': True, 'warn_name_mismatch': False, 'check_missing_html_tag': True, 'check_paragraph_structure': True, 'check_invalid_nesting': False, 'paragraph_threshold': 0.3, 'cache_enabled': True, 'cache_auto_size': False, 'cache_show_stats': False}
+            self.config.setdefault('qa_scanner_settings', default_qa_settings)
+            self.config.setdefault('ai_hunter_config', {}).setdefault('ai_hunter_max_workers', 1)
+            # Image compression defaults
+            compression_defaults = {'enable_image_compression': False, 'auto_compress_enabled': True, 'target_image_tokens': 1000, 'image_compression_format': 'auto', 'webp_quality': 85, 'jpeg_quality': 85, 'png_compression': 6, 'max_image_dimension': 2048, 'max_image_size_mb': 10, 'preserve_transparency': False, 'preserve_original_format': False, 'optimize_for_ocr': True, 'progressive_encoding': True, 'save_compressed_images': False}
+            for key, val in compression_defaults.items():
+                self.config.setdefault(key, val)
             
-            # Save glossary backup settings
-            if hasattr(self, 'config') and 'glossary_auto_backup' in self.config:
-                # These might be set from the glossary backup dialog
-                pass  # Already in config, don't overwrite
-            else:
-                # Set defaults if not already set
-                self.config.setdefault('glossary_auto_backup', True)
-                self.config.setdefault('glossary_max_backups', 50)
+            # --- 4. Update Environment Variables ---
+            def _update_env(key, new_val, is_bool=False):
+                val_to_set = str(new_val)
+                if is_bool:
+                    val_to_set = '1' if new_val else '0'
                 
-            # Save QA Scanner settings if they exist
-            if hasattr(self, 'config') and 'qa_scanner_settings' in self.config:
-                # QA scanner settings already exist in config, keep them
-                pass
-            else:
-                # Initialize default QA scanner settings if not present
-                default_qa_settings = {
-                    'foreign_char_threshold': 10,
-                    'excluded_characters': '',
-                    'target_language': 'english',
-                    'check_encoding_issues': False,
-                    'check_repetition': True,
-                    'check_translation_artifacts': False,
-                    'check_glossary_leakage': True,
-                    'min_file_length': 0,
-                    'report_format': 'detailed',
-                    'auto_save_report': True,
-                    'check_word_count_ratio': False,
-                    'check_multiple_headers': True,
-                    'warn_name_mismatch': False,
-                    'check_missing_html_tag': True,
-                    'check_paragraph_structure': True,
-                    'check_invalid_nesting': False,
-                    'paragraph_threshold': 0.3,
-                    'cache_enabled': True,
-                    'cache_auto_size': False,
-                    'cache_show_stats': False
-                }
-                self.config.setdefault('qa_scanner_settings', default_qa_settings)
+                old_val = os.environ.get(key, '<NOT SET>')
+                os.environ[key] = val_to_set
+                if show_message and debug_enabled and old_val != val_to_set:
+                    self.append_log(f"🔍 [DEBUG] ENV {key}: '{old_val}' → '{val_to_set}'")
+                return key
             
-            # Save AI Hunter config settings if they exist
-            if 'ai_hunter_config' not in self.config:
-                self.config['ai_hunter_config'] = {}
-            # Ensure ai_hunter_max_workers has a default value
-            self.config['ai_hunter_config'].setdefault('ai_hunter_max_workers', 1)
-            
-            # NEW: Save prompts from text widgets if they exist
-            if hasattr(self, 'auto_prompt_text'):
-                try:
-                    self.config['auto_glossary_prompt'] = self.auto_prompt_text.toPlainText().strip()
-                except:
-                    pass
-            
-            if hasattr(self, 'append_prompt_text'):
-                try:
-                    self.config['append_glossary_prompt'] = self.append_prompt_text.toPlainText().strip()
-                except:
-                    pass
-            
-            if hasattr(self, 'translation_prompt_text'):
-                try:
-                    self.config['glossary_translation_prompt'] = self.translation_prompt_text.toPlainText().strip()
-                except:
-                    pass
+            env_vars_set = []
+            # Standard env vars
+            env_vars_set.append(_update_env('OPENROUTER_USE_HTTP_ONLY', self.config.get('openrouter_use_http_only'), is_bool=True))
+            env_vars_set.append(_update_env('OPENROUTER_ACCEPT_IDENTITY', self.config.get('openrouter_accept_identity'), is_bool=True))
+            env_vars_set.append(_update_env('OPENROUTER_PREFERRED_PROVIDER', self.config.get('openrouter_preferred_provider', '')))
+            env_vars_set.append(_update_env('RETAIN_SOURCE_EXTENSION', self.config.get('retain_source_extension'), is_bool=True))
+            env_vars_set.append(_update_env('ENABLE_GUI_YIELD', self.config.get('enable_gui_yield'), is_bool=True))
 
-            # If format instructions text widget exists, ensure config is updated
-            if hasattr(self, 'format_instructions_text'):
-                try:
-                    self.config['glossary_format_instructions'] = self.format_instructions_text.toPlainText().strip()
-                except:
-                    pass
+            # Extraction workers env var
+            new_workers = str(self.config['extraction_workers']) if self.config['enable_parallel_extraction'] else "1"
+            env_vars_set.append(_update_env('EXTRACTION_WORKERS', new_workers))
 
-            # Wire verbose payload saving to GUI debug mode at save time
+            # Wire debug payload saving to GUI debug mode
+            os.environ['DEBUG_SAVE_REQUEST_PAYLOADS_VERBOSE'] = '1' if debug_enabled else '0'
+            os.environ['SHOW_DEBUG_BUTTONS'] = '1' if debug_enabled else '0'
+            os.environ['DEBUG_SAVE_REQUEST_PAYLOADS'] = '1'
+
+            # Glossary-related environment variables
+            if show_message and debug_enabled: self.append_log("🔍 [DEBUG] Setting glossary environment variables...")
             try:
-                os.environ['DEBUG_SAVE_REQUEST_PAYLOADS_VERBOSE'] = '1' if debug_enabled else '0'
-                os.environ['SHOW_DEBUG_BUTTONS'] = '1' if debug_enabled else '0'
-                os.environ['DEBUG_SAVE_REQUEST_PAYLOADS'] = '1'
-                if debug_enabled and show_message:
-                    self.append_log("🔍 [DEBUG] Verbose payload logging enabled (DEBUG_SAVE_REQUEST_PAYLOADS_VERBOSE=1)")
-                    self.append_log("🔍 [DEBUG] Definitive payload capture enabled (DEBUG_SAVE_REQUEST_PAYLOADS=1)")
-            except Exception:
-                pass
-
-            # Now that UI prompt widgets have been read into config, set glossary env vars
-            if show_message and debug_enabled:
-                self.append_log("🔍 [DEBUG] Setting glossary environment variables (post-UI read)...")
-            glossary_env_vars_set = []
-            try:
-                # Normalize and align glossary prompts across keys with safe fallbacks
-                manual_prompt = (
-                    self.config.get('manual_glossary_prompt') or
-                    (self.manual_prompt_text.toPlainText().strip() if hasattr(self, 'manual_prompt_text') else None) or
-                    getattr(self, 'manual_glossary_prompt', getattr(self, 'default_manual_glossary_prompt', ''))
-                )
-                # FIXED: append_glossary_prompt should be separate from manual_glossary_prompt
-                append_prompt = (
-                    self.config.get('append_glossary_prompt') or
-                    (self.append_prompt_text.toPlainText().strip() if hasattr(self, 'append_prompt_text') else None) or
-                    getattr(self, 'append_glossary_prompt', '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n')
-                )
-                auto_prompt = (
-                    self.config.get('auto_glossary_prompt') or
-                    (self.auto_prompt_text.toPlainText().strip() if hasattr(self, 'auto_prompt_text') else None) or
-                    getattr(self, 'auto_glossary_prompt', getattr(self, 'default_auto_glossary_prompt', ''))
-                )
-                trans_prompt = (
-                    self.config.get('glossary_translation_prompt') or
-                    (self.translation_prompt_text.toPlainText().strip() if hasattr(self, 'translation_prompt_text') else None) or
-                    getattr(self, 'glossary_translation_prompt', '')
-                )
-                format_instr = (
-                    self.config.get('glossary_format_instructions') or
-                    (self.format_instructions_text.toPlainText().strip() if hasattr(self, 'format_instructions_text') else None) or
-                    getattr(self, 'glossary_format_instructions', '')
-                )
-
-                # Persist normalized values - FIXED: append_glossary_prompt should be independent
-                self.config['manual_glossary_prompt'] = manual_prompt or ''
-                self.config['append_glossary_prompt'] = append_prompt or ''
-                self.config['auto_glossary_prompt'] = auto_prompt or ''
-                self.config['glossary_translation_prompt'] = trans_prompt or ''
-                self.config['glossary_format_instructions'] = format_instr or ''
+                # Normalize and align glossary prompts
+                prompt_keys = ['manual_glossary_prompt', 'append_glossary_prompt', 'auto_glossary_prompt', 'glossary_translation_prompt', 'glossary_format_instructions']
+                for key in prompt_keys:
+                    self.config[key] = self.config.get(key, '') or ''
 
                 glossary_env_mappings = [
                     ('GLOSSARY_SYSTEM_PROMPT', self.config.get('manual_glossary_prompt', '')),
@@ -8416,275 +8377,80 @@ Important rules:
                     ('APPEND_GLOSSARY_PROMPT', self.config.get('append_glossary_prompt', '')),
                     ('GLOSSARY_TRANSLATION_PROMPT', self.config.get('glossary_translation_prompt', '')),
                     ('GLOSSARY_FORMAT_INSTRUCTIONS', self.config.get('glossary_format_instructions', '')),
-                    ('GLOSSARY_DISABLE_HONORIFICS_FILTER', '1' if self.config.get('glossary_disable_honorifics_filter', False) else '0'),
-                    ('GLOSSARY_STRIP_HONORIFICS', '1' if self.config.get('strip_honorifics', False) else '0'),
+                    ('GLOSSARY_DISABLE_HONORIFICS_FILTER', '1' if self.config.get('glossary_disable_honorifics_filter') else '0'),
+                    ('GLOSSARY_STRIP_HONORIFICS', '1' if self.config.get('strip_honorifics') else '0'),
                     ('GLOSSARY_FUZZY_THRESHOLD', str(self.config.get('glossary_fuzzy_threshold', 0.90))),
-                    ('GLOSSARY_USE_LEGACY_CSV', '1' if self.config.get('glossary_use_legacy_csv', False) else '0'),
+                    ('GLOSSARY_USE_LEGACY_CSV', '1' if self.config.get('glossary_use_legacy_csv') else '0'),
                     ('GLOSSARY_MAX_SENTENCES', str(self.config.get('glossary_max_sentences', 10))),
                 ]
-
                 for env_key, env_value in glossary_env_mappings:
-                    try:
-                        old_value = os.environ.get(env_key, '<NOT SET>')
-                        os.environ[env_key] = str(env_value) if env_value is not None else ''
-                        new_value = os.environ[env_key]
-                        glossary_env_vars_set.append(env_key)
-                        if show_message and debug_enabled and old_value != new_value:
-                            preview = str(new_value)
-                            self.append_log(f"🔍 [DEBUG] ENV {env_key}: '{old_value}' → '{preview[:50]}{'...' if len(preview) > 50 else ''}'")
-                    except Exception as e:
-                        if show_message and debug_enabled:
-                            self.append_log(f"❌ [DEBUG] Failed to set {env_key}: {e}")
-
-                # JSON environment variables for glossary
-                try:
-                    custom_entry_types = self.config.get('custom_entry_types') or getattr(self, 'custom_entry_types', None) or {
-                        'character': {'enabled': True, 'has_gender': True},
-                        'term': {'enabled': True, 'has_gender': False}
-                    }
-                    custom_types_json = json.dumps(custom_entry_types)
-                    old_types = os.environ.get('GLOSSARY_CUSTOM_ENTRY_TYPES', '<NOT SET>')
-                    os.environ['GLOSSARY_CUSTOM_ENTRY_TYPES'] = custom_types_json
-                    glossary_env_vars_set.append('GLOSSARY_CUSTOM_ENTRY_TYPES')
-                    if show_message and debug_enabled and old_types != custom_types_json:
-                        self.append_log(f"🔍 [DEBUG] ENV GLOSSARY_CUSTOM_ENTRY_TYPES: {len(custom_types_json)} chars")
-                except Exception as e:
-                    if show_message and debug_enabled:
-                        self.append_log(f"❌ [DEBUG] Failed to set GLOSSARY_CUSTOM_ENTRY_TYPES: {e}")
-
-                try:
-                    custom_glossary_fields = self.config.get('custom_glossary_fields', [])
-                    if custom_glossary_fields:
-                        custom_fields_json = json.dumps(custom_glossary_fields)
-                        os.environ['GLOSSARY_CUSTOM_FIELDS'] = custom_fields_json
-                        glossary_env_vars_set.append('GLOSSARY_CUSTOM_FIELDS')
-                        if show_message and debug_enabled:
-                            self.append_log(f"🔍 [DEBUG] ENV GLOSSARY_CUSTOM_FIELDS: {len(custom_fields_json)} chars")
-                except Exception as e:
-                    if show_message and debug_enabled:
-                        self.append_log(f"❌ [DEBUG] Failed to set GLOSSARY_CUSTOM_FIELDS: {e}")
-
-                if show_message and debug_enabled and glossary_env_vars_set:
-                    self.append_log(f"🔍 [DEBUG] Set {len(glossary_env_vars_set)} glossary env vars: {', '.join(glossary_env_vars_set)}")
+                    env_vars_set.append(_update_env(env_key, env_value))
+                
+                # JSON environment variables
+                custom_types_json = json.dumps(self.config.get('custom_entry_types', {}))
+                env_vars_set.append(_update_env('GLOSSARY_CUSTOM_ENTRY_TYPES', custom_types_json))
+                custom_fields_json = json.dumps(self.config.get('custom_glossary_fields', []))
+                env_vars_set.append(_update_env('GLOSSARY_CUSTOM_FIELDS', custom_fields_json))
             except Exception as e:
-                if show_message and debug_enabled:
-                    self.append_log(f"❌ [DEBUG] Glossary environment variable setup failed: {e}")
+                if show_message and debug_enabled: self.append_log(f"❌ [DEBUG] Glossary environment variable setup failed: {e}")
 
-            # Update environment variable when saving with debugging
-            old_workers = os.environ.get('EXTRACTION_WORKERS', '<NOT SET>')
-            if self.enable_parallel_extraction_var:
-                new_workers = str(self.extraction_workers_var)
-                os.environ["EXTRACTION_WORKERS"] = new_workers
-            else:
-                new_workers = "1"
-                os.environ["EXTRACTION_WORKERS"] = new_workers
-                
-            if show_message and old_workers != new_workers:
-                self.append_log(f"🔍 [DEBUG] ENV EXTRACTION_WORKERS: '{old_workers}' → '{new_workers}'")
-                
-            # Chapter Extraction Settings - Save all extraction-related settings
-            # These are the critical settings shown in the screenshot
-            
-            # Save Text Extraction Method (Standard/Enhanced)
-            if hasattr(self, 'text_extraction_method_var'):
-                self.config['text_extraction_method'] = self.text_extraction_method_var
-            
-            # Save File Filtering Level (Smart/Comprehensive/Full)
-            if hasattr(self, 'file_filtering_level_var'):
-                self.config['file_filtering_level'] = self.file_filtering_level_var
-            
-            # Save Preserve Markdown Structure setting
-            if hasattr(self, 'enhanced_preserve_structure_var'):
-                self.config['enhanced_preserve_structure'] = self.enhanced_preserve_structure_var
-            
-            # Save Enhanced Filtering setting (for backwards compatibility)
-            if hasattr(self, 'enhanced_filtering_var'):
-                self.config['enhanced_filtering'] = self.enhanced_filtering_var
-            
-            # Save force BeautifulSoup for traditional APIs
-            if hasattr(self, 'force_bs_for_traditional_var'):
-                self.config['force_bs_for_traditional'] = self.force_bs_for_traditional_var
-            
-            # Update extraction_mode for backwards compatibility with older versions
-            if hasattr(self, 'text_extraction_method_var') and hasattr(self, 'file_filtering_level_var'):
-                if self.text_extraction_method_var == 'enhanced':
-                    self.config['extraction_mode'] = 'enhanced'
-                    # When enhanced mode is selected, the filtering level applies to enhanced mode
-                    self.config['enhanced_filtering'] = self.file_filtering_level_var
-                else:
-                    # When standard mode is selected, use the filtering level directly
-                    self.config['extraction_mode'] = self.file_filtering_level_var
-            elif hasattr(self, 'extraction_mode_var'):
-                # Fallback for older UI
-                self.config['extraction_mode'] = self.extraction_mode_var
+            if show_message and debug_enabled:
+                self.append_log(f"🔍 [DEBUG] Set {len(env_vars_set)} environment variables.")
 
-            # Save image compression settings if they exist
-            # These are saved from the compression dialog, but we ensure defaults here
-            if 'enable_image_compression' not in self.config:
-                self.config['enable_image_compression'] = False
-            if 'auto_compress_enabled' not in self.config:
-                self.config['auto_compress_enabled'] = True
-            if 'target_image_tokens' not in self.config:
-                self.config['target_image_tokens'] = 1000
-            if 'image_compression_format' not in self.config:
-                self.config['image_compression_format'] = 'auto'
-            if 'webp_quality' not in self.config:
-                self.config['webp_quality'] = 85
-            if 'jpeg_quality' not in self.config:
-                self.config['jpeg_quality'] = 85
-            if 'png_compression' not in self.config:
-                self.config['png_compression'] = 6
-            if 'max_image_dimension' not in self.config:
-                self.config['max_image_dimension'] = 2048
-            if 'max_image_size_mb' not in self.config:
-                self.config['max_image_size_mb'] = 10
-            if 'preserve_transparency' not in self.config:
-                self.config['preserve_transparency'] = False  
-            if 'preserve_original_format' not in self.config:
-                self.config['preserve_original_format'] = False 
-            if 'optimize_for_ocr' not in self.config:
-                self.config['optimize_for_ocr'] = True
-            if 'progressive_encoding' not in self.config:
-                self.config['progressive_encoding'] = True
-            if 'save_compressed_images' not in self.config:
-                self.config['save_compressed_images'] = False
-        
-            
-            # Add anti-duplicate parameters
-            if hasattr(self, 'enable_anti_duplicate_var'):
-                self.config['enable_anti_duplicate'] = self.enable_anti_duplicate_var
-                self.config['top_p'] = self.top_p_var
-                self.config['top_k'] = self.top_k_var
-                self.config['frequency_penalty'] = self.frequency_penalty_var
-                self.config['presence_penalty'] = self.presence_penalty_var
-                self.config['repetition_penalty'] = self.repetition_penalty_var
-                self.config['candidate_count'] = self.candidate_count_var  
-                self.config['custom_stop_sequences'] = self.custom_stop_sequences_var
-                self.config['logit_bias_enabled'] = self.logit_bias_enabled_var
-                self.config['logit_bias_strength'] = self.logit_bias_strength_var
-                self.config['bias_common_words'] = self.bias_common_words_var
-                self.config['bias_repetitive_phrases'] = self.bias_repetitive_phrases_var
-            
-            # Save scanning phase settings
-            if hasattr(self, 'scan_phase_enabled_var'):
-                self.config['scan_phase_enabled'] = self.scan_phase_enabled_var
-            if hasattr(self, 'scan_phase_mode_var'):
-                self.config['scan_phase_mode'] = self.scan_phase_mode_var
-
-            _tl = self.token_limit_entry.text().strip()
-            if _tl.isdigit():
-                self.config['token_limit'] = int(_tl)
-            else:
-                self.config['token_limit'] = None
-            
-            # Store Google Cloud credentials path BEFORE encryption
-            # This should NOT be encrypted since it's just a file path
+            # --- 5. Final Write to File ---
             google_creds_path = self.config.get('google_cloud_credentials')
-            
-            # Encrypt the config
             encrypted_config = encrypt_config(self.config)
-            
-            # Re-add the Google Cloud credentials path after encryption
-            # This ensures the path is stored unencrypted for easy access
             if google_creds_path:
                 encrypted_config['google_cloud_credentials'] = google_creds_path
-
-            # Validate config can be serialized to JSON before writing
-            try:
-                json_test = json.dumps(encrypted_config, ensure_ascii=False, indent=2)
-            except Exception as e:
-                raise Exception(f"Config validation failed - invalid JSON: {e}")
             
-            # Write to file
+            json.dumps(encrypted_config, ensure_ascii=False, indent=2) # Validation check
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(encrypted_config, f, ensure_ascii=False, indent=2)
-            
-            # Comprehensive environment variable verification after save
+
+            # --- 6. Post-Save Verification and Messaging ---
             if show_message and debug_enabled:
                 self.append_log("🔍 [SAVE_CONFIG] Verifying environment variables after config save...")
-                
-                # Critical environment variables that should be set from config
                 critical_vars_to_check = [
-                    ('OPENROUTER_USE_HTTP_ONLY', self.config.get('openrouter_use_http_only', False)),
-                    ('OPENROUTER_ACCEPT_IDENTITY', self.config.get('openrouter_accept_identity', False)),
+                    ('OPENROUTER_USE_HTTP_ONLY', '1' if self.config.get('openrouter_use_http_only') else '0'),
+                    ('OPENROUTER_ACCEPT_IDENTITY', '1' if self.config.get('openrouter_accept_identity') else '0'),
                     ('OPENROUTER_PREFERRED_PROVIDER', self.config.get('openrouter_preferred_provider', '')),
-                    ('EXTRACTION_WORKERS', str(self.config.get('extraction_workers', 1)) if self.config.get('enable_parallel_extraction', False) else '1'),
-                    ('ENABLE_GUI_YIELD', '1' if self.config.get('enable_gui_yield', True) else '0'),
-                    ('RETAIN_SOURCE_EXTENSION', '1' if self.config.get('retain_source_extension', False) else '0'),
+                    ('EXTRACTION_WORKERS', str(self.config.get('extraction_workers')) if self.config.get('enable_parallel_extraction') else '1'),
+                    ('ENABLE_GUI_YIELD', '1' if self.config.get('enable_gui_yield') else '0'),
+                    ('RETAIN_SOURCE_EXTENSION', '1' if self.config.get('retain_source_extension') else '0'),
                 ]
-                
-                env_issues_found = []
-                for env_key, expected_value in critical_vars_to_check:
+                total_issues = 0
+                for env_key, expected_str in critical_vars_to_check:
                     actual_value = os.environ.get(env_key, '<NOT SET>')
-                    expected_str = str(expected_value) if not isinstance(expected_value, bool) else ('1' if expected_value else '0')
-                    
-                    if actual_value == '<NOT SET>':
-                        env_issues_found.append(f"{env_key} (not set)")
-                        self.append_log(f"❌ [SAVE_CONFIG] {env_key} not set in environment!")
-                    elif actual_value != expected_str:
-                        env_issues_found.append(f"{env_key} (mismatch)")
+                    if actual_value != expected_str:
                         self.append_log(f"⚠️ [SAVE_CONFIG] {env_key}: expected '{expected_str}', got '{actual_value}'")
+                        total_issues += 1
                     else:
                         self.append_log(f"✅ [SAVE_CONFIG] {env_key}: '{actual_value}' (correct)")
                 
-                # Check glossary environment variables
-                glossary_vars = [
-                    'GLOSSARY_SYSTEM_PROMPT', 'AUTO_GLOSSARY_PROMPT', 'GLOSSARY_CUSTOM_ENTRY_TYPES',
-                    'GLOSSARY_TRANSLATION_PROMPT', 'GLOSSARY_FORMAT_INSTRUCTIONS',
-                    'GLOSSARY_DISABLE_HONORIFICS_FILTER', 'GLOSSARY_STRIP_HONORIFICS', 'GLOSSARY_FUZZY_THRESHOLD'
-                ]
-                
-                missing_glossary_vars = []
-                for var in glossary_vars:
-                    value = os.environ.get(var, '<NOT SET>')
-                    if value == '<NOT SET>' or not value.strip():
-                        missing_glossary_vars.append(var)
-                        self.append_log(f"❌ [SAVE_CONFIG] Glossary var {var} not properly initialized")
-                    else:
-                        char_count = len(str(value))
-                        self.append_log(f"✅ [SAVE_CONFIG] Glossary var {var}: {char_count} chars")
-                
-                # Summary
-                total_issues = len(env_issues_found) + len(missing_glossary_vars)
                 if total_issues > 0:
                     self.append_log(f"❌ [SAVE_CONFIG] {total_issues} environment variable issues found!")
-                    if env_issues_found:
-                        self.append_log(f"⚠️ [SAVE_CONFIG] Config-related issues: {', '.join(env_issues_found)}")
-                    if missing_glossary_vars:
-                        self.append_log(f"⚠️ [SAVE_CONFIG] Missing glossary vars: {', '.join(missing_glossary_vars)}")
-                    self.append_log("🔧 [SAVE_CONFIG] Try: Other Settings → Debug Environment Variables button")
                 else:
                     self.append_log("✅ [SAVE_CONFIG] All environment variables appear to be properly set!")
-            
-            # Only show message if requested
+
             if show_message:
                 from PySide6.QtWidgets import QMessageBox
                 from PySide6.QtGui import QIcon
-                msg_box = QMessageBox()
-                msg_box.setWindowTitle("Saved")
-                msg_box.setText("Configuration saved.")
-                msg_box.setIcon(QMessageBox.Information)
-                msg_box.setStandardButtons(QMessageBox.Ok)
-                # Set custom window icon
+                msg_box = QMessageBox(QMessageBox.Information, "Saved", "Configuration saved.", QMessageBox.Ok)
                 try:
                     icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
                     if os.path.exists(icon_path):
                         msg_box.setWindowIcon(QIcon(icon_path))
-                except Exception:
-                    pass
+                except Exception: pass
                 msg_box.exec()
                 
         except Exception as e:
-            # Always show error messages regardless of show_message
             if show_message:
                 from PySide6.QtWidgets import QMessageBox
                 QMessageBox.critical(None, "Error", f"Failed to save configuration: {e}")
             else:
-                # Silent fail when called from manga integration auto-save
                 print(f"Warning: Config save failed (silent): {e}")
-            # Try to restore from backup if save failed
             self._restore_config_from_backup()
-            
+        
     def debug_environment_variables(self, show_all=False):
         """Debug and verify all critical environment variables are set correctly.
 
@@ -8701,8 +8467,12 @@ Important rules:
         critical_env_vars = {
             # Glossary-related
             'GLOSSARY_SYSTEM_PROMPT': 'Manual glossary extraction prompt',
-            'AUTO_GLOSSARY_PROMPT': 'Auto glossary generation prompt', 
+            'AUTO_GLOSSARY_PROMPT': 'Auto glossary generation prompt',
+            'APPEND_GLOSSARY_PROMPT': 'Append glossary prompt',
             'GLOSSARY_CUSTOM_ENTRY_TYPES': 'Custom entry types configuration (JSON)',
+            'GLOSSARY_CUSTOM_FIELDS': 'Custom glossary fields (JSON)',
+            'GLOSSARY_TRANSLATION_PROMPT': 'Glossary translation prompt',
+            'GLOSSARY_FORMAT_INSTRUCTIONS': 'Glossary formatting instructions',
             'GLOSSARY_DISABLE_HONORIFICS_FILTER': 'Honorifics filter disable flag',
             'GLOSSARY_STRIP_HONORIFICS': 'Strip honorifics flag',
             'GLOSSARY_FUZZY_THRESHOLD': 'Fuzzy matching threshold',
@@ -8718,6 +8488,12 @@ Important rules:
             'EXTRACTION_WORKERS': 'Number of extraction worker threads',
             'ENABLE_GUI_YIELD': 'GUI yield during processing',
             'RETAIN_SOURCE_EXTENSION': 'Retain source file extension',
+            'GLOSSARY_PARALLEL_ENABLED': 'Glossary parallel processing enabled',
+            
+            # Debug/Logging
+            'DEBUG_SAVE_REQUEST_PAYLOADS': 'Save API request payloads',
+            'DEBUG_SAVE_REQUEST_PAYLOADS_VERBOSE': 'Verbose payload logging',
+            'SHOW_DEBUG_BUTTONS': 'Show debug buttons in UI',
             
             # QA Scanner settings
             'QA_FOREIGN_CHAR_THRESHOLD': 'Foreign character detection threshold',
@@ -8734,15 +8510,79 @@ Important rules:
             'AI_HUNTER_MAX_WORKERS': 'AI Hunter maximum workers',
         }
         
-        # Optional environment variables
+        # Optional/Informational environment variables
         optional_env_vars = {
-            'GLOSSARY_CUSTOM_FIELDS': 'Custom glossary fields (JSON)',
-            'GLOSSARY_TRANSLATION_PROMPT': 'Glossary translation prompt',
-            'GLOSSARY_FORMAT_INSTRUCTIONS': 'Glossary formatting instructions',
-            
             # Post-translation scanning phase
             'SCAN_PHASE_ENABLED': 'Enable post-translation scanning phase',
             'SCAN_PHASE_MODE': 'Scanning mode (quick-scan/aggressive/ai-hunter/custom)',
+            
+            # AI Model settings
+            'ENABLE_GEMINI_THINKING': 'Enable Gemini thinking mode',
+            'THINKING_BUDGET': 'Gemini thinking budget',
+            'ENABLE_GPT_THINKING': 'Enable GPT-4o reasoning',
+            'GPT_REASONING_TOKENS': 'GPT reasoning effort tokens',
+            'GPT_EFFORT': 'GPT reasoning effort level',
+            
+            # API Endpoints
+            'OPENAI_CUSTOM_BASE_URL': 'Custom OpenAI API base URL',
+            'GROQ_API_URL': 'Groq API endpoint',
+            'FIREWORKS_API_URL': 'Fireworks API endpoint',
+            'USE_CUSTOM_OPENAI_ENDPOINT': 'Use custom OpenAI endpoint',
+            'USE_GEMINI_OPENAI_ENDPOINT': 'Use Gemini OpenAI-compatible endpoint',
+            'GEMINI_OPENAI_ENDPOINT': 'Gemini OpenAI endpoint URL',
+            
+            # Image Compression
+            'ENABLE_IMAGE_COMPRESSION': 'Enable image compression',
+            'AUTO_COMPRESS_ENABLED': 'Auto compress images',
+            'TARGET_IMAGE_TOKENS': 'Target image token count',
+            'IMAGE_COMPRESSION_FORMAT': 'Image compression format',
+            'WEBP_QUALITY': 'WebP quality',
+            'JPEG_QUALITY': 'JPEG quality',
+            'PNG_COMPRESSION': 'PNG compression level',
+            'MAX_IMAGE_DIMENSION': 'Max image dimension',
+            'MAX_IMAGE_SIZE_MB': 'Max image size MB',
+            'PRESERVE_TRANSPARENCY': 'Preserve image transparency',
+            'OPTIMIZE_FOR_OCR': 'Optimize images for OCR',
+            'PROGRESSIVE_ENCODING': 'Progressive image encoding',
+            'SAVE_COMPRESSED_IMAGES': 'Save compressed images',
+            'IMAGE_CHUNK_OVERLAP_PERCENT': 'Image chunk overlap percentage',
+            
+            # Metadata and Headers
+            'TRANSLATE_METADATA_FIELDS': 'Metadata fields to translate (JSON)',
+            'METADATA_TRANSLATION_MODE': 'Metadata translation mode',
+            'BATCH_TRANSLATE_HEADERS': 'Batch translate headers',
+            'HEADERS_PER_BATCH': 'Headers per batch',
+            'UPDATE_HTML_HEADERS': 'Update HTML headers',
+            'SAVE_HEADER_TRANSLATIONS': 'Save header translations',
+            'IGNORE_HEADER': 'Ignore header metadata',
+            'IGNORE_TITLE': 'Ignore title metadata',
+            
+            # Extraction
+            'TEXT_EXTRACTION_METHOD': 'Text extraction method',
+            'FILE_FILTERING_LEVEL': 'File filtering level',
+            'EXTRACTION_MODE': 'Extraction mode',
+            'ENHANCED_FILTERING': 'Enhanced filtering level',
+            
+            # Anti-Duplicate
+            'ENABLE_ANTI_DUPLICATE': 'Enable anti-duplicate measures',
+            'TOP_P': 'Top-P sampling parameter',
+            'TOP_K': 'Top-K sampling parameter',
+            'FREQUENCY_PENALTY': 'Frequency penalty',
+            'PRESENCE_PENALTY': 'Presence penalty',
+            'REPETITION_PENALTY': 'Repetition penalty',
+            'CANDIDATE_COUNT': 'Candidate count',
+            'CUSTOM_STOP_SEQUENCES': 'Custom stop sequences',
+            'LOGIT_BIAS_ENABLED': 'Logit bias enabled',
+            'LOGIT_BIAS_STRENGTH': 'Logit bias strength',
+            'BIAS_COMMON_WORDS': 'Bias against common words',
+            'BIAS_REPETITIVE_PHRASES': 'Bias against repetitive phrases',
+            
+            # Azure
+            'AZURE_API_VERSION': 'Azure API version',
+            
+            # Fallback Keys
+            'USE_FALLBACK_KEYS': 'Use fallback API keys',
+            'FALLBACK_KEYS': 'Fallback API keys (JSON)',
             
             # Manga Integration and Manga Settings Dialog variables
             'MANGA_FULL_PAGE_CONTEXT': 'Enable full page context translation',
