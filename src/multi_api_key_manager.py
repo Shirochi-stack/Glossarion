@@ -1127,7 +1127,11 @@ class MultiAPIKeyDialog(QDialog):
         """Create the main dialog using PySide6"""
         # Set window properties
         self.setWindowTitle("Multi API Key Manager")
-        self.resize(900, 700)
+        # Use screen ratios for sizing
+        screen = QApplication.primaryScreen().geometry()
+        width = int(screen.width() * 0.47)  # 47% of screen width
+        height = int(screen.height() * 0.68)  # 68% of screen height
+        self.resize(width, height)
         
         # Apply comprehensive stylesheet matching other settings dialogs
         self.setStyleSheet("""
@@ -1796,7 +1800,11 @@ class MultiAPIKeyDialog(QDialog):
         # Create simple dialog
         dialog = QDialog(self)
         dialog.setWindowTitle(f"Change Model for {len(selected)} Fallback Keys")
-        dialog.resize(400, 130)
+        # Use screen ratios for sizing
+        screen = QApplication.primaryScreen().geometry()
+        width = int(screen.width() * 0.21)  # 21% of screen width
+        height = int(screen.height() * 0.13)  # 13% of screen height
+        dialog.resize(width, height)
         self._set_icon(dialog)
         
         # Main layout
@@ -3924,7 +3932,11 @@ class MultiAPIKeyDialog(QDialog):
         
         self.progress_dialog = QDialog(self)
         self.progress_dialog.setWindowTitle("Testing API Keys")
-        self.progress_dialog.resize(500, 400)
+        # Use screen ratios for sizing
+        screen = QApplication.primaryScreen().geometry()
+        width = int(screen.width() * 0.26)  # 26% of screen width
+        height = int(screen.height() * 0.39)  # 39% of screen height
+        self.progress_dialog.resize(width, height)
         
         # Get mouse position and move dialog there
         cursor_pos = QCursor.pos()

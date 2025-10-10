@@ -1709,7 +1709,11 @@ class MangaTranslationTab:
             
             selection_dialog = QDialog(self.dialog)
             selection_dialog.setWindowTitle("Select Qwen2-VL Model Size")
-            selection_dialog.setMinimumSize(600, 450)
+            # Use screen ratios for sizing
+            screen = QApplication.primaryScreen().geometry()
+            width = int(screen.width() * 0.31)  # 31% of screen width
+            height = int(screen.height() * 0.46)  # 46% of screen height
+            selection_dialog.setMinimumSize(width, height)
             main_layout = QVBoxLayout(selection_dialog)
             
             # Title
@@ -1841,7 +1845,11 @@ class MangaTranslationTab:
         
         progress_dialog = QDialog(self.dialog)
         progress_dialog.setWindowTitle(f"Setting up {provider}")
-        progress_dialog.setMinimumSize(400, 200)
+        # Use screen ratios for sizing
+        screen = QApplication.primaryScreen().geometry()
+        width = int(screen.width() * 0.21)  # 21% of screen width
+        height = int(screen.height() * 0.19)  # 19% of screen height
+        progress_dialog.setMinimumSize(width, height)
         progress_layout = QVBoxLayout(progress_dialog)
         
         # Progress section
@@ -4858,7 +4866,11 @@ class MangaTranslationTab:
         # Create PySide6 dialog
         dialog = QDialog(self.dialog)
         dialog.setWindowTitle("Edit Prompts")
-        dialog.setMinimumSize(700, 600)
+        # Use screen ratios for sizing
+        screen = QApplication.primaryScreen().geometry()
+        width = int(screen.width() * 0.37)  # 37% of screen width
+        height = int(screen.height() * 0.58)  # 58% of screen height
+        dialog.setMinimumSize(width, height)
         
         layout = QVBoxLayout(dialog)
         

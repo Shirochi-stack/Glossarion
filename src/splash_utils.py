@@ -34,7 +34,11 @@ class SplashManager:
             self.splash_window = QWidget()
             self.splash_window.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
             self.splash_window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
-            self.splash_window.setFixedSize(450, 370)
+            # Use screen ratios for sizing
+            screen = self.app.primaryScreen().geometry()
+            width = int(screen.width() * 0.24)  # 24% of screen width
+            height = int(screen.height() * 0.36)  # 36% of screen height
+            self.splash_window.setFixedSize(width, height)
             
             # Set dark background with border
             palette = self.splash_window.palette()

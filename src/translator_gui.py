@@ -2558,7 +2558,11 @@ Recent translations to summarize:
         # Create dialog
         dialog = QDialog(self)
         dialog.setWindowTitle("POE Authentication Required")
-        dialog.setMinimumSize(650, 450)
+        # Use screen ratios for sizing
+        screen = QApplication.primaryScreen().geometry()
+        width = int(screen.width() * 0.34)  # 34% of screen width
+        height = int(screen.height() * 0.44)  # 44% of screen height
+        dialog.setMinimumSize(width, height)
         
         # Main layout
         main_layout = QVBoxLayout(dialog)

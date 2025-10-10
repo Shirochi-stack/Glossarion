@@ -33,7 +33,12 @@ class IndividualEndpointDialog(QDialog):
     def _build(self):
         title = f"Configure Individual Endpoint — {getattr(self.key, 'model', '')}"
         self.setWindowTitle(title)
-        self.setMinimumSize(700, 420)
+        # Use screen ratios for sizing
+        from PySide6.QtWidgets import QApplication
+        screen = QApplication.primaryScreen().geometry()
+        width = int(screen.width() * 0.37)  # 37% of screen width
+        height = int(screen.height() * 0.41)  # 41% of screen height
+        self.setMinimumSize(width, height)
         
         # Main layout
         main_layout = QVBoxLayout(self)

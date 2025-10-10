@@ -2240,7 +2240,11 @@ Provide translations in the same numbered format."""
             # Create dialog
             backup_dialog = QDialog(parent)
             backup_dialog.setWindowTitle("Automatic Backup Settings")
-            backup_dialog.setMinimumSize(500, 400)
+            # Use screen ratios for sizing
+            screen = QApplication.primaryScreen().geometry()
+            width = int(screen.width() * 0.26)  # 26% of screen width
+            height = int(screen.height() * 0.39)  # 39% of screen height
+            backup_dialog.setMinimumSize(width, height)
             
             # Main layout
             main_layout = QVBoxLayout(backup_dialog)
@@ -2410,7 +2414,11 @@ Provide translations in the same numbered format."""
             # Create dialog
             trim_dialog = QDialog(parent)
             trim_dialog.setWindowTitle("Smart Trim Glossary")
-            trim_dialog.setMinimumSize(600, 500)
+            # Use screen ratios for sizing
+            screen = QApplication.primaryScreen().geometry()
+            width = int(screen.width() * 0.31)  # 31% of screen width
+            height = int(screen.height() * 0.49)  # 49% of screen height
+            trim_dialog.setMinimumSize(width, height)
             
             main_layout = QVBoxLayout(trim_dialog)
             main_layout.setContentsMargins(20, 20, 20, 20)

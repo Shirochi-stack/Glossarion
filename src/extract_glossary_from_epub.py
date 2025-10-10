@@ -1261,6 +1261,9 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
 
 # Update main function to support batch processing:
 def main(log_callback=None, stop_callback=None):
+    # Declare global variables at the very start of the function
+    global _skipped_chapters
+    
     # Redirect print/logs to callback if provided
     if log_callback:
         set_output_redirect(log_callback)
@@ -1732,11 +1735,11 @@ def main(log_callback=None, stop_callback=None):
                 chapter_num = idx + 1  # 1-based chapter numbering
                 if not (range_start <= chapter_num <= range_end):
                     # Track skipped chapters for summary (don't print individually)
-                    if not hasattr(extract_glossary_from_epub, '_skipped_chapters'):
-                        extract_glossary_from_epub._skipped_chapters = []
+                    if '_skipped_chapters' not in globals():
+                        _skipped_chapters = []
                     is_text_chapter = hasattr(chap, 'filename') and chap.get('filename', '').endswith('.txt')
                     terminology = "Section" if is_text_chapter else "Chapter"
-                    extract_glossary_from_epub._skipped_chapters.append((chapter_num, terminology))
+                    _skipped_chapters.append((chapter_num, terminology))
                     continue
                 
             if idx in completed:
@@ -2101,8 +2104,8 @@ def main(log_callback=None, stop_callback=None):
                     return
     
     # Print skip summary if any chapters were skipped
-    if hasattr(extract_glossary_from_epub, '_skipped_chapters') and extract_glossary_from_epub._skipped_chapters:
-        skipped = extract_glossary_from_epub._skipped_chapters
+    if '_skipped_chapters' in globals() and _skipped_chapters:
+        skipped = _skipped_chapters
         print(f"\n📊 Skipped {len(skipped)} chapters outside range {range_start}-{range_end}")
         if len(skipped) <= 10:
             chapter_list = ', '.join([f"{term} {num}" for num, term in skipped])
@@ -2111,7 +2114,7 @@ def main(log_callback=None, stop_callback=None):
             chapter_nums = [num for num, _ in skipped]
             print(f"   Range: {min(chapter_nums)} to {max(chapter_nums)}")
         # Clear the list
-        extract_glossary_from_epub._skipped_chapters = []
+        _skipped_chapters = []
     
     print(f"\nDone. Glossary saved to {args.output}")
     
