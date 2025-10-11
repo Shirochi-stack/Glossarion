@@ -1334,7 +1334,7 @@ class UnifiedClient:
             
             if not tls.initialized:
                 should_rotate = True
-                print(f"[Thread-{thread_name}] Initializing with multi-key mode")
+                #print(f"[Thread-{thread_name}] Initializing with multi-key mode")
             elif self._force_rotation:
                 tls.request_count = getattr(tls, 'request_count', 0) + 1
                 if tls.request_count >= self._rotation_frequency:
