@@ -68,7 +68,7 @@ def setup_other_settings_methods(gui_instance):
         'toggle_extraction_workers', 'toggle_gemini_endpoint', 'toggle_ai_hunter',
         'toggle_custom_endpoint_ui', 'toggle_more_endpoints',
         '_toggle_multi_key_setting', '_toggle_http_tuning_controls',
-        '_toggle_anti_duplicate_controls',
+        '_toggle_anti_duplicate_controls', 'toggle_image_translation_section',
         # Provider autocomplete methods
         '_setup_provider_combobox_bindings', '_on_provider_combo_keyrelease',
         '_commit_provider_autocomplete', '_scroll_provider_list_to_value',
@@ -2006,6 +2006,67 @@ def _toggle_multi_key_setting(self):
     """Toggle multi-key mode from settings dialog"""
     self.config['use_multi_api_keys'] = self.use_multi_api_keys_var
     # Don't save immediately, let the dialog's save button handle it
+
+def toggle_image_translation_section(self):
+    """Toggle visibility of image translation content with slide animation"""
+    try:
+        if not hasattr(self, 'image_translation_content'):
+            return
+            
+        enabled = bool(self.enable_image_translation_var)
+        
+        # Import animation components
+        from PySide6.QtCore import QPropertyAnimation, QEasingCurve
+        
+        # Remove any existing graphics effects that might cause issues
+        if hasattr(self.image_translation_content, 'opacity_effect'):
+            self.image_translation_content.setGraphicsEffect(None)
+            delattr(self.image_translation_content, 'opacity_effect')
+        
+        # Get current and target heights
+        if enabled:
+            # Show widget first to get its natural size
+            self.image_translation_content.setVisible(True)
+            # Force layout update to get correct size
+            self.image_translation_content.adjustSize()
+            target_height = self.image_translation_content.sizeHint().height()
+            start_height = 0
+        else:
+            # Start from current height and collapse to 0
+            start_height = self.image_translation_content.height()
+            target_height = 0
+        
+        # Create height animation
+        animation = QPropertyAnimation(self.image_translation_content, b"maximumHeight")
+        animation.setDuration(250)  # Slightly faster for better UX
+        animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        animation.setStartValue(start_height)
+        animation.setEndValue(target_height)
+        
+        # Set up animation completion handler
+        def on_animation_finished():
+            if not enabled:
+                # Hide widget after collapse animation
+                self.image_translation_content.setVisible(False)
+            # Reset maximum height to allow natural sizing
+            self.image_translation_content.setMaximumHeight(16777215)  # Qt's QWIDGETSIZE_MAX
+        
+        animation.finished.connect(on_animation_finished)
+        
+        # Store animation reference to prevent garbage collection
+        self._image_section_animation = animation
+        animation.start()
+        
+    except Exception as e:
+        # Fallback to simple show/hide if animation fails
+        try:
+            if hasattr(self, 'image_translation_content'):
+                enabled = bool(self.enable_image_translation_var)
+                self.image_translation_content.setVisible(enabled)
+                # Ensure maximum height is reset
+                self.image_translation_content.setMaximumHeight(16777215)
+        except Exception:
+            pass
 
 def toggle_extraction_workers(self):
     """Enable/disable extraction workers entry and labels based on toggle (PySide6 version)"""
@@ -4057,7 +4118,7 @@ def _create_image_translation_section(self, parent):
     section_v.setContentsMargins(8, 8, 8, 8)  # Compact margins
     section_v.setSpacing(4)  # Compact spacing between widgets
     
-    # Create horizontal container for two columns
+    # Create horizontal container for two columns inside content container
     columns_container = QWidget()
     section_h = QHBoxLayout(columns_container)
     section_h.setContentsMargins(0, 0, 0, 0)
@@ -4077,15 +4138,25 @@ def _create_image_translation_section(self, parent):
     def _on_enable_image_toggle(checked):
         try:
             self.enable_image_translation_var = bool(checked)
+            self.toggle_image_translation_section()
         except Exception:
             pass
     enable_cb.toggled.connect(_on_enable_image_toggle)
-    left_v.addWidget(enable_cb)
+    section_v.addWidget(enable_cb)
     
     enable_desc = QLabel("Extracts and translates text from images using vision models")
     enable_desc.setStyleSheet("color: gray; font-size: 10pt;")
     enable_desc.setContentsMargins(0, 0, 0, 10)
-    left_v.addWidget(enable_desc)
+    section_v.addWidget(enable_desc)
+    
+    # Create container for all content below the main checkbox
+    content_container = QWidget()
+    content_layout = QVBoxLayout(content_container)
+    content_layout.setContentsMargins(0, 0, 0, 0)
+    content_layout.setSpacing(4)
+    
+    # Store reference for fade animation (everything below main checkbox)
+    self.image_translation_content = content_container
     
     # Process Long Images
     webnovel_cb = self._create_styled_checkbox("Process Long Images (Web Novel Style)")
@@ -4293,8 +4364,11 @@ def _create_image_translation_section(self, parent):
     right_v.addStretch()
     section_h.addWidget(right_column)
     
-    # Add the columns container to the main section layout
-    section_v.addWidget(columns_container)
+    # Add the columns container to the content container
+    content_layout.addWidget(columns_container)
+    
+    # Add the content container (everything below main checkbox) to main section
+    section_v.addWidget(content_container)
     
     # Dependency logic for watermark options
     def _toggle_watermark_options():
@@ -4310,6 +4384,9 @@ def _create_image_translation_section(self, parent):
     
     # Call once to set initial state
     _toggle_watermark_options()
+    
+    # Initialize image translation section visibility
+    self.toggle_image_translation_section()
     
     # Place the section at row 2, spanning both columns
     try:
