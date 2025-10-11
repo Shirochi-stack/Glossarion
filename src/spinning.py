@@ -24,14 +24,33 @@ class SpinningIcon:
         if not icon_label:
             return
         
+        # Animation guard: prevent multiple simultaneous animations
+        if hasattr(icon_label, '_is_animating') and icon_label._is_animating:
+            return
+        
+        # Stop any existing timer
+        if hasattr(icon_label, '_rotation_timer'):
+            icon_label._rotation_timer.stop()
+            icon_label._rotation_timer.deleteLater()
+            delattr(icon_label, '_rotation_timer')
+        
         # Get current pixmap for rotation
         current_pixmap = icon_label.pixmap()
         if current_pixmap and not current_pixmap.isNull():
-            # Create rotation frames
-            original_pixmap = current_pixmap
+            # Set animation guard
+            icon_label._is_animating = True
+            
+            # Store original pixmap if not already stored
+            if not hasattr(icon_label, '_original_pixmap'):
+                icon_label._original_pixmap = current_pixmap.copy()
+            
+            original_pixmap = icon_label._original_pixmap
             
             # Animate through rotation
             def rotate_frame(angle):
+                if not icon_label._is_animating:  # Check if animation was cancelled
+                    return
+                    
                 transform = QTransform()
                 transform.rotate(angle)
                 rotated_pixmap = original_pixmap.transformed(transform, Qt.SmoothTransformation)
@@ -49,28 +68,40 @@ class SpinningIcon:
             
             # Create timer-based rotation animation
             rotation_timer = QTimer()
+            icon_label._rotation_timer = rotation_timer  # Store reference for cleanup
             rotation_steps = 36  # 10-degree steps for smooth animation
             rotation_step = 0
             
             def animate_rotation():
                 nonlocal rotation_step
-                if rotation_step < rotation_steps:
+                if rotation_step < rotation_steps and icon_label._is_animating:
                     angle = (rotation_step * 360) // rotation_steps
                     rotate_frame(angle)
                     rotation_step += 1
                 else:
-                    # Animation complete, restore original
-                    icon_label.setPixmap(original_pixmap)
+                    # Animation complete, restore original and cleanup
+                    if hasattr(icon_label, '_original_pixmap'):
+                        icon_label.setPixmap(icon_label._original_pixmap)
+                    icon_label._is_animating = False
                     rotation_timer.stop()
+                    if hasattr(icon_label, '_rotation_timer'):
+                        delattr(icon_label, '_rotation_timer')
             
             rotation_timer.timeout.connect(animate_rotation)
             rotation_timer.start(14)  # ~14ms per frame for smooth 500ms total
         else:
             # Fallback for text-based icons (like gear emoji)
-            # Create a simple scale animation
+            # Animation guard for text icons too
+            if hasattr(icon_label, '_is_pulse_animating') and icon_label._is_pulse_animating:
+                return
+            
+            icon_label._is_pulse_animating = True
             original_stylesheet = icon_label.styleSheet()
             
             def pulse_effect():
+                if not hasattr(icon_label, '_is_pulse_animating') or not icon_label._is_pulse_animating:
+                    return
+                    
                 # Quick scale pulse effect for text icons
                 icon_label.setStyleSheet(original_stylesheet + """
                     QLabel { 
@@ -80,7 +111,12 @@ class SpinningIcon:
                 """)
                 
                 # Return to normal after short delay
-                QTimer.singleShot(150, lambda: icon_label.setStyleSheet(original_stylesheet))
+                def restore_style():
+                    if hasattr(icon_label, '_is_pulse_animating'):
+                        icon_label.setStyleSheet(original_stylesheet)
+                        icon_label._is_pulse_animating = False
+                
+                QTimer.singleShot(150, restore_style)
             
             pulse_effect()
     
