@@ -1248,6 +1248,7 @@ Text to analyze:
         def __init__(self, outer, level=logging.INFO):
             super().__init__(level)
             self.outer = outer
+            self.outer_id = id(outer)  # Store ID to identify handlers from same instance
         def emit(self, record):
             try:
                 # Use the raw message without logger name/level prefixes
@@ -1267,6 +1268,8 @@ Text to analyze:
             fmt = logging.Formatter('%(message)s')
             handler.setFormatter(fmt)
             
+            gui_id = id(self)
+            
             # Target relevant loggers
             target_loggers = [
                 'unified_api_client',
@@ -1276,9 +1279,11 @@ Text to analyze:
             ]
             for name in target_loggers:
                 lg = logging.getLogger(name)
-                # Avoid duplicate GuiLogHandler attachments
-                if not any(isinstance(h, TranslatorGUI.GuiLogHandler) for h in lg.handlers):
-                    lg.addHandler(handler)
+                # Remove any existing handlers from THIS SAME gui instance (any GuiLogHandler type)
+                lg.handlers = [h for h in lg.handlers 
+                              if not (hasattr(h, 'outer_id') and h.outer_id == gui_id)]
+                # Now add the new handler
+                lg.addHandler(handler)
                 # Ensure at least INFO level to see retry/backoff notices
                 if lg.level > logging.INFO or lg.level == logging.NOTSET:
                     lg.setLevel(logging.INFO)
@@ -3976,6 +3981,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
     def run_translation_direct(self):
         """Run translation directly - handles multiple files and different file types"""
         try:
+            # Re-attach GUI logging handlers to reclaim logs from standalone header translation
+            try:
+                self._attach_gui_logging_handlers()
+            except Exception:
+                pass
+            
             # Restore print hijack if it was captured by manga translator
             # This ensures main GUI logs go to main GUI, not manga GUI
             try:
@@ -3998,12 +4009,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
                                         uc_module.__dict__['print'] = MangaTranslator._original_print_backup
                                 except Exception:
                                     pass
-            except Exception:
-                pass
-            
-            # Re-attach GUI logging handlers to reclaim logs from manga integration
-            try:
-                self._attach_gui_logging_handlers()
             except Exception:
                 pass
             
@@ -5360,6 +5365,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
     def run_glossary_extraction_direct(self):
         """Run glossary extraction directly - handles multiple files and different file types"""
         try:
+            # Re-attach GUI logging handlers FIRST to reclaim logs from standalone header translation
+            try:
+                self._attach_gui_logging_handlers()
+            except Exception:
+                pass
+            
             # Restore print hijack if it was captured by manga translator
             # This ensures main GUI logs go to main GUI, not manga GUI
             try:
@@ -5382,12 +5393,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
                                         uc_module.__dict__['print'] = MangaTranslator._original_print_backup
                                 except Exception:
                                     pass
-            except Exception:
-                pass
-            
-            # Re-attach GUI logging handlers to reclaim logs from manga integration
-            try:
-                self._attach_gui_logging_handlers()
             except Exception:
                 pass
             

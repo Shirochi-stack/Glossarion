@@ -308,7 +308,8 @@ def translate_headers_standalone(
     config: dict = None,
     update_html: bool = True,
     save_to_file: bool = True,
-    log_callback=None
+    log_callback=None,
+    gui_instance=None
 ) -> Dict[str, str]:
     """
     Standalone function to translate chapter headers with exact OPF-based matching
@@ -324,6 +325,7 @@ def translate_headers_standalone(
         update_html: Whether to update HTML files with translations
         save_to_file: Whether to save translations to file
         log_callback: Optional callback for logging
+        gui_instance: Optional GUI instance to store translator reference for stop button
         
     Returns:
         Dict mapping output filename to translated title
@@ -376,6 +378,10 @@ def translate_headers_standalone(
     
     # Create translator with same config as pipeline
     translator = BatchHeaderTranslator(api_client, config or {})
+    
+    # Store reference in GUI instance so stop button can access it
+    if gui_instance is not None:
+        gui_instance._batch_header_translator = translator
     
     # Call translate_and_save_headers - IDENTICAL TO PIPELINE
     # This method uses the EXACT same translation prompts, HTML update logic, and file saving
@@ -490,6 +496,7 @@ def _attach_logging_handlers(gui_instance):
             def __init__(self, outer, level=logging.INFO):
                 super().__init__(level)
                 self.outer = outer
+                self.outer_id = id(outer)  # Store ID to identify handlers from same instance
             
             def emit(self, record):
                 try:
@@ -514,12 +521,17 @@ def _attach_logging_handlers(gui_instance):
             'openai'
         ]
         
+        gui_id = id(gui_instance)
+        
         for name in target_loggers:
             try:
                 lg = logging.getLogger(name)
-                # Avoid duplicate handler attachments
-                if not any(isinstance(h, GuiLogHandler) for h in lg.handlers):
-                    lg.addHandler(handler)
+                # Remove any existing handlers from THIS SAME gui_instance
+                # Don't use isinstance since GuiLogHandler is redefined each call
+                lg.handlers = [h for h in lg.handlers 
+                              if not (hasattr(h, 'outer_id') and h.outer_id == gui_id)]
+                # Now add the new handler
+                lg.addHandler(handler)
                 # Ensure at least INFO level to see HTTP requests and retry/backoff notices
                 if lg.level > logging.INFO or lg.level == logging.NOTSET:
                     lg.setLevel(logging.INFO)
@@ -617,6 +629,11 @@ def run_translate_headers_gui(gui_instance):
         gui_instance.append_log(f"📊 Will process {total_files} EPUB file(s)")
         
         for idx, current_epub in enumerate(epub_files, 1):
+            # Check if stop was requested
+            if hasattr(gui_instance, '_headers_stop_requested') and gui_instance._headers_stop_requested:
+                gui_instance.append_log("\n⛔ Translation stopped by user")
+                break
+            
             gui_instance.append_log(f"\n{'='*60}")
             gui_instance.append_log(f"📄 Processing EPUB {idx}/{total_files}: {os.path.basename(current_epub)}")
             gui_instance.append_log(f"{'='*60}")
@@ -693,7 +710,8 @@ def run_translate_headers_gui(gui_instance):
                 config=config,
                 update_html=update_html,
                 save_to_file=save_to_file,
-                log_callback=gui_instance.append_log
+                log_callback=gui_instance.append_log,
+                gui_instance=gui_instance  # Pass GUI instance for stop button support
             )
             
             # Log results

@@ -3253,8 +3253,38 @@ def _create_prompt_management_section(self, parent):
         if is_running:
             # Stop the translation
             try:
-                # Set stop flag
+                # Set local stop flag
                 self._headers_stop_requested = True
+                
+                # Set stop flags on BatchHeaderTranslator if it exists
+                if hasattr(self, '_batch_header_translator'):
+                    self._batch_header_translator.set_stop_flag(True)
+                    self.append_log("✅ Stop signal sent to batch header translator")
+                
+                # Set stop flags on unified_api_client (same as main translator GUI)
+                try:
+                    import unified_api_client
+                    if hasattr(unified_api_client, 'set_stop_flag'):
+                        unified_api_client.set_stop_flag(True)
+                    # If there's a global client instance, stop it too
+                    if hasattr(unified_api_client, 'global_stop_flag'):
+                        unified_api_client.global_stop_flag = True
+                    # Set the _cancelled flag on the UnifiedClient class itself
+                    if hasattr(unified_api_client, 'UnifiedClient'):
+                        unified_api_client.UnifiedClient._global_cancelled = True
+                    self.append_log("✅ Stop signal sent to API client")
+                except Exception as e:
+                    self.append_log(f"⚠️ Could not set API client stop flags: {e}")
+                
+                # Also try to stop the API client instance if it exists
+                if hasattr(self, 'api_client') and self.api_client:
+                    try:
+                        if hasattr(self.api_client, 'set_stop_flag'):
+                            self.api_client.set_stop_flag(True)
+                        if hasattr(self.api_client, '_cancelled'):
+                            self.api_client._cancelled = True
+                    except Exception:
+                        pass
                 
                 # Update button to "Stopping..." state (gray)
                 translate_now_btn.setText("⏹ Stopping...")
@@ -3264,7 +3294,7 @@ def _create_prompt_management_section(self, parent):
                     "QPushButton:disabled { background-color: #e0e0e0; color: #9e9e9e; }"
                 )
                 
-                self.append_log("⚠️ Stopping translate headers...")
+                self.append_log("🛑 Stop requested — waiting for current operation to finish")
                 
             except Exception as e:
                 self.append_log(f"❌ Error stopping: {e}")
