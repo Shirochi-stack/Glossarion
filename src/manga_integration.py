@@ -345,11 +345,6 @@ class MangaTranslationTab:
         self.dialog = dialog
         self.scroll_area = scroll_area
         
-        # DEBUG: Log config object identity to diagnose sharing issues
-        self._log(f"🔍 [DEBUG] Manga integration initialized with config ID: {id(self.main_gui.config)}", "debug")
-        self._log(f"🔍 [DEBUG] Initial multi-key setting: {self.main_gui.config.get('use_multi_api_keys', False)}", "debug")
-        self._log(f"🔍 [DEBUG] Initial model: {self.main_gui.config.get('model', 'Unknown')}", "debug")
-        
         # Record main GUI thread native id for selective demotion of background threads (Windows)
         try:
             self._main_thread_tid = threading.get_native_id()
@@ -466,9 +461,6 @@ class MangaTranslationTab:
         
         # Build interface AFTER loading settings
         self._build_interface()
-        
-        # Add method to force sync with main GUI config
-        self._ensure_config_sync()
 
         # Now allow status checks
         self._initializing_gui = False
@@ -483,33 +475,6 @@ class MangaTranslationTab:
         
         # Start model preloading in background
         QTimer.singleShot(200, self._start_model_preloading)
-    
-    def _ensure_config_sync(self):
-        """Ensure manga integration is using the exact same config object as main GUI"""
-        try:
-            # This method ensures we're always referencing the main GUI's config directly
-            # and not holding any stale copies
-            
-            # Log current config state for debugging
-            print(f"[MANGA_DEBUG] Config object ID: {id(self.main_gui.config)}")
-            print(f"[MANGA_DEBUG] Multi-key mode: {self.main_gui.config.get('use_multi_api_keys', False)}")
-            print(f"[MANGA_DEBUG] Current model: {self.main_gui.config.get('model', 'Unknown')}")
-            print(f"[MANGA_DEBUG] API key present: {bool(self.main_gui.config.get('api_key', '').strip())}")
-            
-            # Force update any cached values that might be stale
-            if hasattr(self, 'multi_key_label'):
-                multi_key_enabled = self.main_gui.config.get('use_multi_api_keys', False)
-                multi_key_text = "Multi-Key: ON" if multi_key_enabled else "Multi-Key: OFF"
-                multi_key_color = "green" if multi_key_enabled else "gray"
-                self.multi_key_label.setText(multi_key_text)
-                self.multi_key_label.setStyleSheet(f"color: {multi_key_color};")
-            
-            if hasattr(self, 'model_label'):
-                current_model = self.main_gui.config.get('model', 'Unknown')
-                self.model_label.setText(f"Model: {current_model}")
-                
-        except Exception as e:
-            print(f"[MANGA_DEBUG] Error in config sync: {e}")
         
         # Now that everything is initialized, allow saving
         self._initializing = False
@@ -2609,6 +2574,7 @@ class MangaTranslationTab:
             print(f"Error getting model: {e}")
             current_model = 'Unknown'
         
+        # Store as instance variable so refresh can update it
         self.model_label = QLabel(f"Model: {current_model}")
         model_font = QFont("Arial", 10)
         model_font.setItalic(True)
@@ -5341,87 +5307,73 @@ class MangaTranslationTab:
             self.refresh_btn.setEnabled(True)
     
     def _refresh_context_settings(self):
-        """Refresh context settings from main GUI"""
+        """Refresh context settings from main GUI - reads LIVE GUI state"""
         # CRITICAL FIX: Read from LIVE GUI state, not from disk
         # The main GUI should be the source of truth for current settings
         try:
             self._log("🔄 Refreshing from LIVE main GUI state...", "info")
             
-            # Force sync current GUI widget values into main_gui.config
-            # This ensures we get the real-time state of GUI controls
-            if hasattr(self.main_gui, '_sync_gui_to_config'):
-                self._log("⚙️ Syncing GUI widgets to config...", "debug")
-                self.main_gui._sync_gui_to_config()
+            # Read directly from main GUI variables which are kept in sync with widgets
+            # Variables like model_var, contextual_var are automatically updated when widgets change
+            self._log("🔍 Reading from live GUI variables (auto-synced with widgets)...", "debug")
             
-            # Get live values directly from main GUI widgets (not config file)
-            live_model = 'Unknown'
-            live_api_key_present = False
-            live_multi_key_enabled = False
-            
-            # Get current model from GUI widget (real-time)
-            try:
-                if hasattr(self.main_gui, 'model_combo'):
-                    if hasattr(self.main_gui.model_combo, 'currentText'):  # PySide6
-                        live_model = self.main_gui.model_combo.currentText()
-                        self._log(f"🔍 Live model from GUI: {live_model}", "debug")
-                    elif hasattr(self.main_gui.model_combo, 'get'):  # Tkinter
-                        live_model = self.main_gui.model_combo.get()
-                elif hasattr(self.main_gui, 'model_var'):
-                    live_model = str(self.main_gui.model_var)
-            except Exception as e:
-                self._log(f"⚠️ Could not get live model: {e}", "debug")
-            
-            # Get current API key presence from GUI widget (real-time)
+            # Get current live GUI state using the comprehensive method
+            # This reads ALL current GUI widget values, not just cached variables
+            live_api_key = ''
             try:
                 if hasattr(self.main_gui, 'api_key_entry'):
                     if hasattr(self.main_gui.api_key_entry, 'text'):  # PySide6
-                        live_api_key_present = bool(self.main_gui.api_key_entry.text().strip())
+                        live_api_key = self.main_gui.api_key_entry.text().strip()
                     elif hasattr(self.main_gui.api_key_entry, 'get'):  # Tkinter
-                        live_api_key_present = bool(self.main_gui.api_key_entry.get().strip())
-                    self._log(f"🔍 Live API key present: {live_api_key_present}", "debug")
+                        live_api_key = self.main_gui.api_key_entry.get().strip()
             except Exception as e:
-                self._log(f"⚠️ Could not get live API key state: {e}", "debug")
+                self._log(f"⚠️ Could not get live API key: {e}", "debug")
             
-            # Try to get live multi-key state from GUI elements
-            # This is tricky because multi-key is managed in a separate dialog
-            # For now, we'll sync what we can and note the limitation
+            # Get ALL current GUI values using the comprehensive method
+            env_vars = self.main_gui._get_environment_variables(
+                epub_path='',  # Not needed for manga
+                api_key=live_api_key or 'dummy'  # Use live API key or dummy
+            )
+            
+            # Extract values from the environment variables
+            live_model = env_vars.get('MODEL', 'Unknown')
+            live_contextual = env_vars.get('CONTEXTUAL_MODE', '0') == '1'
+            live_batch = env_vars.get('BATCH_TRANSLATION', '0') == '1'
+            
+            # API key presence already determined above
+            live_api_key_present = bool(live_api_key)
+            
+            # Log what we found
+            self._log(f"🔍 Live model: {live_model}", "debug")
+            self._log(f"🔍 Live contextual: {live_contextual}", "debug")
+            self._log(f"🔍 Live batch: {live_batch}", "debug")
+            self._log(f"🔍 Live API key present: {live_api_key_present}", "debug")
+            
+            # Update manga integration displays with fresh values
             try:
-                # Update main_gui.config with live GUI values we can read
-                if live_model != 'Unknown':
-                    self.main_gui.config['model'] = live_model
-                    self._log(f"✅ Updated config model to: {live_model}", "info")
+                # Update model display
+                if hasattr(self, 'model_label'):
+                    self.model_label.setText(f"Model: {live_model}")
+                    self._log(f"✅ Updated model display to: {live_model}", "info")
                     
-                # Note: Multi-key settings are managed by separate dialog
-                # They should auto-save when changed, so config should be current
-                self._log("🔑 Multi-key settings managed by separate dialog (should auto-save)", "debug")
+                # Update multi-key status display (this comes from config, not variables)
+                if hasattr(self, 'multi_key_label'):
+                    multi_key_enabled = self.main_gui.config.get('use_multi_api_keys', False)
+                    multi_key_text = "Multi-Key: ON" if multi_key_enabled else "Multi-Key: OFF"
+                    multi_key_color = "green" if multi_key_enabled else "gray"
+                    self.multi_key_label.setText(multi_key_text)
+                    self.multi_key_label.setStyleSheet(f"color: {multi_key_color};")
+                    self._log(f"🔑 Multi-key status: {multi_key_text}", "debug")
+                
+                self._log("✅ Live GUI state refresh completed - no config sync needed!", "info")
                 
             except Exception as e:
-                self._log(f"⚠️ Error syncing live GUI values: {e}", "debug")
+                self._log(f"⚠️ Error updating displays: {e}", "debug")
                 
         except Exception as e:
             self._log(f"❌ Error in live GUI refresh: {e}", "error")
         
-        # Update model display and status
-        self._update_main_status_label()
-        
-        # Force config synchronization
-        self._ensure_config_sync()
-        
-        # Update multi-key status display
-        multi_key_enabled = self.main_gui.config.get('use_multi_api_keys', False)
-        multi_key_text = "Multi-Key: ON" if multi_key_enabled else "Multi-Key: OFF"
-        multi_key_color = "green" if multi_key_enabled else "gray"
-        
-        if hasattr(self, 'multi_key_label'):
-            self.multi_key_label.setText(multi_key_text)
-            self.multi_key_label.setStyleSheet(f"color: {multi_key_color};")
-        
-        # Update model display
-        current_model = self.main_gui.config.get('model', 'Unknown')
-        if hasattr(self, 'model_label'):
-            self.model_label.setText(f"Model: {current_model}")
-        
-        # Actually fetch the current values from main GUI
+        # Keep the existing context settings logic
         if hasattr(self.main_gui, 'contextual_var'):
             contextual_enabled = self.main_gui.contextual_var
             if hasattr(self, 'contextual_status_label'):
@@ -7585,6 +7537,13 @@ class MangaTranslationTab:
             QMessageBox.warning(self.dialog, "No Files", "Please select manga images to translate.")
             return
         
+        # FIRST: Refresh from main GUI to ensure we have latest settings
+        try:
+            if hasattr(self, 'refresh_btn'):
+                self.refresh_btn.click()
+        except Exception as e:
+            self._log(f"⚠️ Warning: Could not refresh from main GUI: {e}", "debug")
+        
         # Immediately update button to Stop state (red)
         try:
             if hasattr(self, 'start_button') and self.start_button:
@@ -7897,57 +7856,6 @@ class MangaTranslationTab:
                 self._reset_ui_state()
                 return
             
-            # CRITICAL: Reload entire config.json to get fresh settings including API key
-            # Changes made in settings dialogs save directly to disk but main_gui.config is stale
-            try:
-                import os
-                config_path = os.path.join(os.path.dirname(__file__), 'config.json')
-                if os.path.exists(config_path):
-                    try:
-                        self._log(f"🔍 Reloading entire config from: {config_path}", "info")
-                        with open(config_path, 'r', encoding='utf-8') as f:
-                            fresh_config = json.load(f)
-                        
-                        # Compare key settings
-                        disk_api_key = fresh_config.get('api_key', '')
-                        memory_api_key = self.main_gui.config.get('api_key', '')
-                        disk_multi_key = fresh_config.get('use_multi_api_keys', False)
-                        memory_multi_key = self.main_gui.config.get('use_multi_api_keys', False)
-                        
-                        # Show what changed
-                        if disk_api_key != memory_api_key:
-                            self._log(f"🔑 API key changed on disk (first 10 chars: {disk_api_key[:10]}...)", "info")
-                        if disk_multi_key != memory_multi_key:
-                            self._log(f"🔑 Multi-key mode on disk: {disk_multi_key}, in memory: {memory_multi_key}", "info")
-                        
-                        # Handle encrypted values if needed
-                        if disk_api_key.startswith('ENC:'):
-                            try:
-                                from api_key_encryption import get_handler
-                                handler = get_handler()
-                                disk_api_key = handler.decrypt_value(disk_api_key)
-                                self._log("🔐 Decrypted API key from config", "debug")
-                            except Exception as decrypt_err:
-                                self._log(f"⚠️ Could not decrypt API key: {decrypt_err}", "warning")
-                        
-                        # Update ALL relevant settings from disk
-                        self.main_gui.config.update({
-                            'api_key': disk_api_key,
-                            'use_multi_api_keys': disk_multi_key,
-                            'multi_api_keys': fresh_config.get('multi_api_keys', []),
-                            'force_key_rotation': fresh_config.get('force_key_rotation', True),
-                            'rotation_frequency': fresh_config.get('rotation_frequency', 1),
-                            'model': fresh_config.get('model', 'gemini-2.5-flash')
-                        })
-                        
-                        self._log(f"✅ Config reloaded - Multi-key: {'ENABLED' if disk_multi_key else 'DISABLED'}", "info")
-                    except Exception as reload_err:
-                        self._log(f"⚠️ Could not reload config from disk: {reload_err}", "error")
-                        import traceback
-                        self._log(traceback.format_exc(), "debug")
-            except Exception as e:
-                self._log(f"❌ Exception reloading config: {e}", "error")
-            
             # Check if we need to create or update the client
             needs_new_client = False
             self._log("🔎 Checking API client...", "debug")
@@ -7959,109 +7867,55 @@ class MangaTranslationTab:
                 needs_new_client = True
                 self._log(f"🛠 Model changed from {self.main_gui.client.model} to {model}, creating new client", "info")
             else:
-                # Check if multi-key mode changed - if so, force new client
-                current_multi_key = bool(self.main_gui.config.get('use_multi_api_keys', False))
-                client_multi_key = getattr(self.main_gui.client, '_multi_key_mode', False)
-                
-                if current_multi_key != client_multi_key:
-                    needs_new_client = True
-                    mode_change = "ENABLED" if current_multi_key else "DISABLED"
-                    self._log(f"🔑 Multi-key mode changed to {mode_change}, creating new client", "info")
-                else:
-                    self._log("♻️ Reusing existing API client", "debug")
-            
-            # CRITICAL: Always sync environment variables with current config state
-            # This ensures multi-key mode is properly enabled/disabled for all API calls
-            try:
-                import os  # Import os here
-                use_mk = bool(self.main_gui.config.get('use_multi_api_keys', False))
-                mk_list = self.main_gui.config.get('multi_api_keys', [])
-                
-                if use_mk and mk_list:
-                    # Validate multi-key configuration before applying
-                    valid_keys = 0
-                    for key_data in mk_list:
-                        if isinstance(key_data, dict) and key_data.get('api_key') and key_data.get('model'):
-                            valid_keys += 1
-                    
-                    if valid_keys == 0:
-                        self._log("❌ Multi-key mode is enabled but no valid keys are configured!", "error")
-                        self._log("   Each key must have both 'api_key' and 'model' fields.", "error")
-                        self._log("   Please check your multi-key configuration in Settings.", "error")
-                        self._stop_startup_heartbeat()
-                        self._reset_ui_state()
-                        return
-                    
-                    os.environ['USE_MULTI_API_KEYS'] = '1'
-                    os.environ['USE_MULTI_KEYS'] = '1'  # backward-compat for retry paths
-                    os.environ['MULTI_API_KEYS'] = json.dumps(mk_list)
-                    os.environ['FORCE_KEY_ROTATION'] = '1' if self.main_gui.config.get('force_key_rotation', True) else '0'
-                    os.environ['ROTATION_FREQUENCY'] = str(self.main_gui.config.get('rotation_frequency', 1))
-                    
-                    # Debug: Verify environment variables were actually set
-                    self._log(f"🔑 Multi-key mode environment: ENABLED ({valid_keys} valid keys)", "info")
-                    self._log(f"🔍 ENV DEBUG: USE_MULTI_API_KEYS = {os.environ.get('USE_MULTI_API_KEYS')}", "debug")
-                    self._log(f"🔍 ENV DEBUG: MULTI_API_KEYS length = {len(os.environ.get('MULTI_API_KEYS', ''))}", "debug")
-                else:
-                    # Explicitly disable multi-key mode in environment
-                    os.environ['USE_MULTI_API_KEYS'] = '0'
-                    os.environ['USE_MULTI_KEYS'] = '0'
-                    
-                    # CRITICAL: Clear any existing multi-key pool to force single-key mode
-                    try:
-                        from unified_api_client import UnifiedClient
-                        if hasattr(UnifiedClient, '_api_key_pool') and UnifiedClient._api_key_pool:
-                            UnifiedClient._api_key_pool = None
-                            self._log("🗑️ Cleared existing multi-key pool", "debug")
-                    except Exception as clear_err:
-                        self._log(f"⚠️ Could not clear multi-key pool: {clear_err}", "debug")
-                    
-                    if use_mk and not mk_list:
-                        self._log("⚠️ Multi-key mode is enabled but no keys are configured", "warning")
-                    elif not use_mk:
-                        self._log("🔑 Multi-key mode environment: DISABLED (using single key)", "info")
-                
-                # Fallback keys (optional)
-                if self.main_gui.config.get('use_fallback_keys', False):
-                    os.environ['USE_FALLBACK_KEYS'] = '1'
-                    os.environ['FALLBACK_KEYS'] = json.dumps(self.main_gui.config.get('fallback_keys', []))
-                else:
-                    os.environ['USE_FALLBACK_KEYS'] = '0'
-                    os.environ['FALLBACK_KEYS'] = '[]'
-            except Exception as env_err:
-                self._log(f"⚠️ Failed to sync multi-key environment variables: {env_err}", "warning")
+                self._log("♻️ Reusing existing API client", "debug")
             
             if needs_new_client:
-                # CRITICAL FIX: Don't replace the main GUI's client - create a separate one for manga
-                # or properly update the existing client to avoid breaking the main GUI connection
+                # Apply multi-key settings from config so UnifiedClient picks them up
+                try:
+                    import os  # Import os here
+                    use_mk = bool(self.main_gui.config.get('use_multi_api_keys', False))
+                    mk_list = self.main_gui.config.get('multi_api_keys', [])
+                    if use_mk and mk_list:
+                        # Validate multi-key configuration before applying
+                        valid_keys = 0
+                        for key_data in mk_list:
+                            if isinstance(key_data, dict) and key_data.get('api_key') and key_data.get('model'):
+                                valid_keys += 1
+                        
+                        if valid_keys == 0:
+                            self._log("❌ Multi-key mode is enabled but no valid keys are configured!", "error")
+                            self._log("   Each key must have both 'api_key' and 'model' fields.", "error")
+                            self._log("   Please check your multi-key configuration in Settings.", "error")
+                            self._stop_startup_heartbeat()
+                            self._reset_ui_state()
+                            return
+                        
+                        os.environ['USE_MULTI_API_KEYS'] = '1'
+                        os.environ['USE_MULTI_KEYS'] = '1'  # backward-compat for retry paths
+                        os.environ['MULTI_API_KEYS'] = json.dumps(mk_list)
+                        os.environ['FORCE_KEY_ROTATION'] = '1' if self.main_gui.config.get('force_key_rotation', True) else '0'
+                        os.environ['ROTATION_FREQUENCY'] = str(self.main_gui.config.get('rotation_frequency', 1))
+                        self._log(f"🔑 Multi-key mode ENABLED for manga translator ({valid_keys} valid keys)", "info")
+                    else:
+                        # Explicitly disable if not configured
+                        os.environ['USE_MULTI_API_KEYS'] = '0'
+                        os.environ['USE_MULTI_KEYS'] = '0'
+                    # Fallback keys (optional)
+                    if self.main_gui.config.get('use_fallback_keys', False):
+                        os.environ['USE_FALLBACK_KEYS'] = '1'
+                        os.environ['FALLBACK_KEYS'] = json.dumps(self.main_gui.config.get('fallback_keys', []))
+                    else:
+                        os.environ['USE_FALLBACK_KEYS'] = '0'
+                        os.environ['FALLBACK_KEYS'] = '[]'
+                except Exception as env_err:
+                    self._log(f"⚠️ Failed to apply multi-key settings: {env_err}", "warning")
+                
+                # Create the unified client with the current model
                 try:
                     from unified_api_client import UnifiedClient
-                    
-                    # Debug: Check environment variables just before creating client
-                    self._log(f"🔍 PRE-CLIENT ENV: USE_MULTI_API_KEYS = {os.environ.get('USE_MULTI_API_KEYS', 'NOT_SET')}", "info")
-                    self._log(f"🔍 PRE-CLIENT ENV: MULTI_API_KEYS length = {len(os.environ.get('MULTI_API_KEYS', ''))}", "info")
-                    
-                    # Check if main GUI already has a client we can update instead of replacing
-                    if (hasattr(self.main_gui, 'client') and self.main_gui.client and 
-                        hasattr(self.main_gui.client, 'update_model_and_key')):
-                        # Try to update existing client instead of replacing
-                        self._log("♾️ Updating existing main GUI client...", "debug")
-                        self.main_gui.client.update_model_and_key(model=model, api_key=api_key)
-                        self._log(f"✅ Updated existing client (model: {model})", "info")
-                    else:
-                        # Create new client but log that we're replacing main GUI's client
-                        self._log("⚠️ Creating new client (will replace main GUI client)", "warning")
-                        self._log("⏳ Creating API client (network/model handshake)...", "debug")
-                        new_client = UnifiedClient(model=model, api_key=api_key)
-                        
-                        # Store reference to old client for debugging
-                        old_client_id = id(self.main_gui.client) if hasattr(self.main_gui, 'client') and self.main_gui.client else 'None'
-                        
-                        # Replace the client
-                        self.main_gui.client = new_client
-                        
-                        self._log(f"✅ API client ready (model: {model})", "info")
-                        self._log(f"🔍 Client replaced: old={old_client_id}, new={id(new_client)}", "debug")
+                    self._log("⏳ Creating API client (network/model handshake)...", "debug")
+                    self.main_gui.client = UnifiedClient(model=model, api_key=api_key)
+                    self._log(f"✅ API client ready (model: {model})", "info")
                     try:
                         time.sleep(0.05)
                     except Exception:
@@ -8454,6 +8308,7 @@ class MangaTranslationTab:
         
         # Stop heartbeat before launching worker; now regular progress takes over
         self._stop_startup_heartbeat()
+        
         
         # Update progress to show we're starting the translation worker
         self._log("🚀 Launching translation worker...", "info")

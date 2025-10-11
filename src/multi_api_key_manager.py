@@ -949,13 +949,6 @@ class MultiAPIKeyDialog(QDialog):
         else:
             dialog = translator_gui._multi_api_key_dialog
         
-        # Sync GUI state with current config before showing
-        # This ensures checkbox states match the current config values
-        try:
-            dialog.sync_gui_with_config()
-        except Exception as e:
-            print(f"Warning: Could not sync GUI state: {e}")
-        
         # Show and raise the dialog
         dialog.show()
         dialog.raise_()
@@ -1428,69 +1421,6 @@ class MultiAPIKeyDialog(QDialog):
         
         # Apply initial state for multi-key mode toggle
         self._toggle_multi_key_mode()
-        
-    def sync_gui_with_config(self):
-        """Sync GUI controls with current config values (useful when config is updated externally)"""
-        try:
-            # First, try to reload config from disk to get the absolute latest values
-            # This is crucial when manga integration has updated settings
-            try:
-                import os
-                import json
-                config_path = os.path.join(os.path.dirname(__file__), 'config.json')
-                if os.path.exists(config_path):
-                    with open(config_path, 'r', encoding='utf-8') as f:
-                        fresh_disk_config = json.load(f)
-                    
-                    # Update translator_gui.config with fresh disk values
-                    relevant_keys = ['use_multi_api_keys', 'multi_api_keys', 'force_key_rotation', 
-                                   'rotation_frequency', 'use_fallback_keys', 'fallback_keys']
-                    for key in relevant_keys:
-                        if key in fresh_disk_config:
-                            self.translator_gui.config[key] = fresh_disk_config[key]
-            except Exception as reload_err:
-                print(f"Warning: Could not reload config from disk for sync: {reload_err}")
-            
-            # Get fresh values from config (now potentially updated from disk)
-            fresh_enabled = self.translator_gui.config.get('use_multi_api_keys', False)
-            fresh_force_rotation = self.translator_gui.config.get('force_key_rotation', True)
-            fresh_rotation_freq = self.translator_gui.config.get('rotation_frequency', 1)
-            fresh_use_fallback = self.translator_gui.config.get('use_fallback_keys', False)
-            
-            # Update GUI controls if they differ from config
-            if hasattr(self, 'enabled_checkbox') and self.enabled_checkbox.isChecked() != fresh_enabled:
-                self.enabled_checkbox.blockSignals(True)  # Prevent triggering toggle handler
-                self.enabled_checkbox.setChecked(fresh_enabled)
-                self.enabled_checkbox.blockSignals(False)
-                self.enabled_var = fresh_enabled
-                
-            if hasattr(self, 'force_rotation_checkbox') and self.force_rotation_checkbox.isChecked() != fresh_force_rotation:
-                self.force_rotation_checkbox.blockSignals(True)
-                self.force_rotation_checkbox.setChecked(fresh_force_rotation)
-                self.force_rotation_checkbox.blockSignals(False)
-                self.force_rotation_var = fresh_force_rotation
-                
-            if hasattr(self, 'frequency_spinbox') and self.frequency_spinbox.value() != fresh_rotation_freq:
-                self.frequency_spinbox.blockSignals(True)
-                self.frequency_spinbox.setValue(fresh_rotation_freq)
-                self.frequency_spinbox.blockSignals(False)
-                self.rotation_frequency_var = fresh_rotation_freq
-                
-            if hasattr(self, 'use_fallback_checkbox') and self.use_fallback_checkbox.isChecked() != fresh_use_fallback:
-                self.use_fallback_checkbox.blockSignals(True)
-                self.use_fallback_checkbox.setChecked(fresh_use_fallback)
-                self.use_fallback_checkbox.blockSignals(False)
-                self.use_fallback_var = fresh_use_fallback
-            
-            # Refresh GUI layout to match new states
-            self._toggle_multi_key_mode()
-            if hasattr(self, '_toggle_fallback_section'):
-                self._toggle_fallback_section()
-            if hasattr(self, '_update_rotation_display'):
-                self._update_rotation_display()
-                
-        except Exception as e:
-            print(f"Warning: Could not sync multi API key GUI with config: {e}")
 
     def _create_fallback_section(self, parent_layout):
         """Create the fallback keys section at the bottom"""

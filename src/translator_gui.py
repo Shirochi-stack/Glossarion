@@ -9186,66 +9186,30 @@ Important rules:
         self.append_log(f"[DEBUG] {message}")
     
     def _sync_gui_to_config(self):
-        """Sync current GUI widget values to config dict (real-time values)
-        This allows other components to read the current GUI state without requiring 'Save Config'
+        """Sync current GUI widget values using comprehensive environment variables method
+        The _get_environment_variables method already reads all GUI widgets comprehensively
         """
         try:
-            # Model selection
-            if hasattr(self, 'model_combo') and self.model_combo:
-                if hasattr(self.model_combo, 'currentText'):  # PySide6
-                    current_model = self.model_combo.currentText()
-                    if current_model:
-                        self.config['model'] = current_model
-                        print(f"[GUI_SYNC] Model: {current_model}")
-                        
-            # API key
+            # Get current API key for the environment variables method
+            api_key = ''
             if hasattr(self, 'api_key_entry') and self.api_key_entry:
                 if hasattr(self.api_key_entry, 'text'):  # PySide6
-                    current_api_key = self.api_key_entry.text().strip()
-                    if current_api_key:
-                        self.config['api_key'] = current_api_key
-                        print(f"[GUI_SYNC] API key present: {bool(current_api_key)}")
-                        
-            # Batch translation settings
-            if hasattr(self, 'batch_checkbox') and self.batch_checkbox:
-                if hasattr(self.batch_checkbox, 'isChecked'):  # PySide6
-                    self.config['batch_translation'] = self.batch_checkbox.isChecked()
-                    print(f"[GUI_SYNC] Batch translation: {self.batch_checkbox.isChecked()}")
-                    
-            if hasattr(self, 'batch_size_entry') and self.batch_size_entry:
-                if hasattr(self.batch_size_entry, 'text'):  # PySide6
-                    try:
-                        batch_size = int(self.batch_size_entry.text())
-                        self.config['batch_size'] = batch_size
-                        print(f"[GUI_SYNC] Batch size: {batch_size}")
-                    except (ValueError, TypeError):
-                        pass
-                        
-            # Temperature
-            if hasattr(self, 'trans_temp') and self.trans_temp:
-                if hasattr(self.trans_temp, 'text'):  # PySide6
-                    try:
-                        temp = float(self.trans_temp.text())
-                        self.config['translation_temperature'] = temp
-                        print(f"[GUI_SYNC] Temperature: {temp}")
-                    except (ValueError, TypeError):
-                        pass
-                        
-            # Contextual translation
-            if hasattr(self, 'contextual_checkbox') and self.contextual_checkbox:
-                if hasattr(self.contextual_checkbox, 'isChecked'):  # PySide6
-                    self.config['contextual'] = self.contextual_checkbox.isChecked()
-                    print(f"[GUI_SYNC] Contextual: {self.contextual_checkbox.isChecked()}")
-                    
-            # Note: Multi-key settings are managed by separate dialog and should auto-save
-            # But we can check the config for current multi-key state
-            current_multi_key = self.config.get('use_multi_api_keys', False)
-            print(f"[GUI_SYNC] Multi-key mode (from config): {current_multi_key}")
+                    api_key = self.api_key_entry.text().strip()
             
-            print("[GUI_SYNC] ✅ GUI to config sync completed")
+            # Call the comprehensive environment variables method which reads ALL GUI widgets
+            # This method already handles model_var, contextual_var, batch_translation_var, etc.
+            # The manga integration can read these values directly from the updated widget variables
+            env_vars = self._get_environment_variables('', api_key)
+            
+            print(f"[GUI_SYNC] ✅ GUI sync completed - _get_environment_variables read all widgets")
+            print(f"[GUI_SYNC] Model from GUI: {env_vars.get('MODEL', 'Unknown')}")
+            print(f"[GUI_SYNC] API key present: {bool(api_key)}")
+            print(f"[GUI_SYNC] Contextual: {env_vars.get('CONTEXTUAL') == '1'}")
+            print(f"[GUI_SYNC] Batch translation: {env_vars.get('BATCH_TRANSLATION') == '1'}")
+            print(f"[GUI_SYNC] Multi-key mode: {self.config.get('use_multi_api_keys', False)}")
             
         except Exception as e:
-            print(f"[GUI_SYNC] ❌ Error syncing GUI to config: {e}")
+            print(f"[GUI_SYNC] ❌ Error syncing GUI: {e}")
             import traceback
             traceback.print_exc()
 
