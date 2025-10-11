@@ -1110,22 +1110,89 @@ class MangaTranslationTab:
             model_id = None
             selected_model_key = None
         
-        # Create download dialog using Tkinter directly (transitional code)
-        download_dialog = tk.Toplevel(self.main_gui.master)
-        download_dialog.title(f"Download {provider} Model")
-        download_dialog.geometry("600x450")
-        scrollable_frame = tk.Frame(download_dialog)
-        scrollable_frame.pack(fill=tk.BOTH, expand=True)
+        # Create download dialog using PySide6
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QProgressBar, QTextEdit, QGroupBox
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QFont
+        
+        # Use the main_gui as parent if it's a QWidget, otherwise use None
+        parent = self.main_gui if hasattr(self.main_gui, 'centralWidget') else None
+        download_dialog = QDialog(parent)
+        download_dialog.setWindowTitle(f"Download {provider} Model")
+        download_dialog.setFixedSize(600, 450)
+        
+        # Make it non-modal and stay on top
+        download_dialog.setModal(False)
+        download_dialog.setWindowFlags(download_dialog.windowFlags() | Qt.WindowStaysOnTopHint)
+        
+        # Apply dark theme styling
+        download_dialog.setStyleSheet("""
+            QDialog {
+                background-color: #1e1e1e;
+                color: #e0e0e0;
+            }
+            QGroupBox {
+                color: #e0e0e0;
+                border: 1px solid #3a3a3a;
+                border-radius: 4px;
+                margin-top: 8px;
+                padding-top: 8px;
+                font-weight: bold;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 5px;
+                color: #5a9fd4;
+            }
+            QLabel {
+                color: #e0e0e0;
+            }
+            QPushButton {
+                background-color: #2d2d2d;
+                color: #e0e0e0;
+                border: 1px solid #3a3a3a;
+                border-radius: 3px;
+                padding: 8px 20px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #3a3a3a;
+                border-color: #5a5a5a;
+            }
+            QPushButton:pressed {
+                background-color: #1a1a1a;
+            }
+            QProgressBar {
+                border: 1px solid #3a3a3a;
+                border-radius: 3px;
+                text-align: center;
+                background-color: #2d2d2d;
+                color: #e0e0e0;
+            }
+            QProgressBar::chunk {
+                background-color: #4a7ba7;
+                border-radius: 2px;
+            }
+            QTextEdit {
+                background-color: #252525;
+                color: #e0e0e0;
+                border: 1px solid #3a3a3a;
+                border-radius: 3px;
+                padding: 5px;
+                font-family: Courier;
+            }
+        """)
+        
+        # Main layout
+        main_dialog_layout = QVBoxLayout(download_dialog)
+        main_dialog_layout.setContentsMargins(20, 20, 20, 20)
+        main_dialog_layout.setSpacing(10)
         
         # Info section
-        info_frame = tk.LabelFrame(
-            scrollable_frame,
-            text="Model Information",
-            font=('Arial', 11, 'bold'),
-            padx=15,
-            pady=10
-        )
-        info_frame.pack(fill=tk.X, padx=20, pady=10)
+        info_frame = QGroupBox("Model Information")
+        info_frame_layout = QVBoxLayout(info_frame)
+        info_frame_layout.setContentsMargins(15, 15, 15, 10)
         
         if provider == 'Qwen2-VL':
             info_text = f"📚 Qwen2-VL {selected_model_key} Model\n"
@@ -1135,80 +1202,78 @@ class MangaTranslationTab:
         else:
             info_text = f"📚 {provider} Model\nOptimized for manga/manhwa text detection"
         
-        tk.Label(info_frame, text=info_text, font=('Arial', 10), justify=tk.LEFT).pack(anchor='w')
+        info_label = QLabel(info_text)
+        info_label_font = QFont("Arial", 10)
+        info_label.setFont(info_label_font)
+        info_label.setAlignment(Qt.AlignLeft)
+        info_label.setWordWrap(True)
+        info_frame_layout.addWidget(info_label)
+        
+        main_dialog_layout.addWidget(info_frame)
         
         # Progress section
-        progress_frame = tk.LabelFrame(
-            scrollable_frame,
-            text="Download Progress",
-            font=('Arial', 11, 'bold'),
-            padx=15,
-            pady=10
-        )
-        progress_frame.pack(fill=tk.X, padx=20, pady=10)
+        progress_frame = QGroupBox("Download Progress")
+        progress_frame_layout = QVBoxLayout(progress_frame)
+        progress_frame_layout.setContentsMargins(15, 15, 15, 10)
         
-        progress_label = tk.Label(progress_frame, text="Ready to download", font=('Arial', 10))
-        progress_label.pack(pady=(5, 10))
+        progress_label = QLabel("Ready to download")
+        progress_label_font = QFont("Arial", 10)
+        progress_label.setFont(progress_label_font)
+        progress_frame_layout.addWidget(progress_label)
         
-        progress_var = tk.DoubleVar()
-        try:
-            # Try to use our custom progress bar style
-            progress_bar = ttk.Progressbar(progress_frame, length=550, mode='determinate', 
-                                          variable=progress_var,
-                                          style="MangaProgress.Horizontal.TProgressbar")
-        except Exception:
-            # Fallback to default if style not available yet
-            progress_bar = ttk.Progressbar(progress_frame, length=550, mode='determinate', 
-                                          variable=progress_var)
-        progress_bar.pack(pady=(0, 5))
+        progress_bar = QProgressBar()
+        progress_bar.setMinimum(0)
+        progress_bar.setMaximum(100)
+        progress_bar.setValue(0)
+        progress_bar.setMinimumWidth(550)
+        progress_frame_layout.addWidget(progress_bar)
         
-        size_label = tk.Label(progress_frame, text="", font=('Arial', 9), fg='#666666')
-        size_label.pack()
+        size_label = QLabel("")
+        size_label_font = QFont("Arial", 9)
+        size_label.setFont(size_label_font)
+        size_label.setStyleSheet("color: #999999;")
+        progress_frame_layout.addWidget(size_label)
         
-        speed_label = tk.Label(progress_frame, text="", font=('Arial', 9), fg='#666666')
-        speed_label.pack()
+        speed_label = QLabel("")
+        speed_label_font = QFont("Arial", 9)
+        speed_label.setFont(speed_label_font)
+        speed_label.setStyleSheet("color: #999999;")
+        progress_frame_layout.addWidget(speed_label)
         
-        status_label = tk.Label(progress_frame, text="Click 'Download' to begin", 
-                              font=('Arial', 9), fg='#666666')
-        status_label.pack(pady=(5, 0))
+        status_label = QLabel("Click 'Download' to begin")
+        status_label_font = QFont("Arial", 9)
+        status_label.setFont(status_label_font)
+        status_label.setStyleSheet("color: #999999;")
+        progress_frame_layout.addWidget(status_label)
+        
+        main_dialog_layout.addWidget(progress_frame)
         
         # Log section
-        log_frame = tk.LabelFrame(
-            scrollable_frame,
-            text="Download Log",
-            font=('Arial', 11, 'bold'),
-            padx=15,
-            pady=10
-        )
-        log_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
-
-        # Create a frame to hold the text widget and scrollbar
-        text_frame = tk.Frame(log_frame)
-        text_frame.pack(fill=tk.BOTH, expand=True)
-
-        details_text = tk.Text(
-            text_frame, 
-            height=12, 
-            width=70, 
-            font=('Courier', 9), 
-            bg='#f5f5f5'
-        )
-        details_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        # Attach scrollbar to the frame, not the text widget
-        scrollbar = ttk.Scrollbar(text_frame, command=details_text.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        details_text.config(yscrollcommand=scrollbar.set)
+        log_frame = QGroupBox("Download Log")
+        log_frame_layout = QVBoxLayout(log_frame)
+        log_frame_layout.setContentsMargins(15, 15, 15, 10)
+        
+        details_text = QTextEdit()
+        details_text.setReadOnly(True)
+        details_text.setMinimumHeight(150)
+        details_text_font = QFont("Courier", 9)
+        details_text.setFont(details_text_font)
+        log_frame_layout.addWidget(details_text)
+        
+        main_dialog_layout.addWidget(log_frame)
             
         def add_log(message):
             """Add message to log"""
-            details_text.insert(tk.END, f"{message}\n")
-            details_text.see(tk.END)
-            details_text.update()
+            details_text.append(message)
+            # Scroll to bottom
+            from PySide6.QtGui import QTextCursor
+            cursor = details_text.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            details_text.setTextCursor(cursor)
         
         # Buttons frame
-        button_frame = tk.Frame(download_dialog)
-        button_frame.pack(pady=15)
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
         
         # Download tracking variables
         download_active = {'value': False}
@@ -1235,10 +1300,10 @@ class MangaTranslationTab:
             
             try:
                 if provider == 'manga-ocr':
-                    progress_label.config(text="Downloading manga-ocr model...")
+                    progress_label.setText("Downloading manga-ocr model...")
                     add_log("Downloading manga-ocr model from Hugging Face...")
                     add_log("This will download ~450MB of model files")
-                    progress_var.set(10)
+                    progress_bar.setValue(10)
                     
                     try:
                         from huggingface_hub import snapshot_download
@@ -1252,7 +1317,7 @@ class MangaTranslationTab:
                         start_time = time.time()
                         
                         add_log("Starting download...")
-                        progress_var.set(20)
+                        progress_bar.setValue(20)
                         
                         # Download with progress tracking
                         import threading
@@ -1282,18 +1347,18 @@ class MangaTranslationTab:
                             
                             if downloaded > 0:
                                 progress = min(20 + (downloaded / total_size) * 70, 95)
-                                progress_var.set(progress)
+                                progress_bar.setValue(int(progress))
                                 
                                 elapsed = time.time() - start_time
                                 if elapsed > 1:
                                     speed = downloaded / elapsed
                                     speed_mb = speed / (1024 * 1024)
-                                    speed_label.config(text=f"Speed: {speed_mb:.1f} MB/s")
+                                    speed_label.setText(f"Speed: {speed_mb:.1f} MB/s")
                                 
                                 mb_downloaded = downloaded / (1024 * 1024)
                                 mb_total = total_size / (1024 * 1024)
-                                size_label.config(text=f"{mb_downloaded:.1f} MB / {mb_total:.1f} MB")
-                                progress_label.config(text=f"Downloading: {progress:.1f}%")
+                                size_label.setText(f"{mb_downloaded:.1f} MB / {mb_total:.1f} MB")
+                                progress_label.setText(f"Downloading: {progress:.1f}%")
                             
                             time.sleep(0.5)
                         
@@ -1303,9 +1368,9 @@ class MangaTranslationTab:
                             raise download_error[0]
                         
                         if download_complete.is_set() and not download_error[0]:
-                            progress_var.set(100)
-                            progress_label.config(text="✅ Download complete!")
-                            status_label.config(text="Model files downloaded")
+                            progress_bar.setValue(100)
+                            progress_label.setText("✅ Download complete!")
+                            status_label.setText("Model files downloaded")
                             add_log("✅ Model files downloaded successfully")
                             add_log("")
                             add_log("Next step: Click 'Load Model' to initialize manga-ocr")
@@ -1315,8 +1380,8 @@ class MangaTranslationTab:
                             raise Exception("Download was cancelled")
                             
                     except ImportError:
-                        progress_label.config(text="❌ Missing huggingface_hub")
-                        status_label.config(text="Install huggingface_hub first")
+                        progress_label.setText("❌ Missing huggingface_hub")
+                        status_label.setText("Install huggingface_hub first")
                         add_log("ERROR: huggingface_hub not installed")
                         add_log("Run: pip install huggingface_hub")
                     except Exception as e:
@@ -1327,32 +1392,32 @@ class MangaTranslationTab:
                         from transformers import AutoProcessor, AutoTokenizer, AutoModelForVision2Seq
                         import torch
                     except ImportError as e:
-                        progress_label.config(text="❌ Missing dependencies")
-                        status_label.config(text="Install dependencies first")
+                        progress_label.setText("❌ Missing dependencies")
+                        status_label.setText("Install dependencies first")
                         add_log(f"ERROR: {str(e)}")
                         add_log("Please install manually:")
                         add_log("pip install transformers torch torchvision")
                         return
                     
-                    progress_label.config(text=f"Downloading model...")
+                    progress_label.setText(f"Downloading model...")
                     add_log(f"Starting download of {model_id}")
-                    progress_var.set(10)
+                    progress_bar.setValue(10)
                     
                     add_log("Downloading processor...")
-                    status_label.config(text="Downloading processor...")
+                    status_label.setText("Downloading processor...")
                     processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
-                    progress_var.set(30)
+                    progress_bar.setValue(30)
                     add_log("✓ Processor downloaded")
                     
                     add_log("Downloading tokenizer...")
-                    status_label.config(text="Downloading tokenizer...")
+                    status_label.setText("Downloading tokenizer...")
                     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
-                    progress_var.set(50)
+                    progress_bar.setValue(50)
                     add_log("✓ Tokenizer downloaded")
                     
                     add_log("Downloading model weights (this may take several minutes)...")
-                    status_label.config(text="Downloading model weights...")
-                    progress_label.config(text="Downloading model weights...")
+                    status_label.setText("Downloading model weights...")
+                    progress_label.setText("Downloading model weights...")
                     
                     if torch.cuda.is_available():
                         add_log(f"Using GPU: {torch.cuda.get_device_name(0)}")
@@ -1370,11 +1435,11 @@ class MangaTranslationTab:
                             trust_remote_code=True
                         )
                     
-                    progress_var.set(90)
+                    progress_bar.setValue(90)
                     add_log("✓ Model weights downloaded")
                     
                     add_log("Initializing model...")
-                    status_label.config(text="Initializing...")
+                    status_label.setText("Initializing...")
                     
                     qwen_provider = self.ocr_manager.get_provider('Qwen2-VL')
                     if qwen_provider:
@@ -1388,39 +1453,39 @@ class MangaTranslationTab:
                         if selected_model_key:
                             qwen_provider.loaded_model_size = selected_model_key
                     
-                    progress_var.set(100)
-                    progress_label.config(text="✅ Download complete!")
-                    status_label.config(text="Model ready for Korean OCR!")
+                    progress_bar.setValue(100)
+                    progress_label.setText("✅ Download complete!")
+                    status_label.setText("Model ready for Korean OCR!")
                     add_log("✓ Model ready to use!")
                     
                     # Schedule status check on main thread
                     self.update_queue.put(('call_method', self._check_provider_status, ()))
                     
                 elif provider == 'rapidocr':
-                    progress_label.config(text="📦 RapidOCR Installation Instructions")
+                    progress_label.setText("📦 RapidOCR Installation Instructions")
                     add_log("RapidOCR requires manual pip installation")
-                    progress_var.set(20)
+                    progress_bar.setValue(20)
                     
                     add_log("Command to run:")
                     add_log("pip install rapidocr-onnxruntime")
-                    progress_var.set(50)
+                    progress_bar.setValue(50)
                     
                     add_log("")
                     add_log("After installation:")
                     add_log("1. Close this dialog")
                     add_log("2. Click 'Load Model' to initialize RapidOCR")
                     add_log("3. Status should show '✅ Model loaded'")
-                    progress_var.set(100)
+                    progress_bar.setValue(100)
                     
-                    progress_label.config(text="📦 Installation instructions shown")
-                    status_label.config(text="Manual pip install required")
+                    progress_label.setText("📦 Installation instructions shown")
+                    status_label.setText("Manual pip install required")
                     
-                    download_btn.config(state=tk.DISABLED)
-                    cancel_btn.config(text="Close")                        
+                    download_btn.setEnabled(False)
+                    cancel_btn.setText("Close")
                         
             except Exception as e:
-                progress_label.config(text="❌ Download failed")
-                status_label.config(text=f"Error: {str(e)[:50]}")
+                progress_label.setText("❌ Download failed")
+                status_label.setText(f"Error: {str(e)[:50]}")
                 add_log(f"ERROR: {str(e)}")
                 self._log(f"Download error: {str(e)}", "error")
                 
@@ -1429,8 +1494,8 @@ class MangaTranslationTab:
         
         def start_download():
             """Start download in background thread or executor"""
-            download_btn.config(state=tk.DISABLED)
-            cancel_btn.config(text="Cancel")
+            download_btn.setEnabled(False)
+            cancel_btn.setText("Cancel")
             
             try:
                 if hasattr(self.main_gui, '_ensure_executor'):
@@ -1451,17 +1516,57 @@ class MangaTranslationTab:
             """Cancel or close dialog"""
             if download_active['value']:
                 download_active['value'] = False
-                status_label.config(text="Cancelling...")
+                status_label.setText("Cancelling...")
             else:
-                download_dialog.destroy()
+                download_dialog.close()
         
-        download_btn = tb.Button(button_frame, text="Download", command=start_download, bootstyle="primary")
-        download_btn.pack(side=tk.LEFT, padx=5)
+        download_btn = QPushButton("Download")
+        download_btn.setStyleSheet("""
+            QPushButton { 
+                background-color: #4a7ba7; 
+                color: white; 
+                padding: 8px 20px; 
+                font-weight: bold;
+                border: 1px solid #5a9fd4;
+            }
+            QPushButton:hover { 
+                background-color: #5a9fd4; 
+            }
+            QPushButton:pressed { 
+                background-color: #3a6a94; 
+            }
+            QPushButton:disabled {
+                background-color: #2d2d2d;
+                color: #666666;
+                border-color: #3a3a3a;
+            }
+        """)
+        download_btn.clicked.connect(start_download)
+        button_layout.addWidget(download_btn)
         
-        cancel_btn = tb.Button(button_frame, text="Close", command=cancel_download, bootstyle="secondary")
-        cancel_btn.pack(side=tk.LEFT, padx=5)
-    
-        # Window sizing handled by Tkinter geometry
+        cancel_btn = QPushButton("Close")
+        cancel_btn.setStyleSheet("""
+            QPushButton { 
+                background-color: #666666; 
+                color: white; 
+                padding: 8px 20px;
+                border: 1px solid #777777;
+            }
+            QPushButton:hover { 
+                background-color: #777777; 
+            }
+            QPushButton:pressed { 
+                background-color: #555555; 
+            }
+        """)
+        cancel_btn.clicked.connect(cancel_download)
+        button_layout.addWidget(cancel_btn)
+        
+        button_layout.addStretch()
+        main_dialog_layout.addLayout(button_layout)
+        
+        # Show dialog (non-modal)
+        download_dialog.show()
     
     def _check_provider_status(self):
         """Check and display OCR provider status"""
@@ -6362,14 +6467,20 @@ class MangaTranslationTab:
         def download_thread():
             import time
             try:
+                print(f"Starting download from: {url}")
+                
                 # Download with progress and speed tracking
                 response = requests.get(url, stream=True, timeout=30)
                 response.raise_for_status()
                 
                 total_size = int(response.headers.get('content-length', 0))
+                total_mb = total_size / (1024 * 1024) if total_size > 0 else 0
+                print(f"Download size: {total_mb:.2f} MB")
+                
                 downloaded = 0
                 start_time = time.time()
                 last_update = start_time
+                last_log_time = start_time
                 
                 with open(save_path, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
@@ -6378,60 +6489,70 @@ class MangaTranslationTab:
                             f.close()
                             if os.path.exists(save_path):
                                 os.remove(save_path)
+                            print("Download cancelled by user")
                             return
                         
                         if chunk:
                             f.write(chunk)
                             downloaded += len(chunk)
                             
-                            # Update progress (throttle updates to every 0.1 seconds)
                             current_time = time.time()
+                            
+                            # Update progress (throttle updates to every 0.1 seconds)
                             if total_size > 0 and (current_time - last_update > 0.1):
                                 last_update = current_time
                                 elapsed = current_time - start_time
                                 speed = downloaded / elapsed if elapsed > 0 else 0
                                 speed_mb = speed / (1024 * 1024)
                                 progress = (downloaded / total_size) * 100
+                                downloaded_mb = downloaded / (1024 * 1024)
                                 
-                                # Direct widget updates
-                                try:
-                                    progress_bar.setValue(int(progress))
-                                    status_label.setText(f"{progress:.1f}% - {speed_mb:.2f} MB/s")
-                                    progress_label.setText(f"⏳ Downloading... {downloaded//1024//1024}MB / {total_size//1024//1024}MB")
-                                except RuntimeError:
-                                    # Widget was destroyed, exit
-                                    cancel_download['value'] = True
-                                    return
+                                # Thread-safe widget updates using QTimer
+                                def update_ui(p=int(progress), d_mb=downloaded_mb, t_mb=total_mb, s_mb=speed_mb):
+                                    try:
+                                        progress_bar.setValue(p)
+                                        status_label.setText(f"{p}% - {s_mb:.2f} MB/s")
+                                        progress_label.setText(f"⏳ Downloading... {d_mb:.1f} MB / {t_mb:.1f} MB")
+                                    except RuntimeError:
+                                        cancel_download['value'] = True
+                                
+                                QTimer.singleShot(0, update_ui)
+                            
+                            # Log progress to console every 2 seconds
+                            if current_time - last_log_time > 2.0:
+                                last_log_time = current_time
+                                if total_size > 0:
+                                    progress = (downloaded / total_size) * 100
+                                    elapsed = current_time - start_time
+                                    speed_mb = (downloaded / elapsed / (1024 * 1024)) if elapsed > 0 else 0
+                                    print(f"Download progress: {progress:.1f}% ({downloaded//1024//1024} MB / {total_size//1024//1024} MB) @ {speed_mb:.2f} MB/s")
                 
-                # Success - direct call
-                try:
+                # Success - schedule on main thread
+                def complete():
                     progress_dialog.close()
                     self._download_complete(save_path, model_name)
-                except Exception as e:
-                    print(f"Error in download completion: {e}")
+                QTimer.singleShot(0, complete)
                 
             except requests.exceptions.RequestException as e:
-                # Error - direct call
+                # Error - schedule on main thread
                 if not cancel_download['value']:
-                    try:
+                    def failed():
                         progress_dialog.close()
                         self._download_failed(str(e))
-                    except Exception as ex:
-                        print(f"Error handling download failure: {ex}")
+                    QTimer.singleShot(0, failed)
             except Exception as e:
                 if not cancel_download['value']:
-                    try:
+                    def failed():
                         progress_dialog.close()
                         self._download_failed(str(e))
-                    except Exception as ex:
-                        print(f"Error handling download failure: {ex}")
+                    QTimer.singleShot(0, failed)
         
         # Start download in background thread
         thread = threading.Thread(target=download_thread, daemon=True)
         thread.start()
         
-        # Show dialog
-        progress_dialog.exec()
+        # Show dialog (non-blocking)
+        progress_dialog.show()
 
     def _download_complete(self, save_path: str, model_name: str):
         """Handle successful download"""

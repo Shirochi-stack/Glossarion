@@ -158,7 +158,8 @@ def get_cache_path_by_url(url: str) -> str:
 
 
 def download_model(url: str, md5: str = None) -> str:
-    """Download model if not cached"""
+    """Download model if not cached with progress reporting"""
+    import time
     cache_path = get_cache_path_by_url(url)
     
     if os.path.exists(cache_path):
@@ -168,7 +169,38 @@ def download_model(url: str, md5: str = None) -> str:
     logger.info(f"📥 Downloading model from {url}")
     
     try:
-        urllib.request.urlretrieve(url, cache_path)
+        # Use requests for better progress tracking instead of urllib
+        import requests
+        
+        response = requests.get(url, stream=True, timeout=30)
+        response.raise_for_status()
+        
+        total_size = int(response.headers.get('content-length', 0))
+        total_mb = total_size / (1024 * 1024) if total_size > 0 else 0
+        
+        if total_size > 0:
+            logger.info(f"   Download size: {total_mb:.2f} MB")
+        
+        downloaded = 0
+        start_time = time.time()
+        last_log_time = start_time
+        
+        with open(cache_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    
+                    # Log progress every 2 seconds
+                    current_time = time.time()
+                    if total_size > 0 and (current_time - last_log_time > 2.0):
+                        last_log_time = current_time
+                        progress = (downloaded / total_size) * 100
+                        elapsed = current_time - start_time
+                        speed_mb = (downloaded / elapsed / (1024 * 1024)) if elapsed > 0 else 0
+                        downloaded_mb = downloaded / (1024 * 1024)
+                        logger.info(f"   Progress: {progress:.1f}% ({downloaded_mb:.1f} MB / {total_mb:.1f} MB) @ {speed_mb:.2f} MB/s")
+        
         logger.info(f"✅ Model downloaded to: {cache_path}")
         return cache_path
     except Exception as e:
