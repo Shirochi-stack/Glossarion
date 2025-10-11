@@ -8336,19 +8336,9 @@ Important rules:
                         found = True
                         break
                 
-                # Debug logging for glossary_max_sentences
-                if key == 'glossary_max_sentences':
-                    # ALWAYS log this, not just in debug mode
-                    self.append_log(f"🔍 [SAVE_CONFIG] glossary_max_sentences: found={found}, final_value='{final_value}', sources={sources}")
-                    if hasattr(self, 'glossary_max_sentences_entry'):
-                        widget_value = self.glossary_max_sentences_entry.text()
-                        self.append_log(f"🔍 [SAVE_CONFIG] Widget text value: '{widget_value}'")
-                
                 if found:
                     converted_value = converter(final_value) if converter else final_value
                     self.config[key] = converted_value
-                    if key == 'glossary_max_sentences':
-                        self.append_log(f"🔍 [SAVE_CONFIG] Converted and stored in config: {converted_value}")
                 elif default is not None:
                     self.config[key] = default
 
@@ -8505,9 +8495,6 @@ Important rules:
                 ]
                 for env_key, env_value in glossary_env_mappings:
                     if env_key:  # Skip None entries
-                        # Log GLOSSARY_MAX_SENTENCES specifically
-                        if env_key == 'GLOSSARY_MAX_SENTENCES':
-                            self.append_log(f"🔍 [DEBUG] save_config setting {env_key}={env_value}")
                         env_vars_set.append(_update_env(env_key, env_value))
                 
                 # JSON environment variables
