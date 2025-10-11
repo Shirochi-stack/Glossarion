@@ -7772,6 +7772,36 @@ class MangaTranslationTab:
                 self._reset_ui_state()
                 return
             
+            # CRITICAL: Reload multi-key settings from disk to get fresh toggle state
+            # The multi-key manager dialog saves directly to config.json, but main_gui.config is stale
+            try:
+                import os
+                config_path = os.path.join(os.path.dirname(__file__), 'config.json')
+                if os.path.exists(config_path):
+                    try:
+                        self._log(f"🔍 Reloading multi-key config from: {config_path}", "info")
+                        with open(config_path, 'r', encoding='utf-8') as f:
+                            fresh_config = json.load(f)
+                        
+                        # Log what we're reading
+                        disk_value = fresh_config.get('use_multi_api_keys', False)
+                        memory_value = self.main_gui.config.get('use_multi_api_keys', False)
+                        self._log(f"🔑 Multi-key toggle on disk: {disk_value}, in memory: {memory_value}", "info")
+                        
+                        # Update only multi-key settings from disk (don't touch other settings)
+                        self.main_gui.config['use_multi_api_keys'] = disk_value
+                        self.main_gui.config['multi_api_keys'] = fresh_config.get('multi_api_keys', [])
+                        self.main_gui.config['force_key_rotation'] = fresh_config.get('force_key_rotation', True)
+                        self.main_gui.config['rotation_frequency'] = fresh_config.get('rotation_frequency', 1)
+                        
+                        self._log(f"✅ Multi-key mode will be: {'ENABLED' if disk_value else 'DISABLED'}", "info")
+                    except Exception as reload_err:
+                        self._log(f"⚠️ Could not reload config from disk: {reload_err}", "error")
+                        import traceback
+                        self._log(traceback.format_exc(), "debug")
+            except Exception as e:
+                self._log(f"❌ Exception reloading config: {e}", "error")
+            
             # Check if we need to create or update the client
             needs_new_client = False
             self._log("🔎 Checking API client...", "debug")
