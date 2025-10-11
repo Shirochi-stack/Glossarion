@@ -7813,52 +7813,87 @@ class MangaTranslationTab:
                 needs_new_client = True
                 self._log(f"🛠 Model changed from {self.main_gui.client.model} to {model}, creating new client", "info")
             else:
-                self._log("♻️ Reusing existing API client", "debug")
+                # Check if multi-key mode changed - if so, force new client
+                current_multi_key = bool(self.main_gui.config.get('use_multi_api_keys', False))
+                client_multi_key = getattr(self.main_gui.client, '_multi_key_mode', False)
+                
+                if current_multi_key != client_multi_key:
+                    needs_new_client = True
+                    mode_change = "ENABLED" if current_multi_key else "DISABLED"
+                    self._log(f"🔑 Multi-key mode changed to {mode_change}, creating new client", "info")
+                else:
+                    self._log("♻️ Reusing existing API client", "debug")
+            
+            # CRITICAL: Always sync environment variables with current config state
+            # This ensures multi-key mode is properly enabled/disabled for all API calls
+            try:
+                import os  # Import os here
+                use_mk = bool(self.main_gui.config.get('use_multi_api_keys', False))
+                mk_list = self.main_gui.config.get('multi_api_keys', [])
+                
+                if use_mk and mk_list:
+                    # Validate multi-key configuration before applying
+                    valid_keys = 0
+                    for key_data in mk_list:
+                        if isinstance(key_data, dict) and key_data.get('api_key') and key_data.get('model'):
+                            valid_keys += 1
+                    
+                    if valid_keys == 0:
+                        self._log("❌ Multi-key mode is enabled but no valid keys are configured!", "error")
+                        self._log("   Each key must have both 'api_key' and 'model' fields.", "error")
+                        self._log("   Please check your multi-key configuration in Settings.", "error")
+                        self._stop_startup_heartbeat()
+                        self._reset_ui_state()
+                        return
+                    
+                    os.environ['USE_MULTI_API_KEYS'] = '1'
+                    os.environ['USE_MULTI_KEYS'] = '1'  # backward-compat for retry paths
+                    os.environ['MULTI_API_KEYS'] = json.dumps(mk_list)
+                    os.environ['FORCE_KEY_ROTATION'] = '1' if self.main_gui.config.get('force_key_rotation', True) else '0'
+                    os.environ['ROTATION_FREQUENCY'] = str(self.main_gui.config.get('rotation_frequency', 1))
+                    
+                    # Debug: Verify environment variables were actually set
+                    self._log(f"🔑 Multi-key mode environment: ENABLED ({valid_keys} valid keys)", "info")
+                    self._log(f"🔍 ENV DEBUG: USE_MULTI_API_KEYS = {os.environ.get('USE_MULTI_API_KEYS')}", "debug")
+                    self._log(f"🔍 ENV DEBUG: MULTI_API_KEYS length = {len(os.environ.get('MULTI_API_KEYS', ''))}", "debug")
+                else:
+                    # Explicitly disable multi-key mode in environment
+                    os.environ['USE_MULTI_API_KEYS'] = '0'
+                    os.environ['USE_MULTI_KEYS'] = '0'
+                    
+                    # CRITICAL: Clear any existing multi-key pool to force single-key mode
+                    try:
+                        from unified_api_client import UnifiedClient
+                        if hasattr(UnifiedClient, '_api_key_pool') and UnifiedClient._api_key_pool:
+                            UnifiedClient._api_key_pool = None
+                            self._log("🗑️ Cleared existing multi-key pool", "debug")
+                    except Exception as clear_err:
+                        self._log(f"⚠️ Could not clear multi-key pool: {clear_err}", "debug")
+                    
+                    if use_mk and not mk_list:
+                        self._log("⚠️ Multi-key mode is enabled but no keys are configured", "warning")
+                    elif not use_mk:
+                        self._log("🔑 Multi-key mode environment: DISABLED (using single key)", "info")
+                
+                # Fallback keys (optional)
+                if self.main_gui.config.get('use_fallback_keys', False):
+                    os.environ['USE_FALLBACK_KEYS'] = '1'
+                    os.environ['FALLBACK_KEYS'] = json.dumps(self.main_gui.config.get('fallback_keys', []))
+                else:
+                    os.environ['USE_FALLBACK_KEYS'] = '0'
+                    os.environ['FALLBACK_KEYS'] = '[]'
+            except Exception as env_err:
+                self._log(f"⚠️ Failed to sync multi-key environment variables: {env_err}", "warning")
             
             if needs_new_client:
-                # Apply multi-key settings from config so UnifiedClient picks them up
-                try:
-                    import os  # Import os here
-                    use_mk = bool(self.main_gui.config.get('use_multi_api_keys', False))
-                    mk_list = self.main_gui.config.get('multi_api_keys', [])
-                    if use_mk and mk_list:
-                        # Validate multi-key configuration before applying
-                        valid_keys = 0
-                        for key_data in mk_list:
-                            if isinstance(key_data, dict) and key_data.get('api_key') and key_data.get('model'):
-                                valid_keys += 1
-                        
-                        if valid_keys == 0:
-                            self._log("❌ Multi-key mode is enabled but no valid keys are configured!", "error")
-                            self._log("   Each key must have both 'api_key' and 'model' fields.", "error")
-                            self._log("   Please check your multi-key configuration in Settings.", "error")
-                            self._stop_startup_heartbeat()
-                            self._reset_ui_state()
-                            return
-                        
-                        os.environ['USE_MULTI_API_KEYS'] = '1'
-                        os.environ['USE_MULTI_KEYS'] = '1'  # backward-compat for retry paths
-                        os.environ['MULTI_API_KEYS'] = json.dumps(mk_list)
-                        os.environ['FORCE_KEY_ROTATION'] = '1' if self.main_gui.config.get('force_key_rotation', True) else '0'
-                        os.environ['ROTATION_FREQUENCY'] = str(self.main_gui.config.get('rotation_frequency', 1))
-                        self._log(f"🔑 Multi-key mode ENABLED for manga translator ({valid_keys} valid keys)", "info")
-                    else:
-                        # Explicitly disable if not configured
-                        os.environ['USE_MULTI_API_KEYS'] = '0'
-                        os.environ['USE_MULTI_KEYS'] = '0'
-                    # Fallback keys (optional)
-                    if self.main_gui.config.get('use_fallback_keys', False):
-                        os.environ['USE_FALLBACK_KEYS'] = '1'
-                        os.environ['FALLBACK_KEYS'] = json.dumps(self.main_gui.config.get('fallback_keys', []))
-                    else:
-                        os.environ['USE_FALLBACK_KEYS'] = '0'
-                        os.environ['FALLBACK_KEYS'] = '[]'
-                except Exception as env_err:
-                    self._log(f"⚠️ Failed to apply multi-key settings: {env_err}", "warning")
-                
                 # Create the unified client with the current model
                 try:
                     from unified_api_client import UnifiedClient
+                    
+                    # Debug: Check environment variables just before creating client
+                    self._log(f"🔍 PRE-CLIENT ENV: USE_MULTI_API_KEYS = {os.environ.get('USE_MULTI_API_KEYS', 'NOT_SET')}", "info")
+                    self._log(f"🔍 PRE-CLIENT ENV: MULTI_API_KEYS length = {len(os.environ.get('MULTI_API_KEYS', ''))}", "info")
+                    
                     self._log("⏳ Creating API client (network/model handshake)...", "debug")
                     self.main_gui.client = UnifiedClient(model=model, api_key=api_key)
                     self._log(f"✅ API client ready (model: {model})", "info")
