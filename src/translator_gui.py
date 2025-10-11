@@ -4001,6 +4001,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
             except Exception:
                 pass
             
+            # Re-attach GUI logging handlers to reclaim logs from manga integration
+            try:
+                self._attach_gui_logging_handlers()
+            except Exception:
+                pass
+            
             # Check stop at the very beginning
             if self.stop_requested:
                 return False
@@ -5376,6 +5382,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
                                         uc_module.__dict__['print'] = MangaTranslator._original_print_backup
                                 except Exception:
                                     pass
+            except Exception:
+                pass
+            
+            # Re-attach GUI logging handlers to reclaim logs from manga integration
+            try:
+                self._attach_gui_logging_handlers()
             except Exception:
                 pass
             

@@ -201,59 +201,23 @@ def _preload_models_worker(models_list, progress_queue):
         progress_queue.put(('error', 'Process', str(e)))
 
 class _MangaGuiLogHandler(logging.Handler):
-    """Forward logging records into MangaTranslationTab._log."""
+    """Forward logging records into MangaTranslationTab._log.
+    Matches translator_gui.py's GuiLogHandler implementation.
+    """
     def __init__(self, gui_ref, level=logging.INFO):
         super().__init__(level)
         self.gui_ref = gui_ref
-        self._last_msg = None
-        self.setFormatter(logging.Formatter('%(levelname)s:%(name)s:%(message)s'))
-
+    
     def emit(self, record: logging.LogRecord) -> None:
-        # Avoid looping/duplicates from this module's own messages or when stdio is redirected
         try:
-            if getattr(self.gui_ref, '_stdio_redirect_active', False):
-                return
-            # Filter out manga_translator, bubble_detector, local_inpainter logs as they're already shown
-            if record and isinstance(record.name, str):
-                if record.name.startswith(('manga_integration', 'manga_translator', 'bubble_detector', 'local_inpainter', 'unified_api_client', 'google_genai', 'httpx')):
-                    return
-        except Exception:
-            pass
-        try:
-            msg = self.format(record)
-        except Exception:
+            # Use the raw message without logger name/level prefixes (matches translator_gui)
             msg = record.getMessage()
-        # Deduplicate identical consecutive messages
-        if msg == self._last_msg:
-            return
-        self._last_msg = msg
-        
-        # Map logging levels to our tag levels
-        lvl = record.levelname.lower()
-        tag = 'info'
-        if lvl.startswith('warn'):
-            tag = 'warning'
-        elif lvl.startswith('err') or lvl.startswith('crit'):
-            tag = 'error'
-        elif lvl.startswith('debug'):
-            tag = 'debug'
-        elif lvl.startswith('info'):
-            tag = 'info'
-        
-        # Always store to persistent log (even if GUI is closed)
-        try:
-            with MangaTranslationTab._persistent_log_lock:
-                if len(MangaTranslationTab._persistent_log) >= 1000:
-                    MangaTranslationTab._persistent_log.pop(0)
-                MangaTranslationTab._persistent_log.append((msg, tag))
-        except Exception:
-            pass
-        
-        # Also try to display in GUI if it exists
-        try:
+            
+            # Call _log directly if it exists
             if hasattr(self.gui_ref, '_log'):
-                self.gui_ref._log(msg, tag)
+                self.gui_ref._log(msg, 'info')
         except Exception:
+            # Never raise from logging path
             pass
 
 class _StreamToGuiLog:
@@ -7172,25 +7136,44 @@ class MangaTranslationTab:
             self._log(f"⚠️ Failed to compile CBZ packages: {e}", "warning")
 
     def _attach_logging_bridge(self):
-        """Attach a root logging handler that forwards records into the GUI log."""
+        """Attach logging handlers so library/client logs appear in the GUI log.
+        Safe to call multiple times (won't duplicate handlers). Matches translator_gui.py implementation.
+        """
         try:
             if getattr(self, '_gui_log_handler', None) is None:
+                # Build handler
                 handler = _MangaGuiLogHandler(self, level=logging.INFO)
-                root_logger = logging.getLogger()
-                # Avoid duplicates
-                if all(not isinstance(h, _MangaGuiLogHandler) for h in root_logger.handlers):
-                    root_logger.addHandler(handler)
+                fmt = logging.Formatter('%(message)s')
+                handler.setFormatter(fmt)
                 self._gui_log_handler = handler
-                # Ensure common module loggers propagate
-                for name in ['bubble_detector', 'local_inpainter', 'manga_translator']:
+                
+                # Target relevant loggers - includes httpx for HTTP request logs
+                target_loggers = [
+                    'unified_api_client',
+                    'httpx',
+                    'requests.packages.urllib3',
+                    'openai',
+                    'bubble_detector',
+                    'local_inpainter',
+                    'manga_translator'
+                ]
+                
+                for name in target_loggers:
                     try:
                         lg = logging.getLogger(name)
-                        lg.setLevel(logging.INFO)
-                        lg.propagate = True
+                        # Avoid duplicate handler attachments
+                        if not any(isinstance(h, _MangaGuiLogHandler) for h in lg.handlers):
+                            lg.addHandler(handler)
+                        # Ensure at least INFO level to see HTTP requests and retry/backoff notices
+                        if lg.level > logging.INFO or lg.level == logging.NOTSET:
+                            lg.setLevel(logging.INFO)
                     except Exception:
                         pass
-        except Exception:
-            pass
+        except Exception as e:
+            try:
+                self._log(f"⚠️ Failed to attach GUI log handlers: {e}")
+            except Exception:
+                pass
 
     def _redirect_stderr(self, enable: bool):
         """Temporarily redirect stderr to the GUI log (captures tqdm/HF progress)."""

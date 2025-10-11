@@ -5519,13 +5519,38 @@ def run_standalone_translate_headers(self):
         # Define the thread function
         def translation_thread():
             try:
-                # Initialize API client with current settings
-                from unified_api_client import UnifiedClient
-                api_client = UnifiedClient(model=model, api_key=api_key)
-                
-                # Temporarily set it on self so the standalone module can use it
+                # Use existing API client if available (it has multi-key support)
+                # Otherwise create a new one with proper config
                 original_client = getattr(self, 'api_client', None)
-                self.api_client = api_client
+                
+                if original_client:
+                    # Use existing client - it already has multi-key mode configured
+                    self.append_log("✅ Using existing API client (with multi-key support)")
+                    api_client = original_client
+                else:
+                    # Initialize new API client with current settings
+                    # Multi-key mode is configured via environment variables (not constructor params)
+                    from unified_api_client import UnifiedClient
+                    import json
+                    
+                    # Set environment variables for multi-key mode if configured
+                    if hasattr(self, 'config'):
+                        if self.config.get('use_multi_api_keys', False):
+                            multi_keys = self.config.get('multi_api_keys', [])
+                            os.environ['USE_MULTI_API_KEYS'] = '1'
+                            os.environ['MULTI_API_KEYS'] = json.dumps(multi_keys)
+                            os.environ['FORCE_KEY_ROTATION'] = '1' if self.config.get('force_key_rotation', True) else '0'
+                            os.environ['ROTATION_FREQUENCY'] = str(self.config.get('rotation_frequency', 1))
+                            self.append_log(f"🔑 Multi-key mode enabled ({len(multi_keys)} keys)")
+                    
+                    api_client = UnifiedClient(
+                        model=model, 
+                        api_key=api_key
+                    )
+                    self.append_log("✅ Created new API client")
+                    
+                    # Set it temporarily
+                    self.api_client = api_client
                 
                 try:
                     # Import and run the translation GUI

@@ -11,6 +11,7 @@ import re
 import json
 import zipfile
 import xml.etree.ElementTree as ET
+import logging
 from typing import Dict, Tuple, Optional, List
 from bs4 import BeautifulSoup
 
@@ -479,6 +480,59 @@ def run_translation(
         return {}
 
 
+def _attach_logging_handlers(gui_instance):
+    """Attach logging handlers to reclaim HTTP logs for translator GUI.
+    Matches the implementation in translator_gui.py's _attach_gui_logging_handlers.
+    """
+    try:
+        # Define a simple handler that forwards logs to the GUI
+        class GuiLogHandler(logging.Handler):
+            def __init__(self, outer, level=logging.INFO):
+                super().__init__(level)
+                self.outer = outer
+            
+            def emit(self, record):
+                try:
+                    # Use the raw message without logger name/level prefixes
+                    msg = record.getMessage()
+                    if hasattr(self.outer, 'append_log'):
+                        self.outer.append_log(msg)
+                except Exception:
+                    # Never raise from logging path
+                    pass
+        
+        # Build handler
+        handler = GuiLogHandler(gui_instance, level=logging.INFO)
+        fmt = logging.Formatter('%(message)s')
+        handler.setFormatter(fmt)
+        
+        # Target relevant loggers - includes httpx for HTTP request logs
+        target_loggers = [
+            'unified_api_client',
+            'httpx',
+            'requests.packages.urllib3',
+            'openai'
+        ]
+        
+        for name in target_loggers:
+            try:
+                lg = logging.getLogger(name)
+                # Avoid duplicate handler attachments
+                if not any(isinstance(h, GuiLogHandler) for h in lg.handlers):
+                    lg.addHandler(handler)
+                # Ensure at least INFO level to see HTTP requests and retry/backoff notices
+                if lg.level > logging.INFO or lg.level == logging.NOTSET:
+                    lg.setLevel(logging.INFO)
+            except Exception:
+                pass
+    except Exception as e:
+        try:
+            if hasattr(gui_instance, 'append_log'):
+                gui_instance.append_log(f"⚠️ Failed to attach GUI log handlers: {e}")
+        except Exception:
+            pass
+
+
 def run_translate_headers_gui(gui_instance):
     """
     GUI wrapper for standalone header translation
@@ -489,61 +543,53 @@ def run_translate_headers_gui(gui_instance):
     from PySide6.QtWidgets import QMessageBox
     
     try:
-        # Get EPUB path
-        epub_path = gui_instance.get_current_epub_path()
-        if not epub_path or not os.path.exists(epub_path):
-            QMessageBox.critical(
-                None, 
-                "Error", 
-                "No EPUB file selected or file does not exist."
-            )
-            return
+        # Re-attach GUI logging handlers to reclaim logs from manga integration
+        _attach_logging_handlers(gui_instance)
         
-        # Get output directory
-        epub_base = os.path.splitext(os.path.basename(epub_path))[0]
-        current_dir = os.getcwd()
-        script_dir = os.path.dirname(os.path.abspath(__file__))
+        # Get EPUB files - check if multiple files are selected first
+        epub_files = []
         
-        # Try multiple locations
-        candidates = [
-            os.path.join(os.path.dirname(epub_path), epub_base),  # Same dir as EPUB
-            os.path.join(current_dir, epub_base),                 # Current working dir
-            os.path.join(script_dir, epub_base),                  # Script dir
-            os.path.join(script_dir, '..', epub_base),            # Parent of script dir
-        ]
+        # Try to get multiple selected files from the GUI (if available)
+        if hasattr(gui_instance, 'selected_files') and gui_instance.selected_files:
+            # Filter for only EPUB files
+            epub_files = [f for f in gui_instance.selected_files if f.lower().endswith('.epub')]
+            if epub_files:
+                gui_instance.append_log(f"📚 Found {len(epub_files)} EPUB file(s) in selection")
         
-        output_dir = None
-        
-        for candidate in candidates:
-            if os.path.isdir(candidate):
-                # Verify it actually has HTML files
-                try:
-                    files = os.listdir(candidate)
-                    html_files = [f for f in files if f.lower().endswith(('.html', '.xhtml', '.htm'))]
-                    if html_files:
-                        output_dir = candidate
-                        break
-                except Exception:
-                    continue
-        
-        if not output_dir or not os.path.exists(output_dir):
-            from PySide6.QtGui import QIcon
-            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
-            icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
+        # Fallback to single EPUB path
+        if not epub_files:
+            epub_path = gui_instance.get_current_epub_path()
+            if not epub_path or not os.path.exists(epub_path):
+                QMessageBox.critical(
+                    None, 
+                    "Error", 
+                    "No EPUB file selected or file does not exist."
+                )
+                return
             
-            msg_box = QMessageBox()
-            msg_box.setIcon(QMessageBox.Critical)
-            msg_box.setWindowTitle("Error")
-            msg_box.setText(f"Output directory not found for: {epub_base}")
-            msg_box.setInformativeText(
-                "Please extract the EPUB first.\n\n"
-                "The tool checked these locations:\n" + "\n".join([f"  - {c}" for c in candidates[:3]])
-            )
-            msg_box.setWindowIcon(icon)
-            msg_box.exec()
-            return
+            # Check if epub_path is a directory containing multiple EPUBs
+            if os.path.isdir(epub_path):
+                # Process all EPUBs in the directory
+                gui_instance.append_log(f"📁 Scanning directory for EPUB files: {epub_path}")
+                for file in os.listdir(epub_path):
+                    if file.lower().endswith('.epub'):
+                        full_path = os.path.join(epub_path, file)
+                        epub_files.append(full_path)
+                
+                if not epub_files:
+                    QMessageBox.critical(
+                        None,
+                        "Error",
+                        f"No EPUB files found in directory: {epub_path}"
+                    )
+                    return
+                
+                gui_instance.append_log(f"📚 Found {len(epub_files)} EPUB file(s) to process")
+            else:
+                # Single EPUB file
+                epub_files = [epub_path]
         
-        # Get API client
+        # Check API client once before processing any files
         if not hasattr(gui_instance, 'api_client') or not gui_instance.api_client:
             QMessageBox.critical(
                 None, 
@@ -552,41 +598,118 @@ def run_translate_headers_gui(gui_instance):
             )
             return
         
-        # Get config from GUI
+        # Get config from GUI once
         config = {
             'headers_per_batch': int(getattr(gui_instance, 'headers_per_batch_var', 350)),
             'temperature': float(os.getenv('TRANSLATION_TEMPERATURE', '0.3')),
             'max_tokens': int(os.getenv('MAX_OUTPUT_TOKENS', '12000')),
         }
         
-        # Get options
+        # Get options once
         update_html = getattr(gui_instance, 'update_html_headers_var', True)
         save_to_file = getattr(gui_instance, 'save_header_translations_var', True)
         
-        gui_instance.append_log("🌐 Starting standalone header translation...")
+        # Process each EPUB file
+        total_files = len(epub_files)
+        successful = 0
+        failed = 0
         
-        # Run translation
-        result = translate_headers_standalone(
-            epub_path=epub_path,
-            output_dir=output_dir,
-            api_client=gui_instance.api_client,
-            config=config,
-            update_html=update_html,
-            save_to_file=save_to_file,
-            log_callback=gui_instance.append_log
-        )
+        gui_instance.append_log(f"📊 Will process {total_files} EPUB file(s)")
         
-        # Log results instead of showing message box
-        if result:
-            gui_instance.append_log(f"✅ Successfully translated {len(result)} chapter headers!")
-            # Show the translated_headers.txt file path only if saving was enabled
-            if save_to_file:
-                translations_file = os.path.join(output_dir, "translated_headers.txt")
-                gui_instance.append_log(f"📄 Translations saved to: {translations_file}")
-            if update_html:
-                gui_instance.append_log(f"🗂️ HTML files updated in: {output_dir}")
-        else:
-            gui_instance.append_log("⚠️ No chapters were translated. Please check the logs above.")
+        for idx, current_epub in enumerate(epub_files, 1):
+            gui_instance.append_log(f"\n{'='*60}")
+            gui_instance.append_log(f"📄 Processing EPUB {idx}/{total_files}: {os.path.basename(current_epub)}")
+            gui_instance.append_log(f"{'='*60}")
+            
+            # Get output directory for this EPUB
+            # Using EXACT same logic as QA Scanner auto-search (lines 1189-1193)
+            epub_base = os.path.splitext(os.path.basename(current_epub))[0]
+            current_dir = os.getcwd()
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            
+            # Check the most common locations in order of priority (same as QA Scanner)
+            candidates = [
+                os.path.join(current_dir, epub_base),        # current working directory
+                os.path.join(script_dir, epub_base),         # src directory (where output typically goes)
+                os.path.join(current_dir, 'src', epub_base), # src subdirectory from current dir
+            ]
+            
+            output_dir = None
+            checked_locations = []
+            
+            for candidate in candidates:
+                checked_locations.append(candidate)
+                if os.path.isdir(candidate):
+                    # Verify it actually has HTML files
+                    try:
+                        files = os.listdir(candidate)
+                        html_files = [f for f in files if f.lower().endswith(('.html', '.xhtml', '.htm'))]
+                        if html_files:
+                            output_dir = candidate
+                            gui_instance.append_log(f"✓ Found output directory: {candidate}")
+                            break
+                    except Exception:
+                        continue
+            
+            if not output_dir or not os.path.exists(output_dir):
+                gui_instance.append_log(f"⚠️ Output directory not found for: {epub_base}")
+                gui_instance.append_log(f"   Checked all {len(checked_locations)} locations:")
+                for loc in checked_locations:
+                    gui_instance.append_log(f"     - {loc}")
+                failed += 1
+                gui_instance.append_log(f"⏭️ Skipping to next EPUB... ({successful + failed}/{total_files} processed)\n")
+                # Force GUI event processing
+                try:
+                    from PySide6.QtWidgets import QApplication
+                    QApplication.processEvents()
+                except Exception:
+                    pass
+                continue
+            
+            # Log starting message
+            if total_files == 1:
+                gui_instance.append_log("🌐 Starting standalone header translation...")
+            
+            # Run translation
+            result = translate_headers_standalone(
+                epub_path=current_epub,
+                output_dir=output_dir,
+                api_client=gui_instance.api_client,
+                config=config,
+                update_html=update_html,
+                save_to_file=save_to_file,
+                log_callback=gui_instance.append_log
+            )
+            
+            # Log results
+            if result:
+                gui_instance.append_log(f"✅ Successfully translated {len(result)} chapter headers!")
+                # Show the translated_headers.txt file path only if saving was enabled
+                if save_to_file:
+                    translations_file = os.path.join(output_dir, "translated_headers.txt")
+                    gui_instance.append_log(f"📄 Translations saved to: {translations_file}")
+                if update_html:
+                    gui_instance.append_log(f"🗂️ HTML files updated in: {output_dir}")
+                successful += 1
+            else:
+                gui_instance.append_log(f"⚠️ No chapters were translated for: {epub_base}")
+                failed += 1
+            
+            # Force GUI event processing after each file
+            try:
+                from PySide6.QtWidgets import QApplication
+                QApplication.processEvents()
+            except Exception:
+                pass
+        
+        # Show summary if multiple files were processed
+        if total_files > 1:
+            gui_instance.append_log(f"\n{'='*60}")
+            gui_instance.append_log(f"📊 Translation Summary:")
+            gui_instance.append_log(f"  ✅ Successful: {successful}/{total_files}")
+            if failed > 0:
+                gui_instance.append_log(f"  ❌ Failed: {failed}/{total_files}")
+            gui_instance.append_log(f"{'='*60}")
     
     except Exception as e:
         import traceback
