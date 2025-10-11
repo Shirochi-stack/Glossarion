@@ -69,6 +69,7 @@ def setup_other_settings_methods(gui_instance):
         'toggle_custom_endpoint_ui', 'toggle_more_endpoints',
         '_toggle_multi_key_setting', '_toggle_http_tuning_controls',
         '_toggle_anti_duplicate_controls', 'toggle_image_translation_section',
+        'toggle_anti_duplicate_section',
         # Provider autocomplete methods
         '_setup_provider_combobox_bindings', '_on_provider_combo_keyrelease',
         '_commit_provider_autocomplete', '_scroll_provider_list_to_value',
@@ -2008,7 +2009,7 @@ def _toggle_multi_key_setting(self):
     # Don't save immediately, let the dialog's save button handle it
 
 def toggle_image_translation_section(self):
-    """Toggle visibility of image translation content with slide animation"""
+    """Toggle visibility of image translation content with smooth fade"""
     try:
         if not hasattr(self, 'image_translation_content'):
             return
@@ -2017,54 +2018,50 @@ def toggle_image_translation_section(self):
         
         # Import animation components
         from PySide6.QtCore import QPropertyAnimation, QEasingCurve
+        from PySide6.QtWidgets import QGraphicsOpacityEffect
         
-        # Remove any existing graphics effects that might cause issues
-        if hasattr(self.image_translation_content, 'opacity_effect'):
-            self.image_translation_content.setGraphicsEffect(None)
-            delattr(self.image_translation_content, 'opacity_effect')
+        # Stop any existing animation
+        if hasattr(self, '_image_section_animation') and self._image_section_animation:
+            self._image_section_animation.stop()
         
-        # Get current and target heights
-        if enabled:
-            # Show widget first to get its natural size
-            self.image_translation_content.setVisible(True)
-            # Force layout update to get correct size
-            self.image_translation_content.adjustSize()
-            target_height = self.image_translation_content.sizeHint().height()
-            start_height = 0
+        # Ensure widget is visible for animation
+        self.image_translation_content.setVisible(True)
+        
+        # Create or get opacity effect
+        if not hasattr(self.image_translation_content, '_opacity_effect'):
+            effect = QGraphicsOpacityEffect()
+            self.image_translation_content.setGraphicsEffect(effect)
+            self.image_translation_content._opacity_effect = effect
         else:
-            # Start from current height and collapse to 0
-            start_height = self.image_translation_content.height()
-            target_height = 0
+            effect = self.image_translation_content._opacity_effect
         
-        # Create height animation
-        animation = QPropertyAnimation(self.image_translation_content, b"maximumHeight")
-        animation.setDuration(250)  # Slightly faster for better UX
+        # Create opacity animation
+        animation = QPropertyAnimation(effect, b"opacity")
+        animation.setDuration(150)  # Faster for no glitch
         animation.setEasingCurve(QEasingCurve.Type.OutCubic)
-        animation.setStartValue(start_height)
-        animation.setEndValue(target_height)
         
-        # Set up animation completion handler
-        def on_animation_finished():
-            if not enabled:
-                # Hide widget after collapse animation
-                self.image_translation_content.setVisible(False)
-            # Reset maximum height to allow natural sizing
-            self.image_translation_content.setMaximumHeight(16777215)  # Qt's QWIDGETSIZE_MAX
+        if enabled:
+            # Fade in
+            animation.setStartValue(0.0)
+            animation.setEndValue(1.0)
+        else:
+            # Fade out
+            animation.setStartValue(1.0)
+            animation.setEndValue(0.0)
+            # Hide after fade out
+            animation.finished.connect(
+                lambda: self.image_translation_content.setVisible(False) if not enabled else None
+            )
         
-        animation.finished.connect(on_animation_finished)
-        
-        # Store animation reference to prevent garbage collection
         self._image_section_animation = animation
         animation.start()
         
-    except Exception as e:
+    except Exception:
         # Fallback to simple show/hide if animation fails
         try:
             if hasattr(self, 'image_translation_content'):
                 enabled = bool(self.enable_image_translation_var)
                 self.image_translation_content.setVisible(enabled)
-                # Ensure maximum height is reset
-                self.image_translation_content.setMaximumHeight(16777215)
         except Exception:
             pass
 
@@ -4448,9 +4445,57 @@ def _create_anti_duplicate_section(self, parent):
     enable_cb.setContentsMargins(0, 0, 0, 10)
     section_v.addWidget(enable_cb)
     
+    # Create container for all content below the main checkbox
+    content_container = QWidget()
+    content_layout = QVBoxLayout(content_container)
+    content_layout.setContentsMargins(0, 0, 0, 0)
+    content_layout.setSpacing(4)
+    
+    # Store reference for slide animation
+    self.anti_duplicate_content = content_container
+    
     # Create tab widget for organized parameters
     self.anti_duplicate_notebook = QTabWidget()
-    section_v.addWidget(self.anti_duplicate_notebook)
+    
+    # Enhanced tab styling
+    self.anti_duplicate_notebook.setStyleSheet("""
+        QTabWidget::pane {
+            border: 1px solid #555;
+            background-color: #2d2d2d;
+            border-top-left-radius: 0px;
+            border-top-right-radius: 4px;
+            border-bottom-left-radius: 4px;
+            border-bottom-right-radius: 4px;
+        }
+        QTabWidget::tab-bar {
+            left: 5px;
+        }
+        QTabBar::tab {
+            background-color: #404040;
+            color: #cccccc;
+            padding: 8px 16px;
+            margin-right: 2px;
+            border-top-left-radius: 4px;
+            border-top-right-radius: 4px;
+            min-width: 80px;
+            font-weight: 500;
+        }
+        QTabBar::tab:selected {
+            background-color: #2d2d2d;
+            color: #ffffff;
+            border-bottom: 2px solid #0078d4;
+            font-weight: bold;
+        }
+        QTabBar::tab:hover:!selected {
+            background-color: #4a4a4a;
+            color: #ffffff;
+        }
+        QTabBar::tab:first {
+            margin-left: 0;
+        }
+    """)
+    
+    content_layout.addWidget(self.anti_duplicate_notebook)
     
     # Tab 1: Core Parameters
     core_frame = QWidget()
@@ -4657,12 +4702,12 @@ def _create_anti_duplicate_section(self, parent):
     compat_title = QLabel("Parameter Compatibility:")
     compat_title.setStyleSheet("font-weight: bold; font-size: 9pt;")
     compat_title.setContentsMargins(0, 15, 0, 0)
-    section_v.addWidget(compat_title)
+    content_layout.addWidget(compat_title)
     
     compat_text = QLabel("• Core: Most providers • Advanced: DeepSeek, Mistral, Groq • Logit Bias: OpenAI only")
     compat_text.setStyleSheet("color: gray; font-size: 8pt;")
     compat_text.setContentsMargins(0, 5, 0, 0)
-    section_v.addWidget(compat_text)
+    content_layout.addWidget(compat_text)
     
     # Reset button
     reset_row = QWidget()
@@ -4678,7 +4723,10 @@ def _create_anti_duplicate_section(self, parent):
     reset_desc.setStyleSheet("color: gray; font-size: 8pt;")
     reset_h.addWidget(reset_desc)
     reset_h.addStretch()
-    section_v.addWidget(reset_row)
+    content_layout.addWidget(reset_row)
+    
+    # Add content container to main section
+    section_v.addWidget(content_container)
     
     # Store all tab frames for enable/disable
     self.anti_duplicate_tabs = [core_frame, advanced_frame, stop_frame, bias_frame]
@@ -4692,25 +4740,73 @@ def _create_anti_duplicate_section(self, parent):
         # Fallback: just stack
         section_box.setParent(parent)
     
-    # Initial state
-    self._toggle_anti_duplicate_controls()
+    # Initialize anti-duplicate section visibility
+    self.toggle_anti_duplicate_section()
 
-def _toggle_anti_duplicate_controls(self):
-    """Enable/disable anti-duplicate parameter controls (Qt version)"""
+def toggle_anti_duplicate_section(self):
+    """Toggle visibility of anti-duplicate content with smooth fade"""
     try:
+        if not hasattr(self, 'anti_duplicate_content'):
+            return
+            
         enabled = bool(self.enable_anti_duplicate_var)
+        
+        # Import animation components
+        from PySide6.QtCore import QPropertyAnimation, QEasingCurve
+        from PySide6.QtWidgets import QGraphicsOpacityEffect
+        
+        # Stop any existing animation
+        if hasattr(self, '_anti_duplicate_animation') and self._anti_duplicate_animation:
+            self._anti_duplicate_animation.stop()
+        
+        # Ensure widget is visible for animation
+        self.anti_duplicate_content.setVisible(True)
+        
+        # Create or get opacity effect
+        if not hasattr(self.anti_duplicate_content, '_opacity_effect'):
+            effect = QGraphicsOpacityEffect()
+            self.anti_duplicate_content.setGraphicsEffect(effect)
+            self.anti_duplicate_content._opacity_effect = effect
+        else:
+            effect = self.anti_duplicate_content._opacity_effect
+        
+        # Create opacity animation
+        animation = QPropertyAnimation(effect, b"opacity")
+        animation.setDuration(150)  # Faster for no glitch
+        animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        
+        if enabled:
+            # Fade in
+            animation.setStartValue(0.0)
+            animation.setEndValue(1.0)
+        else:
+            # Fade out
+            animation.setStartValue(1.0)
+            animation.setEndValue(0.0)
+            # Hide after fade out
+            animation.finished.connect(
+                lambda: self.anti_duplicate_content.setVisible(False) if not enabled else None
+            )
+        
+        self._anti_duplicate_animation = animation
+        animation.start()
+        
     except Exception:
-        enabled = False
-    
-    # Disable/enable the notebook (tab widget)
-    if hasattr(self, 'anti_duplicate_notebook'):
+        # Fallback to simple show/hide if animation fails
         try:
-            self.anti_duplicate_notebook.setEnabled(enabled)
+            if hasattr(self, 'anti_duplicate_content'):
+                enabled = bool(self.enable_anti_duplicate_var)
+                self.anti_duplicate_content.setVisible(enabled)
         except Exception:
             pass
 
+def _toggle_anti_duplicate_controls(self):
+    """Enable/disable anti-duplicate parameter controls (Qt version)"""
+    # Call the slide animation function
+    self.toggle_anti_duplicate_section()
+
 def _toggle_http_tuning_controls(self):
-    """Enable/disable the HTTP timeout/pooling controls as a group (Qt version)"""
+    """Enable/disable the HTTP timeout/pooling controls as a group with proper styling (Qt version)"""
     try:
         enabled = bool(self.enable_http_tuning_var) if hasattr(self, 'enable_http_tuning_var') else False
     except Exception:
@@ -4725,12 +4821,20 @@ def _toggle_http_tuning_controls(self):
             except Exception:
                 pass
     
-    # Labels
-    for attr in ['connect_timeout_label', 'read_timeout_label', 'http_pool_connections_label', 'http_pool_maxsize_label']:
+    # Labels with proper disabled styling
+    label_attrs = [
+        'connect_timeout_label', 'read_timeout_label', 
+        'http_pool_connections_label', 'http_pool_maxsize_label'
+    ]
+    
+    for attr in label_attrs:
         widget = getattr(self, attr, None)
         if widget is not None:
             try:
                 widget.setEnabled(enabled)
+                # Apply proper disabled state styling
+                color = "white" if enabled else "#808080"
+                widget.setStyleSheet(f"color: {color};")
             except Exception:
                 pass
     
