@@ -3288,13 +3288,13 @@ class MangaTranslationTab:
         model_path_frame = QWidget()
         model_path_layout = QHBoxLayout(model_path_frame)
         model_path_layout.setContentsMargins(0, 5, 0, 0)
-        model_path_layout.setSpacing(10)
+        model_path_layout.setSpacing(5)
 
         model_file_label = QLabel("Model File:")
         model_file_label_font = QFont('Arial', 9)
         model_file_label.setFont(model_file_label_font)
         model_file_label.setMinimumWidth(95)
-        model_file_label.setAlignment(Qt.AlignLeft)
+        model_file_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         model_path_layout.addWidget(model_file_label)
         self.model_file_label = model_file_label
 

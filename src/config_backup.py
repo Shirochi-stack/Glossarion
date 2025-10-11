@@ -48,15 +48,16 @@ def _backup_config_file(self):
         # Copy the file
         shutil.copy2(CONFIG_FILE, backup_path)
         
-        # Maintain only the last 10 backups
+        # Clean backups older than 72 hours
+        cutoff_time = time.time() - (72 * 60 * 60)  # 72 hours in seconds
         backups = [os.path.join(backup_dir, f) for f in os.listdir(backup_dir) 
                    if f.startswith("config_") and f.endswith(".json.bak")]
-        backups.sort(key=lambda x: os.path.getmtime(x), reverse=True)
         
-        # Remove oldest backups if more than 10
-        for old_backup in backups[10:]:
+        # Remove backups older than 72 hours
+        for backup_file in backups:
             try:
-                os.remove(old_backup)
+                if os.path.getmtime(backup_file) <= cutoff_time:
+                    os.remove(backup_file)
             except Exception:
                 pass  # Ignore errors when cleaning old backups
     
