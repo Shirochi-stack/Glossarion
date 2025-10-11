@@ -604,7 +604,7 @@ class QAScannerMixin:
             custom_dialog.setModal(True)
             # Use screen ratios: 20% width, 50% height for better content fit
             screen = QApplication.primaryScreen().geometry()
-            custom_width = int(screen.width() * 0.41)
+            custom_width = int(screen.width() * 0.42)
             custom_height = int(screen.height() * 0.60)
             custom_dialog.resize(custom_width, custom_height)
             # Set window icon
@@ -631,6 +631,10 @@ class QAScannerMixin:
             dialog_layout.addWidget(scroll)
             
             # Variables for custom settings (using native Python values instead of tk vars)
+            # Load saved settings from config if they exist
+            saved_custom_settings = self.config.get('qa_scanner_settings', {}).get('custom_mode_settings', {})
+            
+            # Default values
             custom_settings = {
                 'similarity': 85,
                 'semantic': 80,
@@ -643,14 +647,77 @@ class QAScannerMixin:
                 'min_text_length': 500
             }
             
+            # Override with saved settings if they exist
+            if saved_custom_settings:
+                # Load threshold values (they're stored as decimals, need to convert to percentages)
+                saved_thresholds = saved_custom_settings.get('thresholds', {})
+                if saved_thresholds:
+                    custom_settings['similarity'] = int(saved_thresholds.get('similarity', 0.85) * 100)
+                    custom_settings['semantic'] = int(saved_thresholds.get('semantic', 0.80) * 100)
+                    custom_settings['structural'] = int(saved_thresholds.get('structural', 0.90) * 100)
+                    custom_settings['word_overlap'] = int(saved_thresholds.get('word_overlap', 0.75) * 100)
+                    custom_settings['minhash_threshold'] = int(saved_thresholds.get('minhash_threshold', 0.80) * 100)
+                
+                # Load other settings
+                custom_settings['consecutive_chapters'] = saved_custom_settings.get('consecutive_chapters', 2)
+                custom_settings['check_all_pairs'] = saved_custom_settings.get('check_all_pairs', False)
+                custom_settings['sample_size'] = saved_custom_settings.get('sample_size', 3000)
+                custom_settings['min_text_length'] = saved_custom_settings.get('min_text_length', 500)
+                
+                self.append_log("📥 Loaded saved custom mode settings from config")
+            
             # Store widget references
             custom_widgets = {}
             
-            # Title using consistent styling
+            # Title with icons on both sides
+            title_container = QWidget()
+            title_layout = QHBoxLayout(title_container)
+            title_layout.setContentsMargins(0, 0, 0, 0)
+            
+            # Left icon
+            left_icon_label = QLabel()
+            try:
+                ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
+                if os.path.isfile(ico_path):
+                    icon = QIcon(ico_path)
+                    pixmap = icon.pixmap(48, 48)
+                    if not pixmap.isNull():
+                        left_icon_label.setPixmap(pixmap)
+                        left_icon_label.setAlignment(Qt.AlignCenter)
+                        left_icon_label.setStyleSheet("background-color: transparent; border: none;")
+            except Exception:
+                pass
+            
+            # Title text
             title_label = QLabel("Configure Custom Detection Settings")
             title_label.setFont(QFont('Arial', 20, QFont.Bold))
             title_label.setAlignment(Qt.AlignCenter)
-            scroll_layout.addWidget(title_label)
+            title_label.setStyleSheet("background-color: transparent; border: none;")
+            
+            # Right icon
+            right_icon_label = QLabel()
+            try:
+                ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
+                if os.path.isfile(ico_path):
+                    icon = QIcon(ico_path)
+                    pixmap = icon.pixmap(48, 48)
+                    if not pixmap.isNull():
+                        right_icon_label.setPixmap(pixmap)
+                        right_icon_label.setAlignment(Qt.AlignCenter)
+                        right_icon_label.setStyleSheet("background-color: transparent; border: none;")
+            except Exception:
+                pass
+            
+            # Add to layout with proper spacing
+            title_layout.addStretch()
+            title_layout.addWidget(left_icon_label)
+            title_layout.addSpacing(15)
+            title_layout.addWidget(title_label)
+            title_layout.addSpacing(15)
+            title_layout.addWidget(right_icon_label)
+            title_layout.addStretch()
+            
+            scroll_layout.addWidget(title_container)
             scroll_layout.addSpacing(20)
             
             # Detection Thresholds Section
@@ -810,19 +877,18 @@ class QAScannerMixin:
             options_layout.addWidget(check_all_checkbox)
             custom_widgets['check_all_pairs'] = check_all_checkbox
             
-            scroll_layout.addSpacing(30)
+            scroll_layout.addStretch()
             
-            # Create button layout at bottom
+            # Create fixed bottom button section (outside scroll area)
             button_widget = QWidget()
             button_layout = QHBoxLayout(button_widget)
-            button_layout.addStretch()
-            scroll_layout.addWidget(button_widget)
+            button_layout.setContentsMargins(20, 15, 20, 15)
             
             # Flag to track if settings were saved
             settings_saved = False
             
             def save_custom_settings():
-                """Save custom settings and close dialog"""
+                """Save custom settings and close dialog for scan"""
                 nonlocal settings_saved
                 qa_settings['custom_mode_settings'] = {
                     'thresholds': {
@@ -840,6 +906,80 @@ class QAScannerMixin:
                 settings_saved = True
                 self.append_log("✅ Custom detection settings saved")
                 custom_dialog.accept()
+            
+            def save_settings_to_config():
+                """Save settings to config.json without closing dialog"""
+                try:
+                    # Update qa_settings with current values
+                    current_custom_settings = {
+                        'thresholds': {
+                            'similarity': custom_widgets['similarity'].value() / 100,
+                            'semantic': custom_widgets['semantic'].value() / 100,
+                            'structural': custom_widgets['structural'].value() / 100,
+                            'word_overlap': custom_widgets['word_overlap'].value() / 100,
+                            'minhash_threshold': custom_widgets['minhash_threshold'].value() / 100
+                        },
+                        'consecutive_chapters': custom_widgets['consecutive_chapters'].value(),
+                        'check_all_pairs': custom_widgets['check_all_pairs'].isChecked(),
+                        'sample_size': custom_widgets['sample_size'].value(),
+                        'min_text_length': custom_widgets['min_text_length'].value()
+                    }
+                    
+                    # Ensure qa_scanner_settings exists in config
+                    if 'qa_scanner_settings' not in self.config:
+                        self.config['qa_scanner_settings'] = {}
+                    
+                    # Update config with current custom settings - FORCE UPDATE
+                    self.config['qa_scanner_settings']['custom_mode_settings'] = current_custom_settings
+                    
+                    # Also update qa_settings dict for this session
+                    qa_settings['custom_mode_settings'] = current_custom_settings
+                    
+                    # Write config directly to ensure persistence
+                    import json
+                    from api_key_encryption import encrypt_config
+                    
+                    google_creds_path = self.config.get('google_cloud_credentials')
+                    encrypted_config = encrypt_config(self.config)
+                    if google_creds_path:
+                        encrypted_config['google_cloud_credentials'] = google_creds_path
+                    
+                    # Get config file path
+                    config_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
+                    
+                    # Write to file
+                    with open(config_file, 'w', encoding='utf-8') as f:
+                        json.dump(encrypted_config, f, ensure_ascii=False, indent=2)
+                    
+                    # Show success message
+                    self.append_log("✅ Custom settings saved to config.json")
+                    self.append_log(f"💾 Saved thresholds: similarity={current_custom_settings['thresholds']['similarity']:.0%}, semantic={current_custom_settings['thresholds']['semantic']:.0%}, structural={current_custom_settings['thresholds']['structural']:.0%}")
+                    
+                    # Animate the save button
+                    original_text = save_config_btn.text()
+                    original_style = save_config_btn.styleSheet()
+                    save_config_btn.setText("💾 Saved!")
+                    save_config_btn.setStyleSheet("""
+                        QPushButton {
+                            background-color: #28a745;
+                            color: white;
+                            border: 1px solid #28a745;
+                            padding: 6px 12px;
+                            font-weight: bold;
+                        }
+                    """)
+                    
+                    # Reset button after delay
+                    def reset_button():
+                        save_config_btn.setText(original_text)
+                        save_config_btn.setStyleSheet(original_style)
+                    
+                    QTimer.singleShot(1500, reset_button)
+                    
+                except Exception as e:
+                    self.append_log(f"❌ Error saving settings: {e}")
+                    import traceback
+                    traceback.print_exc()
             
             def reset_to_defaults():
                 """Reset all values to default settings"""
@@ -871,88 +1011,54 @@ class QAScannerMixin:
                     
                 cancel_in_progress = True
                 try:
-                    if not settings_saved:
-                        # Check if any settings were changed
-                        defaults = {
-                            'similarity': 85,
-                            'semantic': 80,
-                            'structural': 90,
-                            'word_overlap': 75,
-                            'minhash_threshold': 80,
-                            'consecutive_chapters': 2,
-                            'check_all_pairs': False,
-                            'sample_size': 3000,
-                            'min_text_length': 500
-                        }
-                        
-                        changed = False
-                        for key, default_val in defaults.items():
-                            if key == 'check_all_pairs':
-                                if custom_widgets[key].isChecked() != default_val:
-                                    changed = True
-                                    break
-                            else:
-                                if custom_widgets[key].value() != default_val:
-                                    changed = True
-                                    break
-                        
-                        if changed:
-                            reply = QMessageBox.question(custom_dialog, "Unsaved Changes", 
-                                                        "You have unsaved changes. Are you sure you want to cancel?",
-                                                        QMessageBox.Yes | QMessageBox.No)
-                            if reply == QMessageBox.Yes:
-                                # Disconnect signal before rejecting to prevent loop
-                                try:
-                                    custom_dialog.rejected.disconnect(cancel_settings)
-                                except:
-                                    pass
-                                custom_dialog.reject()
-                        else:
-                            # Disconnect signal before rejecting to prevent loop
-                            try:
-                                custom_dialog.rejected.disconnect(cancel_settings)
-                            except:
-                                pass
-                            custom_dialog.reject()
-                    else:
-                        # Disconnect signal before rejecting to prevent loop
-                        try:
-                            custom_dialog.rejected.disconnect(cancel_settings)
-                        except:
-                            pass
-                        custom_dialog.reject()
+                    # Disconnect signal before rejecting to prevent loop
+                    try:
+                        custom_dialog.rejected.disconnect(cancel_settings)
+                    except:
+                        pass
+                    custom_dialog.reject()
                 finally:
                     cancel_in_progress = False
             
-            # Create buttons
+            # Create buttons for bottom section
             cancel_btn = QPushButton("Cancel")
-            cancel_btn.setMinimumWidth(120)
+            cancel_btn.setMinimumWidth(140)
+            cancel_btn.setStyleSheet("background-color: #6c757d; color: white; padding: 6px 12px; font-weight: bold;")
             cancel_btn.clicked.connect(cancel_settings)
             button_layout.addWidget(cancel_btn)
             
-            reset_btn = QPushButton("Reset Defaults")
-            reset_btn.setMinimumWidth(120)
+            reset_btn = QPushButton("Reset to Default")
+            reset_btn.setMinimumWidth(140)
+            reset_btn.setStyleSheet("background-color: #ffc107; color: black; padding: 6px 12px; font-weight: bold;")
             reset_btn.clicked.connect(reset_to_defaults)
             button_layout.addWidget(reset_btn)
             
-            start_btn = QPushButton("Start Scan")
-            start_btn.setMinimumWidth(120)
-            start_btn.setStyleSheet("""
+            # Save Settings button (saves to config.json)
+            save_config_btn = QPushButton("💾 Save Settings")
+            save_config_btn.setMinimumWidth(140)
+            save_config_btn.setStyleSheet("""
                 QPushButton {
-                    background-color: #28a745;
+                    background-color: #007bff;
                     color: white;
-                    border: 1px solid #28a745;
+                    border: 1px solid #007bff;
                     padding: 6px 12px;
-                    border-radius: 4px;
+                    font-weight: bold;
                 }
                 QPushButton:hover {
-                    background-color: #218838;
+                    background-color: #0056b3;
                 }
             """)
+            save_config_btn.clicked.connect(save_settings_to_config)
+            button_layout.addWidget(save_config_btn)
+            
+            start_btn = QPushButton("Start Scan")
+            start_btn.setMinimumWidth(140)
+            start_btn.setStyleSheet("background-color: #28a745; color: white; padding: 6px 12px; font-weight: bold;")
             start_btn.clicked.connect(save_custom_settings)
             button_layout.addWidget(start_btn)
             
-            button_layout.addStretch()
+            # Add button widget to main layout (not scroll layout)
+            dialog_layout.addWidget(button_widget)
             
             # Handle window close properly - treat as cancel
             # Store the connection so we can disconnect it later if needed
