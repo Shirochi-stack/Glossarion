@@ -1884,9 +1884,24 @@ class MangaTranslator:
     def _merge_with_bubble_detection(self, regions: List[TextRegion], image_path: str) -> List[TextRegion]:
         """Merge text regions by bubble and filter based on RT-DETR class settings"""
         try:
-            # Get detector settings from config
+                # Get detector settings from config
             ocr_settings = self.main_gui.config.get('manga_settings', {}).get('ocr', {})
             detector_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
+            
+            # Log critical settings
+            self._log("\n🔍 CRITICAL DETECTION SETTINGS:", "info")
+            self._log(f"   • Detector type: {detector_type}", "info")
+            self._log(f"   • RT-DETR for OCR regions: {ocr_settings.get('use_rtdetr_for_ocr_regions', True)}", "info")
+            self._log(f"   • Bubble detection: {ocr_settings.get('bubble_detection_enabled', False)}", "info")
+            self._log(f"   • Free text enabled: {ocr_settings.get('detect_free_text', True)}", "info")
+            
+            # Log current OCR and detection settings
+            self._log("⚙️ Current OCR Settings:", "info")
+            self._log(f"   • Detector: {detector_type}", "info")
+            self._log(f"   • Bubble detection: {ocr_settings.get('bubble_detection_enabled', False)}", "info")
+            self._log(f"   • RT-DETR guide: {ocr_settings.get('use_rtdetr_for_ocr_regions', True)}", "info")
+            self._log(f"   • Free text detection: {ocr_settings.get('detect_free_text', True)}", "info")
+            self._log(f"   • RT-DETR confidence: {ocr_settings.get('rtdetr_confidence', 0.3)}", "info")
             
             # Ensure detector is ready (auto-reload after cleanup)
             bd = self._ensure_bubble_detector_ready(ocr_settings)
@@ -1932,17 +1947,45 @@ class MangaTranslator:
                 detect_empty = ocr_settings.get('detect_empty_bubbles', True)
                 detect_text_bubbles = ocr_settings.get('detect_text_bubbles', True)
                 detect_free_text = ocr_settings.get('detect_free_text', True)
-                self._log(f"📋 RTEDR_onnx class filters:", "info")
+                use_rtdetr_guide = ocr_settings.get('use_rtdetr_for_ocr_regions', True)
+                
+                self._log(f"📋 RT-DETR ONNX Settings:", "info")
+                self._log(f"   RT-DETR Guide: {'✓' if use_rtdetr_guide else '✗'}", "info")
                 self._log(f"   Empty bubbles: {'✓' if detect_empty else '✗'}", "info")
                 self._log(f"   Text bubbles: {'✓' if detect_text_bubbles else '✗'}", "info")
                 self._log(f"   Free text: {'✓' if detect_free_text else '✗'}", "info")
-                self._log(f"🎯 RTEDR_onnx confidence threshold: {rtdetr_confidence:.2f}", "info")
+                self._log(f"🎯 RT-DETR confidence threshold: {rtdetr_confidence:.2f}", "info")
+                self._log(f"🔍 Running RT-DETR detection on: {image_path}", "info")
+                # Get raw detections for logging
+                self._log("\n🔍 Running RT-DETR detection...", "info")
                 rtdetr_detections = bd.detect_with_rtdetr_onnx(
                     image_path=image_path,
                     confidence=rtdetr_confidence,
-                    return_all_bubbles=False
+                    return_all_bubbles=True  # Get all detections for analysis
                 )
-                # Combine enabled bubble types for merging
+                
+                # Log what was detected
+                self._log("📊 RT-DETR detection results:", "info")
+                for class_name, boxes in rtdetr_detections.items():
+                    self._log(f"   • {class_name}: {len(boxes)} detected", "info")
+                    if boxes:
+                        for i, box in enumerate(boxes):
+                            conf = box[4] if len(box) > 4 else 'N/A'
+                            self._log(f"     - Box {i+1}: conf={conf}", "debug")
+                
+                # Log raw detection counts and confidence scores
+                self._log("📊 RT-DETR raw detections:", "info")
+                for class_name, boxes in rtdetr_detections.items():
+                    if boxes:
+                        conf_scores = [box[4] if len(box) > 4 else 0.0 for box in boxes]
+                        avg_conf = sum(conf_scores) / len(conf_scores) if conf_scores else 0
+                        self._log(f"   • {class_name}: {len(boxes)} detected (avg conf: {avg_conf:.2f})", "info")
+                        for i, box in enumerate(boxes):
+                            self._log(f"     Box {i+1}: {box[:4]}, conf={box[4] if len(box) > 4 else 'N/A'}", "debug")
+                    else:
+                        self._log(f"   • {class_name}: None detected", "info")
+                
+                # Combine enabled bubble types for merging based on settings
                 bubbles = []
                 if detect_empty and 'bubbles' in rtdetr_detections:
                     bubbles.extend(rtdetr_detections['bubbles'])
@@ -2144,10 +2187,14 @@ class MangaTranslator:
                         
                         # Store original regions for masking
                         merged_region.original_regions = group
-                        # Classify as text bubble for downstream rendering/masking
+                        # Set both type flags consistently
+                        merged_region.region_type = 'text_bubble'
                         merged_region.bubble_type = 'text_bubble'
                         # Mark that this should be inpainted
                         merged_region.should_inpaint = True
+                        
+                        self._log(f"   • Set region type: {merged_region.region_type}/{merged_region.bubble_type}", "debug")
+                        self._log(f"   • Inpainting: enabled", "debug")
                         
                         merged_regions.append(merged_region)
                         
@@ -2170,10 +2217,17 @@ class MangaTranslator:
                     
                     # For RT-DETR mode, check if we should include free text
                     if detector_type in ('rtdetr', 'rtdetr_onnx'):
+                        # Log region state before processing
+                        self._log(f"⚡ Processing text region outside bubbles: '{region.text[:30]}...'", "debug")
+                        self._log(f"   • Current state: {getattr(region, 'bubble_type', 'unclassified')}, should_inpaint={getattr(region, 'should_inpaint', False)}", "debug")
+                        self._log(f"   • Free text enabled: {ocr_settings.get('detect_free_text', True)}", "debug")
+                        self._log(f"   • RT-DETR guide enabled: {ocr_settings.get('use_rtdetr_for_ocr_regions', True)}", "debug")
+                        
                         # If "Free Text" checkbox is checked, include ALL text outside bubbles
                         # Don't require RT-DETR to specifically detect it as free text
                         if ocr_settings.get('detect_free_text', True):
                             region.should_inpaint = True
+                            self._log(f"   • Setting should_inpaint=True (detect_free_text is enabled)", "debug")
                             # If RT-DETR detected free text box covering this region's center, mark explicitly
                             try:
                                 cx = region.bounding_box[0] + region.bounding_box[2] / 2
@@ -2182,12 +2236,21 @@ class MangaTranslator:
                                 found_free_text_box = False
                                 for fx, fy, fw, fh in free_text_bboxes:
                                     if fx <= cx <= fx + fw and fy <= cy <= fy + fh:
+                                        # Ensure this region is properly marked as free text
                                         region.bubble_type = 'free_text'
+                                        region.region_type = 'free_text'  # Critical: Set both type flags
                                         # CRITICAL: Set bubble_bounds to the RT-DETR free text detection box
                                         # This ensures rendering uses the full RT-DETR bounds, not just OCR polygon
                                         if not hasattr(region, 'bubble_bounds') or region.bubble_bounds is None:
                                             region.bubble_bounds = (fx, fy, fw, fh)
                                         found_free_text_box = True
+                                        self._log(f"✨ Free text region INCLUDED: '{region.text[:30]}...'", "debug")
+                                        self._log(f"   • Region type set to: {region.region_type}/{region.bubble_type}", "debug")
+                                        self._log(f"   • RT-DETR bounds: {(fx, fy, fw, fh)}", "debug")
+                                        self._log(f"   • Region text: '{region.text[:30]}...'", "debug")
+                                        self._log(f"   • RT-DETR box: {(fx, fy, fw, fh)}", "debug")
+                                        self._log(f"   • OCR box: {getattr(region, 'bounding_box', 'unknown')}", "debug")
+                                        self._log(f"   • Current state: bubble_type=free_text, should_inpaint={getattr(region, 'should_inpaint', True)}", "debug")
                                         self._log(f"   Free text region INCLUDED: '{region.text[:30]}...'", "debug")
                                         break
                                 
@@ -2205,6 +2268,10 @@ class MangaTranslator:
                                     region.bubble_bounds = region.bounding_box
                         else:
                             region.should_inpaint = False
+                            self._log(f"❌ Excluding text region (Free Text disabled):", "debug")
+                            self._log(f"   • Region text: '{region.text[:30]}...'", "debug")
+                            self._log(f"   • Current state: {getattr(region, 'bubble_type', 'unclassified')}, should_inpaint=False", "debug")
+                            self._log(f"   • Box coordinates: {getattr(region, 'bounding_box', 'unknown')}", "debug")
                             self._log(f"   Text outside bubbles EXCLUDED (Free Text unchecked): '{region.text[:30]}...'", "info")
                     else:
                         # For YOLO/auto, include all text by default
@@ -3211,21 +3278,66 @@ class MangaTranslator:
                                 
                                 # Convert matched blocks to TextRegion format
                                 regions = []
+
+                                # Helper to normalize boxes to int tuples
+                                def _norm_box(b):
+                                    try:
+                                        x, y, w, h = b[:4]
+                                        return (int(round(x)), int(round(y)), int(round(w)), int(round(h)))
+                                    except Exception:
+                                        return tuple(b)
+
+                                # Build quick-lookup sets for class membership
+                                text_bubble_set = set(_norm_box(b) for b in rtdetr_detections.get('text_bubbles', []) or [])
+                                free_text_set = set(_norm_box(b) for b in rtdetr_detections.get('text_free', []) or [])
+                                empty_bubble_set = set(_norm_box(b) for b in rtdetr_detections.get('bubbles', []) or [])
+
                                 for block_data in matched_blocks:
                                     if block_data['text'].strip():  # Only include blocks with text
+                                        bbox = _norm_box(block_data['bbox'])
                                         # Create TextRegion with RT-DETR bubble bounds
                                         region = TextRegion(
                                             text=block_data['text'],
-                                            vertices=[(block_data['bbox'][0], block_data['bbox'][1]),
-                                                     (block_data['bbox'][0]+block_data['bbox'][2], block_data['bbox'][1]),
-                                                     (block_data['bbox'][0]+block_data['bbox'][2], block_data['bbox'][1]+block_data['bbox'][3]),
-                                                     (block_data['bbox'][0], block_data['bbox'][1]+block_data['bbox'][3])],
-                                            bounding_box=block_data['bbox'],
+                                            vertices=[(bbox[0], bbox[1]),
+                                                     (bbox[0]+bbox[2], bbox[1]),
+                                                     (bbox[0]+bbox[2], bbox[1]+bbox[3]),
+                                                     (bbox[0], bbox[1]+bbox[3])],
+                                            bounding_box=bbox,
                                             confidence=0.9,
                                             region_type='text_block'
                                         )
                                         # Use RT-DETR bubble bounds for rendering
-                                        region.bubble_bounds = block_data['bbox']
+                                        region.bubble_bounds = bbox
+
+                                        # Classify by RT-DETR class membership
+                                        if bbox in free_text_set:
+                                            # Determine free-text inclusion from LIVE settings first, then config
+                                            live_detect_free = None
+                                            try:
+                                                live_detect_free = (self.manga_settings.get('ocr', {}).get('detect_free_text')
+                                                                    if hasattr(self, 'manga_settings') and isinstance(self.manga_settings, dict)
+                                                                    else None)
+                                            except Exception:
+                                                live_detect_free = None
+                                            cfg_detect_free = ocr_settings.get('detect_free_text', True) if isinstance(ocr_settings, dict) else True
+                                            detect_free = cfg_detect_free if (live_detect_free is None) else bool(live_detect_free)
+
+                                            region.region_type = 'free_text'
+                                            region.bubble_type = 'free_text'
+                                            region.should_inpaint = bool(detect_free)
+                                            if detect_free:
+                                                self._log(f"📝 Classified RT-DETR block as FREE TEXT (ENABLED): {bbox}", "info")
+                                            else:
+                                                self._log(f"📝 Classified RT-DETR block as FREE TEXT (DISABLED by toggle) — will NOT inpaint: {bbox}", "info")
+                                        elif bbox in text_bubble_set or bbox in empty_bubble_set:
+                                            region.region_type = 'text_bubble'
+                                            region.bubble_type = 'text_bubble'
+                                            region.should_inpaint = True
+                                            self._log(f"💬 Classified RT-DETR block as TEXT BUBBLE: {bbox}", "info")
+                                        else:
+                                            # Fallback
+                                            self._log(f"⚠️ RT-DETR block not found in class sets, leaving as text_block: {bbox}", "warning")
+
                                         regions.append(region)
                                 
                                 self._log(f"✅ Matched text to {len(regions)} RT-DETR blocks (comic-translate style)")
@@ -7122,6 +7234,19 @@ class MangaTranslator:
         
         self._log(f"🎭 Creating text mask for {len(regions)} regions", "info")
         
+        # Log detailed state of each region
+        self._log("\n📋 REGION STATES BEFORE MASKING:", "info")
+        for idx, region in enumerate(regions):
+            self._log(f"\nRegion {idx + 1}:", "info")
+            self._log(f"   • Text preview: '{region.text[:30]}...'", "info")
+            self._log(f"   • Region type: {getattr(region, 'region_type', 'unset')}", "info")
+            self._log(f"   • Bubble type: {getattr(region, 'bubble_type', 'unset')}", "info")
+            self._log(f"   • Should inpaint: {getattr(region, 'should_inpaint', 'unset')}", "info")
+            self._log(f"   • Has vertices: {bool(getattr(region, 'vertices', None))}", "info")
+            self._log(f"   • Has bubble_bounds: {hasattr(region, 'bubble_bounds')}", "info")
+            if hasattr(region, 'bubble_bounds'):
+                self._log(f"   • Bubble bounds: {region.bubble_bounds}", "info")
+
         # Get manga settings
         manga_settings = self.main_gui.config.get('manga_settings', {})
         
@@ -7135,23 +7260,33 @@ class MangaTranslator:
                 ocr_settings = manga_settings.get('ocr', {})
                 use_rtdetr_guide = ocr_settings.get('use_rtdetr_for_ocr_regions', True)
                 bubble_detection_enabled = ocr_settings.get('bubble_detection_enabled', False)
-                
-                # If RT-DETR guide is enabled for Google/Azure, force dilation to 0
-                if (getattr(self, 'ocr_provider', '').lower() in ('azure', 'google') and 
-                    bubble_detection_enabled and use_rtdetr_guide):
-                    base_dilation_size = 0
-                    self._log(f"📏 Auto dilation (RT-DETR guided): 0px (using iterations only)", "info")
-                elif getattr(self, 'ocr_provider', '').lower() == 'azure':
-                    # New Azure API is more accurate, only needs minimal expansion
-                    base_dilation_size = 5
-                    self._log(f"📏 Auto dilation by provider (Azure, no RT-DETR): {base_dilation_size}px", "info")
-                elif getattr(self, 'ocr_provider', '').lower() == 'google':
-                    # Google still needs more expansion to catch full bubble regions
-                    base_dilation_size = 15
-                    self._log(f"📏 Auto dilation by provider (Google, no RT-DETR): {base_dilation_size}px", "info")
+
+                # Determine dilation settings based on OCR provider and RT-DETR status
+                ocr_provider = getattr(self, 'ocr_provider', '').lower()
+                if ocr_provider in ('azure', 'google'):
+                    if bubble_detection_enabled and use_rtdetr_guide:
+                        # Use different dilation for bubbles vs free text
+                        base_dilation_size = {
+                            'text_bubble': 0,    # No dilation - RT-DETR gives accurate bounds
+                            'empty_bubble': 0,   # No dilation - RT-DETR gives accurate bounds
+                            'free_text': 15,     # Use standard dilation for free text
+                            'default': 15        # Fallback dilation if type unknown
+                        }
+                        self._log(f"📏 Mixed dilation mode (RT-DETR guided):", "info")
+                        self._log(f"   • Bubbles: 0px (using RT-DETR bounds)", "info")
+                        self._log(f"   • Free text: 15px (standard dilation)", "info")
+                    else:
+                        # Standard dilation when RT-DETR guide is off - fine-tune by provider
+                        if ocr_provider == 'azure':
+                            base_dilation_size = 5
+                            self._log(f"📏 Auto dilation by provider (Azure, no RT-DETR): {base_dilation_size}px", "info")
+                        else:
+                            base_dilation_size = 15
+                            self._log(f"📏 Auto dilation by provider (Google, no RT-DETR): {base_dilation_size}px", "info")
                 else:
-                    base_dilation_size = 0
-                    self._log(f"📏 Auto dilation by provider ({self.ocr_provider}): {base_dilation_size}px", "info")
+                    # Default for other providers
+                    base_dilation_size = 15
+                    self._log(f"📏 Auto dilation by provider ({ocr_provider}): {base_dilation_size}px", "info")
             except Exception:
                 pass
         
@@ -7311,16 +7446,30 @@ class MangaTranslator:
         # Use kernel_size for the structuring element (5x5 in auto mode, comic-translate approach)
         # Base dilation is applied first if > 0, then iterations with kernel
         
+        # Helper to get dilation size for region type
+        def get_dilation_for_type(region_type):
+            if isinstance(base_dilation_size, dict):
+                return base_dilation_size.get(region_type, base_dilation_size['default'])
+            return base_dilation_size
+        
+        # Get dilation sizes for each type
+        text_bubble_dilation = get_dilation_for_type('text_bubble')
+        empty_bubble_dilation = get_dilation_for_type('empty_bubble')
+        free_text_dilation = get_dilation_for_type('free_text')
+        
         # First apply base dilation if needed (simple pixel expansion)
-        if base_dilation_size > 0:
-            base_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (base_dilation_size, base_dilation_size))
-            if text_bubble_count > 0:
-                text_bubble_mask = cv2.dilate(text_bubble_mask, base_kernel, iterations=1)
-            if empty_bubble_count > 0:
-                empty_bubble_mask = cv2.dilate(empty_bubble_mask, base_kernel, iterations=1)
-            if free_text_count > 0:
-                free_text_mask = cv2.dilate(free_text_mask, base_kernel, iterations=1)
-            self._log(f"📏 Applied base dilation: {base_dilation_size}px expansion", "info")
+        if any(x > 0 for x in [text_bubble_dilation, empty_bubble_dilation, free_text_dilation]):
+            # Apply different kernels for each type
+            if text_bubble_count > 0 and text_bubble_dilation > 0:
+                text_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (text_bubble_dilation, text_bubble_dilation))
+                text_bubble_mask = cv2.dilate(text_bubble_mask, text_kernel, iterations=1)
+            if empty_bubble_count > 0 and empty_bubble_dilation > 0:
+                empty_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (empty_bubble_dilation, empty_bubble_dilation))
+                empty_bubble_mask = cv2.dilate(empty_bubble_mask, empty_kernel, iterations=1)
+            if free_text_count > 0 and free_text_dilation > 0:
+                free_text_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (free_text_dilation, free_text_dilation))
+                free_text_mask = cv2.dilate(free_text_mask, free_text_kernel, iterations=1)
+            self._log("📏 Applied base dilation per type (bubbles/free text)", "info")
         
         # Then apply iterations with kernel_size (default 5x5)
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
