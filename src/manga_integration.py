@@ -1340,8 +1340,31 @@ class MangaTranslationTab:
                         download_thread = threading.Thread(target=download_model, daemon=True)
                         download_thread.start()
                         
-                        # Show progress while downloading
-                        while not download_complete.is_set() and download_active['value']:
+                        # Use QTimer to poll progress without blocking
+                        progress_timer = QTimer()
+                        
+                        def update_download_progress():
+                            if download_complete.is_set():
+                                progress_timer.stop()
+                                # Handle completion
+                                if download_error[0]:
+                                    raise download_error[0]
+                                elif not download_error[0]:
+                                    progress_bar.setValue(100)
+                                    progress_label.setText("✅ Download complete!")
+                                    status_label.setText("Model files downloaded")
+                                    add_log("✅ Model files downloaded successfully")
+                                    add_log("")
+                                    add_log("Next step: Click 'Load Model' to initialize manga-ocr")
+                                    # Schedule status check on main thread
+                                    self.update_queue.put(('call_method', self._check_provider_status, ()))
+                                return
+                            
+                            if not download_active['value']:
+                                progress_timer.stop()
+                                return
+                            
+                            # Update progress
                             current_size = get_dir_size(cache_dir) if os.path.exists(cache_dir) else 0
                             downloaded = current_size - initial_size
                             
@@ -1359,25 +1382,12 @@ class MangaTranslationTab:
                                 mb_total = total_size / (1024 * 1024)
                                 size_label.setText(f"{mb_downloaded:.1f} MB / {mb_total:.1f} MB")
                                 progress_label.setText(f"Downloading: {progress:.1f}%")
-                            
-                            time.sleep(0.5)
                         
-                        download_thread.join(timeout=5)
+                        progress_timer.timeout.connect(update_download_progress)
+                        progress_timer.start(500)  # Update every 500ms
                         
-                        if download_error[0]:
-                            raise download_error[0]
-                        
-                        if download_complete.is_set() and not download_error[0]:
-                            progress_bar.setValue(100)
-                            progress_label.setText("✅ Download complete!")
-                            status_label.setText("Model files downloaded")
-                            add_log("✅ Model files downloaded successfully")
-                            add_log("")
-                            add_log("Next step: Click 'Load Model' to initialize manga-ocr")
-                            # Schedule status check on main thread
-                            self.update_queue.put(('call_method', self._check_provider_status, ()))
-                        else:
-                            raise Exception("Download was cancelled")
+                        # Return immediately - timer will handle updates
+                        return
                             
                     except ImportError:
                         progress_label.setText("❌ Missing huggingface_hub")
@@ -6273,55 +6283,97 @@ class MangaTranslationTab:
         except Exception:
             pass
 
-    def _try_load_model(self, method: str, model_path: str):
-        """Try to load a model and update status without threading for now."""
+    def _try_load_model(self, method: str, model_path: str, show_completion_dialog: bool = False):
+        """Try to load a model in background thread with proper GUI updates."""
+        import threading
         from PySide6.QtWidgets import QApplication
         
-        try:
-            # Show loading status immediately
-            self.local_model_status_label.setText("⏳ Loading model...")
-            self.local_model_status_label.setStyleSheet("color: orange;")
-            QApplication.processEvents()  # Process pending events to update UI
-            self.main_gui.append_log(f"⏳ Loading {method.upper()} model...")
-            
+        # Show loading status immediately
+        self.local_model_status_label.setText("⏳ Loading model...")
+        self.local_model_status_label.setStyleSheet("color: orange;")
+        self.main_gui.append_log(f"⏳ Loading {method.upper()} model...")
+        
+        # Track result
+        load_result = {'success': False, 'error_msg': None, 'done': False}
+        
+        def load_in_background():
+            """Background thread for model loading"""
             from local_inpainter import LocalInpainter
-            success = False
+            
             try:
                 test_inpainter = LocalInpainter()
                 success = test_inpainter.load_model_with_retry(method, model_path, force_reload=True)
                 print(f"DEBUG: Model loading completed, success={success}")
+                load_result['success'] = success
             except Exception as e:
                 print(f"DEBUG: Model loading exception: {e}")
-                self.main_gui.append_log(f"❌ Error loading model: {e}")
-                success = False
-            
-            # Update UI directly on main thread
-            print(f"DEBUG: Updating UI, success={success}")
-            if success:
-                self.local_model_status_label.setText(f"✅ {method.upper()} model ready")
-                self.local_model_status_label.setStyleSheet("color: green;")
-                self.main_gui.append_log(f"✅ {method.upper()} model loaded successfully!")
-                if hasattr(self, 'translator') and self.translator:
-                    for attr in ('local_inpainter', '_last_local_method', '_last_local_model_path'):
-                        if hasattr(self.translator, attr):
-                            try:
-                                delattr(self.translator, attr)
-                            except Exception:
-                                pass
+                load_result['error_msg'] = str(e)
+                load_result['success'] = False
+            finally:
+                load_result['done'] = True
+        
+        # Start loading in background thread
+        thread = threading.Thread(target=load_in_background, daemon=True)
+        thread.start()
+        
+        # Poll for completion in a non-blocking way using QTimer on main thread
+        from PySide6.QtCore import QTimer
+        check_timer = QTimer()
+        
+        def check_load_complete():
+            if load_result['done']:
+                check_timer.stop()
+                # Call completion handler on main thread
+                self._handle_model_load_complete(method, load_result['success'], load_result['error_msg'], show_completion_dialog)
             else:
-                self.local_model_status_label.setText("⚠️ Model file found but failed to load")
-                self.local_model_status_label.setStyleSheet("color: orange;")
+                # Process events while waiting
+                QApplication.processEvents()
+        
+        check_timer.timeout.connect(check_load_complete)
+        check_timer.start(100)  # Check every 100ms
+        
+        # Return True to indicate load was initiated (not necessarily completed)
+        return True
+    
+    def _handle_model_load_complete(self, method: str, success: bool, error_msg: str = None, show_dialog: bool = False):
+        """Handle model load completion on main thread"""
+        from PySide6.QtWidgets import QMessageBox
+        
+        print(f"DEBUG: Updating UI after load, success={success}")
+        
+        if success:
+            self.local_model_status_label.setText(f"✅ {method.upper()} model ready")
+            self.local_model_status_label.setStyleSheet("color: green;")
+            self.main_gui.append_log(f"✅ {method.upper()} model loaded successfully!")
+            
+            # Clear translator cache
+            if hasattr(self, 'translator') and self.translator:
+                for attr in ('local_inpainter', '_last_local_method', '_last_local_model_path'):
+                    if hasattr(self.translator, attr):
+                        try:
+                            delattr(self.translator, attr)
+                        except Exception:
+                            pass
+            
+            # Show success dialog if requested
+            if show_dialog:
+                QMessageBox.information(self.dialog, "Success", f"{method.upper()} model loaded successfully!")
+        else:
+            self.local_model_status_label.setText("⚠️ Model file found but failed to load")
+            self.local_model_status_label.setStyleSheet("color: orange;")
+            if error_msg:
+                self.main_gui.append_log(f"❌ Error loading model: {error_msg}")
+            else:
                 self.main_gui.append_log("⚠️ Model file found but failed to load")
-            print(f"DEBUG: UI update completed")
-            return success
-        except Exception as e:
-            try:
-                self.local_model_status_label.setText(f"❌ Error: {str(e)[:50]}")
-                self.local_model_status_label.setStyleSheet("color: red;")
-            except Exception:
-                pass
-            self.main_gui.append_log(f"❌ Error loading model: {e}")
-            return False
+            
+            # Show error dialog if requested
+            if show_dialog:
+                msg = f"Failed to load {method.upper()} model"
+                if error_msg:
+                    msg += f":\n{error_msg}"
+                QMessageBox.warning(self.dialog, "Load Failed", msg)
+        
+        print(f"DEBUG: UI update completed")
         
     def _update_local_model_status(self):
         """Update local model status display"""
@@ -6414,150 +6466,93 @@ class MangaTranslationTab:
         self._perform_download(url, save_path, model_type)
 
     def _perform_download(self, url: str, save_path: str, model_name: str):
-        """Perform the actual download with progress indication"""
+        """Perform the actual download with status updates"""
         import threading
         import requests
-        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QProgressBar, QPushButton
-        from PySide6.QtCore import Qt, QTimer
-        from PySide6.QtGui import QIcon
+        from PySide6.QtWidgets import QApplication
         
-        # Create a progress dialog
-        progress_dialog = QDialog(self.dialog)
-        progress_dialog.setWindowTitle(f"Downloading {model_name.upper()} Model")
-        # Use screen ratios for sizing
-        screen = QApplication.primaryScreen().geometry()
-        width = int(screen.width() * 0.21)  # 21% of screen width
-        height = int(screen.height() * 0.14)  # 14% of screen height
-        progress_dialog.setFixedSize(width, height)
-        progress_dialog.setModal(True)
-        
-        # Set window icon
-        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'halgakos.ico')
-        if os.path.exists(icon_path):
-            progress_dialog.setWindowIcon(QIcon(icon_path))
-        
-        layout = QVBoxLayout(progress_dialog)
-        
-        # Progress label
-        progress_label = QLabel("⏳ Downloading...")
-        progress_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(progress_label)
-        
-        # Progress bar
-        progress_bar = QProgressBar()
-        progress_bar.setMinimum(0)
-        progress_bar.setMaximum(100)
-        progress_bar.setValue(0)
-        layout.addWidget(progress_bar)
-        
-        # Status label
-        status_label = QLabel("0%")
-        status_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(status_label)
-        
-        # Cancel flag
-        cancel_download = {'value': False}
-        
-        def on_cancel():
-            cancel_download['value'] = True
-            progress_dialog.close()
-        
-        progress_dialog.closeEvent = lambda event: on_cancel()
+        # Show downloading status
+        self.local_model_status_label.setText(f"📥 Downloading {model_name.upper()}...")
+        self.local_model_status_label.setStyleSheet("color: #17a2b8;")  # Cyan
+        QApplication.processEvents()
         
         def download_thread():
-            import time
             try:
-                print(f"Starting download from: {url}")
+                # Check if it's a HuggingFace URL and use their API if so
+                if 'huggingface.co' in url:
+                    try:
+                        from huggingface_hub import hf_hub_download
+                        import re
+                        
+                        # Parse HuggingFace URL: https://huggingface.co/USER/REPO/resolve/BRANCH/FILENAME
+                        match = re.match(r'https://huggingface\.co/([^/]+)/([^/]+)/resolve/([^/]+)/(.+)', url)
+                        if match:
+                            user, repo, branch, filename = match.groups()
+                            repo_id = f"{user}/{repo}"
+                            
+                            # Download using huggingface_hub (it has its own progress in console)
+                            downloaded_path = hf_hub_download(
+                                repo_id=repo_id,
+                                filename=filename,
+                                revision=branch,
+                                local_dir=os.path.dirname(save_path),
+                                local_dir_use_symlinks=False
+                            )
+                            
+                            # Copy to expected location if different
+                            if downloaded_path != save_path:
+                                import shutil
+                                shutil.copy2(downloaded_path, save_path)
+                            
+                            return  # Success
+                    except Exception as hf_error:
+                        print(f"[ERROR] HuggingFace download failed: {hf_error}")
+                        raise
                 
-                # Download with progress and speed tracking
+                # Fallback: Download with requests for non-HuggingFace URLs
+                import time
                 response = requests.get(url, stream=True, timeout=30)
                 response.raise_for_status()
                 
                 total_size = int(response.headers.get('content-length', 0))
-                total_mb = total_size / (1024 * 1024) if total_size > 0 else 0
-                print(f"Download size: {total_mb:.2f} MB")
-                
                 downloaded = 0
-                start_time = time.time()
-                last_update = start_time
-                last_log_time = start_time
                 
                 with open(save_path, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
-                        if cancel_download['value']:
-                            # Clean up partial file
-                            f.close()
-                            if os.path.exists(save_path):
-                                os.remove(save_path)
-                            print("Download cancelled by user")
-                            return
-                        
                         if chunk:
                             f.write(chunk)
                             downloaded += len(chunk)
-                            
-                            current_time = time.time()
-                            
-                            # Update progress (throttle updates to every 0.1 seconds)
-                            if total_size > 0 and (current_time - last_update > 0.1):
-                                last_update = current_time
-                                elapsed = current_time - start_time
-                                speed = downloaded / elapsed if elapsed > 0 else 0
-                                speed_mb = speed / (1024 * 1024)
-                                progress = (downloaded / total_size) * 100
-                                downloaded_mb = downloaded / (1024 * 1024)
-                                
-                                # Thread-safe widget updates using QTimer
-                                def update_ui(p=int(progress), d_mb=downloaded_mb, t_mb=total_mb, s_mb=speed_mb):
-                                    try:
-                                        progress_bar.setValue(p)
-                                        status_label.setText(f"{p}% - {s_mb:.2f} MB/s")
-                                        progress_label.setText(f"⏳ Downloading... {d_mb:.1f} MB / {t_mb:.1f} MB")
-                                    except RuntimeError:
-                                        cancel_download['value'] = True
-                                
-                                QTimer.singleShot(0, update_ui)
-                            
-                            # Log progress to console every 2 seconds
-                            if current_time - last_log_time > 2.0:
-                                last_log_time = current_time
-                                if total_size > 0:
-                                    progress = (downloaded / total_size) * 100
-                                    elapsed = current_time - start_time
-                                    speed_mb = (downloaded / elapsed / (1024 * 1024)) if elapsed > 0 else 0
-                                    print(f"Download progress: {progress:.1f}% ({downloaded//1024//1024} MB / {total_size//1024//1024} MB) @ {speed_mb:.2f} MB/s")
                 
-                # Success - schedule on main thread
-                def complete():
-                    progress_dialog.close()
-                    self._download_complete(save_path, model_name)
-                QTimer.singleShot(0, complete)
-                
-            except requests.exceptions.RequestException as e:
-                # Error - schedule on main thread
-                if not cancel_download['value']:
-                    def failed():
-                        progress_dialog.close()
-                        self._download_failed(str(e))
-                    QTimer.singleShot(0, failed)
             except Exception as e:
-                if not cancel_download['value']:
-                    def failed():
-                        progress_dialog.close()
-                        self._download_failed(str(e))
-                    QTimer.singleShot(0, failed)
+                download_result['error'] = str(e)
+        
+        # Track download result
+        download_result = {'error': None}
         
         # Start download in background thread
         thread = threading.Thread(target=download_thread, daemon=True)
         thread.start()
         
-        # Show dialog (non-blocking)
-        progress_dialog.show()
+        # Poll for completion using QTimer
+        from PySide6.QtCore import QTimer
+        check_timer = QTimer()
+        
+        def check_download_complete():
+            if not thread.is_alive():
+                check_timer.stop()
+                # Handle result on main thread
+                if download_result['error']:
+                    self._download_failed(download_result['error'])
+                else:
+                    self._download_complete(save_path, model_name)
+            else:
+                QApplication.processEvents()
+        
+        check_timer.timeout.connect(check_download_complete)
+        check_timer.start(100)  # Check every 100ms
 
     def _download_complete(self, save_path: str, model_name: str):
         """Handle successful download"""
-        from PySide6.QtWidgets import QMessageBox
-        
         # Update the model path entry
         self.local_model_entry.setText(save_path)
         self.local_model_path_value = save_path
@@ -6569,15 +6564,12 @@ class MangaTranslationTab:
         # Log to main GUI
         self.main_gui.append_log(f"✅ Downloaded {model_name} model to: {save_path}")
         
-        # Auto-load the downloaded model (direct call)
+        # Auto-load the downloaded model in background with completion dialog
         self.local_model_status_label.setText("⏳ Loading downloaded model...")
         self.local_model_status_label.setStyleSheet("color: orange;")
         
-        # Try to load immediately
-        if self._try_load_model(model_name, save_path):
-            QMessageBox.information(self.dialog, "Success", f"{model_name.upper()} model downloaded and loaded!")
-        else:
-            QMessageBox.information(self.dialog, "Download Complete", f"{model_name.upper()} model downloaded but needs manual loading")
+        # Load in background - completion dialog will be shown when done
+        self._try_load_model(model_name, save_path, show_completion_dialog=True)
 
     def _download_failed(self, error: str):
         """Handle download failure"""

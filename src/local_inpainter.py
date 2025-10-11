@@ -157,13 +157,27 @@ def get_cache_path_by_url(url: str) -> str:
     return os.path.join(CACHE_DIR, filename)
 
 
-def download_model(url: str, md5: str = None) -> str:
-    """Download model if not cached with progress reporting"""
+def download_model(url: str, md5: str = None, progress_callback=None) -> str:
+    """Download model if not cached with progress reporting
+    
+    Args:
+        url: URL to download from
+        md5: Optional MD5 checksum to verify
+        progress_callback: Optional callable(percent, downloaded_mb, total_mb, speed_mb) for progress updates
+    
+    Returns:
+        Path to downloaded/cached model
+    """
     import time
     cache_path = get_cache_path_by_url(url)
     
     if os.path.exists(cache_path):
         logger.info(f"✅ Model already cached: {cache_path}")
+        if progress_callback:
+            try:
+                progress_callback(100, 0, 0, 0)
+            except Exception:
+                pass
         return cache_path
     
     logger.info(f"📥 Downloading model from {url}")
@@ -184,6 +198,7 @@ def download_model(url: str, md5: str = None) -> str:
         downloaded = 0
         start_time = time.time()
         last_log_time = start_time
+        last_callback_time = start_time
         
         with open(cache_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
@@ -191,8 +206,21 @@ def download_model(url: str, md5: str = None) -> str:
                     f.write(chunk)
                     downloaded += len(chunk)
                     
-                    # Log progress every 2 seconds
                     current_time = time.time()
+                    
+                    # Call progress callback more frequently (every 0.1s)
+                    if progress_callback and total_size > 0 and (current_time - last_callback_time > 0.1):
+                        last_callback_time = current_time
+                        progress = (downloaded / total_size) * 100
+                        downloaded_mb = downloaded / (1024 * 1024)
+                        elapsed = current_time - start_time
+                        speed_mb = (downloaded / elapsed / (1024 * 1024)) if elapsed > 0 else 0
+                        try:
+                            progress_callback(int(progress), downloaded_mb, total_mb, speed_mb)
+                        except Exception:
+                            pass
+                    
+                    # Log progress every 2 seconds
                     if total_size > 0 and (current_time - last_log_time > 2.0):
                         last_log_time = current_time
                         progress = (downloaded / total_size) * 100
