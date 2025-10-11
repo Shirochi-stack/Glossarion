@@ -517,12 +517,25 @@ def toggle_thinking_budget(self):
     """Enable/disable thinking budget entry and labels based on checkbox state (PySide6 version)"""
     try:
         enabled = bool(self.enable_gemini_thinking_var)
+        
         if hasattr(self, 'thinking_budget_entry'):
             self.thinking_budget_entry.setEnabled(enabled)
+            
         if hasattr(self, 'thinking_budget_label'):
             self.thinking_budget_label.setEnabled(enabled)
+            color = "white" if enabled else "#808080"
+            self.thinking_budget_label.setStyleSheet(f"color: {color};")
+            
         if hasattr(self, 'thinking_tokens_label'):
             self.thinking_tokens_label.setEnabled(enabled)
+            color = "white" if enabled else "#808080"
+            self.thinking_tokens_label.setStyleSheet(f"color: {color};")
+            
+        # Description label
+        if hasattr(self, 'gemini_desc_label'):
+            self.gemini_desc_label.setEnabled(enabled)
+            color = "gray" if enabled else "#606060"
+            self.gemini_desc_label.setStyleSheet(f"color: {color}; font-size: 10pt;")
     except Exception:
         pass
 
@@ -530,16 +543,34 @@ def toggle_gpt_reasoning_controls(self):
     """Enable/disable GPT reasoning controls and labels based on toggle state (PySide6 version)"""
     try:
         enabled = bool(self.enable_gpt_thinking_var)
+        
         # Tokens entry and label
         if hasattr(self, 'gpt_reasoning_tokens_entry'):
             self.gpt_reasoning_tokens_entry.setEnabled(enabled)
         if hasattr(self, 'gpt_reasoning_tokens_label'):
             self.gpt_reasoning_tokens_label.setEnabled(enabled)
+            color = "white" if enabled else "#808080"
+            self.gpt_reasoning_tokens_label.setStyleSheet(f"color: {color};")
+            
         # Effort combo and label
         if hasattr(self, 'gpt_effort_combo'):
             self.gpt_effort_combo.setEnabled(enabled)
         if hasattr(self, 'gpt_effort_label'):
             self.gpt_effort_label.setEnabled(enabled)
+            color = "white" if enabled else "#808080"
+            self.gpt_effort_label.setStyleSheet(f"color: {color};")
+            
+        # GPT tokens label
+        if hasattr(self, 'gpt_tokens_label'):
+            self.gpt_tokens_label.setEnabled(enabled)
+            color = "white" if enabled else "#808080"
+            self.gpt_tokens_label.setStyleSheet(f"color: {color};")
+            
+        # Description label
+        if hasattr(self, 'gpt_desc_label'):
+            self.gpt_desc_label.setEnabled(enabled)
+            color = "gray" if enabled else "#606060"
+            self.gpt_desc_label.setStyleSheet(f"color: {color}; font-size: 10pt;")
     except Exception:
         pass
 
@@ -1183,17 +1214,19 @@ def _create_response_handling_section(self, parent):
             pass
     self.gpt_reasoning_tokens_entry.textChanged.connect(_on_gpt_tokens_changed)
     gpt_h2.addWidget(self.gpt_reasoning_tokens_entry)
-    gpt_h2.addWidget(QLabel("tokens"))
+    self.gpt_tokens_label = QLabel("tokens")
+    gpt_h2.addWidget(self.gpt_tokens_label)
     gpt_h2.addStretch()
     section_v.addWidget(gpt_row2)
     
+    # Store reference to description label for enable/disable
+    self.gpt_desc_label = QLabel("Controls GPT-5 and OpenRouter reasoning.\nProvide Tokens to force a max token budget for other models,\n GPT-5 only uses Effort (low/medium/high).")
+    self.gpt_desc_label.setStyleSheet("color: gray; font-size: 10pt;")
+    self.gpt_desc_label.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(self.gpt_desc_label)
+    
     # Initialize enabled state for GPT controls
     self.toggle_gpt_reasoning_controls()
-    
-    gpt_desc = QLabel("Controls GPT-5 and OpenRouter reasoning.\nProvide Tokens to force a max token budget for other models,\n GPT-5 only uses Effort (low/medium/high).")
-    gpt_desc.setStyleSheet("color: gray; font-size: 10pt;")
-    gpt_desc.setContentsMargins(20, 0, 0, 10)
-    section_v.addWidget(gpt_desc)
     
     # Gemini Thinking Mode
     gemini_title = QLabel("Gemini Thinking Mode")
@@ -1239,10 +1272,14 @@ def _create_response_handling_section(self, parent):
     thinking_h.addStretch()
     section_v.addWidget(thinking_row)
     
-    gemini_desc = QLabel("Control Gemini's thinking process. 0 = disabled,\n512-24576 = limited thinking, -1 = dynamic (auto)")
-    gemini_desc.setStyleSheet("color: gray; font-size: 10pt;")
-    gemini_desc.setContentsMargins(20, 0, 0, 10)
-    section_v.addWidget(gemini_desc)
+    # Store reference to description label for enable/disable
+    self.gemini_desc_label = QLabel("Control Gemini's thinking process. 0 = disabled,\n512-24576 = limited thinking, -1 = dynamic (auto)")
+    self.gemini_desc_label.setStyleSheet("color: gray; font-size: 10pt;")
+    self.gemini_desc_label.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(self.gemini_desc_label)
+    
+    # Initialize enabled state for Gemini controls
+    self.toggle_thinking_budget()
     
     # Separator
     sep1 = QFrame()
@@ -1274,7 +1311,8 @@ def _create_response_handling_section(self, parent):
     extraction_h.addWidget(parallel_cb)
     
     extraction_h.addSpacing(20)
-    extraction_h.addWidget(QLabel("Workers:"))
+    self.workers_label = QLabel("Workers:")
+    extraction_h.addWidget(self.workers_label)
     self.extraction_workers_entry = QLineEdit()
     self.extraction_workers_entry.setFixedWidth(50)
     try:
@@ -1288,14 +1326,19 @@ def _create_response_handling_section(self, parent):
             pass
     self.extraction_workers_entry.textChanged.connect(_on_workers_changed)
     extraction_h.addWidget(self.extraction_workers_entry)
-    extraction_h.addWidget(QLabel("threads"))
+    self.threads_label = QLabel("threads")
+    extraction_h.addWidget(self.threads_label)
     extraction_h.addStretch()
     section_v.addWidget(extraction_row)
     
-    parallel_desc = QLabel("Speed up EPUB extraction using multiple threads.\nRecommended: 4-8 workers (set to 1 to disable)")
-    parallel_desc.setStyleSheet("color: gray; font-size: 10pt;")
-    parallel_desc.setContentsMargins(20, 0, 0, 10)
-    section_v.addWidget(parallel_desc)
+    # Store reference to description label for enable/disable
+    self.parallel_desc_label = QLabel("Speed up EPUB extraction using multiple threads.\nRecommended: 4-8 workers (set to 1 to disable)")
+    self.parallel_desc_label.setStyleSheet("color: gray; font-size: 10pt;")
+    self.parallel_desc_label.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(self.parallel_desc_label)
+    
+    # Initialize enabled state for Parallel Extraction controls
+    self.toggle_extraction_workers()
     
     # GUI Yield Toggle
     gui_yield_row = QWidget()
@@ -1965,12 +2008,30 @@ def _toggle_multi_key_setting(self):
     # Don't save immediately, let the dialog's save button handle it
 
 def toggle_extraction_workers(self):
-    """Enable/disable extraction workers entry based on toggle (PySide6 version)"""
+    """Enable/disable extraction workers entry and labels based on toggle (PySide6 version)"""
     try:
         enabled = bool(self.enable_parallel_extraction_var)
         
+        # Workers entry
         if hasattr(self, 'extraction_workers_entry'):
             self.extraction_workers_entry.setEnabled(enabled)
+            
+        # Workers and threads labels
+        if hasattr(self, 'workers_label'):
+            self.workers_label.setEnabled(enabled)
+            color = "white" if enabled else "#808080"
+            self.workers_label.setStyleSheet(f"color: {color};")
+            
+        if hasattr(self, 'threads_label'):
+            self.threads_label.setEnabled(enabled)
+            color = "white" if enabled else "#808080"
+            self.threads_label.setStyleSheet(f"color: {color};")
+            
+        # Description label
+        if hasattr(self, 'parallel_desc_label'):
+            self.parallel_desc_label.setEnabled(enabled)
+            color = "gray" if enabled else "#606060"
+            self.parallel_desc_label.setStyleSheet(f"color: {color}; font-size: 10pt;")
         
         if enabled:
             # Set environment variable
