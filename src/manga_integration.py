@@ -1115,15 +1115,16 @@ class MangaTranslationTab:
         from PySide6.QtCore import Qt
         from PySide6.QtGui import QFont
         
-        # Use the main_gui as parent if it's a QWidget, otherwise use None
-        parent = self.main_gui if hasattr(self.main_gui, 'centralWidget') else None
+        # Use the manga integration dialog as parent so it stays on top of it
+        parent = self.dialog if hasattr(self, 'dialog') else (self.main_gui if hasattr(self.main_gui, 'centralWidget') else None)
         download_dialog = QDialog(parent)
         download_dialog.setWindowTitle(f"Download {provider} Model")
         download_dialog.setFixedSize(600, 450)
         
         # Make it non-modal and stay on top
         download_dialog.setModal(False)
-        download_dialog.setWindowFlags(download_dialog.windowFlags() | Qt.WindowStaysOnTopHint)
+        download_dialog.setWindowFlags(Qt.Dialog | Qt.WindowStaysOnTopHint | Qt.WindowCloseButtonHint)
+        download_dialog.setAttribute(Qt.WA_ShowWithoutActivating, False)  # Allow activation
         
         # Apply dark theme styling
         download_dialog.setStyleSheet("""
@@ -1337,57 +1338,64 @@ class MangaTranslationTab:
                                 download_error[0] = e
                                 download_complete.set()
                         
+                        def check_progress():
+                            """Recursively check progress using QTimer.singleShot"""
+                            try:
+                                if download_complete.is_set():
+                                    # Handle completion
+                                    if download_error[0]:
+                                        progress_label.setText("❌ Download failed")
+                                        status_label.setText("Error occurred")
+                                        # Use QTimer.singleShot to defer log updates
+                                        QTimer.singleShot(0, lambda: add_log(f"❌ Download error: {str(download_error[0])}"))
+                                    else:
+                                        progress_bar.setValue(100)
+                                        progress_label.setText("✅ Download complete!")
+                                        status_label.setText("Model files downloaded")
+                                        # Defer log updates to avoid paint conflicts
+                                        QTimer.singleShot(0, lambda: add_log("✅ Model files downloaded successfully"))
+                                        QTimer.singleShot(10, lambda: add_log(""))
+                                        QTimer.singleShot(20, lambda: add_log("Next step: Click 'Load Model' to initialize manga-ocr"))
+                                        try:
+                                            self.update_queue.put(('call_method', self._check_provider_status, ()))
+                                        except:
+                                            pass
+                                    return
+                                
+                                if not download_active['value']:
+                                    return
+                                
+                                # Update progress
+                                current_size = get_dir_size(cache_dir) if os.path.exists(cache_dir) else 0
+                                downloaded = current_size - initial_size
+                                
+                                if downloaded > 0:
+                                    progress = min(20 + (downloaded / total_size) * 70, 95)
+                                    progress_bar.setValue(int(progress))
+                                    
+                                    elapsed = time.time() - start_time
+                                    if elapsed > 1:
+                                        speed = downloaded / elapsed
+                                        speed_mb = speed / (1024 * 1024)
+                                        speed_label.setText(f"Speed: {speed_mb:.1f} MB/s")
+                                    
+                                    mb_downloaded = downloaded / (1024 * 1024)
+                                    mb_total = total_size / (1024 * 1024)
+                                    size_label.setText(f"{mb_downloaded:.1f} MB / {mb_total:.1f} MB")
+                                    progress_label.setText(f"Downloading: {progress:.1f}%")
+                                
+                                # Schedule next check
+                                QTimer.singleShot(500, check_progress)
+                            except Exception:
+                                # Silently ignore errors to prevent crashes
+                                pass
+                        
+                        # Start download thread
                         download_thread = threading.Thread(target=download_model, daemon=True)
                         download_thread.start()
                         
-                        # Use QTimer to poll progress without blocking
-                        progress_timer = QTimer()
-                        
-                        def update_download_progress():
-                            if download_complete.is_set():
-                                progress_timer.stop()
-                                # Handle completion
-                                if download_error[0]:
-                                    raise download_error[0]
-                                elif not download_error[0]:
-                                    progress_bar.setValue(100)
-                                    progress_label.setText("✅ Download complete!")
-                                    status_label.setText("Model files downloaded")
-                                    add_log("✅ Model files downloaded successfully")
-                                    add_log("")
-                                    add_log("Next step: Click 'Load Model' to initialize manga-ocr")
-                                    # Schedule status check on main thread
-                                    self.update_queue.put(('call_method', self._check_provider_status, ()))
-                                return
-                            
-                            if not download_active['value']:
-                                progress_timer.stop()
-                                return
-                            
-                            # Update progress
-                            current_size = get_dir_size(cache_dir) if os.path.exists(cache_dir) else 0
-                            downloaded = current_size - initial_size
-                            
-                            if downloaded > 0:
-                                progress = min(20 + (downloaded / total_size) * 70, 95)
-                                progress_bar.setValue(int(progress))
-                                
-                                elapsed = time.time() - start_time
-                                if elapsed > 1:
-                                    speed = downloaded / elapsed
-                                    speed_mb = speed / (1024 * 1024)
-                                    speed_label.setText(f"Speed: {speed_mb:.1f} MB/s")
-                                
-                                mb_downloaded = downloaded / (1024 * 1024)
-                                mb_total = total_size / (1024 * 1024)
-                                size_label.setText(f"{mb_downloaded:.1f} MB / {mb_total:.1f} MB")
-                                progress_label.setText(f"Downloading: {progress:.1f}%")
-                        
-                        progress_timer.timeout.connect(update_download_progress)
-                        progress_timer.start(500)  # Update every 500ms
-                        
-                        # Return immediately - timer will handle updates
-                        return
+                        # Start progress checking
+                        QTimer.singleShot(500, check_progress)
                             
                     except ImportError:
                         progress_label.setText("❌ Missing huggingface_hub")
@@ -1433,7 +1441,7 @@ class MangaTranslationTab:
                         add_log(f"Using GPU: {torch.cuda.get_device_name(0)}")
                         model = AutoModelForVision2Seq.from_pretrained(
                             model_id,
-                            dtype=torch.float16,
+                            torch_dtype=torch.float16,
                             device_map="auto",
                             trust_remote_code=True
                         )
@@ -1441,7 +1449,7 @@ class MangaTranslationTab:
                         add_log("No GPU detected, will load on CPU")
                         model = AutoModelForVision2Seq.from_pretrained(
                             model_id,
-                            dtype=torch.float32,
+                            torch_dtype=torch.float32,
                             trust_remote_code=True
                         )
                     
@@ -1503,24 +1511,13 @@ class MangaTranslationTab:
                 download_active['value'] = False
         
         def start_download():
-            """Start download in background thread or executor"""
+            """Start download - runs on main thread, spawns background thread internally"""
             download_btn.setEnabled(False)
             cancel_btn.setText("Cancel")
             
-            try:
-                if hasattr(self.main_gui, '_ensure_executor'):
-                    self.main_gui._ensure_executor()
-                execu = getattr(self.main_gui, 'executor', None)
-                if execu:
-                    execu.submit(download_with_progress)
-                else:
-                    import threading
-                    download_thread = threading.Thread(target=download_with_progress, daemon=True)
-                    download_thread.start()
-            except Exception:
-                import threading
-                download_thread = threading.Thread(target=download_with_progress, daemon=True)
-                download_thread.start()
+            # Call download_with_progress directly on main thread
+            # It will spawn its own background thread for the actual download
+            download_with_progress()
         
         def cancel_download():
             """Cancel or close dialog"""
