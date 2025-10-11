@@ -556,7 +556,7 @@ class MangaSettingsDialog(QDialog):
                 color: white;
                 border: 1px solid #555;
                 border-radius: 5px;
-                margin-top: 10px;
+                margin-top: 3px;
                 padding-top: 5px;
             }
             QGroupBox::title {
@@ -3964,6 +3964,9 @@ class MangaSettingsDialog(QDialog):
         # Update RT-DETR concurrency control visibility based on current detector type
         # This is called after the Advanced tab is fully created to sync with OCR tab state
         QTimer.singleShot(0, self._sync_rtdetr_concurrency_visibility)
+        
+        # Add stretch at the end to push all content to the top and prevent sections from stretching
+        main_layout.addStretch()
 
     def _sync_rtdetr_concurrency_visibility(self):
         """Sync RT-DETR concurrency control visibility with detector type selection"""

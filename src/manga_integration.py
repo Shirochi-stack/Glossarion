@@ -902,7 +902,7 @@ class MangaTranslationTab:
         from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
                                         QRadioButton, QButtonGroup, QLineEdit, QPushButton,
                                         QGroupBox, QTextEdit, QProgressBar, QFrame,
-                                        QScrollArea, QWidget, QSizePolicy)
+                                        QScrollArea, QWidget, QSizePolicy, QApplication)
         from PySide6.QtCore import Qt, QThread, Signal, QTimer
         from PySide6.QtGui import QFont
         
@@ -1111,7 +1111,7 @@ class MangaTranslationTab:
             selected_model_key = None
         
         # Create download dialog using PySide6
-        from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QProgressBar, QTextEdit, QGroupBox
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QProgressBar, QTextEdit, QGroupBox, QApplication
         from PySide6.QtCore import Qt
         from PySide6.QtGui import QFont
         
@@ -1119,7 +1119,11 @@ class MangaTranslationTab:
         parent = self.dialog if hasattr(self, 'dialog') else (self.main_gui if hasattr(self.main_gui, 'centralWidget') else None)
         download_dialog = QDialog(parent)
         download_dialog.setWindowTitle(f"Download {provider} Model")
-        download_dialog.setFixedSize(600, 450)
+        # Use screen ratios for sizing
+        screen = QApplication.primaryScreen().geometry()
+        width = int(screen.width() * 0.31)  # 31% of screen width
+        height = int(screen.height() * 0.42)  # 42% of screen height
+        download_dialog.setFixedSize(width, height)
         
         # Make it non-modal and stay on top
         download_dialog.setModal(False)
@@ -2069,7 +2073,14 @@ class MangaTranslationTab:
                             self.main_gui.save_config(show_message=False)
                     self._log(f"DEBUG: In thread, about to load with model_size={model_size}")
                     if model_size:
-                        success = self.ocr_manager.load_provider(provider, model_size=model_size)
+                        try:
+                            success = self.ocr_manager.load_provider(provider, model_size=model_size)
+                            self._log(f"DEBUG: load_provider call completed, success={success}")
+                        except Exception as load_error:
+                            self._log(f"Exception during load_provider: {str(load_error)}", "error")
+                            import traceback
+                            self._log(f"Load error traceback: {traceback.format_exc()}", "debug")
+                            success = False
                         
                         if success:
                             provider_obj = self.ocr_manager.get_provider('Qwen2-VL')
@@ -2080,9 +2091,19 @@ class MangaTranslationTab:
                                     "3": "72B",
                                     "4": "custom"
                                 }.get(model_size, model_size)
+                                self._log(f"DEBUG: Set loaded_model_size to {provider_obj.loaded_model_size}")
+                            else:
+                                self._log("Warning: Could not get Qwen2-VL provider object after successful load", "warning")
+                        else:
+                            self._log(f"Failed to load Qwen2-VL model with size {model_size}", "error")
                     else:
                         self._log("Warning: No model size specified for Qwen2-VL, defaulting to 2B", "warning")
-                        success = self.ocr_manager.load_provider(provider, model_size="1")
+                        try:
+                            success = self.ocr_manager.load_provider(provider, model_size="1")
+                            self._log(f"DEBUG: Default load_provider call completed, success={success}")
+                        except Exception as load_error:
+                            self._log(f"Exception during default load_provider: {str(load_error)}", "error")
+                            success = False
                 else:
                     print(f"Loading {provider} without model_size parameter")
                     self._log(f"DEBUG: Loading {provider} without model_size parameter")
@@ -3280,7 +3301,7 @@ class MangaTranslationTab:
         self.local_model_path_value = self.main_gui.config.get(f'manga_{self.local_model_type_value}_model_path', '')
         self.local_model_entry = QLineEdit(self.local_model_path_value)
         self.local_model_entry.setReadOnly(True)
-        self.local_model_entry.setMinimumWidth(100)  # Reduced for better fit
+        self.local_model_entry.setMinimumWidth(250)  # Increased width for better path visibility
         self.local_model_entry.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.local_model_entry.setStyleSheet(
             "QLineEdit { background-color: #2b2b2b; color: #ffffff; }"

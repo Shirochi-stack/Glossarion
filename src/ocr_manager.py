@@ -1065,12 +1065,16 @@ class Qwen2VL(OCRProvider):
             self._log(f"Loading model: {model_id}")
             
             # Load processor and tokenizer
+            self._log("📥 Loading processor...")
             self.processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+            self._log("📥 Loading tokenizer...")
             self.tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+            self._log("✅ Processor and tokenizer loaded successfully")
             
             # Load the model - let it figure out the class dynamically
             if torch.cuda.is_available():
                 self._log(f"GPU: {torch.cuda.get_device_name(0)}")
+                self._log("💾 Loading model on GPU...")
                 # Use auto model class
                 from transformers import AutoModelForVision2Seq
                 self.model = AutoModelForVision2Seq.from_pretrained(
@@ -1082,6 +1086,7 @@ class Qwen2VL(OCRProvider):
                 self._log("✅ Model loaded on GPU")
             else:
                 self._log("Loading on CPU...")
+                self._log("💾 Loading model on CPU (this may take several minutes)...")
                 from transformers import AutoModelForVision2Seq
                 self.model = AutoModelForVision2Seq.from_pretrained(
                     model_id,
