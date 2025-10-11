@@ -3311,16 +3311,18 @@ class MangaTranslator:
 
                                         # Classify by RT-DETR class membership
                                         if bbox in free_text_set:
-                                            # Determine free-text inclusion from LIVE settings first, then config
+                                            # Always read from live GUI config for immediate setting changes
                                             live_detect_free = None
                                             try:
-                                                live_detect_free = (self.manga_settings.get('ocr', {}).get('detect_free_text')
-                                                                    if hasattr(self, 'manga_settings') and isinstance(self.manga_settings, dict)
-                                                                    else None)
+                                                # First try getting from live GUI config
+                                                if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'config'):
+                                                    live_detect_free = self.main_gui.config.get('manga_settings', {}).get('ocr', {}).get('detect_free_text')
                                             except Exception:
                                                 live_detect_free = None
+                                            # Fallback to local settings if GUI not available
                                             cfg_detect_free = ocr_settings.get('detect_free_text', True) if isinstance(ocr_settings, dict) else True
                                             detect_free = cfg_detect_free if (live_detect_free is None) else bool(live_detect_free)
+                                            self._log(f"   • Free text detection: {detect_free} (from {'GUI' if live_detect_free is not None else 'config'})", "debug")
 
                                             region.region_type = 'free_text'
                                             region.bubble_type = 'free_text'
