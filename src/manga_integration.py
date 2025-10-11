@@ -2574,25 +2574,7 @@ class MangaTranslationTab:
             print(f"Error getting model: {e}")
             current_model = 'Unknown'
         
-        # Store as instance variable so refresh can update it
-        self.model_label = QLabel(f"Model: {current_model}")
-        model_font = QFont("Arial", 10)
-        model_font.setItalic(True)
-        self.model_label.setFont(model_font)
-        self.model_label.setStyleSheet("color: gray;")
-        
-        # Multi-key status display
-        multi_key_enabled = self.main_gui.config.get('use_multi_api_keys', False)
-        multi_key_text = "Multi-Key: ON" if multi_key_enabled else "Multi-Key: OFF"
-        multi_key_color = "green" if multi_key_enabled else "gray"
-        
-        self.multi_key_label = QLabel(multi_key_text)
-        self.multi_key_label.setFont(model_font)
-        self.multi_key_label.setStyleSheet(f"color: {multi_key_color};")
-        
         api_layout.addStretch()
-        api_layout.addWidget(self.multi_key_label)
-        api_layout.addWidget(self.model_label)
         
         settings_frame_layout.addWidget(api_frame)
 
@@ -2840,7 +2822,7 @@ class MangaTranslationTab:
         context_info_layout.setContentsMargins(0, 0, 0, 10)
         context_info_layout.setSpacing(5)
         
-        context_title = QLabel("Main GUI Context Settings:")
+        context_title = QLabel("Current Main GUI Settings:")
         title_font = QFont("Arial", 10)
         title_font.setBold(True)
         context_title.setFont(title_font)
@@ -2881,6 +2863,48 @@ class MangaTranslationTab:
         settings_display_layout.addWidget(self.rolling_status_label)
         
         context_info_layout.addWidget(settings_frame_display)
+        
+        # API Settings Status within context section
+        api_status_frame = QWidget()
+        api_status_layout = QVBoxLayout(api_status_frame)
+        api_status_layout.setContentsMargins(20, 0, 0, 0)
+        api_status_layout.setSpacing(3)
+        
+        # Show current model from main GUI
+        current_model = 'Unknown'
+        try:
+            if hasattr(self.main_gui, 'model_combo'):
+                if hasattr(self.main_gui.model_combo, 'currentText'):  # PySide6
+                    current_model = self.main_gui.model_combo.currentText()
+                elif hasattr(self.main_gui.model_combo, 'get'):  # Tkinter
+                    current_model = self.main_gui.model_combo.get()
+            elif hasattr(self.main_gui, 'model_var'):
+                # Variable attribute
+                current_model = self.main_gui.model_var if isinstance(self.main_gui.model_var, str) else str(self.main_gui.model_var)
+            elif hasattr(self.main_gui, 'config'):
+                # Fallback to config
+                current_model = self.main_gui.config.get('model', 'Unknown')
+        except Exception as e:
+            print(f"Error getting model: {e}")
+            current_model = 'Unknown'
+        
+        # Store as instance variable so refresh can update it
+        self.model_label = QLabel(f"• Model: {current_model}")
+        model_font = QFont("Arial", 10)
+        self.model_label.setFont(model_font)
+        api_status_layout.addWidget(self.model_label)
+        
+        # Multi-key status display
+        multi_key_enabled = self.main_gui.config.get('use_multi_api_keys', False)
+        multi_key_text = "• Multi-Key: ON" if multi_key_enabled else "• Multi-Key: OFF"
+        multi_key_color = "green" if multi_key_enabled else "gray"
+        
+        self.multi_key_label = QLabel(multi_key_text)
+        self.multi_key_label.setFont(model_font)
+        self.multi_key_label.setStyleSheet(f"color: {multi_key_color};")
+        api_status_layout.addWidget(self.multi_key_label)
+        
+        context_info_layout.addWidget(api_status_frame)
         context_frame_layout.addWidget(context_info)
 
         # Refresh button to update from main GUI
@@ -5353,13 +5377,13 @@ class MangaTranslationTab:
             try:
                 # Update model display
                 if hasattr(self, 'model_label'):
-                    self.model_label.setText(f"Model: {live_model}")
+                    self.model_label.setText(f"• Model: {live_model}")
                     self._log(f"✅ Updated model display to: {live_model}", "info")
                     
                 # Update multi-key status display (this comes from config, not variables)
                 if hasattr(self, 'multi_key_label'):
                     multi_key_enabled = self.main_gui.config.get('use_multi_api_keys', False)
-                    multi_key_text = "Multi-Key: ON" if multi_key_enabled else "Multi-Key: OFF"
+                    multi_key_text = "• Multi-Key: ON" if multi_key_enabled else "• Multi-Key: OFF"
                     multi_key_color = "green" if multi_key_enabled else "gray"
                     self.multi_key_label.setText(multi_key_text)
                     self.multi_key_label.setStyleSheet(f"color: {multi_key_color};")
