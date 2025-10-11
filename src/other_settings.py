@@ -199,6 +199,11 @@ def _add_combobox_arrow(self, combobox):
     def new_resize(event):
         original_resize(event)
         position_arrow()
+    
+    combobox.resizeEvent = new_resize
+    
+    # Initial position
+    QTimer.singleShot(0, position_arrow)
 
 
 class HeaderTranslationHelpDialog(QDialog):
@@ -2241,7 +2246,7 @@ def configure_translation_chunk_prompt(self):
     from PySide6.QtGui import QIcon
     
     dialog = QDialog(None)
-    dialog.setWindowTitle("Configure Translation Chunk Prompt")
+    dialog.setWindowTitle("Configure Chunk Prompt")
     # Use screen ratios for sizing
     from PySide6.QtWidgets import QApplication
     screen = QApplication.primaryScreen().geometry()
@@ -3243,38 +3248,16 @@ def _create_processing_options_section(self, parent):
     section_v.setContentsMargins(8, 8, 8, 8)  # Compact margins
     section_v.setSpacing(4)  # Compact spacing between widgets
     
-    # Translation Chunk Prompt button
-    btn_chunk_prompt = QPushButton("⚙️ Configure Translation Chunk Prompt")
-    btn_chunk_prompt.setFixedWidth(280)
-    btn_chunk_prompt.clicked.connect(lambda: self.configure_translation_chunk_prompt())
-    section_v.addWidget(btn_chunk_prompt)
+    # Create two-column layout
+    columns_container = QWidget()
+    columns_h = QHBoxLayout(columns_container)
+    columns_h.setContentsMargins(0, 0, 0, 15)
+    columns_h.setSpacing(20)
     
-    chunk_prompt_desc = QLabel("Configure context for split chapter chunks")
-    chunk_prompt_desc.setStyleSheet("color: gray; font-size: 10pt;")
-    chunk_prompt_desc.setContentsMargins(0, 0, 0, 15)
-    section_v.addWidget(chunk_prompt_desc)
-    
-    # Reinforce messages option
-    reinforce_w = QWidget()
-    reinforce_h = QHBoxLayout(reinforce_w)
-    reinforce_h.setContentsMargins(0, 0, 0, 10)
-    reinforce_h.addWidget(QLabel("Reinforce every"))
-    reinforce_edit = QLineEdit()
-    reinforce_edit.setFixedWidth(60)
-    try:
-        reinforce_edit.setText(str(self.reinforcement_freq_var))
-    except Exception:
-        pass
-    def _on_reinforce_changed(text):
-        try:
-            self.reinforcement_freq_var = text
-        except Exception:
-            pass
-    reinforce_edit.textChanged.connect(_on_reinforce_changed)
-    reinforce_h.addWidget(reinforce_edit)
-    reinforce_h.addWidget(QLabel("messages"))
-    reinforce_h.addStretch()
-    section_v.addWidget(reinforce_w)
+    # Left column - Checkboxes
+    left_column = QWidget()
+    left_v = QVBoxLayout(left_column)
+    left_v.setContentsMargins(0, 0, 0, 0)
     
     # Emergency Paragraph Restoration
     emergency_cb = self._create_styled_checkbox("Emergency Paragraph Restoration")
@@ -3289,12 +3272,12 @@ def _create_processing_options_section(self, parent):
             pass
     emergency_cb.toggled.connect(_on_emergency_toggle)
     emergency_cb.setContentsMargins(0, 2, 0, 0)
-    section_v.addWidget(emergency_cb)
+    left_v.addWidget(emergency_cb)
     
     emergency_desc = QLabel("Fixes AI responses that lose paragraph\nstructure (wall of text)")
     emergency_desc.setStyleSheet("color: gray; font-size: 10pt;")
     emergency_desc.setContentsMargins(20, 0, 0, 5)
-    section_v.addWidget(emergency_desc)
+    left_v.addWidget(emergency_desc)
     
     # Enable Decimal Chapter Detection
     decimal_cb = self._create_styled_checkbox("Enable Decimal Chapter Detection (EPUBs)")
@@ -3309,12 +3292,57 @@ def _create_processing_options_section(self, parent):
             pass
     decimal_cb.toggled.connect(_on_decimal_toggle)
     decimal_cb.setContentsMargins(0, 2, 0, 0)
-    section_v.addWidget(decimal_cb)
+    left_v.addWidget(decimal_cb)
     
     decimal_desc = QLabel("Detect chapters like 1.1, 1.2 in EPUB files\n(Text files always use decimal chapters when split)")
     decimal_desc.setStyleSheet("color: gray; font-size: 10pt;")
-    decimal_desc.setContentsMargins(20, 0, 0, 10)
-    section_v.addWidget(decimal_desc)
+    decimal_desc.setContentsMargins(20, 0, 0, 5)
+    left_v.addWidget(decimal_desc)
+    
+    left_v.addStretch()
+    columns_h.addWidget(left_column)
+    
+    # Right column - Button and Reinforce field
+    right_column = QWidget()
+    right_v = QVBoxLayout(right_column)
+    right_v.setContentsMargins(0, 0, 0, 0)
+    
+    # Translation Chunk Prompt button (renamed)
+    btn_chunk_prompt = QPushButton("⚙️ Configure Chunk Prompt")
+    btn_chunk_prompt.setFixedWidth(180)
+    btn_chunk_prompt.clicked.connect(lambda: self.configure_translation_chunk_prompt())
+    right_v.addWidget(btn_chunk_prompt)
+    
+    chunk_prompt_desc = QLabel("Split chapter context")
+    chunk_prompt_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    chunk_prompt_desc.setContentsMargins(0, 0, 0, 15)
+    right_v.addWidget(chunk_prompt_desc)
+    
+    # Message Reinforcement option
+    reinforce_w = QWidget()
+    reinforce_h = QHBoxLayout(reinforce_w)
+    reinforce_h.setContentsMargins(0, 0, 0, 0)
+    reinforce_h.addWidget(QLabel("Prompt Reinforcement:"))
+    reinforce_edit = QLineEdit()
+    reinforce_edit.setFixedWidth(60)
+    try:
+        reinforce_edit.setText(str(self.reinforcement_freq_var))
+    except Exception:
+        pass
+    def _on_reinforce_changed(text):
+        try:
+            self.reinforcement_freq_var = text
+        except Exception:
+            pass
+    reinforce_edit.textChanged.connect(_on_reinforce_changed)
+    reinforce_h.addWidget(reinforce_edit)
+    reinforce_h.addStretch()
+    right_v.addWidget(reinforce_w)
+    
+    right_v.addStretch()
+    columns_h.addWidget(right_column)
+    
+    section_v.addWidget(columns_container)
     
     # === CHAPTER EXTRACTION SETTINGS ===
     extraction_box = QGroupBox("Chapter Extraction Settings")
