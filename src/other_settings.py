@@ -62,6 +62,7 @@ def setup_other_settings_methods(gui_instance):
         'toggle_gpt_reasoning_controls', 'open_other_settings',
         'open_multi_api_key_manager', 'show_ai_hunter_settings',
         'delete_translated_headers_file', 'run_standalone_translate_headers', 'validate_epub_structure_gui',
+        'show_header_help_dialog',
         'on_extraction_method_change', 'on_extraction_mode_change',
         # Toggle methods
         'toggle_extraction_workers', 'toggle_gemini_endpoint', 'toggle_ai_hunter',
@@ -198,10 +199,201 @@ def _add_combobox_arrow(self, combobox):
     def new_resize(event):
         original_resize(event)
         position_arrow()
-    combobox.resizeEvent = new_resize
+
+
+class HeaderTranslationHelpDialog(QDialog):
+    """Dialog to display detailed information about header translation functionality"""
     
-    # Initial position
-    QTimer.singleShot(0, position_arrow)
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Header Translation - Help")
+        self.setup_ui()
+        
+        # Set icon if available
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+    
+    def setup_ui(self):
+        """Set up the dialog UI using ratios for sizing"""
+        # Use ratios for dialog size based on screen resolution
+        from PySide6.QtWidgets import QApplication
+        screen = QApplication.primaryScreen().availableGeometry()
+        width = int(screen.width() * 0.4)  # 40% of screen width
+        height = int(screen.height() * 0.6)  # 60% of screen height
+        self.resize(width, height)
+        
+        # Center the dialog
+        self.move(
+            screen.x() + (screen.width() - width) // 2,
+            screen.y() + (screen.height() - height) // 2
+        )
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(
+            int(width * 0.03),  # 3% of dialog width
+            int(height * 0.02),  # 2% of dialog height
+            int(width * 0.03),  # 3% of dialog width
+            int(height * 0.02)   # 2% of dialog height
+        )
+        layout.setSpacing(int(height * 0.02))  # 2% of dialog height
+        
+        # Title
+        title_label = QLabel("Chapter Header Translation - Detailed Guide")
+        title_label.setStyleSheet(f"""
+            QLabel {{
+                font-weight: bold;
+                font-size: {int(height * 0.025)}pt;
+                color: #6c7b7f;
+                padding-bottom: {int(height * 0.015)}px;
+            }}
+        """)
+        layout.addWidget(title_label)
+        
+        # Scrollable content area
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        
+        # Content widget
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(
+            int(width * 0.02),  # 2% margins
+            int(height * 0.01), 
+            int(width * 0.02), 
+            int(height * 0.01)
+        )
+        content_layout.setSpacing(int(height * 0.015))  # 1.5% spacing
+        
+        # Create sections with detailed explanations
+        sections = [
+            {
+                "title": "🔄 Translation Modes",
+                "content": [
+                    "• OFF: Use existing headers from already translated chapters",
+                    "• ON: Extract all headers → Translate in batch → Update files"
+                ]
+            },
+            {
+                "title": "⚙️ Options Explained",
+                "content": [
+                    "• Update headers in HTML files: Modifies the actual chapter files with translated headers",
+                    "• Save translations to .txt: Creates backup files with translation mappings",
+                    "• Headers per batch: Number of headers to translate simultaneously (affects API usage)"
+                ]
+            },
+            {
+                "title": "🚫 Ignore Options",
+                "content": [
+                    "• Ignore header: Skip h1/h2/h3 tags (prevents re-translation of visible headers)",
+                    "• Ignore title: Skip <title> tag (prevents re-translation of document titles)"
+                ]
+            },
+            {
+                "title": "⚠️ Fallback System",
+                "content": [
+                    "• Use Sorted Fallback: If OPF-based matching fails, use sorted index matching",
+                    "• WARNING: Less accurate - may mismatch chapters if file order differs from OPF spine",
+                    "• Only use if you're experiencing matching issues with standard mode"
+                ]
+            },
+            {
+                "title": "📂 Standalone Mode",
+                "content": [
+                    "• Uses content.opf-based exact mapping for precise chapter matching",
+                    "• Only translates chapters with matching names (ignores 'response_' prefix and extensions)",
+                    "• More accurate than batch processing for complex EPUB structures"
+                ]
+            },
+            {
+                "title": "🗑️ File Management",
+                "content": [
+                    "• Delete Header Files: Removes translated_headers.txt files for all selected EPUBs",
+                    "• Use this to reset translation state or clean up after testing",
+                    "• Safe operation - only removes translation cache files, not original content"
+                ]
+            },
+            {
+                "title": "💡 Best Practices",
+                "content": [
+                    "• Test with a small batch first to verify settings work correctly",
+                    "• Enable 'Save translations to .txt' for backup and debugging",
+                    "• Use 'Ignore header' if chapters already have translated visible titles",
+                    "• Keep 'Headers per batch' moderate to be within your output token limit"
+                ]
+            }
+        ]
+        
+        font_size = max(9, int(height * 0.018))  # Scale font with dialog size, minimum 9pt
+        
+        for section in sections:
+            # Section title
+            section_title = QLabel(section["title"])
+            section_title.setStyleSheet(f"""
+                QLabel {{
+                    font-weight: bold;
+                    font-size: {font_size + 1}pt;
+                    color: #7f8c8d;
+                    padding-top: {int(height * 0.01)}px;
+                    padding-bottom: {int(height * 0.005)}px;
+                }}
+            """)
+            content_layout.addWidget(section_title)
+            
+            # Section content
+            section_text = "\n".join(section["content"])
+            section_label = QLabel(section_text)
+            section_label.setStyleSheet(f"""
+                QLabel {{
+                    font-size: {font_size}pt;
+                    color: #95a5a6;
+                    line-height: 1.4;
+                    padding-left: {int(width * 0.02)}px;
+                    padding-bottom: {int(height * 0.01)}px;
+                }}
+            """)
+            section_label.setWordWrap(True)
+            content_layout.addWidget(section_label)
+        
+        scroll_area.setWidget(content_widget)
+        layout.addWidget(scroll_area)
+        
+        # Close button
+        close_btn = QPushButton("Close")
+        close_btn.setFixedHeight(int(height * 0.05))  # 5% of dialog height
+        close_btn.clicked.connect(self.accept)
+        close_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #3498db;
+                color: white;
+                padding: {int(height * 0.01)}px {int(width * 0.03)}px;
+                border-radius: {int(height * 0.01)}px;
+                font-weight: bold;
+                font-size: {font_size}pt;
+            }}
+            QPushButton:hover {{
+                background-color: #2980b9;
+            }}
+            QPushButton:pressed {{
+                background-color: #21618c;
+            }}
+        """)
+        
+        # Button layout
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        button_layout.addWidget(close_btn)
+        button_layout.addStretch()
+        
+        layout.addLayout(button_layout)
+
+
+def show_header_help_dialog(self):
+    """Show the header translation help dialog"""
+    dialog = HeaderTranslationHelpDialog(self._other_settings_dialog or self.main_window)
+    dialog.exec()
 
 def configure_rolling_summary_prompts(self):
     """Configure rolling summary prompts (PySide6)"""
@@ -2736,6 +2928,31 @@ def _create_prompt_management_section(self, parent):
             pass
     batch_entry.textChanged.connect(_on_headers_per_batch_changed)
     header_h1.addWidget(batch_entry)
+    
+    # Add help button next to batch entry
+    header_h1.addSpacing(5)
+    help_btn = QPushButton("ℹ️")
+    help_btn.setFixedSize(28, 28)
+    help_btn.clicked.connect(lambda: self.show_header_help_dialog())
+    help_btn.setStyleSheet(
+        "QPushButton { "
+        "background-color: transparent; "
+        "border: none; "
+        "font-size: 18px; "
+        "padding: 0px; "
+        "} "
+        "QPushButton:hover { "
+        "background-color: rgba(23, 162, 184, 0.2); "
+        "border-radius: 14px; "
+        "} "
+        "QPushButton:pressed { "
+        "background-color: rgba(23, 162, 184, 0.4); "
+        "border-radius: 14px; "
+        "}"
+    )
+    help_btn.setToolTip("Show detailed help for header translation options")
+    header_h1.addWidget(help_btn)
+    
     header_h1.addStretch()
     
     section_v.addWidget(header_row1)
@@ -2903,8 +3120,7 @@ def _create_prompt_management_section(self, parent):
     
     # Description for the buttons
     button_desc = QLabel(
-        "Standalone mode: Translates chapter headers using exact content.opf mapping.\n"
-        "Only translates chapters with matching names (ignores 'response_' prefix and extensions)."
+        "Standalone mode: Translates chapter headers using exact content.opf mapping."
     )
     button_desc.setStyleSheet("color: gray; font-size: 10pt;")
     button_desc.setContentsMargins(20, 2, 0, 10)
@@ -2935,17 +3151,6 @@ def _create_prompt_management_section(self, parent):
     except Exception:
         _toggle_header_controls(False)
     
-    header_desc = QLabel(
-        "• OFF: Use existing headers from translated chapters\n"
-        "• ON: Extract all headers → Translate in batch → Update files\n"
-        "• Ignore header: Skip h1/h2/h3 tags (prevents re-translation of visible headers)\n"
-        "• Ignore title: Skip <title> tag (prevents re-translation of document titles)\n"
-        "• Use Sorted Fallback: If OPF-based matching fails, use sorted index (less accurate)\n"
-        "• Delete button: Removes translated_headers.txt files for all selected EPUBs"
-    )
-    header_desc.setStyleSheet("color: gray; font-size: 10pt;")
-    header_desc.setContentsMargins(20, 5, 0, 10)
-    section_v.addWidget(header_desc)
     
     # Separator
     sep2 = QFrame()
