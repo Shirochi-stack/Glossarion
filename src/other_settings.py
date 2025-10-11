@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
 )
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QIcon, QPixmap
 
 # Local imports - these will be available through the TranslatorGUI instance
 # WindowManager and UIHelper removed - not needed in PySide6
@@ -3182,46 +3182,120 @@ def _create_prompt_management_section(self, parent):
     translate_now_btn = QPushButton("Translate Headers Now")
     translate_now_btn.setFixedWidth(210)
     
-    def _on_translate_now():
+    # Store reference for button transformation
+    self.translate_headers_btn = translate_now_btn
+    
+    # Create a rotatable label for the icon
+    from PySide6.QtCore import Property, QPropertyAnimation, QEasingCurve
+    from PySide6.QtGui import QTransform
+    
+    class RotatableLabel(QLabel):
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self._rotation = 0
+            self._original_pixmap = None
+        
+        def set_rotation(self, angle):
+            self._rotation = angle
+            if self._original_pixmap:
+                transform = QTransform()
+                transform.rotate(angle)
+                rotated = self._original_pixmap.transformed(transform, Qt.SmoothTransformation)
+                self.setPixmap(rotated)
+        
+        def get_rotation(self):
+            return self._rotation
+        
+        rotation = Property(float, get_rotation, set_rotation)
+        
+        def set_original_pixmap(self, pixmap):
+            self._original_pixmap = pixmap
+            self.setPixmap(pixmap)
+    
+    # Create icon with rotation support
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+    translate_icon_label = RotatableLabel()
+    if os.path.exists(icon_path):
+        pixmap = QPixmap(icon_path)
+        scaled_pixmap = pixmap.scaled(16, 16, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        translate_icon_label.set_original_pixmap(scaled_pixmap)
+    
+    self.translate_headers_icon = translate_icon_label
+    
+    # Create rotation animations
+    self.translate_icon_spin_animation = QPropertyAnimation(translate_icon_label, b"rotation")
+    self.translate_icon_spin_animation.setDuration(900)  # 0.9 seconds per rotation
+    self.translate_icon_spin_animation.setStartValue(0)
+    self.translate_icon_spin_animation.setEndValue(360)
+    self.translate_icon_spin_animation.setLoopCount(-1)  # Infinite loop
+    self.translate_icon_spin_animation.setEasingCurve(QEasingCurve.Linear)
+    
+    # Create smooth stop animation
+    self.translate_icon_stop_animation = QPropertyAnimation(translate_icon_label, b"rotation")
+    self.translate_icon_stop_animation.setDuration(800)  # Deceleration time
+    self.translate_icon_stop_animation.setEasingCurve(QEasingCurve.OutCubic)
+    
+    def _on_translate_toggle():
         from PySide6.QtWidgets import QMessageBox
         from PySide6.QtGui import QIcon
         
-        # Get icon
-        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
-        icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
+        # Check if currently running
+        is_running = getattr(self, '_headers_translation_running', False)
         
-        # Show confirmation dialog
-        msg_box = QMessageBox()
-        msg_box.setIcon(QMessageBox.Question)
-        msg_box.setWindowTitle("Translate Headers")
-        msg_box.setText("Start standalone header translation?")
-        msg_box.setInformativeText(
-            "This will translate chapter headers using content.opf-based exact matching."
-        )
-        msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-        msg_box.setDefaultButton(QMessageBox.Yes)
-        msg_box.setWindowIcon(icon)
-        
-        result = msg_box.exec()
-        
-        if result == QMessageBox.Yes:
-            # Close the Other Settings dialog
-            if hasattr(self, '_other_settings_dialog') and self._other_settings_dialog:
-                self._other_settings_dialog.close()
+        if is_running:
+            # Stop the translation
+            try:
+                # Set stop flag
+                self._headers_stop_requested = True
+                
+                # Update button to "Stopping..." state (gray)
+                translate_now_btn.setText("⏹ Stopping...")
+                translate_now_btn.setStyleSheet(
+                    "QPushButton { background-color: #9e9e9e; color: white; padding: 5px 10px; border-radius: 3px; font-weight: bold; } "
+                    "QPushButton:hover { background-color: #9e9e9e; } "
+                    "QPushButton:disabled { background-color: #e0e0e0; color: #9e9e9e; }"
+                )
+                
+                self.append_log("⚠️ Stopping translate headers...")
+                
+            except Exception as e:
+                self.append_log(f"❌ Error stopping: {e}")
+        else:
+            # Start the translation
+            # Get icon
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+            icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
             
-            # Run translation in background thread
-            self.run_standalone_translate_headers()
+            # Show confirmation dialog
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Question)
+            msg_box.setWindowTitle("Translate Headers")
+            msg_box.setText("Start standalone header translation?")
+            msg_box.setInformativeText(
+                "This will translate chapter headers using content.opf-based exact matching."
+            )
+            msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            msg_box.setDefaultButton(QMessageBox.Yes)
+            msg_box.setWindowIcon(icon)
+            
+            result = msg_box.exec()
+            
+            if result == QMessageBox.Yes:
+                # Don't close the dialog - keep it open so user can see spinning button and stop if needed
+                # The button will transform to show stop state
+                
+                # Run translation in background thread
+                self.run_standalone_translate_headers()
     
-    translate_now_btn.clicked.connect(_on_translate_now)
+    translate_now_btn.clicked.connect(_on_translate_toggle)
     translate_now_btn.setStyleSheet(
         "QPushButton { background-color: #6c757d; color: white; padding: 5px 10px; border-radius: 3px; font-weight: bold; } "
         "QPushButton:hover { background-color: #28a745; } "
         "QPushButton:disabled { background-color: #e0e0e0; color: #9e9e9e; }"
     )
-    # Set icon
-    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
-    if os.path.exists(icon_path):
-        translate_now_btn.setIcon(QIcon(icon_path))
+    # Set icon from the rotatable label
+    if translate_icon_label._original_pixmap:
+        translate_now_btn.setIcon(QIcon(translate_icon_label._original_pixmap))
     buttons_h.addWidget(translate_now_btn)
     
     buttons_h.addSpacing(10)
@@ -5513,6 +5587,81 @@ def run_standalone_translate_headers(self):
             msg_box.exec()
             return
         
+        # Initialize stop flag and running state
+        self._headers_stop_requested = False
+        self._headers_translation_running = True
+        
+        # Transform button to stop mode (red)
+        if hasattr(self, 'translate_headers_btn'):
+            self.translate_headers_btn.setText("⏹ Stop Headers")
+            self.translate_headers_btn.setStyleSheet(
+                "QPushButton { background-color: #dc3545; color: white; padding: 5px 10px; border-radius: 3px; font-weight: bold; } "
+                "QPushButton:hover { background-color: #c82333; } "
+                "QPushButton:disabled { background-color: #e0e0e0; color: #9e9e9e; }"
+            )
+            
+        # Start spinning animation on icon
+        if hasattr(self, 'translate_icon_spin_animation') and hasattr(self, 'translate_headers_icon'):
+            try:
+                from PySide6.QtCore import QTimer, QPropertyAnimation
+                
+                # Start the continuous spin animation
+                if self.translate_icon_spin_animation.state() != QPropertyAnimation.Running:
+                    self.translate_icon_spin_animation.start()
+                
+                # Update button icon periodically and monitor for completion
+                def update_and_monitor():
+                    # Check if still running
+                    if hasattr(self, '_headers_translation_running') and self._headers_translation_running:
+                        # Update spinning icon
+                        if hasattr(self, 'translate_headers_icon') and self.translate_headers_icon.pixmap():
+                            self.translate_headers_btn.setIcon(QIcon(self.translate_headers_icon.pixmap()))
+                        # Continue monitoring
+                        QTimer.singleShot(50, update_and_monitor)
+                    else:
+                        # Translation finished - stop animation gracefully
+                        if hasattr(self, 'translate_icon_spin_animation') and hasattr(self, 'translate_icon_stop_animation'):
+                            if self.translate_icon_spin_animation.state() == QPropertyAnimation.Running:
+                                # Stop the infinite spin
+                                self.translate_icon_spin_animation.stop()
+                                
+                                # Get current rotation and smoothly decelerate to 0
+                                if hasattr(self, 'translate_headers_icon'):
+                                    current_rotation = self.translate_headers_icon.get_rotation()
+                                    current_rotation = current_rotation % 360
+                                    
+                                    # Determine shortest path to 0
+                                    if current_rotation > 180:
+                                        target_rotation = 360
+                                    else:
+                                        target_rotation = 0
+                                    
+                                    self.translate_icon_stop_animation.setStartValue(current_rotation)
+                                    self.translate_icon_stop_animation.setEndValue(target_rotation)
+                                    self.translate_icon_stop_animation.start()
+                        
+                        # Wait for deceleration to finish before resetting button
+                        def reset_button():
+                            if hasattr(self, 'translate_headers_btn'):
+                                self.translate_headers_btn.setText("Translate Headers Now")
+                                self.translate_headers_btn.setStyleSheet(
+                                    "QPushButton { background-color: #6c757d; color: white; padding: 5px 10px; border-radius: 3px; font-weight: bold; } "
+                                    "QPushButton:hover { background-color: #28a745; } "
+                                    "QPushButton:disabled { background-color: #e0e0e0; color: #9e9e9e; }"
+                                )
+                                # Reset icon to static position
+                                if hasattr(self, 'translate_headers_icon'):
+                                    self.translate_headers_icon.set_rotation(0)
+                                    if self.translate_headers_icon._original_pixmap:
+                                        self.translate_headers_btn.setIcon(QIcon(self.translate_headers_icon._original_pixmap))
+                        
+                        # Delay reset to allow deceleration animation to finish
+                        QTimer.singleShot(900, reset_button)
+                
+                update_and_monitor()
+            except Exception as e:
+                pass
+        
         # Log that translation is starting
         self.append_log("🌐 Starting standalone header translation in background...")
         
@@ -5566,9 +5715,15 @@ def run_standalone_translate_headers(self):
             except Exception as e:
                 error_msg = f"Failed to run standalone header translation: {e}\n\n{traceback.format_exc()}"
                 self.append_log(f"❌ {error_msg}")
+            finally:
+                # Reset button to initial state when thread completes
+                # Just set flags - the monitoring timer will handle UI updates
+                self._headers_translation_running = False
+                self._headers_stop_requested = True  # Stop spinning animation
         
         # Start the thread
         thread = threading.Thread(target=translation_thread, daemon=True, name="HeaderTranslationThread")
+        self._headers_thread = thread  # Store reference for stop button
         thread.start()
         
     except Exception as e:
