@@ -102,6 +102,13 @@ def setup_other_settings_methods(gui_instance):
                 setattr(gui_instance, method_name, types.MethodType(method, gui_instance))
 
 
+def _center_messagebox_buttons(msg_box):
+    """Helper to center buttons in a QMessageBox"""
+    from PySide6.QtWidgets import QDialogButtonBox
+    button_box = msg_box.findChild(QDialogButtonBox)
+    if button_box:
+        button_box.setCenterButtons(True)
+
 def _create_styled_checkbox(self, text):
     """Create a checkbox with proper checkmark using text overlay - from manga integration"""
     from PySide6.QtWidgets import QCheckBox, QLabel
@@ -309,8 +316,8 @@ class HeaderTranslationHelpDialog(QDialog):
                 "title": "📂 Standalone Mode",
                 "content": [
                     "• Uses content.opf-based exact mapping for precise chapter matching",
-                    "• Only translates chapters with matching names (ignores 'response_' prefix and extensions)",
-                    "• More accurate than batch processing for complex EPUB structures"
+                    "• Translates chapters with matching names (ignores 'response_' prefix and extensions)",
+                    "• The regular translation logic uses this logic as well"
                 ]
             },
             {
@@ -2357,6 +2364,7 @@ def show_ai_hunter_settings(self):
             msg_box.setWindowIcon(QIcon("halgakos.ico"))
         except Exception:
             pass
+        _center_messagebox_buttons(msg_box)
         msg_box.exec()
 
 def configure_translation_chunk_prompt(self):
@@ -3277,6 +3285,12 @@ def _create_prompt_management_section(self, parent):
             msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
             msg_box.setDefaultButton(QMessageBox.Yes)
             msg_box.setWindowIcon(icon)
+            
+            # Center the buttons
+            from PySide6.QtWidgets import QDialogButtonBox
+            button_box = msg_box.findChild(QDialogButtonBox)
+            if button_box:
+                button_box.setCenterButtons(True)
             
             result = msg_box.exec()
             
@@ -5574,6 +5588,7 @@ def run_standalone_translate_headers(self):
             msg_box.setText("API key not configured.")
             msg_box.setInformativeText("Please enter your API key in the main window before using this feature.")
             msg_box.setWindowIcon(icon)
+            _center_messagebox_buttons(msg_box)
             msg_box.exec()
             return
         
@@ -5584,6 +5599,7 @@ def run_standalone_translate_headers(self):
             msg_box.setText("Model not selected.")
             msg_box.setInformativeText("Please select a model in the main window before using this feature.")
             msg_box.setWindowIcon(icon)
+            _center_messagebox_buttons(msg_box)
             msg_box.exec()
             return
         
@@ -5736,6 +5752,7 @@ def run_standalone_translate_headers(self):
         msg_box.setText(f"Failed to start standalone header translation: {e}")
         msg_box.setDetailedText(traceback.format_exc())
         msg_box.setWindowIcon(icon)
+        _center_messagebox_buttons(msg_box)
         msg_box.exec()
 
 def delete_translated_headers_file(self):
@@ -5779,6 +5796,7 @@ def delete_translated_headers_file(self):
             msg_box.setWindowTitle("Error")
             msg_box.setText("No EPUB file(s) selected. Please select EPUB file(s) first.")
             msg_box.setWindowIcon(icon)
+            _center_messagebox_buttons(msg_box)
             msg_box.exec()
             return
         
@@ -5844,6 +5862,7 @@ def delete_translated_headers_file(self):
             msg_box.setWindowTitle("No Files")
             msg_box.setText("No EPUB files were processed.")
             msg_box.setWindowIcon(icon)
+            _center_messagebox_buttons(msg_box)
             msg_box.exec()
             return
         
@@ -5878,6 +5897,7 @@ def delete_translated_headers_file(self):
             msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
             msg_box.setDefaultButton(QMessageBox.No)
             msg_box.setWindowIcon(icon)
+            _center_messagebox_buttons(msg_box)
             result = msg_box.exec()
             
             if result == QMessageBox.Yes:
@@ -5902,6 +5922,7 @@ def delete_translated_headers_file(self):
                     msg_box.setWindowTitle("Success")
                     msg_box.setText(success_msg)
                     msg_box.setWindowIcon(icon)
+                    _center_messagebox_buttons(msg_box)
                     msg_box.exec()
                 else:
                     msg_box = QMessageBox()
@@ -5909,6 +5930,7 @@ def delete_translated_headers_file(self):
                     msg_box.setWindowTitle("Error")
                     msg_box.setText("No files were successfully deleted.")
                     msg_box.setWindowIcon(icon)
+                    _center_messagebox_buttons(msg_box)
                     msg_box.exec()
         else:
             # No files to delete
@@ -5917,6 +5939,7 @@ def delete_translated_headers_file(self):
             msg_box.setWindowTitle("No Files to Delete")
             msg_box.setText(summary_text)
             msg_box.setWindowIcon(icon)
+            _center_messagebox_buttons(msg_box)
             msg_box.exec()
         
     except Exception as e:
@@ -5926,6 +5949,7 @@ def delete_translated_headers_file(self):
         msg_box.setWindowTitle("Error")
         msg_box.setText(f"Failed to delete file: {e}")
         msg_box.setWindowIcon(icon)
+        _center_messagebox_buttons(msg_box)
         msg_box.exec()
 
 def validate_epub_structure_gui(self):
@@ -5950,6 +5974,7 @@ def validate_epub_structure_gui(self):
         msg_box.setWindowTitle("Error")
         msg_box.setText("Please select a file first.")
         msg_box.setWindowIcon(icon)
+        _center_messagebox_buttons(msg_box)
         msg_box.exec()
         return
     
@@ -5959,6 +5984,7 @@ def validate_epub_structure_gui(self):
         msg_box.setWindowTitle("Info")
         msg_box.setText("Structure validation is only available for EPUB files.")
         msg_box.setWindowIcon(icon)
+        _center_messagebox_buttons(msg_box)
         msg_box.exec()
         return
     
@@ -5971,6 +5997,7 @@ def validate_epub_structure_gui(self):
         msg_box.setWindowTitle("Info")
         msg_box.setText(f"No output directory found: {output_dir}")
         msg_box.setWindowIcon(icon)
+        _center_messagebox_buttons(msg_box)
         msg_box.exec()
         return
     
@@ -5990,6 +6017,7 @@ def validate_epub_structure_gui(self):
             msg_box.setText("✅ All EPUB structure files are present!\n\n"
                               "Your translation is ready for EPUB compilation.")
             msg_box.setWindowIcon(icon)
+            _center_messagebox_buttons(msg_box)
             msg_box.exec()
         elif structure_ok:
             self.append_log("⚠️ EPUB structure OK, but some issues found")
@@ -5999,6 +6027,7 @@ def validate_epub_structure_gui(self):
             msg_box.setText("⚠️ EPUB structure is mostly OK, but some issues were found.\n\n"
                                  "Check the log for details.")
             msg_box.setWindowIcon(icon)
+            _center_messagebox_buttons(msg_box)
             msg_box.exec()
         else:
             self.append_log("❌ EPUB validation FAILED - Missing critical files")
@@ -6009,6 +6038,7 @@ def validate_epub_structure_gui(self):
                                "container.xml and/or OPF files are missing.\n"
                                "Try re-running the translation to extract them.")
             msg_box.setWindowIcon(icon)
+            _center_messagebox_buttons(msg_box)
             msg_box.exec()
     
     except ImportError as e:
@@ -6018,6 +6048,7 @@ def validate_epub_structure_gui(self):
         msg_box.setWindowTitle("Error")
         msg_box.setText("Validation functions not available.")
         msg_box.setWindowIcon(icon)
+        _center_messagebox_buttons(msg_box)
         msg_box.exec()
     except Exception as e:
         self.append_log(f"❌ Validation error: {e}")
@@ -6026,6 +6057,7 @@ def validate_epub_structure_gui(self):
         msg_box.setWindowTitle("Error")
         msg_box.setText(f"Validation failed: {e}")
         msg_box.setWindowIcon(icon)
+        _center_messagebox_buttons(msg_box)
         msg_box.exec()
 
 def on_profile_select(self, event=None):
@@ -6080,6 +6112,7 @@ def save_profile(self):
             msg_box.setWindowIcon(QIcon(icon_path))
     except:
         pass
+    _center_messagebox_buttons(msg_box)
     msg_box.exec()
     self.save_profiles()
 
@@ -6108,6 +6141,7 @@ def delete_profile(self):
             msg_box.setWindowIcon(QIcon(icon_path))
     except:
         pass
+    _center_messagebox_buttons(msg_box)
     result = msg_box.exec()
     
     if result == QMessageBox.Yes:

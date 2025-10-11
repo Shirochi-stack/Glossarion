@@ -666,6 +666,21 @@ def run_translate_headers_gui(gui_instance):
                     pass
                 continue
             
+            # Check if translated_headers.txt already exists
+            translations_file = os.path.join(output_dir, "translated_headers.txt")
+            if os.path.exists(translations_file):
+                gui_instance.append_log(f"📁 Found existing translated_headers.txt for: {epub_base}")
+                gui_instance.append_log(f"   File: {translations_file}")
+                gui_instance.append_log(f"⏭️ Skipping translation (already exists)... ({successful + 1}/{total_files} processed)\n")
+                successful += 1
+                # Force GUI event processing
+                try:
+                    from PySide6.QtWidgets import QApplication
+                    QApplication.processEvents()
+                except Exception:
+                    pass
+                continue
+            
             # Log starting message
             if total_files == 1:
                 gui_instance.append_log("🌐 Starting standalone header translation...")
