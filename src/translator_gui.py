@@ -5195,8 +5195,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GEMINI_OPENAI_ENDPOINT': self.gemini_openai_endpoint_var if self.gemini_openai_endpoint_var else '',
             "ATTACH_CSS_TO_CHAPTERS": "1" if self.attach_css_to_chapters_var else "0",
             'GLOSSARY_FUZZY_THRESHOLD': str(self.config.get('glossary_fuzzy_threshold', 0.90)),
-            'GLOSSARY_MAX_TEXT_SIZE': str(self.glossary_max_text_size_var),
-            'GLOSSARY_MAX_SENTENCES': str(self.glossary_max_sentences_var),
+            'GLOSSARY_MAX_TEXT_SIZE': str(self.config.get('glossary_max_text_size', 50000)),
+            'GLOSSARY_MAX_SENTENCES': str(self.config.get('glossary_max_sentences', 200)),
             'USE_FALLBACK_KEYS': '1' if self.config.get('use_fallback_keys', False) else '0',
             'FALLBACK_KEYS': json.dumps(self.config.get('fallback_keys', [])),
 
@@ -6225,8 +6225,9 @@ Important rules:
                     'GLOSSARY_FUZZY_THRESHOLD': str(self.config.get('glossary_fuzzy_threshold', 0.90)),
                     'MANUAL_GLOSSARY': self.manual_glossary_path if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path else '',
                     'GLOSSARY_FORMAT_INSTRUCTIONS': self.glossary_format_instructions if hasattr(self, 'glossary_format_instructions') else '',
-                    
-
+                    'GLOSSARY_MAX_SENTENCES': str(self.config.get('glossary_max_sentences', 200)),
+                    'GLOSSARY_MAX_TEXT_SIZE': str(self.config.get('glossary_max_text_size', 50000)),
+                    'GLOSSARY_FILTER_MODE': self.config.get('glossary_filter_mode', 'all'),
                 }
                 
                 # Add project ID for Vertex AI
@@ -8335,8 +8336,19 @@ Important rules:
                         found = True
                         break
                 
+                # Debug logging for glossary_max_sentences
+                if key == 'glossary_max_sentences':
+                    # ALWAYS log this, not just in debug mode
+                    self.append_log(f"🔍 [SAVE_CONFIG] glossary_max_sentences: found={found}, final_value='{final_value}', sources={sources}")
+                    if hasattr(self, 'glossary_max_sentences_entry'):
+                        widget_value = self.glossary_max_sentences_entry.text()
+                        self.append_log(f"🔍 [SAVE_CONFIG] Widget text value: '{widget_value}'")
+                
                 if found:
-                    self.config[key] = converter(final_value) if converter else final_value
+                    converted_value = converter(final_value) if converter else final_value
+                    self.config[key] = converted_value
+                    if key == 'glossary_max_sentences':
+                        self.append_log(f"🔍 [SAVE_CONFIG] Converted and stored in config: {converted_value}")
                 elif default is not None:
                     self.config[key] = default
 
@@ -8481,10 +8493,22 @@ Important rules:
                     ('GLOSSARY_STRIP_HONORIFICS', '1' if self.config.get('strip_honorifics') else '0'),
                     ('GLOSSARY_FUZZY_THRESHOLD', str(self.config.get('glossary_fuzzy_threshold', 0.90))),
                     ('GLOSSARY_USE_LEGACY_CSV', '1' if self.config.get('glossary_use_legacy_csv') else '0'),
-                    ('GLOSSARY_MAX_SENTENCES', str(self.config.get('glossary_max_sentences', 10))),
+                    ('GLOSSARY_MAX_SENTENCES', str(self.config.get('glossary_max_sentences', 200))),
+                    # Add missing environment variables that GlossaryManager.py reads
+                    ('GLOSSARY_MIN_FREQUENCY', str(self.config.get('glossary_min_frequency', 2))),
+                    ('GLOSSARY_MAX_NAMES', str(self.config.get('glossary_max_names', 50))),
+                    ('GLOSSARY_MAX_TITLES', str(self.config.get('glossary_max_titles', 30))),
+                    ('GLOSSARY_BATCH_SIZE', str(self.config.get('glossary_batch_size', 50))),
+                    ('GLOSSARY_MAX_TEXT_SIZE', str(self.config.get('glossary_max_text_size', 50000))),
+                    ('GLOSSARY_CHAPTER_SPLIT_THRESHOLD', str(self.config.get('glossary_chapter_split_threshold', 8192))),
+                    ('GLOSSARY_FILTER_MODE', self.config.get('glossary_filter_mode', 'strict')),
                 ]
                 for env_key, env_value in glossary_env_mappings:
-                    env_vars_set.append(_update_env(env_key, env_value))
+                    if env_key:  # Skip None entries
+                        # Log GLOSSARY_MAX_SENTENCES specifically
+                        if env_key == 'GLOSSARY_MAX_SENTENCES':
+                            self.append_log(f"🔍 [DEBUG] save_config setting {env_key}={env_value}")
+                        env_vars_set.append(_update_env(env_key, env_value))
                 
                 # JSON environment variables
                 custom_types_json = json.dumps(self.config.get('custom_entry_types', {}))

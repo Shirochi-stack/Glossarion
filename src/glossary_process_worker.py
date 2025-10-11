@@ -71,6 +71,8 @@ def generate_glossary_in_process(output_dir, chapters_data, instructions, env_va
         # Set environment variables from parent process
         for key, value in env_vars.items():
             os.environ[key] = str(value)
+            if key == 'GLOSSARY_MAX_SENTENCES':
+                print(f"🔍 [DEBUG] Worker process setting GLOSSARY_MAX_SENTENCES to: '{value}'")
         
         # Import here to avoid circular imports
         import GlossaryManager
@@ -145,11 +147,11 @@ def generate_glossary_async(output_dir, chapters, instructions, extraction_worke
     important_vars = [
         'EXTRACTION_WORKERS', 'GLOSSARY_MIN_FREQUENCY', 'GLOSSARY_MAX_NAMES',
         'GLOSSARY_MAX_TITLES', 'GLOSSARY_BATCH_SIZE', 'GLOSSARY_STRIP_HONORIFICS',
-        'GLOSSARY_FUZZY_THRESHOLD', 'GLOSSARY_MAX_TEXT_SIZE', 'AUTO_GLOSSARY_PROMPT',
-        'GLOSSARY_USE_SMART_FILTER', 'GLOSSARY_USE_LEGACY_CSV', 'GLOSSARY_PARALLEL_ENABLED',
-        'GLOSSARY_FILTER_MODE', 'GLOSSARY_SKIP_FREQUENCY_CHECK', 'GLOSSARY_SKIP_ALL_VALIDATION',
-        'MODEL', 'API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'MAX_OUTPUT_TOKENS',
-        'GLOSSARY_TEMPERATURE', 'MANUAL_GLOSSARY', 'ENABLE_AUTO_GLOSSARY'
+        'GLOSSARY_FUZZY_THRESHOLD', 'GLOSSARY_MAX_TEXT_SIZE', 'GLOSSARY_MAX_SENTENCES',
+        'AUTO_GLOSSARY_PROMPT', 'GLOSSARY_USE_SMART_FILTER', 'GLOSSARY_USE_LEGACY_CSV',
+        'GLOSSARY_PARALLEL_ENABLED', 'GLOSSARY_FILTER_MODE', 'GLOSSARY_SKIP_FREQUENCY_CHECK',
+        'GLOSSARY_SKIP_ALL_VALIDATION', 'MODEL', 'API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY',
+        'MAX_OUTPUT_TOKENS', 'GLOSSARY_TEMPERATURE', 'MANUAL_GLOSSARY', 'ENABLE_AUTO_GLOSSARY'
     ]
     
     for var in important_vars:

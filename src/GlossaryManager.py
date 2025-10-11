@@ -103,7 +103,12 @@ def _atomic_write_file(filepath, content, encoding='utf-8'):
 
 def save_glossary(output_dir, chapters, instructions, language="korean"):
     """Targeted glossary generator with true CSV format output and parallel processing"""
-    print("📑 Targeted Glossary Generator v6.0 (CSV Format + Parallel)")
+    print("📁 Targeted Glossary Generator v6.0 (CSV Format + Parallel)")
+    
+    # CRITICAL: Reload ALL glossary settings from environment variables at the START
+    # This ensures child processes spawned by ProcessPoolExecutor get the latest values
+    # Force fresh read of all environment variables (they were set by save_config)
+    print("🔄 Reloading glossary settings from environment variables...")
     
     # Check stop flag at start
     # Ensure output directory exists
@@ -112,14 +117,14 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
     except Exception as _e:
         print(f"⚠️ Could not ensure output directory exists: {output_dir} ({_e})")
     if is_stop_requested():
-        print("📑 ❌ Glossary generation stopped by user")
+        print("📁 ❌ Glossary generation stopped by user")
         return {}
     
     # Check if glossary already exists; if so, we'll MERGE it later (do not return early)
     glossary_path = os.path.join(output_dir, "glossary.csv")
     existing_glossary_content = None
     if os.path.exists(glossary_path):
-        print(f"📑 Existing glossary detected (will merge): {glossary_path}")
+        print(f"📁 Existing glossary detected (will merge): {glossary_path}")
         try:
             with open(glossary_path, 'r', encoding='utf-8') as f:
                 existing_glossary_content = f.read()
@@ -127,18 +132,18 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
             print(f"⚠️ Could not read existing glossary: {e}")
     
     # Rest of the method continues as before...
-    print("📑 Extracting names and terms with configurable options")
+    print("📁 Extracting names and terms with configurable options")
     
     # Check stop flag before processing
     if is_stop_requested():
-        print("📑 ❌ Glossary generation stopped by user")
+        print("📁 ❌ Glossary generation stopped by user")
         return {}
     
     # Check for manual glossary first (CSV only)
     manual_glossary_path = os.getenv("MANUAL_GLOSSARY")
     existing_glossary = None
     if manual_glossary_path and os.path.exists(manual_glossary_path):
-        print(f"📑 Manual glossary detected: {os.path.basename(manual_glossary_path)}")
+        print(f"📁 Manual glossary detected: {os.path.basename(manual_glossary_path)}")
         try:
             with open(manual_glossary_path, 'r', encoding='utf-8') as f:
                 content = f.read()
@@ -146,11 +151,11 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
             target_path = os.path.join(output_dir, "glossary.csv")
             with open(target_path, 'w', encoding='utf-8') as f:
                 f.write(content)
-            print(f"📑 ✅ Manual CSV glossary copied to: {target_path}")
+            print(f"📁 ✅ Manual CSV glossary copied to: {target_path}")
             existing_glossary = content
         except Exception as e:
             print(f"⚠️ Could not copy manual glossary: {e}")
-            print(f"📑 Proceeding with automatic generation...")
+            print(f"📁 Proceeding with automatic generation...")
     
     # Check for existing glossary from manual extraction
     glossary_folder_path = os.path.join(output_dir, "Glossary")
@@ -164,12 +169,12 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
                     with open(existing_path, 'r', encoding='utf-8') as f:
                         existing_content = f.read()
                     existing_glossary = existing_content
-                    print(f"📑 Found existing glossary from manual extraction: {file}")
+                    print(f"📁 Found existing glossary from manual extraction: {file}")
                     break
                 except Exception as e:
                     print(f"⚠️ Could not load existing glossary: {e}")
     
-    # Get configuration from environment variables
+    # Get configuration from environment variables (FRESH READ)
     min_frequency = int(os.getenv("GLOSSARY_MIN_FREQUENCY", "2"))
     max_names = int(os.getenv("GLOSSARY_MAX_NAMES", "50"))
     max_titles = int(os.getenv("GLOSSARY_MAX_TITLES", "30"))
@@ -178,9 +183,16 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
     fuzzy_threshold = float(os.getenv("GLOSSARY_FUZZY_THRESHOLD", "0.90"))
     max_text_size = int(os.getenv("GLOSSARY_MAX_TEXT_SIZE", "50000"))
     
+    # DEBUG: Show what we're reading from environment
+    max_sentences_env = os.getenv("GLOSSARY_MAX_SENTENCES", "200")
+    print(f"🔍 [DEBUG] Reading GLOSSARY_MAX_SENTENCES from environment: '{max_sentences_env}'")
+    max_sentences = int(max_sentences_env)
+    print(f"🔍 [DEBUG] Converted to integer: {max_sentences}")
+    
     print(f"📑 Settings: Min frequency: {min_frequency}, Max names: {max_names}, Max titles: {max_titles}")
     print(f"📑 Strip honorifics: {'✅ Yes' if strip_honorifics else '❌ No'}")
     print(f"📑 Fuzzy matching threshold: {fuzzy_threshold}")
+    print(f"📑 Max sentences for filtering: {max_sentences}")
     
     # Get custom prompt from environment
     custom_prompt = os.getenv("AUTO_GLOSSARY_PROMPT", "").strip()
@@ -220,12 +232,13 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
     
     filtered_text_cache = None
     if use_smart_filter and custom_prompt:  # Only apply for AI extraction
-        print(f"📑 Smart filtering enabled - checking effective text size after filtering...")
+        print(f"📁 Smart filtering enabled - checking effective text size after filtering...")
         # Perform filtering ONCE and reuse for chunking
-        filtered_sample, _ = _filter_text_for_glossary(all_text, min_frequency)
+        print(f"🔍 [DEBUG] Calling _filter_text_for_glossary with max_sentences={max_sentences}")
+        filtered_sample, _ = _filter_text_for_glossary(all_text, min_frequency, max_sentences)
         filtered_text_cache = filtered_sample
         effective_text_size = len(filtered_sample)
-        print(f"📑 Effective text size after filtering: {effective_text_size:,} chars (from {len(all_text):,})")
+        print(f"📁 Effective text size after filtering: {effective_text_size:,} chars (from {len(all_text):,})")
     
     # Check if we need to split into chunks based on EFFECTIVE size after filtering
     if chapter_split_threshold > 0 and effective_text_size > chapter_split_threshold:
@@ -234,7 +247,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
         # If using smart filter, we need to split the FILTERED text, not raw text
         if use_smart_filter and custom_prompt:
             # Split the filtered text into chunks (reuse cached filtered text)
-            filtered_text = filtered_text_cache if filtered_text_cache is not None else _filter_text_for_glossary(all_text, min_frequency)[0]
+            filtered_text = filtered_text_cache if filtered_text_cache is not None else _filter_text_for_glossary(all_text, min_frequency, max_sentences)[0]
             chunks_to_process = []
             
             # Split filtered text into chunks of appropriate size
@@ -283,7 +296,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
                 chunks_to_process, custom_prompt, language, 
                 min_frequency, max_names, max_titles, 
                 output_dir, strip_honorifics, fuzzy_threshold, 
-                filter_mode, api_batch_size, extraction_workers
+                filter_mode, api_batch_size, extraction_workers, max_sentences
             )
             
             # Reset validation mode
@@ -385,7 +398,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
                             custom_prompt, chunk_text, language, 
                             min_frequency, max_names, max_titles, 
                             None, output_dir,  # Don't pass existing glossary to chunks
-                            strip_honorifics, fuzzy_threshold, filter_mode
+                            strip_honorifics, fuzzy_threshold, filter_mode, max_sentences
                         )
                     else:
                         chunk_glossary = _extract_with_patterns(
@@ -507,7 +520,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
         return _extract_with_custom_prompt(custom_prompt, all_text, language, 
                                                min_frequency, max_names, max_titles, 
                                                existing_glossary, output_dir, 
-                                               strip_honorifics, fuzzy_threshold, filter_mode)
+                                               strip_honorifics, fuzzy_threshold, filter_mode, max_sentences)
     else:
         return _extract_with_patterns(all_text, language, min_frequency, 
                                          max_names, max_titles, batch_size, 
@@ -675,7 +688,7 @@ def _sanitize_final_glossary_lines(lines, use_legacy_format=False):
 def _process_chunks_batch_api(chunks_to_process, custom_prompt, language, 
                               min_frequency, max_names, max_titles, 
                               output_dir, strip_honorifics, fuzzy_threshold, 
-                              filter_mode, api_batch_size, extraction_workers):
+                              filter_mode, api_batch_size, extraction_workers, max_sentences=200):
     """Process chunks using batch API calls for AI extraction with thread delay"""
     
     print(f"📑 Using batch API mode with {api_batch_size} chunks per batch")
@@ -733,7 +746,7 @@ def _process_chunks_batch_api(chunks_to_process, custom_prompt, language,
                     custom_prompt, chunk_text, language,
                     min_frequency, max_names, max_titles,
                     None, output_dir, strip_honorifics,
-                    fuzzy_threshold, filter_mode
+                    fuzzy_threshold, filter_mode, max_sentences
                 )
                 futures[future] = chunk_idx
                 last_submission_time = time.time()
@@ -848,7 +861,7 @@ def _incremental_update_glossary(output_dir, chunk_lines, strip_honorifics, lang
 def _process_single_chunk(chunk_idx, chunk_text, custom_prompt, language,
                          min_frequency, max_names, max_titles, batch_size,
                          output_dir, strip_honorifics, fuzzy_threshold, filter_mode,
-                         already_filtered=False):
+                         already_filtered=False, max_sentences=200):
     """Process a single chunk - wrapper for parallel execution"""
     print(f"📑 Worker processing chunk {chunk_idx} ({len(chunk_text):,} chars)...")
     
@@ -862,7 +875,7 @@ def _process_single_chunk(chunk_idx, chunk_text, custom_prompt, language,
                 custom_prompt, chunk_text, language, 
                 min_frequency, max_names, max_titles, 
                 None, output_dir,
-                strip_honorifics, fuzzy_threshold, filter_mode
+                strip_honorifics, fuzzy_threshold, filter_mode, max_sentences
             )
         finally:
             os.environ["_CHUNK_ALREADY_FILTERED"] = "0"  # Reset
@@ -1347,8 +1360,14 @@ def _strip_honorific(term, language_hint='unknown'):
     
     return term
 
-def _filter_text_for_glossary(text, min_frequency=2):
-    """Filter text to extract only meaningful content for glossary extraction"""
+def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
+    """Filter text to extract only meaningful content for glossary extraction
+    
+    Args:
+        text: Input text to filter
+        min_frequency: Minimum frequency threshold for terms
+        max_sentences: Maximum number of sentences to return (reads from env if None)
+    """
     import re
     from collections import Counter
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1549,13 +1568,39 @@ def _filter_text_for_glossary(text, min_frequency=2):
         use_process_pool = (not in_subprocess and len(sentences) > 5000)
         
         if use_process_pool:
-            print(f"📑 Using ProcessPoolExecutor for maximum performance (true parallelism)")
+            print(f"📁 Using ProcessPoolExecutor for maximum performance (true parallelism)")
             executor_class = ProcessPoolExecutor
+            
+            # Capture CURRENT environment variable values from parent process
+            current_env_vars = {
+                'GLOSSARY_MAX_SENTENCES': os.getenv('GLOSSARY_MAX_SENTENCES', '200'),
+                'GLOSSARY_MIN_FREQUENCY': os.getenv('GLOSSARY_MIN_FREQUENCY', '2'),
+                'GLOSSARY_MAX_NAMES': os.getenv('GLOSSARY_MAX_NAMES', '50'),
+                'GLOSSARY_MAX_TITLES': os.getenv('GLOSSARY_MAX_TITLES', '30'),
+                'GLOSSARY_BATCH_SIZE': os.getenv('GLOSSARY_BATCH_SIZE', '50'),
+                'GLOSSARY_STRIP_HONORIFICS': os.getenv('GLOSSARY_STRIP_HONORIFICS', '1'),
+                'GLOSSARY_FUZZY_THRESHOLD': os.getenv('GLOSSARY_FUZZY_THRESHOLD', '0.90'),
+            }
+            print(f"📁 Passing env vars to child processes: GLOSSARY_MAX_SENTENCES={current_env_vars['GLOSSARY_MAX_SENTENCES']}")
+            
+            # Create initializer that sets these values in child processes
+            def init_worker(env_vars_dict):
+                """Initialize worker process with environment variables from parent"""
+                import os
+                for k, v in env_vars_dict.items():
+                    os.environ[k] = str(v)
+            
+            executor_kwargs = {
+                'max_workers': extraction_workers, 
+                'initializer': init_worker,
+                'initargs': (current_env_vars,)
+            }
         else:
-            print(f"📑 Using ThreadPoolExecutor for sentence processing")
+            print(f"📁 Using ThreadPoolExecutor for sentence processing")
             executor_class = ThreadPoolExecutor
+            executor_kwargs = {'max_workers': extraction_workers}
         
-        with executor_class(max_workers=extraction_workers) as executor:
+        with executor_class(**executor_kwargs) as executor:
             futures = []
             
             # Prepare data for ProcessPoolExecutor if needed
@@ -1755,9 +1800,16 @@ def _filter_text_for_glossary(text, min_frequency=2):
     print(f"📑 Selected {len(filtered_sentences):,} sentences containing frequent terms")
     
     # Limit the number of sentences to reduce token usage
-    max_sentences = int(os.getenv("GLOSSARY_MAX_SENTENCES", "200"))
+    if max_sentences is None:
+        max_sentences_fallback = os.getenv("GLOSSARY_MAX_SENTENCES", "200")
+        print(f"🔍 [DEBUG] max_sentences was None, reading from environment: '{max_sentences_fallback}'")
+        max_sentences = int(max_sentences_fallback)
+    else:
+        print(f"🔍 [DEBUG] max_sentences parameter was provided: {max_sentences}")
+    
+    print(f"🔍 [DEBUG] Final GLOSSARY_MAX_SENTENCES value being used: {max_sentences}")
     if len(filtered_sentences) > max_sentences:
-        print(f"📑 Limiting to {max_sentences} representative sentences (from {len(filtered_sentences):,})")
+        print(f"📁 Limiting to {max_sentences} representative sentences (from {len(filtered_sentences):,})")
         # Take a representative sample
         step = len(filtered_sentences) // max_sentences
         filtered_sentences = filtered_sentences[::step][:max_sentences]
@@ -1785,7 +1837,7 @@ def _filter_text_for_glossary(text, min_frequency=2):
 def _extract_with_custom_prompt(custom_prompt, all_text, language, 
                                min_frequency, max_names, max_titles, 
                                existing_glossary, output_dir, 
-                               strip_honorifics=True, fuzzy_threshold=0.90, filter_mode='all'):
+                               strip_honorifics=True, fuzzy_threshold=0.90, filter_mode='all', max_sentences=200):
     """Extract glossary using custom AI prompt with proper filtering"""
     print("📑 Using custom automatic glossary prompt")
     extraction_start = time.time()
@@ -1845,8 +1897,10 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                 use_smart_filter = (os.getenv("GLOSSARY_USE_SMART_FILTER", "1") == "1") and not force_disable
                 
                 if use_smart_filter:
-                    print("📑 Applying smart text filtering to reduce noise...")
-                    text_sample, detected_terms = _filter_text_for_glossary(all_text, min_frequency)
+                    print("📁 Applying smart text filtering to reduce noise...")
+                    # Use max_sentences parameter (passed from parent, already read from environment)
+                    print(f"🔍 [DEBUG] In _extract_with_custom_prompt: max_sentences={max_sentences}")
+                    text_sample, detected_terms = _filter_text_for_glossary(all_text, min_frequency, max_sentences)
                 else:
                     print("📑 Smart filter disabled - using raw text sample")
                     # Fallback to simple truncation

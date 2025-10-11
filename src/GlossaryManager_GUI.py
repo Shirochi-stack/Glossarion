@@ -439,7 +439,22 @@ class GlossaryManagerMixin:
                 # 4. Set environment variables
                 self.save_config(show_message=False)
                 
+                # CRITICAL: Reload config.json from disk, then reinitialize ALL environment variables
+                # This ensures environment variables are fully synced with the saved config
+                try:
+                    import json
+                    from api_key_encryption import decrypt_config
+                    with open('config.json', 'r', encoding='utf-8') as f:
+                        self.config = json.load(f)
+                        self.config = decrypt_config(self.config)
+                    # Now call save_config to set ALL environment variables from the reloaded config
+                    self.save_config(show_message=False)
+                    
+                except Exception as e:
+                    self.append_log(f"⚠️ Failed to reload config: {e}")
+                
                 self.append_log("✅ Glossary settings saved successfully")
+                self.append_log("✅ Environment variables reinitialized")
                 QMessageBox.information(dialog, "Success", "Glossary settings saved!")
                 dialog.accept()
                 
