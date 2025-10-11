@@ -6903,11 +6903,20 @@ Important rules:
             scrollbar = self.log_text.verticalScrollBar()
             # If user scrolled up (not at bottom), mark it
             at_bottom = value >= scrollbar.maximum() - 10
-            if not at_bottom:
+            
+            # Only mark as user scrolled if we were previously at bottom and now we're not
+            # This prevents false positives when content is added and scrollbar max changes
+            was_at_bottom = getattr(self, '_was_at_bottom', True)
+            
+            if not at_bottom and was_at_bottom:
+                # User intentionally scrolled up from the bottom
                 self._user_scrolled_up = True
-            else:
+            elif at_bottom:
                 # User scrolled back to bottom, resume auto-scroll
                 self._user_scrolled_up = False
+            
+            # Track current state for next comparison
+            self._was_at_bottom = at_bottom
         except Exception:
             pass
     

@@ -7234,11 +7234,20 @@ class MangaTranslationTab:
             scrollbar = self.log_text.verticalScrollBar()
             # If user scrolled up (not at bottom), mark it
             at_bottom = value >= scrollbar.maximum() - 10
-            if not at_bottom:
+            
+            # Only mark as user scrolled if we were previously at bottom and now we're not
+            # This prevents false positives when content is added and scrollbar max changes
+            was_at_bottom = getattr(self, '_was_at_bottom', True)
+            
+            if not at_bottom and was_at_bottom:
+                # User intentionally scrolled up from the bottom
                 self._user_scrolled_up = True
-            else:
+            elif at_bottom:
                 # User scrolled back to bottom, resume auto-scroll
                 self._user_scrolled_up = False
+            
+            # Track current state for next comparison
+            self._was_at_bottom = at_bottom
         except Exception:
             pass
     
@@ -7685,17 +7694,17 @@ class MangaTranslationTab:
                 def scroll_to_bottom():
                     try:
                         if hasattr(self, 'log_text') and self.log_text:
-                            # Only auto-scroll if user hasn't manually scrolled up
+                            # Only auto-scroll LOG if user hasn't manually scrolled up (respects delay)
                             import time as _time
                             if (_time.time() >= getattr(self, '_autoscroll_delay_until', 0) and 
                                 not getattr(self, '_user_scrolled_up', False)):
                                 self.log_text.moveCursor(QTextCursor.End)
                                 self.log_text.ensureCursorVisible()
-                                # Also scroll the parent scroll area if it exists
-                                if hasattr(self, 'scroll_area') and self.scroll_area:
-                                    scrollbar = self.scroll_area.verticalScrollBar()
-                                    if scrollbar:
-                                        scrollbar.setValue(scrollbar.maximum())
+                            # Always scroll the entire GUI scroll area to bottom (no delay check)
+                            if hasattr(self, 'scroll_area') and self.scroll_area:
+                                scrollbar = self.scroll_area.verticalScrollBar()
+                                if scrollbar:
+                                    scrollbar.setValue(scrollbar.maximum())
                     except Exception:
                         pass
                 
