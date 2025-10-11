@@ -7792,12 +7792,26 @@ class MangaTranslationTab:
                     use_mk = bool(self.main_gui.config.get('use_multi_api_keys', False))
                     mk_list = self.main_gui.config.get('multi_api_keys', [])
                     if use_mk and mk_list:
+                        # Validate multi-key configuration before applying
+                        valid_keys = 0
+                        for key_data in mk_list:
+                            if isinstance(key_data, dict) and key_data.get('api_key') and key_data.get('model'):
+                                valid_keys += 1
+                        
+                        if valid_keys == 0:
+                            self._log("❌ Multi-key mode is enabled but no valid keys are configured!", "error")
+                            self._log("   Each key must have both 'api_key' and 'model' fields.", "error")
+                            self._log("   Please check your multi-key configuration in Settings.", "error")
+                            self._stop_startup_heartbeat()
+                            self._reset_ui_state()
+                            return
+                        
                         os.environ['USE_MULTI_API_KEYS'] = '1'
                         os.environ['USE_MULTI_KEYS'] = '1'  # backward-compat for retry paths
                         os.environ['MULTI_API_KEYS'] = json.dumps(mk_list)
                         os.environ['FORCE_KEY_ROTATION'] = '1' if self.main_gui.config.get('force_key_rotation', True) else '0'
                         os.environ['ROTATION_FREQUENCY'] = str(self.main_gui.config.get('rotation_frequency', 1))
-                        self._log("🔑 Multi-key mode ENABLED for manga translator", "info")
+                        self._log(f"🔑 Multi-key mode ENABLED for manga translator ({valid_keys} valid keys)", "info")
                     else:
                         # Explicitly disable if not configured
                         os.environ['USE_MULTI_API_KEYS'] = '0'

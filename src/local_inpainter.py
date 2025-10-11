@@ -182,6 +182,57 @@ def download_model(url: str, md5: str = None, progress_callback=None) -> str:
     
     logger.info(f"📥 Downloading model from {url}")
     
+    # Use HuggingFace Hub for HuggingFace URLs (handles redirects better)
+    if 'huggingface.co' in url:
+        try:
+            from huggingface_hub import hf_hub_download
+            import re
+            
+            # Parse HuggingFace URL: https://huggingface.co/USER/REPO/resolve/BRANCH/FILENAME
+            match = re.match(r'https://huggingface\.co/([^/]+)/([^/]+)/resolve/([^/]+)/(.+)', url)
+            if match:
+                user, repo, branch, filename = match.groups()
+                repo_id = f"{user}/{repo}"
+                logger.info(f"   Using HuggingFace Hub API: {repo_id}/{filename}")
+                
+                # Download using huggingface_hub (it shows progress in console with tqdm)
+                downloaded_path = hf_hub_download(
+                    repo_id=repo_id,
+                    filename=filename,
+                    revision=branch,
+                    local_dir=os.path.dirname(cache_path),
+                    local_dir_use_symlinks=False
+                )
+                
+                # Copy to expected cache location if different
+                if downloaded_path != cache_path:
+                    # Check if file already exists at cache_path (might be same file)
+                    if os.path.exists(cache_path):
+                        logger.info(f"✅ File already at cache location: {cache_path}")
+                    else:
+                        # Try to copy with retry for file locks
+                        import shutil
+                        import time as _time
+                        for attempt in range(3):
+                            try:
+                                shutil.copy2(downloaded_path, cache_path)
+                                logger.info(f"✅ Copied to: {cache_path}")
+                                break
+                            except (PermissionError, OSError) as e:
+                                if attempt < 2:
+                                    logger.debug(f"Copy attempt {attempt + 1} failed, retrying...")
+                                    _time.sleep(0.5)  # Wait for file to be released
+                                else:
+                                    # If copy fails, just use downloaded_path
+                                    logger.warning(f"Could not copy to cache_path, using downloaded location: {downloaded_path}")
+                                    cache_path = downloaded_path
+                
+                logger.info(f"✅ Model ready: {cache_path}")
+                return cache_path
+        except Exception as hf_error:
+            logger.warning(f"HuggingFace Hub download failed: {hf_error}")
+            logger.info("Falling back to requests...")
+    
     try:
         # Use requests for better progress tracking instead of urllib
         import requests
