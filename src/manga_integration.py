@@ -6575,8 +6575,15 @@ class MangaTranslationTab:
             
             # Update status labels before download
             if not (model_path and os.path.exists(model_path)):
+                # Get model display name from the constants
+                model_name = model_type.upper()
+                if model_type in ['anime_onnx', 'aot_onnx', 'lama_onnx']:
+                    model_name = f"Optimized {model_type.split('_')[0].upper()}"
+                elif model_type == 'sd_local':
+                    model_name = "Stable Diffusion"
+                
                 if hasattr(self, 'local_model_status_label'):
-                    self.local_model_status_label.setText("Downloading...")
+                    self.local_model_status_label.setText(f"📥 Downloading {model_name} model...")
                     self.local_model_status_label.setStyleSheet("color: #4a9eff;")
                     try:
                         # Force immediate repaint so the user sees the status before blocking work
@@ -6599,13 +6606,10 @@ class MangaTranslationTab:
                 # Use downloaded/cached model
                 self.local_model_entry.setText(model_path)
                 self.local_model_path_value = model_path
-                if hasattr(self, 'local_model_status_label'):
-                    self.local_model_status_label.setText("✅ Model ready")
-                    self.local_model_status_label.setStyleSheet("color: green;")
-                # Save path and schedule load
+                # Save path and immediately try to load
                 self.main_gui.config[f'manga_{model_type}_model_path'] = model_path
                 self._save_rendering_settings()
-                QTimer.singleShot(100, lambda: self._try_load_model(model_type, model_path, show_completion_dialog=True))
+                self._try_load_model(model_type, model_path, show_completion_dialog=True)
             else:
                 if hasattr(self, 'local_model_status_label'):
                     self.local_model_status_label.setText("❌ Failed to download model")
