@@ -327,7 +327,12 @@ def download_model(url: str = None, md5: str = None, progress_callback=None, rep
             total_size = int(response.headers.get('content-length', 0))
             total_mb = total_size / (1024 * 1024) if total_size > 0 else 0
             
-            # Remove GUI update - this is a standalone function
+            # Send initial status through progress callback
+            if progress_callback:
+                try:
+                    progress_callback(0, 0, total_mb, 0)
+                except Exception:
+                    pass
             
             if total_size > 0:
                 logger.info(f"📦 Download size: {total_mb:.2f} MB")
@@ -373,7 +378,12 @@ def download_model(url: str = None, md5: str = None, progress_callback=None, rep
                             downloaded_mb = downloaded / (1024 * 1024)
                             logger.info(f"📥 Progress: {progress:.1f}% ({downloaded_mb:.1f} MB / {total_mb:.1f} MB) @ {speed_mb:.2f} MB/s")
                             
-                            # Remove GUI update - this is a standalone function
+                            # Update progress through callback
+                            if progress_callback and total_size > 0:
+                                try:
+                                    progress_callback(int(progress), downloaded_mb, total_mb, speed_mb)
+                                except Exception:
+                                    pass
             finally:
                 response.release_conn()
                 # Notify GUI that download is complete
