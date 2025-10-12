@@ -3318,6 +3318,20 @@ class MangaSettingsDialog(QDialog):
                     base = _P(models_dir)
                     formatted = repo_id.replace('/', '--')
 
+                    # First check if files exist directly in models root (your current setup)
+                    if (_P(models_dir) / 'config.json').exists() and \
+                       (_P(models_dir) / 'model.safetensors').exists() and \
+                       (_P(models_dir) / 'preprocessor_config.json').exists():
+                        logger.info("📁 Found RT-DETR files in models root directory")
+                        resolved_local_dir = models_dir
+                        
+                        # Load directly from models root
+                        if bd.load_rtdetr_model(model_path=models_dir, force_reload=True):
+                            self.rtdetr_status_label.setText("✅ Ready")
+                            self.rtdetr_status_label.setStyleSheet("color: green;")
+                            QMessageBox.information(self, "Success", "RT-DETR model loaded from models directory")
+                            return
+                    
                     # Helper: determine if a folder looks like an RT-DETR repo snapshot
                     def _looks_like_rtdetr_dir(p: _P) -> bool:
                         try:
@@ -3326,25 +3340,13 @@ class MangaSettingsDialog(QDialog):
                             cfg = p / 'config.json'
                             has_cfg = cfg.exists()
                             has_weights = any((p / f).exists() for f in ['model.safetensors','pytorch_model.bin'])
-                            return has_cfg and has_weights
+                            has_proc = (p / 'preprocessor_config.json').exists()
+                            return has_cfg and has_weights and has_proc
                         except Exception:
                             return False
 
-                    # 1) Preferred HF snapshot layout
-                    candidates = list(base.glob(f"models--{formatted}*/snapshots/*"))
-
-                    # 2) Common plain layouts users may copy manually
-                    alt_candidates = [
-                        base / repo_id.replace('/', os.sep),           # models/org/name
-                        base / repo_id.split('/')[-1],                 # models/name
-                        base / formatted                               # models/models--org--name
-                    ]
-                    for d in alt_candidates:
-                        try:
-                            if d.exists() and d.is_dir():
-                                candidates.append(d)
-                        except Exception:
-                            pass
+                    # Look for files in standard locations if not in root
+                    candidates = []
 
                     # 3) Deep scan models dir (max depth 3) for a folder containing config.json + weights
                     try:

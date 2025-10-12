@@ -590,6 +590,20 @@ class BubbleDetector:
                 
                 # Use custom model_id if provided, otherwise use default
                 repo_id = model_id if model_id else self.rtdetr_repo
+
+                # If caller did not pass a local model_path, auto-detect a local install in models root
+                if not model_path:
+                    try:
+                        root = Path(self.models_dir)
+                        cfg = root / 'config.json'
+                        weights_ok = (root / 'model.safetensors').exists() or (root / 'pytorch_model.bin').exists()
+                        proc_ok = (root / 'preprocessor_config.json').exists() or (root / 'processor_config.json').exists()
+                        if cfg.exists() and weights_ok and proc_ok:
+                            model_path = str(root)
+                            logger.info(f"📥 Using local RT-DETR from models root: {model_path}")
+                    except Exception:
+                        pass
+
                 logger.info(f"📥 Loading RT-DETR model from {repo_id}...")
 
                 # Ensure TorchDynamo/compile doesn't interfere on some builds
