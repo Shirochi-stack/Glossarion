@@ -233,9 +233,14 @@ class BubbleDetector:
             self.max_det_yolo = 100
             self.max_det_rtdetr = 100
         
-        # Cache directory for ONNX conversions
-        self.cache_dir = os.environ.get('BUBBLE_CACHE_DIR', 'models')
-        os.makedirs(self.cache_dir, exist_ok=True)
+        # Model directory for all models
+        self.models_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'models'))
+        os.makedirs(self.models_dir, exist_ok=True)
+        # Use models dir for cache as well
+        os.environ['HF_HOME'] = self.models_dir
+        os.environ['TRANSFORMERS_CACHE'] = os.path.join(self.models_dir, 'transformers')
+        os.environ['TORCH_HOME'] = self.models_dir
+        self.cache_dir = self.models_dir
         
         # RT-DETR concurrency setting from config
         try:
@@ -355,9 +360,17 @@ class BubbleDetector:
             if model_path and (('/' in model_path) and not os.path.exists(model_path)):
                 try:
                     from huggingface_hub import hf_hub_download
-                    os.makedirs(self.cache_dir, exist_ok=True)
-                    logger.info(f"📥 Resolving repo '{model_path}' to detector.onnx in {self.cache_dir}...")
-                    resolved = hf_hub_download(repo_id=model_path, filename='detector.onnx', cache_dir=self.cache_dir, local_dir=self.cache_dir, local_dir_use_symlinks=False)
+                    os.makedirs(self.models_dir, exist_ok=True)
+                    dest_dir = os.path.join(self.models_dir, model_path.replace('/', '_'))
+                    os.makedirs(dest_dir, exist_ok=True)
+                    logger.info(f"📥 Resolving repo '{model_path}' to detector.onnx in {dest_dir}...")
+                    resolved = hf_hub_download(
+                        repo_id=model_path,
+                        filename='detector.onnx',
+                        cache_dir=self.models_dir,
+                        local_dir=dest_dir,
+                        local_dir_use_symlinks=False
+                    )
                     if resolved and os.path.exists(resolved):
                         model_path = resolved
                         logger.info(f"✅ Downloaded detector.onnx to: {model_path}")
@@ -726,8 +739,8 @@ class BubbleDetector:
             # Use provided model_id or default
             repo_id = model_id if model_id else self.rtdetr_repo
             
-            # Check HuggingFace cache
-            cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
+            # Check models directory
+            cache_dir = Path(self.models_dir)
             model_id_formatted = repo_id.replace("/", "--")
             
             # Look for model folder
@@ -1634,10 +1647,25 @@ class BubbleDetector:
 
             # Download files into models/ and avoid symlinks so the file is visible there
             try:
-                _ = hf_hub_download(repo_id=repo, filename='config.json', cache_dir=cache_dir, local_dir=cache_dir, local_dir_use_symlinks=False)
+                dest_dir = os.path.join(self.models_dir, repo.replace('/', '_'))
+                os.makedirs(dest_dir, exist_ok=True)
+                _ = hf_hub_download(
+                    repo_id=repo,
+                    filename='config.json',
+                    cache_dir=self.models_dir,
+                    local_dir=dest_dir,
+                    local_dir_use_symlinks=False
+                )
             except Exception:
                 pass
-            onnx_fp = hf_hub_download(repo_id=repo, filename='detector.onnx', cache_dir=cache_dir, local_dir=cache_dir, local_dir_use_symlinks=False)
+            dest_dir = os.path.join(self.models_dir, repo.replace('/', '_'))
+            onnx_fp = hf_hub_download(
+                repo_id=repo,
+                filename='detector.onnx',
+                cache_dir=self.models_dir,
+                local_dir=dest_dir,
+                local_dir_use_symlinks=False
+            )
             BubbleDetector._rtdetr_onnx_model_path = onnx_fp
 
             # Pick providers: prefer CUDA if available; otherwise CPU. Do NOT use DML.
