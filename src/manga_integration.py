@@ -1678,17 +1678,15 @@ class MangaTranslationTab:
             provider_instance = None
             try:
                 provider_instance = self.ocr_manager.get_provider(provider)
+                # Pass model size to provider for proper loading
+                if provider == 'Qwen2-VL':
+                    saved_model_size = getattr(self, 'qwen2vl_model_size', self.main_gui.config.get('qwen2vl_model_size', '1'))
+                    provider_instance.qwen2vl_model_size = saved_model_size
             except Exception:
                 pass
                 
             # Check status first
             status = self.ocr_manager.check_provider_status(provider)
-            
-            # Get saved model size
-            if hasattr(self, 'qwen2vl_model_size'):
-                saved_model_size = self.qwen2vl_model_size
-            else:
-                saved_model_size = self.main_gui.config.get('qwen2vl_model_size', '1')
             
             # When displaying status for loaded model
             if status['loaded']:

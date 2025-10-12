@@ -948,7 +948,8 @@ class Qwen2VL(OCRProvider):
         self.processor = None
         self.model = None
         self.tokenizer = None
-        
+        self.model_id = None
+        self.qwen2vl_model_size = '1'  # Default to 2B
         # Get OCR prompt from environment or use default (UPDATED: Improved prompt)
         self.ocr_prompt = os.environ.get('OCR_SYSTEM_PROMPT', 
             "YOU ARE A TEXT EXTRACTION MACHINE. EXTRACT EXACTLY WHAT YOU SEE.\n\n"
@@ -1001,9 +1002,25 @@ class Qwen2VL(OCRProvider):
         """Install requirements for Qwen2-VL"""
         pass
     
-    def load_model(self, model_size=None, **kwargs) -> bool:
+    def load_model(self, **kwargs) -> bool:
         """Load Qwen2-VL model with size selection"""
+        # Use either passed size or saved size
+        model_size = kwargs.get('model_size', self.qwen2vl_model_size)
         self._log(f"DEBUG: load_model called with model_size={model_size}")
+        
+        # Map model size to model ID
+        model_options = {
+            "1": "Qwen/Qwen2-VL-2B-Instruct",
+            "2": "Qwen/Qwen2-VL-7B-Instruct",
+            "3": "Qwen/Qwen2-VL-72B-Instruct"
+        }
+        
+        if str(model_size).startswith("custom:"):
+            model_id = str(model_size).replace("custom:", "")
+        else:
+            model_id = model_options.get(str(model_size), model_options["1"])
+        
+        self._log(f"Using model: {model_id}")
 
         try:
             if not self.is_installed and not self.check_installation():
@@ -1011,6 +1028,20 @@ class Qwen2VL(OCRProvider):
                 return False
             
             self._log("🔥 Loading Qwen2-VL for Advanced OCR...")
+            
+            from transformers import AutoProcessor, AutoTokenizer, AutoModelForVision2Seq
+            import torch
+            
+            # Clear, sequential initialization like in the dialog
+            self._log("Downloading processor...")
+            self.processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+            self._log("✓ Processor downloaded")
+            
+            self._log("Downloading tokenizer...")
+            self.tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+            self._log("✓ Tokenizer downloaded")
+            
+            self._log("Downloading model weights (this may take several minutes)...")
 
 
             
@@ -1073,24 +1104,19 @@ class Qwen2VL(OCRProvider):
             
             # Load the model - let it figure out the class dynamically
             if torch.cuda.is_available():
-                self._log(f"GPU: {torch.cuda.get_device_name(0)}")
-                self._log("💾 Loading model on GPU...")
-                # Use auto model class
-                from transformers import AutoModelForVision2Seq
+                self._log(f"Using GPU: {torch.cuda.get_device_name(0)}")
                 self.model = AutoModelForVision2Seq.from_pretrained(
                     model_id,
-                    dtype=torch.float16,
+                    torch_dtype=torch.float16,
                     device_map="auto",
                     trust_remote_code=True
                 )
                 self._log("✅ Model loaded on GPU")
             else:
-                self._log("Loading on CPU...")
-                self._log("💾 Loading model on CPU (this may take several minutes)...")
-                from transformers import AutoModelForVision2Seq
+                self._log("No GPU detected, will load on CPU")
                 self.model = AutoModelForVision2Seq.from_pretrained(
                     model_id,
-                    dtype=torch.float32,
+                    torch_dtype=torch.float32,
                     trust_remote_code=True
                 )
                 self._log("✅ Model loaded on CPU")
@@ -1103,8 +1129,11 @@ class Qwen2VL(OCRProvider):
         except Exception as e:
             self._log(f"❌ Failed to load: {str(e)}", "error")
             import traceback
-            self._log(traceback.format_exc(), "debug")
-            return False       
+            full_error = traceback.format_exc()
+            self._log("Full error trace:")
+            for line in full_error.split('\n'):
+                self._log(f"    {line}")
+            return False
 
     def detect_text(self, image: np.ndarray, **kwargs) -> List[OCRResult]:
         """Process image with Qwen2-VL for Korean text extraction"""
