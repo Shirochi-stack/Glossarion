@@ -863,6 +863,48 @@ class MangaTranslationTab:
 
     def _download_hf_model(self):
         """Download HuggingFace models with progress tracking - PySide6 version"""
+        from PySide6.QtCore import QTimer
+        
+        def check_download_status():
+            # If there's still a download in progress (button disabled), check again in 500ms
+            if self.download_model_btn.isEnabled() == False:
+                QTimer.singleShot(500, check_download_status)
+                return
+            
+            # Re-enable Download Model button once inpainter shows up as loaded
+            self.download_model_btn.setEnabled(True)
+            self._check_provider_status()
+        
+        try:
+            # Disable the button during download
+            self.download_model_btn.setEnabled(False)
+            # Schedule status check
+            QTimer.singleShot(500, check_download_status)
+            
+            provider = self.ocr_provider_value
+            
+            # Initialize OCR manager if needed
+            if not hasattr(self, 'ocr_manager'):
+                from ocr_manager import OCRManager
+                self.ocr_manager = OCRManager(log_callback=self._log)
+            
+            # Model sizes (approximate in MB)
+            model_sizes = {
+                'manga-ocr': 450,
+                'Qwen2-VL': {
+                    '2B': 4000,
+                    '7B': 14000,
+                    '72B': 144000,
+                    'custom': 10000  # Default estimate for custom models
+                }
+            }
+            
+            # Create download dialog using PySide6
+            # ... rest of your original download dialog code ...
+        except Exception as e:
+            self._log(f"Failed to initialize download: {e}", "error")
+            self.download_model_btn.setEnabled(True)
+        """Download HuggingFace models with progress tracking - PySide6 version"""
         from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
                                         QRadioButton, QButtonGroup, QLineEdit, QPushButton,
                                         QGroupBox, QTextEdit, QProgressBar, QFrame,
@@ -1632,10 +1674,17 @@ class MangaTranslationTab:
                 from ocr_manager import OCRManager
                 self.ocr_manager = OCRManager(log_callback=self._log)
             
+            # Get provider instance to check its loading status
+            provider_instance = None
+            try:
+                provider_instance = self.ocr_manager.get_provider(provider)
+            except Exception:
+                pass
+                
             # Check status first
             status = self.ocr_manager.check_provider_status(provider)
             
-            # Load saved model size if available
+            # Get saved model size
             if hasattr(self, 'qwen2vl_model_size'):
                 saved_model_size = self.qwen2vl_model_size
             else:
@@ -1693,47 +1742,53 @@ class MangaTranslationTab:
                 from ocr_manager import OCRManager
                 self.ocr_manager = OCRManager(log_callback=self._log)
                 
+            # Get provider instance to check its loading status
+            provider_instance = None
+            try:
+                provider_instance = self.ocr_manager.get_provider(provider)
+            except Exception:
+                pass
+                
+            # Check if model is loaded and ready
             status = self.ocr_manager.check_provider_status(provider)
             
-            if status['loaded']:
-                # Model is loaded and ready
-                if provider == 'Qwen2-VL':
-                    # Check which model size is loaded
-                    qwen_provider = self.ocr_manager.get_provider('Qwen2-VL')
-                    if qwen_provider and hasattr(qwen_provider, 'loaded_model_size'):
-                        model_size = qwen_provider.loaded_model_size
-                        status_text = f"✅ {model_size} model loaded"
-                    else:
-                        status_text = "✅ Model loaded"
-                    self.provider_status_label.setText(status_text)
-                    self.provider_status_label.setStyleSheet("color: green;")
-                else:
-                    self.provider_status_label.setText("✅ Model loaded")
-                    self.provider_status_label.setStyleSheet("color: green;")
-                
-                # Show reload button for all local providers
+            # Determine loaded status for local providers, including JIT models
+            is_loaded = status['loaded']
+            try:
+                # If translator has a local inpainter loaded, reflect it
+                if hasattr(self, 'translator') and self.translator:
+                    inp = getattr(self.translator, 'local_inpainter', None)
+                    if inp and getattr(inp, 'model_loaded', False):
+                        is_loaded = True
+                # Also check any thread-local inpainter instances
+                if hasattr(self.translator, '_thread_local'):
+                    tlocal = self.translator._thread_local
+                    if hasattr(tlocal, 'local_inpainters') and isinstance(tlocal.local_inpainters, dict):
+                        for _k, _inp in tlocal.local_inpainters.items():
+                            if getattr(_inp, 'model_loaded', False):
+                                is_loaded = True
+                                break
+            except Exception:
+                pass
+            
+            if is_loaded:
+                self.provider_status_label.setText("✅ Model loaded")
+                self.provider_status_label.setStyleSheet("color: green;")
                 self.provider_setup_btn.setText("Reload")
                 self.provider_setup_btn.setVisible(True)
-                
             elif status['installed']:
                 # Dependencies installed but model not loaded
                 self.provider_status_label.setText("📦 Dependencies ready")
                 self.provider_status_label.setStyleSheet("color: orange;")
-                
-                # Show Load button for all providers
                 self.provider_setup_btn.setText("Load Model")
                 self.provider_setup_btn.setVisible(True)
-                
-                # Also show Download button for models that need downloading
                 if provider in ['Qwen2-VL', 'manga-ocr']:
                     self.download_model_btn.setText("📥 Download Model")
                     self.download_model_btn.setVisible(True)
-                
             else:
                 # Not installed
                 self.provider_status_label.setText("❌ Not installed")
                 self.provider_status_label.setStyleSheet("color: red;")
-                
                 # Categorize providers
                 huggingface_providers = ['manga-ocr', 'Qwen2-VL', 'rapidocr']  # Move rapidocr here
                 pip_providers = ['easyocr', 'paddleocr', 'doctr']  # Remove rapidocr from here
@@ -6493,10 +6548,45 @@ class MangaTranslationTab:
             self.local_model_status_label.setStyleSheet("color: green;")
 
     def _download_model(self):
-        """Actually download the model for the selected type"""
+        """Actually download the model for the selected type.
+        Checks cache first and auto-loads if present."""
         from PySide6.QtWidgets import QMessageBox
+        from PySide6.QtCore import QTimer
         
         model_type = self.local_model_type_value
+        
+        try:
+            from local_inpainter import LocalInpainter
+            inp = LocalInpainter()
+            self.local_model_status_label.setText("⏳ Downloading model...")
+            self.local_model_status_label.setStyleSheet("color: orange;")
+            model_path = inp.get_cached_model_path(model_type)
+            
+            # If not cached, attempt download
+            if not (model_path and os.path.exists(model_path)):
+                try:
+                    model_path = inp.download_jit_model(model_type)
+                except Exception as e:
+                    QMessageBox.critical(self.dialog, "Download Error", str(e))
+                    return
+            
+            if model_path and os.path.exists(model_path):
+                # Use downloaded/cached model
+                self.local_model_entry.setText(model_path)
+                self.local_model_path_value = model_path
+                self.local_model_status_label.setText("✅ Model ready; loading...")
+                self.local_model_status_label.setStyleSheet("color: green;")
+                # Save path and schedule load
+                self.main_gui.config[f'manga_{model_type}_model_path'] = model_path
+                self._save_rendering_settings()
+                QTimer.singleShot(100, lambda: self._try_load_model(model_type, model_path, show_completion_dialog=True))
+            else:
+                self.local_model_status_label.setText("❌ Failed to download model")
+                self.local_model_status_label.setStyleSheet("color: red;")
+            return
+        except Exception as e:
+            QMessageBox.critical(self.dialog, "Error", str(e))
+            return
         
         # Define URLs for each model type
         model_urls = {
@@ -6635,7 +6725,9 @@ class MangaTranslationTab:
         check_timer.start(100)  # Check every 100ms
 
     def _download_complete(self, save_path: str, model_name: str):
-        """Handle successful download"""
+        """Handle successful download and attempt to load the model"""
+        from PySide6.QtCore import QTimer
+        
         # Update the model path entry
         self.local_model_entry.setText(save_path)
         self.local_model_path_value = save_path
@@ -6646,6 +6738,9 @@ class MangaTranslationTab:
         
         # Log to main GUI
         self.main_gui.append_log(f"✅ Downloaded {model_name} model to: {save_path}")
+        
+        # Attempt to load the downloaded model after a short delay
+        QTimer.singleShot(100, lambda: self._try_load_model(model_name, save_path, show_completion_dialog=True))
         
         # Auto-load the downloaded model in background with completion dialog
         self.local_model_status_label.setText("⏳ Loading downloaded model...")

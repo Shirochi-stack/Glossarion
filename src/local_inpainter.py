@@ -297,12 +297,7 @@ def download_model(url: str = None, md5: str = None, progress_callback=None, rep
             import urllib3
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
             
-            # Notify GUI that download is starting
-            if hasattr(self, 'update_queue') and hasattr(self, 'main_gui'):
-                try:
-                    self.update_queue.put(('status', 'Downloading model...'))
-                except Exception:
-                    pass
+            # We don't have GUI context in this function, removed
             
             # Create a pool manager with retry strategy
             retries = urllib3.Retry(
@@ -332,12 +327,7 @@ def download_model(url: str = None, md5: str = None, progress_callback=None, rep
             total_size = int(response.headers.get('content-length', 0))
             total_mb = total_size / (1024 * 1024) if total_size > 0 else 0
             
-            # Update GUI with total size
-            if hasattr(self, 'update_queue') and hasattr(self, 'main_gui'):
-                try:
-                    self.update_queue.put(('status', f'Downloading {total_mb:.1f} MB...'))
-                except Exception:
-                    pass
+            # Remove GUI update - this is a standalone function
             
             if total_size > 0:
                 logger.info(f"📦 Download size: {total_mb:.2f} MB")
@@ -383,24 +373,11 @@ def download_model(url: str = None, md5: str = None, progress_callback=None, rep
                             downloaded_mb = downloaded / (1024 * 1024)
                             logger.info(f"📥 Progress: {progress:.1f}% ({downloaded_mb:.1f} MB / {total_mb:.1f} MB) @ {speed_mb:.2f} MB/s")
                             
-                            # Update GUI progress
-                            if hasattr(self, 'update_queue') and hasattr(self, 'main_gui'):
-                                try:
-                                    self.update_queue.put(('status', f'Downloading {downloaded_mb:.1f} MB / {total_mb:.1f} MB'))
-                                    self.update_queue.put(('progress', int(progress)))
-                                except Exception:
-                                    pass
+                            # Remove GUI update - this is a standalone function
             finally:
                 response.release_conn()
                 # Notify GUI that download is complete
-                if hasattr(self, 'update_queue') and hasattr(self, 'main_gui'):
-                    try:
-                        self.update_queue.put(('status', 'Download complete'))
-                        self.update_queue.put(('progress', 100))
-                        # Force a GUI refresh
-                        self.update_queue.put(('call_method', self._check_provider_status, ()))
-                    except Exception:
-                        pass
+            # We don't have GUI context in this function, removed
             
             logger.info(f"✅ Model downloaded to: {cache_path}")
             return cache_path
@@ -1455,13 +1432,37 @@ class LocalInpainter:
         model.load_state_dict(complete_dict, strict=True)
         return True
     
+    def get_cached_model_path(self, method: str) -> Optional[str]:
+        """Return the cached path for a given method if already downloaded, else None."""
+        try:
+            info = LAMA_JIT_MODELS.get(method)
+            if not info:
+                return None
+            # Prefer HF repo mapping
+            if 'repo_id' in info and 'filename' in info:
+                candidate = os.path.join(CACHE_DIR, info['filename'])
+                return candidate if os.path.exists(candidate) else None
+            # Fallback to URL-based cache
+            if 'url' in info and info['url']:
+                candidate = get_cache_path_by_url(info['url'])
+                return candidate if os.path.exists(candidate) else None
+            return None
+        except Exception:
+            return None
+
     def download_jit_model(self, method: str) -> str:
         """Download JIT model for a method"""
-        if method in LAMA_JIT_MODELS:
-            model_info = LAMA_JIT_MODELS[method]
-            logger.info(f"📥 Downloading {model_info['name']}...")
+        # First check if already cached
+        cached = self.get_cached_model_path(method)
+        if cached and os.path.exists(cached):
+            return cached
             
-            try:
+        # Not cached, need to download
+        try:
+            if method in LAMA_JIT_MODELS:
+                model_info = LAMA_JIT_MODELS[method]
+                logger.info(f"📥 Downloading {model_info['name']}...")
+                
                 # Prefer HuggingFace download if repo info is available
                 if 'repo_id' in model_info and 'filename' in model_info:
                     model_path = download_model(
@@ -1477,13 +1478,141 @@ class LocalInpainter:
                     )
                 else:
                     raise ValueError(f"No download info for {method}")
-                    
+                
                 return model_path
+            else:
+                logger.warning(f"No JIT model available for {method}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Failed to download {method}: {e}")
+            return None
+            try:
+                if method in LAMA_JIT_MODELS:
+                    model_info = LAMA_JIT_MODELS[method]
+                    model_name = model_info.get('name', method.upper())
+                    logger.info(f"📥 Downloading {model_name}...")
+                    
+                    # Send initial progress
+                    progress_queue.put(('progress', 0, f"Starting {model_name} download..."))
+                    
+                    def progress_callback(percent, downloaded_mb, total_mb, speed_mb):
+                        progress_queue.put(('progress', percent, 
+                                          f"Downloading {model_name}: {percent:.1f}% ({downloaded_mb:.1f}MB/{total_mb:.1f}MB) @ {speed_mb:.1f}MB/s"))
+                    
+                    try:
+                        # Prefer HuggingFace download if repo info is available
+                        if 'repo_id' in model_info and 'filename' in model_info:
+                            progress_queue.put(('progress', 10, f"Getting {model_name} from Hugging Face..."))
+                            model_path = download_model(
+                                repo_id=model_info['repo_id'],
+                                filename=model_info['filename'],
+                                md5=model_info.get('md5'),
+                                progress_callback=progress_callback
+                            )
+                        # Fallback to legacy URL if available
+                        elif 'url' in model_info:
+                            progress_queue.put(('progress', 10, f"Getting {model_name} from URL..."))
+                            model_path = download_model(
+                                url=model_info['url'],
+                                md5=model_info.get('md5'),
+                                progress_callback=progress_callback
+                            )
+                        else:
+                            raise ValueError(f"No download info for {method}")
+                        
+                        if model_path and os.path.exists(model_path):
+                            progress_queue.put(('progress', 100, f"{model_name} download complete!"))
+                            result['success'] = True
+                            result['path'] = model_path
+                        else:
+                            raise ValueError("Download completed but file not found")
+                            
+                    except Exception as download_error:
+                        raise download_error
+                        
+                else:
+                    progress_queue.put(('error', f"No JIT model available for {method}"))
+                    result['error'] = f"No JIT model available for {method}"
+            
             except Exception as e:
-                logger.error(f"Failed to download {method}: {e}")
-        else:
-            logger.warning(f"No JIT model available for {method}")
+                error_msg = f"Failed to download {method}: {str(e)}"
+                logger.error(error_msg)
+                progress_queue.put(('error', error_msg))
+                result['error'] = str(e)
+            
+            finally:
+                # Signal completion
+                progress_queue.put(('done', result['success'], result.get('error')))
+                
+                # Update GUI if available
+                if hasattr(self, 'update_queue') and hasattr(self, 'main_gui'):
+                    try:
+                        if result['success']:
+                            self.update_queue.put(('status', 'Download complete'))
+                        else:
+                            self.update_queue.put(('status', f"Download failed: {result.get('error', 'Unknown error')}"))
+                        self.update_queue.put(('progress', 100))
+                        self.update_queue.put(('call_method', self._check_provider_status, ()))
+                    except Exception:
+                        pass
         
+        # Start download in background thread
+        download_thread = threading.Thread(
+            target=_download_in_background,
+            args=(method, result, progress_queue),
+            daemon=True
+        )
+        download_thread.start()
+        
+        def _monitor_progress():
+            try:
+                last_update = time.time()
+                while True:
+                    try:
+                        msg_type, *msg_data = progress_queue.get(timeout=0.1)
+                        
+                        # Handle progress updates
+                        if msg_type == 'progress':
+                            percent, status = msg_data
+                            if time.time() - last_update >= 0.1:  # Throttle GUI updates
+                                if hasattr(self, 'update_queue'):
+                                    self.update_queue.put(('progress', percent))
+                                    self.update_queue.put(('status', status))
+                                last_update = time.time()
+                            logger.info(status)
+                        
+                        # Handle errors
+                        elif msg_type == 'error':
+                            error_msg = msg_data[0]
+                            logger.error(f"❌ {error_msg}")
+                            if hasattr(self, 'update_queue'):
+                                self.update_queue.put(('status', f"Error: {error_msg}"))
+                            break
+                        
+                        # Handle completion
+                        elif msg_type == 'done':
+                            success, error = msg_data
+                            if success:
+                                logger.info("✅ Download completed successfully")
+                            else:
+                                logger.error(f"❌ Download failed: {error if error else 'Unknown error'}")
+                            break
+                            
+                    except Empty:
+                        # Check if download thread is still alive
+                        if not download_thread.is_alive():
+                            break
+                        continue
+                    
+            except Exception as e:
+                logger.error(f"Progress monitoring error: {e}")
+        
+        # Start progress monitoring in another thread
+        progress_thread = threading.Thread(target=_monitor_progress, daemon=True)
+        progress_thread.start()
+        
+        # Return immediately to keep GUI responsive
         return None
     
     def load_model(self, method, model_path, force_reload=False):
