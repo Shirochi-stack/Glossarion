@@ -8199,11 +8199,29 @@ class MangaTranslator:
                     if not model_path or not os.path.exists(model_path):
                         self._log(f"⚠️ Model path not found: {model_path}", "warning")
                         self._log("📥 Attempting to download JIT model...", "info")
+                        self._downloading_model = True
                         try:
-                            downloaded_path = self.local_inpainter.download_jit_model(local_method)
+                            def progress_callback(percent, downloaded_mb, total_mb, speed_mb):
+                                if hasattr(self, 'update_queue'):
+                                    try:
+                                        self.update_queue.put(('progress', percent))
+                                        # Update both queue and GUI labels
+                                        self.update_queue.put(('model_file_status', 'Downloading...'))
+                                        self.update_queue.put(('status', f'Downloading {downloaded_mb:.1f} MB / {total_mb:.1f} MB @ {speed_mb:.1f} MB/s'))
+                                        # Also check if we have GUI labels to update directly
+                                        if hasattr(self.main_gui, 'manga_translator'):
+                                            manga_gui = self.main_gui.manga_translator
+                                            if hasattr(manga_gui, 'local_model_entry'):
+                                                manga_gui.local_model_entry.setText('Downloading...')
+                                            if hasattr(manga_gui, 'local_model_status_label'):
+                                                manga_gui.local_model_status_label.setText('Downloading...')
+                                    except Exception:
+                                        pass
+                            downloaded_path = self.local_inpainter.download_jit_model(local_method, progress_callback=progress_callback)
                         except Exception as e:
                             self._log(f"⚠️ JIT download failed: {e}", "warning")
                             downloaded_path = None
+                        self._downloading_model = False
                         if downloaded_path:
                             model_path = downloaded_path
                             self._log(f"✅ Downloaded JIT model to: {model_path}")

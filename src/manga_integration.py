@@ -1120,6 +1120,16 @@ class MangaTranslationTab:
         from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QProgressBar, QTextEdit, QGroupBox, QApplication
         from PySide6.QtCore import Qt
         from PySide6.QtGui import QFont
+            
+        # Create status update function for model download
+        def update_status(percent, downloaded_mb, total_mb, speed_mb):
+            if progress_label and status_label:
+                try:
+                    progress_label.setText(f"Downloading: {percent}%")
+                    status_label.setText(f"{downloaded_mb:.1f} MB / {total_mb:.1f} MB @ {speed_mb:.1f} MB/s")
+                    progress_bar.setValue(percent)
+                except Exception:
+                    pass
         
         # Use the manga integration dialog as parent so it stays on top of it
         parent = self.dialog if hasattr(self, 'dialog') else (self.main_gui if hasattr(self.main_gui, 'centralWidget') else None)
@@ -1774,6 +1784,11 @@ class MangaTranslationTab:
                 self.provider_status_label.setStyleSheet("color: green;")
                 self.provider_setup_btn.setText("Reload")
                 self.provider_setup_btn.setVisible(True)
+            elif hasattr(self.translator, '_downloading_model') and self.translator._downloading_model:
+                self.provider_status_label.setText("📥 Downloading...")
+                self.provider_status_label.setStyleSheet("color: blue;")
+                self.provider_setup_btn.setEnabled(False)
+                self.download_model_btn.setEnabled(False)
             elif status['installed']:
                 # Dependencies installed but model not loaded
                 self.provider_status_label.setText("📦 Dependencies ready")
@@ -6556,15 +6571,27 @@ class MangaTranslationTab:
         try:
             from local_inpainter import LocalInpainter
             inp = LocalInpainter()
-            self.local_model_status_label.setText("⏳ Downloading model...")
-            self.local_model_status_label.setStyleSheet("color: orange;")
             model_path = inp.get_cached_model_path(model_type)
             
-            # If not cached, attempt download
+            # Update status labels before download
             if not (model_path and os.path.exists(model_path)):
+                if hasattr(self, 'local_model_status_label'):
+                    self.local_model_status_label.setText("Downloading...")
+                    self.local_model_status_label.setStyleSheet("color: #4a9eff;")
+                    try:
+                        # Force immediate repaint so the user sees the status before blocking work
+                        self.local_model_status_label.repaint()
+                        from PySide6.QtWidgets import QApplication as _QApp
+                        _QApp.processEvents()
+                    except Exception:
+                        pass
+                
                 try:
                     model_path = inp.download_jit_model(model_type)
                 except Exception as e:
+                    if hasattr(self, 'local_model_status_label'):
+                        self.local_model_status_label.setText(f"Download failed: {str(e)}")
+                        self.local_model_status_label.setStyleSheet("color: red;")
                     QMessageBox.critical(self.dialog, "Download Error", str(e))
                     return
             
@@ -6572,15 +6599,17 @@ class MangaTranslationTab:
                 # Use downloaded/cached model
                 self.local_model_entry.setText(model_path)
                 self.local_model_path_value = model_path
-                self.local_model_status_label.setText("✅ Model ready; loading...")
-                self.local_model_status_label.setStyleSheet("color: green;")
+                if hasattr(self, 'local_model_status_label'):
+                    self.local_model_status_label.setText("✅ Model ready")
+                    self.local_model_status_label.setStyleSheet("color: green;")
                 # Save path and schedule load
                 self.main_gui.config[f'manga_{model_type}_model_path'] = model_path
                 self._save_rendering_settings()
                 QTimer.singleShot(100, lambda: self._try_load_model(model_type, model_path, show_completion_dialog=True))
             else:
-                self.local_model_status_label.setText("❌ Failed to download model")
-                self.local_model_status_label.setStyleSheet("color: red;")
+                if hasattr(self, 'local_model_status_label'):
+                    self.local_model_status_label.setText("❌ Failed to download model")
+                    self.local_model_status_label.setStyleSheet("color: red;")
             return
         except Exception as e:
             QMessageBox.critical(self.dialog, "Error", str(e))
@@ -7588,6 +7617,19 @@ class MangaTranslationTab:
                         import traceback
                         print(f"Error calling method {method}: {e}")
                         print(traceback.format_exc())
+
+                elif update[0] == 'model_file_status':
+                    _, status = update
+                    if hasattr(self, 'local_model_status_label'):
+                        self.local_model_status_label.setText(status)
+                        if "Downloading" in status:
+                            self.local_model_status_label.setStyleSheet("color: #4a9eff;")  # Blue
+                        elif "error" in status.lower() or "failed" in status.lower():
+                            self.local_model_status_label.setStyleSheet("color: red;")
+                        elif "complete" in status.lower() or "ready" in status.lower():
+                            self.local_model_status_label.setStyleSheet("color: green;")
+                        else:
+                            self.local_model_status_label.setStyleSheet("color: gray;")
                     
         except Exception:
             # Queue is empty or some other exception

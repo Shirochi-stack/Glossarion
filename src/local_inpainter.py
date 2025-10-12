@@ -1465,6 +1465,8 @@ class LocalInpainter:
         # First check if already cached
         cached = self.get_cached_model_path(method)
         if cached and os.path.exists(cached):
+            if hasattr(self, 'progress_queue'):
+                self.progress_queue.put(('model_file_status', '✅ Model found in cache'))
             return cached
             
         # Not cached, need to download
@@ -1472,6 +1474,8 @@ class LocalInpainter:
             if method in LAMA_JIT_MODELS:
                 model_info = LAMA_JIT_MODELS[method]
                 logger.info(f"📥 Downloading {model_info['name']}...")
+                if hasattr(self, 'progress_queue'):
+                    self.progress_queue.put(('model_file_status', f"📥 Downloading {model_info['name']}..."))
                 
                 # Prefer HuggingFace download if repo info is available
                 if 'repo_id' in model_info and 'filename' in model_info:
@@ -1488,14 +1492,21 @@ class LocalInpainter:
                     )
                 else:
                     raise ValueError(f"No download info for {method}")
-                
+                if hasattr(self, 'progress_queue'):
+                    self.progress_queue.put(('model_file_status', '✅ Download complete'))
                 return model_path
             else:
-                logger.warning(f"No JIT model available for {method}")
+                error_msg = f"No JIT model available for {method}"
+                logger.warning(error_msg)
+                if hasattr(self, 'progress_queue'):
+                    self.progress_queue.put(('model_file_status', f'❌ {error_msg}'))
                 return None
                 
         except Exception as e:
-            logger.error(f"Failed to download {method}: {e}")
+            error_msg = f"Failed to download {method}: {e}"
+            logger.error(error_msg)
+            if hasattr(self, 'progress_queue'):
+                self.progress_queue.put(('model_file_status', f'❌ {error_msg}'))
             return None
             try:
                 if method in LAMA_JIT_MODELS:
