@@ -3169,18 +3169,38 @@ class MangaSettingsDialog(QDialog):
                     self.rtdetr_status_label.setStyleSheet("color: red;")
                     QMessageBox.critical(self, "Error", f"Failed to download RTEDR_onnx model")
             elif 'RT-DETR' in detector:
-                # RT-DETR handling (works fine)
-                from bubble_detector import BubbleDetector
-                bd = BubbleDetector()
-                
-                if bd.load_rtdetr_model(model_id=model_url):
+                # Download RT-DETR snapshot directly into models directory (no ~/.cache)
+                try:
+                    from huggingface_hub import snapshot_download
+                    import os
+                    
+                    # Ensure models directory exists next to this script
+                    models_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), 'models'))
+                    os.makedirs(models_dir, exist_ok=True)
+                    
+                    # Force HF to place files inside our models dir
+                    os.environ['HF_HOME'] = models_dir
+                    os.environ['TRANSFORMERS_CACHE'] = models_dir
+                    
+                    # Download entire repo snapshot into models dir structure
+                    self.rtdetr_status_label.setText("Downloading (RT-DETR)...")
+                    self.rtdetr_status_label.setStyleSheet("color: orange;")
+                    QApplication.processEvents()
+                    
+                    local_path = snapshot_download(
+                        repo_id=model_url,
+                        local_dir=models_dir,
+                        local_dir_use_symlinks=False,
+                        resume_download=True
+                    )
+                    
                     self.rtdetr_status_label.setText("✅ Downloaded")
                     self.rtdetr_status_label.setStyleSheet("color: green;")
-                    QMessageBox.information(self, "Success", f"RT-DETR model downloaded successfully!")
-                else:
+                    QMessageBox.information(self, "Success", f"RT-DETR model downloaded to:\n{local_path}")
+                except Exception as de:
                     self.rtdetr_status_label.setText("❌ Failed")
                     self.rtdetr_status_label.setStyleSheet("color: red;")
-                    QMessageBox.critical(self, "Error", f"Failed to download RT-DETR model")
+                    QMessageBox.critical(self, "Error", f"Failed to download RT-DETR model: {de}")
             else:
                 # FIX FOR YOLO: Download to a simpler local path
                 from huggingface_hub import hf_hub_download
@@ -3280,14 +3300,110 @@ class MangaSettingsDialog(QDialog):
                     self.rtdetr_status_label.setText("❌ Failed")
                     self.rtdetr_status_label.setStyleSheet("color: red;")
             elif 'RT-DETR' in detector:
-                # RT-DETR uses model_id directly
-                if bd.load_rtdetr_model(model_id=model_path):
-                    self.rtdetr_status_label.setText("✅ Ready")
-                    self.rtdetr_status_label.setStyleSheet("color: green;")
-                    QMessageBox.information(self, "Success", f"RT-DETR model loaded successfully!")
-                else:
+                # Resolve RT-DETR locally inside models directory; never use ~/.cache or network
+                try:
+                    import os
+                    from pathlib import Path as _P
+                    
+                    models_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), 'models'))
+                    os.makedirs(models_dir, exist_ok=True)
+                    
+                    # Force local caches to our models dir
+                    os.environ['HF_HOME'] = models_dir
+                    os.environ['TRANSFORMERS_CACHE'] = models_dir
+                    os.environ['TRANSFORMERS_OFFLINE'] = '1'
+                    os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
+                    
+                    repo_id = model_path if model_path else 'ogkalu/comic-text-and-bubble-detector'
+                    base = _P(models_dir)
+                    formatted = repo_id.replace('/', '--')
+
+                    # Helper: determine if a folder looks like an RT-DETR repo snapshot
+                    def _looks_like_rtdetr_dir(p: _P) -> bool:
+                        try:
+                            if not p.exists() or not p.is_dir():
+                                return False
+                            cfg = p / 'config.json'
+                            has_cfg = cfg.exists()
+                            has_weights = any((p / f).exists() for f in ['model.safetensors','pytorch_model.bin'])
+                            return has_cfg and has_weights
+                        except Exception:
+                            return False
+
+                    # 1) Preferred HF snapshot layout
+                    candidates = list(base.glob(f"models--{formatted}*/snapshots/*"))
+
+                    # 2) Common plain layouts users may copy manually
+                    alt_candidates = [
+                        base / repo_id.replace('/', os.sep),           # models/org/name
+                        base / repo_id.split('/')[-1],                 # models/name
+                        base / formatted                               # models/models--org--name
+                    ]
+                    for d in alt_candidates:
+                        try:
+                            if d.exists() and d.is_dir():
+                                candidates.append(d)
+                        except Exception:
+                            pass
+
+                    # 3) Deep scan models dir (max depth 3) for a folder containing config.json + weights
+                    try:
+                        for root, dirs, files in os.walk(models_dir):
+                            depth = len(_P(root).relative_to(models_dir).parts)
+                            if depth > 3:
+                                # prune deep walks
+                                dirs[:] = []
+                                continue
+                            p = _P(root)
+                            if _looks_like_rtdetr_dir(p):
+                                candidates.append(p)
+                    except Exception:
+                        pass
+
+                    resolved_local_dir = None
+                    if candidates:
+                        existing = []
+                        for p in candidates:
+                            try:
+                                if _looks_like_rtdetr_dir(_P(p)):
+                                    existing.append(_P(p))
+                            except Exception:
+                                pass
+                        if existing:
+                            # Prefer latest modified folder
+                            existing.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                            resolved_local_dir = str(existing[0])
+
+                    if not resolved_local_dir:
+                        # As a fallback, ask BubbleDetector if it can resolve a snapshot under models/
+                        try:
+                            if bd.check_rtdetr_available(model_id=repo_id):
+                                if bd.load_rtdetr_model(model_id=repo_id, force_reload=True):
+                                    self.rtdetr_status_label.setText("✅ Ready")
+                                    self.rtdetr_status_label.setStyleSheet("color: green;")
+                                    QMessageBox.information(self, "Success", f"RT-DETR model loaded (auto-resolved)")
+                                    return
+                        except Exception:
+                            pass
+                        # Not downloaded yet
+                        QMessageBox.warning(self, "Download Required", 
+                            "RT-DETR model not found in models directory.\nPlease use the Download button first.")
+                        self.rtdetr_status_label.setText("❌ Not downloaded")
+                        self.rtdetr_status_label.setStyleSheet("color: orange;")
+                        return
+                    
+                    # Load strictly from resolved local directory
+                    if bd.load_rtdetr_model(model_path=resolved_local_dir, force_reload=True):
+                        self.rtdetr_status_label.setText("✅ Ready")
+                        self.rtdetr_status_label.setStyleSheet("color: green;")
+                        QMessageBox.information(self, "Success", f"RT-DETR model loaded from:\n{resolved_local_dir}")
+                    else:
+                        self.rtdetr_status_label.setText("❌ Failed")
+                        self.rtdetr_status_label.setStyleSheet("color: red;")
+                except Exception as le:
                     self.rtdetr_status_label.setText("❌ Failed")
                     self.rtdetr_status_label.setStyleSheet("color: red;")
+                    QMessageBox.critical(self, "Error", f"Failed to load RT-DETR: {le}")
             else:
                 # YOLOv8 - CHECK LOCAL MODELS FOLDER FIRST
                 if model_path.startswith('ogkalu/'):

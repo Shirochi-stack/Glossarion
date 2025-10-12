@@ -8231,6 +8231,8 @@ class MangaTranslator:
                     # Load model with retry to avoid transient file/JSON issues under parallel init
                     loaded_ok = False
                     if model_path and os.path.exists(model_path):
+                        # Default to True for fallback instance to ensure clean load
+                        need_reload = True
                         for attempt in range(2):
                             try:
                                 self._log(f"📥 Loading {local_method} model... (attempt {attempt+1})", "info")

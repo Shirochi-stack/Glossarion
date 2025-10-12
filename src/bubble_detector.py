@@ -598,6 +598,70 @@ class BubbleDetector:
                 except Exception:
                     pass
                 
+                # Prefer local-only loading from models/ to avoid stale ~/.cache entries
+                try:
+                    os.environ.setdefault('TRANSFORMERS_OFFLINE', '1')
+                    os.environ.setdefault('HF_HUB_DISABLE_TELEMETRY', '1')
+                except Exception:
+                    pass
+
+                # Resolve local model path under models/ if available (no ~/.cache usage)
+                resolved_local_dir = None
+                try:
+                    from pathlib import Path as _P
+                    base = _P(self.models_dir)
+                    formatted = repo_id.replace('/', '--')
+                    # 1) Prefer latest HF snapshot layout: models--<org>--<name>*/snapshots/*
+                    candidates = list(base.glob(f"models--{formatted}*/snapshots/*"))
+                    # 2) Also support plain folder layouts users may have copied manually
+                    alt_candidates = [
+                        base / repo_id.replace('/', os.sep),                       # models/org/name
+                        base / repo_id.split('/')[-1],                             # models/name
+                        base / formatted                                          # models/models--org--name
+                    ]
+                    for d in alt_candidates:
+                        try:
+                            if d.exists() and d.is_dir():
+                                candidates.append(d)
+                        except Exception:
+                            pass
+                    if candidates:
+                        # Pick most recent by modification time among existing dirs
+                        existing = []
+                        for p in candidates:
+                            try:
+                                if p.exists():
+                                    existing.append(p)
+                            except Exception:
+                                pass
+                        if existing:
+                            existing.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                            resolved_local_dir = str(existing[0])
+                            logger.info(f"📁 Using local RT-DETR model path: {resolved_local_dir}")
+                except Exception as _e:
+                    logger.debug(f"Failed to resolve local model path: {_e}")
+
+                # If still not found, check for ONNX in models dir and initialize ONNX backend directly
+                if resolved_local_dir is None and ONNX_AVAILABLE:
+                    try:
+                        from glob import glob as _glob
+                        onnx_matches = _glob(os.path.join(self.models_dir, "rtdetr*.onnx"))
+                        if onnx_matches:
+                            onnx_path = onnx_matches[0]
+                            logger.info(f"📦 Found RT-DETR ONNX in models dir: {onnx_path}")
+                            if self._init_rtdetr_onnx(onnx_path):
+                                return True
+                    except Exception as _e:
+                        logger.debug(f"ONNX fallback probe failed: {_e}")
+
+                # If we still have no local dir and no model_path, do not attempt network; error out with guidance
+                if resolved_local_dir is None and not model_path:
+                    logger.error("❌ RT-DETR not found in models directory and offline mode is enforced.")
+                    logger.error(f"   Looked under: {self.models_dir}")
+                    logger.error("   Please place the model locally (HF snapshot or ONNX) and try again.")
+                    self.rtdetr_loaded = False
+                    return False
+
                 # Decide device strategy
                 gpu_available = bool(TORCH_AVAILABLE and hasattr(torch, 'cuda') and torch.cuda.is_available())
                 device_map = 'auto' if gpu_available else None
@@ -610,11 +674,13 @@ class BubbleDetector:
                         dtype = None
                 low_cpu = True if gpu_available else False
                 
-                # Load processor (once)
+                # Load processor (once) strictly from local cache if possible
+                # IMPORTANT: if a local model_path is provided, use it directly (do NOT use repo_id)
                 self.rtdetr_processor = RTDetrImageProcessor.from_pretrained(
-                    repo_id,
+                    model_path if model_path else repo_id,
                     size={"width": 640, "height": 640},
-                    cache_dir=self.cache_dir if not model_path else None
+                    cache_dir=self.cache_dir if not model_path else None,
+                    local_files_only=True
                 )
                 
                 # Prepare kwargs for from_pretrained
@@ -622,30 +688,39 @@ class BubbleDetector:
                     'cache_dir': self.cache_dir if not model_path else None,
                     'low_cpu_mem_usage': low_cpu,
                     'device_map': device_map,
+                    'local_files_only': True,
                 }
                 # Note: dtype is handled via torch_dtype parameter in newer transformers
                 if dtype is not None:
                     from_kwargs['torch_dtype'] = dtype
                 
-                # First attempt: load directly to target (CUDA if available)
+                # First attempt: load directly to target (CUDA if available) from resolved local dir if present
                 try:
+                    load_ref = model_path or resolved_local_dir or repo_id
                     self.rtdetr_model = RTDetrForObjectDetection.from_pretrained(
-                        model_path if model_path else repo_id,
+                        load_ref,
                         **from_kwargs,
                     )
                 except Exception as primary_err:
+                    # If this is a PyO3 multi-init error, do not attempt a second init in this process
+                    if 'PyO3 modules compiled for CPython 3.8 or older may only be initialized once' in str(primary_err):
+                        logger.error("❌ RT-DETR failed due to PyO3 single-init constraint. Won't retry in this process.")
+                        logger.error("   Tip: Clear old HuggingFace caches and restart the process.")
+                        raise
                     # Fallback to a simple CPU load (no device move) if CUDA path fails
-                    logger.warning(f"RT-DETR primary load failed ({primary_err}); retrying on CPU...")
+                    logger.warning(f"RT-DETR primary load failed ({primary_err}); retrying on CPU with local-only cache...")
                     from_kwargs_fallback = {
                         'cache_dir': self.cache_dir if not model_path else None,
                         'low_cpu_mem_usage': False,
                         'device_map': None,
+                        'local_files_only': True,
                     }
                     if TORCH_AVAILABLE:
                         from_kwargs_fallback['torch_dtype'] = torch.float32
+                    load_ref = model_path or resolved_local_dir or repo_id
                     self.rtdetr_model = RTDetrForObjectDetection.from_pretrained(
-                        model_path if model_path else repo_id,
-                        **from_kwargs_fallback,
+                        load_ref,
+                        **from_kwargs_fallback
                     )
                 
                 # Optional dynamic quantization for linear layers (CPU only)
