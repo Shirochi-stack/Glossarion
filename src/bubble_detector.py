@@ -234,7 +234,7 @@ class BubbleDetector:
             self.max_det_rtdetr = 100
         
         # Model directory for all models
-        self.models_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'models'))
+        self.models_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), 'models'))
         os.makedirs(self.models_dir, exist_ok=True)
         # Use models dir for cache as well
         os.environ['HF_HOME'] = self.models_dir

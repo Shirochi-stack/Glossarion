@@ -134,6 +134,16 @@ except ImportError:
 def _preload_models_worker(models_list, progress_queue):
     """Worker function to preload models in separate process (module-level for pickling)"""
     try:
+        # Set up models directory and environment
+        models_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), 'models'))
+        os.makedirs(models_dir, exist_ok=True)
+        os.environ['HF_HOME'] = models_dir
+        os.environ['TRANSFORMERS_CACHE'] = os.path.join(models_dir, 'transformers')
+        os.environ['TORCH_HOME'] = models_dir
+        os.environ['MODEL_CACHE_DIR'] = models_dir
+        os.environ['ONNX_CACHE_DIR'] = os.path.join(models_dir, 'onnx')
+        os.environ['BUBBLE_CACHE_DIR'] = models_dir
+        
         total_steps = len(models_list)
         
         for idx, (model_type, model_key, model_name, model_path) in enumerate(models_list):
@@ -154,6 +164,9 @@ def _preload_models_worker(models_list, progress_queue):
                     progress_queue.put(('progress', base_progress + int(50 / total_steps), f"{model_name} - Downloading/Loading"))
                     if model_key == 'rtdetr_onnx':
                         model_repo = model_path if model_path else 'ogkalu/comic-text-and-bubble-detector'
+                        # Ensure models are downloaded to the project's models directory
+                        dest_dir = os.path.join(models_dir, model_repo.replace('/', '_'))
+                        os.makedirs(dest_dir, exist_ok=True)
                         bd.load_rtdetr_onnx_model(model_repo)
                     elif model_key == 'rtdetr':
                         bd.load_rtdetr_model()
@@ -283,6 +296,18 @@ class MangaTranslationTab:
         """
         # CRITICAL: Set thread limits FIRST before any imports or processing
         import os
+        
+        # Set up consistent models directory
+        self.models_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), 'models'))
+        os.makedirs(self.models_dir, exist_ok=True)
+        os.environ['HF_HOME'] = self.models_dir
+        os.environ['TRANSFORMERS_CACHE'] = os.path.join(self.models_dir, 'transformers')
+        os.environ['TORCH_HOME'] = self.models_dir
+        os.environ['MODEL_CACHE_DIR'] = self.models_dir
+        os.environ['ONNX_CACHE_DIR'] = os.path.join(self.models_dir, 'onnx')
+        os.environ['BUBBLE_CACHE_DIR'] = self.models_dir
+        
+        # Configure parallel processing
         parallel_enabled = main_gui.config.get('manga_settings', {}).get('advanced', {}).get('parallel_processing', False)
         if not parallel_enabled:
             # Force single-threaded mode for all libraries
@@ -751,6 +776,10 @@ class MangaTranslationTab:
                                             # Load into pool
                                             bd = BubbleDetector()
                                             model_repo = model_path if model_path else 'ogkalu/comic-text-and-bubble-detector'
+                                            # Ensure consistent model directory usage
+                                            models_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), 'models'))
+                                            dest_dir = os.path.join(models_dir, model_repo.replace('/', '_'))
+                                            os.makedirs(dest_dir, exist_ok=True)
                                             bd.load_rtdetr_onnx_model(model_repo)
                                             
                                             with MangaTranslator._detector_pool_lock:

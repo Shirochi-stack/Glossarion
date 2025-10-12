@@ -29,12 +29,20 @@ if IS_FROZEN:
     os.environ['HF_HOME'] = os.path.join(MEIPASS, 'huggingface')
     logger.info(f"Running in frozen environment: {MEIPASS}")
 
-# Environment variables for ONNX
-ONNX_CACHE_DIR = os.environ.get('ONNX_CACHE_DIR', 'models')
+# Model directories
+MODELS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), 'models'))
+CACHE_DIR = MODELS_DIR
+ONNX_CACHE_DIR = os.path.join(MODELS_DIR, 'onnx')
+
+# ONNX settings
 AUTO_CONVERT_TO_ONNX = os.environ.get('AUTO_CONVERT_TO_ONNX', 'false').lower() == 'true'
 SKIP_ONNX_FOR_CKPT = os.environ.get('SKIP_ONNX_FOR_CKPT', 'true').lower() == 'true'
 FORCE_ONNX_REBUILD = os.environ.get('FORCE_ONNX_REBUILD', 'false').lower() == 'true'
-CACHE_DIR = os.environ.get('MODEL_CACHE_DIR', os.path.expanduser('~/.cache/inpainting'))
+
+# Point cache directories to models
+os.environ['HF_HOME'] = MODELS_DIR
+os.environ['TRANSFORMERS_CACHE'] = os.path.join(MODELS_DIR, 'transformers')
+os.environ['TORCH_HOME'] = MODELS_DIR
 
 # Modified import handling for frozen environment
 TORCH_AVAILABLE = False
@@ -161,7 +169,7 @@ def get_cache_path_by_url(url: str) -> str:
     return os.path.join(CACHE_DIR, filename)
 
 
-def download_model(url: str = None, md5: str = None, progress_callback=None, repo_id: str = None, filename: str = None) -> str:
+def download_model(url: str = None, md5: str = None, progress_callback=None, repo_id: str = None, filename: str = None, cache_dir: str = None, local_dir: str = None, local_dir_use_symlinks: bool = False) -> str:
     """Download model if not cached with progress reporting
     
     Args:
@@ -170,15 +178,24 @@ def download_model(url: str = None, md5: str = None, progress_callback=None, rep
         progress_callback: Optional callable(percent, downloaded_mb, total_mb, speed_mb) for progress updates
         repo_id: Hugging Face repository ID (preferred)
         filename: Filename within the repository (preferred)
+        cache_dir: Directory to use for HF cache (defaults to CACHE_DIR)
+        local_dir: Directory to place the actual file (defaults to CACHE_DIR)
+        local_dir_use_symlinks: Whether to use symlinks in local_dir (defaults to False)
     
     Returns:
         Path to downloaded/cached model
     """
     import time
     
+    # Normalize target directories
+    hf_cache_dir = cache_dir or CACHE_DIR
+    target_local_dir = local_dir or CACHE_DIR
+    os.makedirs(hf_cache_dir, exist_ok=True)
+    os.makedirs(target_local_dir, exist_ok=True)
+    
     # Get cache path - prefer HF repo style if available
     if repo_id and filename:
-        cache_path = os.path.join(CACHE_DIR, filename)
+        cache_path = os.path.join(target_local_dir, filename)
     else:
         cache_path = get_cache_path_by_url(url)
     
@@ -201,8 +218,9 @@ def download_model(url: str = None, md5: str = None, progress_callback=None, rep
             downloaded_path = hf_hub_download(
                 repo_id=repo_id,
                 filename=filename,
-                local_dir=os.path.dirname(cache_path),
-                local_dir_use_symlinks=False
+                cache_dir=hf_cache_dir,
+                local_dir=target_local_dir,
+                local_dir_use_symlinks=local_dir_use_symlinks
             )
             
             # Copy to expected cache location if different
@@ -262,8 +280,9 @@ def download_model(url: str = None, md5: str = None, progress_callback=None, rep
                             repo_id=repo_id,
                             filename=filename,
                             revision=branch,
-                            local_dir=os.path.dirname(cache_path),
-                            local_dir_use_symlinks=False
+                            cache_dir=hf_cache_dir,
+                            local_dir=target_local_dir,
+                            local_dir_use_symlinks=local_dir_use_symlinks
                         )
                         
                         # Copy to expected cache location if different
@@ -1450,8 +1469,14 @@ class LocalInpainter:
                 return None
             # Prefer HF repo mapping
             if 'repo_id' in info and 'filename' in info:
-                candidate = os.path.join(CACHE_DIR, info['filename'])
-                return candidate if os.path.exists(candidate) else None
+                # Prefer subfolder under models dir for this repo
+                repo_folder = os.path.join(MODELS_DIR, info['repo_id'].replace('/', '_'))
+                candidate = os.path.join(repo_folder, info['filename'])
+                if os.path.exists(candidate):
+                    return candidate
+                # Backward-compatibility: also check directly under CACHE_DIR
+                fallback = os.path.join(CACHE_DIR, info['filename'])
+                return fallback if os.path.exists(fallback) else None
             # Fallback to URL-based cache
             if 'url' in info and info['url']:
                 candidate = get_cache_path_by_url(info['url'])
@@ -1479,10 +1504,15 @@ class LocalInpainter:
                 
                 # Prefer HuggingFace download if repo info is available
                 if 'repo_id' in model_info and 'filename' in model_info:
+                    dest_dir = os.path.join(MODELS_DIR, model_info['repo_id'].replace('/', '_'))
+                    os.makedirs(dest_dir, exist_ok=True)
                     model_path = download_model(
                         repo_id=model_info['repo_id'],
                         filename=model_info['filename'],
-                        md5=model_info.get('md5')
+                        md5=model_info.get('md5'),
+                        cache_dir=MODELS_DIR,
+                        local_dir=dest_dir,
+                        local_dir_use_symlinks=False
                     )
                 # Fallback to legacy URL if available
                 elif 'url' in model_info:
