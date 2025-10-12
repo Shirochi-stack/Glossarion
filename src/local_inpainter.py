@@ -118,24 +118,28 @@ LAMA_JIT_MODELS = {
         'name': 'LaMa Official'
     },
     'aot': {
-        'url': 'https://huggingface.co/ogkalu/aot-inpainting-jit/resolve/main/aot_traced.pt',
+        'repo_id': 'ogkalu/aot-inpainting-jit',
+        'filename': 'aot_traced.pt',
         'md5': '5ecdac562c1d56267468fc4fbf80db27',
         'name': 'AOT GAN'
     },
     'aot_onnx': {
-        'url': 'https://huggingface.co/ogkalu/aot-inpainting/resolve/main/aot.onnx',
+        'repo_id': 'ogkalu/aot-inpainting',
+        'filename': 'aot.onnx',
         'md5': 'ffd39ed8e2a275869d3b49180d030f0d8b8b9c2c20ed0e099ecd207201f0eada',
         'name': 'AOT ONNX (Fast)',
         'is_onnx': True
     },
     'lama_onnx': {
-        'url': 'https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx',
+        'repo_id': 'Carve/LaMa-ONNX',
+        'filename': 'lama_fp32.onnx',
         'md5': None,  # Add MD5 if you want to verify
         'name': 'LaMa ONNX (Carve)',
         'is_onnx': True  # Flag to indicate this is ONNX, not JIT
     },
     'anime_onnx': {
-        'url': 'https://huggingface.co/ogkalu/lama-manga-onnx-dynamic/resolve/main/lama-manga-dynamic.onnx',
+        'repo_id': 'ogkalu/lama-manga-onnx-dynamic',
+        'filename': 'lama-manga-dynamic.onnx',
         'md5': 'de31ffa5ba26916b8ea35319f6c12151ff9654d4261bccf0583a69bb095315f9',
         'name': 'Anime/Manga ONNX (Dynamic)',
         'is_onnx': True  # Flag to indicate this is ONNX
@@ -157,19 +161,26 @@ def get_cache_path_by_url(url: str) -> str:
     return os.path.join(CACHE_DIR, filename)
 
 
-def download_model(url: str, md5: str = None, progress_callback=None) -> str:
+def download_model(url: str = None, md5: str = None, progress_callback=None, repo_id: str = None, filename: str = None) -> str:
     """Download model if not cached with progress reporting
     
     Args:
-        url: URL to download from
+        url: URL to download from (legacy support)
         md5: Optional MD5 checksum to verify
         progress_callback: Optional callable(percent, downloaded_mb, total_mb, speed_mb) for progress updates
+        repo_id: Hugging Face repository ID (preferred)
+        filename: Filename within the repository (preferred)
     
     Returns:
         Path to downloaded/cached model
     """
     import time
-    cache_path = get_cache_path_by_url(url)
+    
+    # Get cache path - prefer HF repo style if available
+    if repo_id and filename:
+        cache_path = os.path.join(CACHE_DIR, filename)
+    else:
+        cache_path = get_cache_path_by_url(url)
     
     if os.path.exists(cache_path):
         logger.info(f"✅ Model already cached: {cache_path}")
@@ -180,113 +191,227 @@ def download_model(url: str, md5: str = None, progress_callback=None) -> str:
                 pass
         return cache_path
     
-    logger.info(f"📥 Downloading model from {url}")
-    
-    # Use HuggingFace Hub for HuggingFace URLs (handles redirects better)
-    if 'huggingface.co' in url:
+    # Prefer HF Hub download if repo info is provided
+    if repo_id and filename:
         try:
             from huggingface_hub import hf_hub_download
-            import re
+            logger.info(f"📥 Downloading from Hugging Face: {repo_id}/{filename}")
             
-            # Parse HuggingFace URL: https://huggingface.co/USER/REPO/resolve/BRANCH/FILENAME
-            match = re.match(r'https://huggingface\.co/([^/]+)/([^/]+)/resolve/([^/]+)/(.+)', url)
-            if match:
-                user, repo, branch, filename = match.groups()
-                repo_id = f"{user}/{repo}"
-                logger.info(f"   Using HuggingFace Hub API: {repo_id}/{filename}")
-                
-                # Download using huggingface_hub (it shows progress in console with tqdm)
-                downloaded_path = hf_hub_download(
-                    repo_id=repo_id,
-                    filename=filename,
-                    revision=branch,
-                    local_dir=os.path.dirname(cache_path),
-                    local_dir_use_symlinks=False
-                )
-                
-                # Copy to expected cache location if different
-                if downloaded_path != cache_path:
-                    # Check if file already exists at cache_path (might be same file)
-                    if os.path.exists(cache_path):
-                        logger.info(f"✅ File already at cache location: {cache_path}")
-                    else:
-                        # Try to copy with retry for file locks
-                        import shutil
-                        import time as _time
-                        for attempt in range(3):
-                            try:
-                                shutil.copy2(downloaded_path, cache_path)
-                                logger.info(f"✅ Copied to: {cache_path}")
-                                break
-                            except (PermissionError, OSError) as e:
-                                if attempt < 2:
-                                    logger.debug(f"Copy attempt {attempt + 1} failed, retrying...")
-                                    _time.sleep(0.5)  # Wait for file to be released
-                                else:
-                                    # If copy fails, just use downloaded_path
-                                    logger.warning(f"Could not copy to cache_path, using downloaded location: {downloaded_path}")
-                                    cache_path = downloaded_path
-                
-                logger.info(f"✅ Model ready: {cache_path}")
-                return cache_path
-        except Exception as hf_error:
-            logger.warning(f"HuggingFace Hub download failed: {hf_error}")
-            logger.info("Falling back to requests...")
-    
-    try:
-        # Use requests for better progress tracking instead of urllib
-        import requests
-        
-        response = requests.get(url, stream=True, timeout=30)
-        response.raise_for_status()
-        
-        total_size = int(response.headers.get('content-length', 0))
-        total_mb = total_size / (1024 * 1024) if total_size > 0 else 0
-        
-        if total_size > 0:
-            logger.info(f"   Download size: {total_mb:.2f} MB")
-        
-        downloaded = 0
-        start_time = time.time()
-        last_log_time = start_time
-        last_callback_time = start_time
-        
-        with open(cache_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    
-                    current_time = time.time()
-                    
-                    # Call progress callback more frequently (every 0.1s)
-                    if progress_callback and total_size > 0 and (current_time - last_callback_time > 0.1):
-                        last_callback_time = current_time
-                        progress = (downloaded / total_size) * 100
-                        downloaded_mb = downloaded / (1024 * 1024)
-                        elapsed = current_time - start_time
-                        speed_mb = (downloaded / elapsed / (1024 * 1024)) if elapsed > 0 else 0
+            # Download using huggingface_hub (it shows progress in console with tqdm)
+            downloaded_path = hf_hub_download(
+                repo_id=repo_id,
+                filename=filename,
+                local_dir=os.path.dirname(cache_path),
+                local_dir_use_symlinks=False
+            )
+            
+            # Copy to expected cache location if different
+            if downloaded_path != cache_path:
+                # Check if file already exists at cache_path (might be same file)
+                if os.path.exists(cache_path):
+                    logger.info(f"✅ File already at cache location: {cache_path}")
+                else:
+                    # Try to copy with retry for file locks
+                    import shutil
+                    import time as _time
+                    for attempt in range(3):
                         try:
-                            progress_callback(int(progress), downloaded_mb, total_mb, speed_mb)
-                        except Exception:
-                            pass
+                            shutil.copy2(downloaded_path, cache_path)
+                            logger.info(f"✅ Copied to: {cache_path}")
+                            break
+                        except (PermissionError, OSError) as e:
+                            if attempt < 2:
+                                logger.debug(f"Copy attempt {attempt + 1} failed, retrying...")
+                                _time.sleep(0.5)  # Wait for file to be released
+                            else:
+                                # If copy fails, just use downloaded_path
+                                logger.warning(f"Could not copy to cache_path, using downloaded location: {downloaded_path}")
+                                cache_path = downloaded_path
+            
+            logger.info(f"✅ Model ready: {cache_path}")
+            return cache_path
+            
+        except Exception as hf_error:
+            logger.error(f"❌ HuggingFace Hub download failed: {hf_error}")
+            # If we have a fallback URL, try that
+            if url:
+                logger.info(f"Falling back to direct URL download: {url}")
+            else:
+                raise
+    
+    # Legacy URL-based download as fallback
+    if url:
+        try:
+            logger.info(f"📥 Downloading model from {url}")
+            
+            # Check if it's a HF URL we can parse
+            if 'huggingface.co' in url:
+                try:
+                    from huggingface_hub import hf_hub_download
+                    import re
                     
-                    # Log progress every 2 seconds
-                    if total_size > 0 and (current_time - last_log_time > 2.0):
-                        last_log_time = current_time
-                        progress = (downloaded / total_size) * 100
-                        elapsed = current_time - start_time
-                        speed_mb = (downloaded / elapsed / (1024 * 1024)) if elapsed > 0 else 0
-                        downloaded_mb = downloaded / (1024 * 1024)
-                        logger.info(f"   Progress: {progress:.1f}% ({downloaded_mb:.1f} MB / {total_mb:.1f} MB) @ {speed_mb:.2f} MB/s")
-        
-        logger.info(f"✅ Model downloaded to: {cache_path}")
-        return cache_path
-    except Exception as e:
-        logger.error(f"❌ Download failed: {e}")
-        if os.path.exists(cache_path):
-            os.remove(cache_path)
-        raise
+                    # Parse HuggingFace URL: https://huggingface.co/USER/REPO/resolve/BRANCH/FILENAME
+                    match = re.match(r'https://huggingface\.co/([^/]+)/([^/]+)/resolve/([^/]+)/(.+)', url)
+                    if match:
+                        user, repo, branch, filename = match.groups()
+                        repo_id = f"{user}/{repo}"
+                        logger.info(f"   Using HuggingFace Hub API: {repo_id}/{filename}")
+                        
+                        # Download using huggingface_hub
+                        downloaded_path = hf_hub_download(
+                            repo_id=repo_id,
+                            filename=filename,
+                            revision=branch,
+                            local_dir=os.path.dirname(cache_path),
+                            local_dir_use_symlinks=False
+                        )
+                        
+                        # Copy to expected cache location if different
+                        if downloaded_path != cache_path:
+                            if os.path.exists(cache_path):
+                                logger.info(f"✅ File already at cache location: {cache_path}")
+                            else:
+                                import shutil
+                                import time as _time
+                                for attempt in range(3):
+                                    try:
+                                        shutil.copy2(downloaded_path, cache_path)
+                                        logger.info(f"✅ Copied to: {cache_path}")
+                                        break
+                                    except (PermissionError, OSError) as e:
+                                        if attempt < 2:
+                                            logger.debug(f"Copy attempt {attempt + 1} failed, retrying...")
+                                            _time.sleep(0.5)
+                                        else:
+                                            logger.warning(f"Could not copy to cache_path, using downloaded location: {downloaded_path}")
+                                            cache_path = downloaded_path
+                        
+                        logger.info(f"✅ Model ready: {cache_path}")
+                        return cache_path
+                        
+                except Exception as hf_error:
+                    logger.warning(f"HuggingFace Hub download failed: {hf_error}")
+                    logger.info("Falling back to direct download...")
+            
+            # Direct download using urllib3 for better control
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            
+            # Notify GUI that download is starting
+            if hasattr(self, 'update_queue') and hasattr(self, 'main_gui'):
+                try:
+                    self.update_queue.put(('status', 'Downloading model...'))
+                except Exception:
+                    pass
+            
+            # Create a pool manager with retry strategy
+            retries = urllib3.Retry(
+                total=5,
+                backoff_factor=0.1,
+                status_forcelist=[500, 502, 503, 504],
+            )
+            http = urllib3.PoolManager(
+                retries=retries,
+                timeout=urllib3.Timeout(connect=5, read=60),
+                headers={
+                    'Accept': 'application/octet-stream',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+            )
+            
+            logger.info(f"🔍 Requesting file info from {url}")
+            response = http.request('GET', url, preload_content=False)
+            
+            if response.status != 200:
+                error_msg = f"Download failed with status {response.status}: {response.reason}"
+                logger.error(error_msg)
+                response.release_conn()
+                raise RuntimeError(error_msg)
+            
+            # Get file size
+            total_size = int(response.headers.get('content-length', 0))
+            total_mb = total_size / (1024 * 1024) if total_size > 0 else 0
+            
+            # Update GUI with total size
+            if hasattr(self, 'update_queue') and hasattr(self, 'main_gui'):
+                try:
+                    self.update_queue.put(('status', f'Downloading {total_mb:.1f} MB...'))
+                except Exception:
+                    pass
+            
+            if total_size > 0:
+                logger.info(f"📦 Download size: {total_mb:.2f} MB")
+            else:
+                logger.warning("⚠️ Could not determine file size")
+            
+            downloaded = 0
+            start_time = time.time()
+            last_log_time = start_time
+            last_callback_time = start_time
+            chunk_size = 1024 * 1024  # 1MB chunks for better progress reporting
+            
+            try:
+                with open(cache_path, 'wb') as f:
+                    while True:
+                        chunk = response.read(chunk_size)
+                        if not chunk:
+                            break
+                            
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        
+                        current_time = time.time()
+                        
+                        # Call progress callback more frequently (every 0.1s)
+                        if progress_callback and total_size > 0 and (current_time - last_callback_time > 0.1):
+                            last_callback_time = current_time
+                            progress = (downloaded / total_size) * 100
+                            downloaded_mb = downloaded / (1024 * 1024)
+                            elapsed = current_time - start_time
+                            speed_mb = (downloaded / elapsed / (1024 * 1024)) if elapsed > 0 else 0
+                            try:
+                                progress_callback(int(progress), downloaded_mb, total_mb, speed_mb)
+                            except Exception:
+                                pass
+                        
+                        # Log progress every 2 seconds
+                        if total_size > 0 and (current_time - last_log_time > 2.0):
+                            last_log_time = current_time
+                            progress = (downloaded / total_size) * 100
+                            elapsed = current_time - start_time
+                            speed_mb = (downloaded / elapsed / (1024 * 1024)) if elapsed > 0 else 0
+                            downloaded_mb = downloaded / (1024 * 1024)
+                            logger.info(f"📥 Progress: {progress:.1f}% ({downloaded_mb:.1f} MB / {total_mb:.1f} MB) @ {speed_mb:.2f} MB/s")
+                            
+                            # Update GUI progress
+                            if hasattr(self, 'update_queue') and hasattr(self, 'main_gui'):
+                                try:
+                                    self.update_queue.put(('status', f'Downloading {downloaded_mb:.1f} MB / {total_mb:.1f} MB'))
+                                    self.update_queue.put(('progress', int(progress)))
+                                except Exception:
+                                    pass
+            finally:
+                response.release_conn()
+                # Notify GUI that download is complete
+                if hasattr(self, 'update_queue') and hasattr(self, 'main_gui'):
+                    try:
+                        self.update_queue.put(('status', 'Download complete'))
+                        self.update_queue.put(('progress', 100))
+                        # Force a GUI refresh
+                        self.update_queue.put(('call_method', self._check_provider_status, ()))
+                    except Exception:
+                        pass
+            
+            logger.info(f"✅ Model downloaded to: {cache_path}")
+            return cache_path
+            
+        except Exception as e:
+            logger.error(f"❌ Download failed: {e}")
+            if os.path.exists(cache_path):
+                os.remove(cache_path)
+            raise
+    
+    raise ValueError("Either repo_id/filename or url must be provided")
 
 
 class FFCInpaintModel(BaseModel):  # Use BaseModel instead of nn.Module
@@ -1337,7 +1462,22 @@ class LocalInpainter:
             logger.info(f"📥 Downloading {model_info['name']}...")
             
             try:
-                model_path = download_model(model_info['url'], model_info['md5'])
+                # Prefer HuggingFace download if repo info is available
+                if 'repo_id' in model_info and 'filename' in model_info:
+                    model_path = download_model(
+                        repo_id=model_info['repo_id'],
+                        filename=model_info['filename'],
+                        md5=model_info.get('md5')
+                    )
+                # Fallback to legacy URL if available
+                elif 'url' in model_info:
+                    model_path = download_model(
+                        url=model_info['url'],
+                        md5=model_info.get('md5')
+                    )
+                else:
+                    raise ValueError(f"No download info for {method}")
+                    
                 return model_path
             except Exception as e:
                 logger.error(f"Failed to download {method}: {e}")
