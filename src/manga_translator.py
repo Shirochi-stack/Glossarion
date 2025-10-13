@@ -3390,24 +3390,50 @@ class MangaTranslator:
                                             # Get block bounding box
                                             x, y, w, h = region.bounding_box
                                             
-                                            # Safety check for valid crop region
+                                            # Add padding to capture surrounding text (like "...")
+                                            # 20% padding on each side to ensure we get the full text
                                             img_h, img_w = original_image.shape[:2]
-                                            if x < 0 or y < 0 or x + w > img_w or y + h > img_h or w <= 0 or h <= 0:
-                                                self._log(f"   Block {idx+1}: Invalid crop region {(x,y,w,h)}, skipping")
+                                            padding_ratio = 0.2
+                                            pad_w = int(w * padding_ratio)
+                                            pad_h = int(h * padding_ratio)
+                                            
+                                            # Expand bounding box with padding
+                                            crop_x = max(0, x - pad_w)
+                                            crop_y = max(0, y - pad_h)
+                                            crop_w = min(img_w - crop_x, w + 2 * pad_w)
+                                            crop_h = min(img_h - crop_y, h + 2 * pad_h)
+                                            
+                                            # Ensure minimum size of 50x50 before cropping
+                                            MIN_CROP_SIZE = 50
+                                            if crop_w < MIN_CROP_SIZE:
+                                                expand_w = (MIN_CROP_SIZE - crop_w) // 2
+                                                crop_x = max(0, crop_x - expand_w)
+                                                crop_w = min(img_w - crop_x, MIN_CROP_SIZE)
+                                            if crop_h < MIN_CROP_SIZE:
+                                                expand_h = (MIN_CROP_SIZE - crop_h) // 2
+                                                crop_y = max(0, crop_y - expand_h)
+                                                crop_h = min(img_h - crop_y, MIN_CROP_SIZE)
+                                            
+                                            # Safety check for valid crop region
+                                            if crop_x < 0 or crop_y < 0 or crop_x + crop_w > img_w or crop_y + crop_h > img_h or crop_w <= 0 or crop_h <= 0:
+                                                self._log(f"   Block {idx+1}: Invalid expanded crop region, skipping")
                                                 continue
                                             
-                                            # Crop the region
-                                            cropped = original_image[y:y+h, x:x+w].copy()
+                                            # Crop the expanded region
+                                            cropped = original_image[crop_y:crop_y+crop_h, crop_x:crop_x+crop_w].copy()
+                                            original_crop_size = f"{crop_w}x{crop_h}"
                                             
                                             # Upscale if too small (small text may not be detected by full-image OCR)
                                             MIN_SIZE = 100
-                                            crop_h, crop_w = cropped.shape[:2]
-                                            if crop_h < MIN_SIZE or crop_w < MIN_SIZE:
-                                                scale_factor = max(MIN_SIZE / crop_w, MIN_SIZE / crop_h)
-                                                new_w = int(crop_w * scale_factor)
-                                                new_h = int(crop_h * scale_factor)
+                                            actual_h, actual_w = cropped.shape[:2]
+                                            if actual_h < MIN_SIZE or actual_w < MIN_SIZE:
+                                                scale_factor = max(MIN_SIZE / actual_w, MIN_SIZE / actual_h)
+                                                new_w = int(actual_w * scale_factor)
+                                                new_h = int(actual_h * scale_factor)
                                                 cropped = cv2.resize(cropped, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
-                                                self._log(f"   Block {idx+1}: Upscaled from {crop_w}x{crop_h} to {new_w}x{new_h}")
+                                                self._log(f"   Block {idx+1}: Expanded to {original_crop_size} (+20% padding), upscaled to {new_w}x{new_h}")
+                                            else:
+                                                self._log(f"   Block {idx+1}: Expanded to {original_crop_size} (+20% padding)")
                                             
                                             # Encode cropped image to JPEG for Azure
                                             _, encoded = cv2.imencode('.jpg', cropped, [cv2.IMWRITE_JPEG_QUALITY, 95])
