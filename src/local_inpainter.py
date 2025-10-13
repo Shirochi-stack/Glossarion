@@ -2653,48 +2653,76 @@ class LocalInpainter:
                             logger.warning(f"Tensor processing error: {e}")
                             # Emergency fallback: ensure we have a valid tensor
                             image_tensor = image_tensor.cpu().float()
-                    # For JIT models, we need to match the model's device and dtype exactly
-                    if TORCH_AVAILABLE and torch is not None:
+                    # Reset CUDA state and clear cache
+                    if TORCH_AVAILABLE and torch is not None and torch.cuda.is_available():
                         try:
-                            # Get device and dtype from model
-                            if hasattr(self.model, '_parameters'):
-                                # Regular PyTorch model
-                                target_device = None
-                                target_dtype = None
-                                for param in self.model.parameters():
-                                    if param is not None:
-                                        target_device = param.device
-                                        target_dtype = param.dtype
-                                        break
-                                
-                                if target_device is not None:
-                                    # Regular model path: normalize and convert mask
-                                    mask_tensor = mask_tensor.cpu().float()
-                                    mask_tensor = torch.clamp(mask_tensor, 0.0, 1.0)
-                                    mask_tensor = mask_tensor.to(device=target_device, dtype=target_dtype)
-                                    image_tensor = image_tensor.to(device=target_device, dtype=target_dtype)
-                            else:
-                                # JIT model - force CPU float32 first
-                                mask_tensor = mask_tensor.cpu().float()
-                                image_tensor = image_tensor.cpu().float()
-                                mask_tensor = torch.clamp(mask_tensor, 0.0, 1.0)
-                                
-                                # Then move both tensors to target device
-                                if self.use_gpu:
-                                    mask_tensor = mask_tensor.cuda()
-                                    image_tensor = image_tensor.cuda()
+                            torch.cuda.empty_cache()
+                            torch.cuda.synchronize()
                         except Exception as e:
-                            logger.warning(f"Tensor device/dtype matching failed: {e}")
-                            # Fallback: ensure both tensors are on same device as float32
+                            logger.warning(f"CUDA state reset failed: {e}")
+
+                    # Initialize everything on CPU first
+                    try:
+                        mask_tensor = mask_tensor.detach().cpu().float()
+                        image_tensor = image_tensor.detach().cpu().float()
+                        mask_tensor = torch.clamp(mask_tensor, 0.0, 1.0)
+                    except Exception as e:
+                        logger.warning(f"CPU tensor initialization failed: {e}")
+                        return image
+
+                    if not TORCH_AVAILABLE or torch is None:
+                        return image
+
+                    try:
+                        # Determine if we're using a JIT model
+                        is_jit = not hasattr(self.model, '_parameters')
+                        device = torch.device('cuda' if self.use_gpu else 'cpu')
+                        
+                        if is_jit:
+                            # JIT models: use simple float32 on target device
+                            dtype = torch.float32
+                            logger.debug("Using JIT model path with float32")
+                        else:
+                            # Regular models: match model parameters
+                            dtype = None
+                            for param in self.model.parameters():
+                                if param is not None:
+                                    dtype = param.dtype
+                                    break
+                            if dtype is None:
+                                dtype = torch.float32
+                            logger.debug(f"Using regular model path with dtype {dtype}")
+
+                        # Move tensors with error checking
+                        def safe_to_device(tensor, name):
                             try:
-                                device = self.device if self.device is not None else 'cpu'
-                                mask_tensor = mask_tensor.to(device=device, dtype=torch.float32)
-                                image_tensor = image_tensor.to(device=device, dtype=torch.float32)
-                            except Exception as e2:
-                                logger.warning(f"Fallback tensor conversion failed: {e2}")
-                                # Last resort: keep everything on CPU
-                                mask_tensor = mask_tensor.cpu().float()
-                                image_tensor = image_tensor.cpu().float()
+                                if device.type == 'cuda':
+                                    # First to CPU float32
+                                    tensor = tensor.cpu().float()
+                                    # Then to target dtype
+                                    tensor = tensor.to(dtype=dtype)
+                                    # Finally to GPU
+                                    tensor = tensor.cuda()
+                                    torch.cuda.synchronize()
+                                else:
+                                    tensor = tensor.to(device=device, dtype=dtype)
+                                return tensor
+                            except Exception as e:
+                                logger.warning(f"Failed to move {name} to {device}: {e}")
+                                return tensor.cpu().float()
+
+                        mask_tensor = safe_to_device(mask_tensor, "mask")
+                        image_tensor = safe_to_device(image_tensor, "image")
+
+                        # Verify tensor states
+                        logger.debug(f"Mask tensor: device={mask_tensor.device}, dtype={mask_tensor.dtype}")
+                        logger.debug(f"Image tensor: device={image_tensor.device}, dtype={image_tensor.dtype}")
+
+                    except Exception as e:
+                        logger.error(f"Tensor preparation failed: {e}")
+                        # Ensure tensors are in a usable state
+                        mask_tensor = mask_tensor.cpu().float()
+                        image_tensor = image_tensor.cpu().float()
                     
                     # Optional FP16 on GPU for lower VRAM
                     if self.quantize_enabled and self.use_gpu:
