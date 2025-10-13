@@ -3031,29 +3031,36 @@ class MangaTranslator:
                             if len(all_regions_merged) < original_count:
                                 self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions_merged)} unique blocks (removed {original_count - len(all_regions_merged)} overlaps)")
                             
-                            # Update all_regions with merged boxes and rebuild region_types mapping
-                            # Note: After merge, we need to reassign region types based on original types
-                            # For simplicity, check each merged box against original boxes to determine type
-                            new_region_types = {}
-                            for new_idx, merged_bbox in enumerate(all_regions_merged):
-                                # Check which original boxes this merged box came from
-                                mx, my, mw, mh = merged_bbox
-                                # Default to text_bubble, but if any contributing box was free_text, mark as free_text
-                                merged_type = 'text_bubble'
-                                for orig_idx, orig_bbox in enumerate(all_regions):
-                                    ox, oy, ow, oh = orig_bbox
-                                    # Check if original box overlaps significantly with merged box
-                                    overlap_x = max(0, min(mx+mw, ox+ow) - max(mx, ox))
-                                    overlap_y = max(0, min(my+mh, oy+oh) - max(my, oy))
-                                    if overlap_x > 0 and overlap_y > 0:
-                                        # Original box contributes to this merged box
-                                        if region_types.get(orig_idx) == 'free_text':
-                                            merged_type = 'free_text'
-                                            break
-                                new_region_types[new_idx] = merged_type
-                            
+                            # CRITICAL: After merge, reclassify based on RT-DETR detection sets
+                            # Don't rely on pre-merge types as merge can combine different types
+                            # Use the same classification logic as Azure Vision for consistency
                             all_regions = all_regions_merged
-                            region_types = new_region_types
+                            
+                            # Helper to normalize boxes to int tuples for classification
+                            def _norm_box(b):
+                                try:
+                                    x, y, w, h = b[:4]
+                                    return (int(round(x)), int(round(y)), int(round(w)), int(round(h)))
+                                except Exception:
+                                    return tuple(b)
+                            
+                            # Build quick-lookup sets for class membership (same as Azure)
+                            text_bubble_set = set(_norm_box(b) for b in rtdetr_detections.get('text_bubbles', []) or [])
+                            free_text_set = set(_norm_box(b) for b in rtdetr_detections.get('text_free', []) or [])
+                            empty_bubble_set = set(_norm_box(b) for b in rtdetr_detections.get('bubbles', []) or [])
+                            
+                            # Classify each merged region by checking RT-DETR class membership
+                            region_types = {}
+                            for idx, bbox in enumerate(all_regions):
+                                norm_bbox = _norm_box(bbox)
+                                # Classify same as Azure: free_text if in free_text set, else text_bubble
+                                if norm_bbox in free_text_set:
+                                    region_types[idx] = 'free_text'
+                                elif norm_bbox in text_bubble_set or norm_bbox in empty_bubble_set:
+                                    region_types[idx] = 'text_bubble'
+                                else:
+                                    # Fallback: default to text_bubble
+                                    region_types[idx] = 'text_bubble'
                             
                             self._log(f"📊 RT-DETR detected {len(all_regions)} text regions, OCR-ing each with Google Vision")
                             
