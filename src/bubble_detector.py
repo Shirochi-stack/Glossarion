@@ -1822,10 +1822,24 @@ class BubbleDetector:
 
             # Apply NMS to remove duplicate detections
             # Group detections by class and apply NMS per class
+            # Initialize class detections dict with lower confidence for small text
             class_detections = {self.CLASS_BUBBLE: [], self.CLASS_TEXT_BUBBLE: [], self.CLASS_TEXT_FREE: []}
+            text_sizes = []
             
+            # First pass: calculate text area distribution
             for lab, box, scr in zip(labels, boxes, scores):
-                if float(scr) < float(confidence):
+                x1, y1, x2, y2 = map(float, box)
+                area = (x2 - x1) * (y2 - y1)
+                text_sizes.append(area)
+            
+            # Calculate median text size
+            median_size = sorted(text_sizes)[len(text_sizes)//2] if text_sizes else 0
+            
+            # Second pass: use adaptive confidence for small text
+            for lab, box, scr, area in zip(labels, boxes, scores, text_sizes):
+                # Lower confidence threshold for small text (< 50% of median)
+                text_conf = confidence * 0.6 if area < median_size * 0.5 else confidence
+                if float(scr) < float(text_conf):
                     continue
                 label_id = int(lab)
                 if label_id in class_detections:

@@ -3321,7 +3321,7 @@ class MangaTranslator:
                                                      (bbox[0]+bbox[2], bbox[1]+bbox[3]),
                                                      (bbox[0], bbox[1]+bbox[3])],
                                             bounding_box=bbox,
-                                            confidence=0.9,
+                                            confidence=0.0,
                                             region_type='text_block'
                                         )
                                         # Use RT-DETR bubble bounds for rendering
@@ -3361,9 +3361,88 @@ class MangaTranslator:
                                         regions.append(region)
                                 
                                 self._log(f"✅ Matched text to {len(regions)} RT-DETR blocks (comic-translate style)")
+                                empty_blocks_count = sum(1 for r in regions if not r.text.strip())
+                                if empty_blocks_count > 0:
+                                    self._log(f"⚠️ {empty_blocks_count} blocks have NO matched OCR text — will try fallback OCR")
                                 for i, region in enumerate(regions, 1):
                                     line_count = len(matched_blocks[i-1]['lines']) if i <= len(matched_blocks) else 0
                                     self._log(f"   Block {i}: {line_count} lines → '{region.text[:50]}...'")
+                                
+                                # FALLBACK OCR FOR EMPTY BLOCKS
+                                # If some RT-DETR blocks got NO OCR matches (empty text), re-run Azure OCR on cropped regions
+                                # This catches small text that full-image OCR missed
+                                if empty_blocks_count > 0:
+                                    self._log(f"🔍 Step 3: Running fallback OCR for {empty_blocks_count} empty blocks")
+                                    
+                                    # Load the original image for cropping
+                                    import cv2
+                                    original_image = cv2.imread(image_path)
+                                    if original_image is None:
+                                        self._log("❌ Failed to load original image for fallback OCR", "error")
+                                    else:
+                                        from azure.ai.vision.imageanalysis.models import VisualFeatures
+                                        
+                                        for idx, region in enumerate(regions):
+                                            if region.text.strip():  # Skip blocks that already have text
+                                                continue
+                                            
+                                            # Get block bounding box
+                                            x, y, w, h = region.bounding_box
+                                            
+                                            # Safety check for valid crop region
+                                            img_h, img_w = original_image.shape[:2]
+                                            if x < 0 or y < 0 or x + w > img_w or y + h > img_h or w <= 0 or h <= 0:
+                                                self._log(f"   Block {idx+1}: Invalid crop region {(x,y,w,h)}, skipping")
+                                                continue
+                                            
+                                            # Crop the region
+                                            cropped = original_image[y:y+h, x:x+w].copy()
+                                            
+                                            # Upscale if too small (small text may not be detected by full-image OCR)
+                                            MIN_SIZE = 100
+                                            crop_h, crop_w = cropped.shape[:2]
+                                            if crop_h < MIN_SIZE or crop_w < MIN_SIZE:
+                                                scale_factor = max(MIN_SIZE / crop_w, MIN_SIZE / crop_h)
+                                                new_w = int(crop_w * scale_factor)
+                                                new_h = int(crop_h * scale_factor)
+                                                cropped = cv2.resize(cropped, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+                                                self._log(f"   Block {idx+1}: Upscaled from {crop_w}x{crop_h} to {new_w}x{new_h}")
+                                            
+                                            # Encode cropped image to JPEG for Azure
+                                            _, encoded = cv2.imencode('.jpg', cropped, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                                            cropped_bytes = encoded.tobytes()
+                                            
+                                            try:
+                                                # Run Azure OCR on this specific crop
+                                                crop_result = self.vision_client.analyze(
+                                                    image_data=cropped_bytes,
+                                                    visual_features=[VisualFeatures.READ]
+                                                )
+                                                
+                                                # Extract text from crop result
+                                                crop_texts = []
+                                                if crop_result.read and crop_result.read.blocks:
+                                                    for block in crop_result.read.blocks:
+                                                        for line in block.lines:
+                                                            if line.text:
+                                                                crop_texts.append(line.text.strip())
+                                                
+                                                if crop_texts:
+                                                    # Success! Replace empty text with fallback OCR result
+                                                    source_lang = ocr_settings.get('language_hints', ['ja'])[0] if ocr_settings.get('language_hints') else 'ja'
+                                                    if source_lang in ['ja', 'zh', 'ko']:
+                                                        fallback_text = ''.join(crop_texts)  # No spaces for CJK
+                                                    else:
+                                                        fallback_text = ' '.join(crop_texts)  # Spaces for others
+                                                    
+                                                    region.text = fallback_text
+                                                    self._log(f"   ✅ Block {idx+1}: Fallback OCR detected text: '{fallback_text[:50]}...'")
+                                                else:
+                                                    self._log(f"   ⚠️ Block {idx+1}: Fallback OCR found no text")
+                                            
+                                            except Exception as e:
+                                                self._log(f"   ❌ Block {idx+1}: Fallback OCR failed: {str(e)}", "warning")
+                                                continue
                                 
                                 # Clear detections
                                 rtdetr_detections = None

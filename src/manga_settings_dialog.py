@@ -76,7 +76,8 @@ class MangaSettingsDialog(QDialog):
             },
             'ocr': {
                 'language_hints': ['ja', 'ko', 'zh'],
-                'confidence_threshold': 0.7,
+                'confidence_threshold': 0.0,  # DEFAULT 0.0 (accept all, like comic-translate) to avoid missing text
+                'cloud_ocr_confidence': 0.0,  # Explicit default for cloud OCR (Azure/Google)
                 'min_region_size': 50,  # Minimum dimension for cloud OCR regions (0 = disabled)
                 'merge_nearby_threshold': 20,
                 'azure_merge_multiplier': 3.0,
@@ -2310,6 +2311,7 @@ class MangaSettingsDialog(QDialog):
         conf_layout.addWidget(conf_label)
         
         # Get cloud OCR confidence (fallback to old setting for migration)
+        # DEFAULT TO 0.0 (accept all, like comic-translate) to avoid missing text
         cloud_conf = self.settings['ocr'].get('cloud_ocr_confidence', self.settings['ocr'].get('confidence_threshold', 0.0))
         
         self.confidence_threshold_slider = QSlider(Qt.Orientation.Horizontal)
@@ -2467,7 +2469,7 @@ class MangaSettingsDialog(QDialog):
         min_length_layout.addWidget(min_length_label)
         
         self.min_text_length_spinbox = QSpinBox()
-        self.min_text_length_spinbox.setRange(1, 10)
+        self.min_text_length_spinbox.setRange(0, 10)  # Allow 0 (no minimum)
         self.min_text_length_spinbox.setValue(self.settings['ocr'].get('min_text_length', 0))
         min_length_layout.addWidget(self.min_text_length_spinbox)
         
@@ -4495,8 +4497,13 @@ class MangaSettingsDialog(QDialog):
                 if hasattr(self.main_gui.manga_tab.translator, 'bubble_detector'):
                     self.main_gui.manga_tab.translator.bubble_detector = None
             
-            # Save to config
+            # Save to config - CRITICAL: Update both local and main_gui config
             self.config['manga_settings'] = self.settings
+            
+            # CRITICAL: Directly update main_gui.config to ensure settings propagate
+            if hasattr(self.main_gui, 'config'):
+                self.main_gui.config['manga_settings'] = self.settings
+                print(f"✅ Updated main_gui.config with manga_settings (cloud_ocr_confidence={self.settings.get('ocr', {}).get('cloud_ocr_confidence', 'N/A')}, min_text_length={self.settings.get('ocr', {}).get('min_text_length', 'N/A')})")
             
             # Save to file - using the correct method name
             try:
