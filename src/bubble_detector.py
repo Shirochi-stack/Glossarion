@@ -147,11 +147,13 @@ class BubbleDetector:
     Backward compatible with existing code while adding RT-DETR support.
     """
     
+    # CUDA behavior toggles
+    _ENABLE_CUDA_CACHE_OPS = False  # set True to enable empty_cache/synchronize calls
+    
     # VRAM monitoring settings
     _VRAM_WARNING_THRESHOLD = 0.90  # Warn when VRAM usage is above 90%
     _last_vram_warning = 0          # Track last warning time to avoid spam
     _VRAM_WARNING_COOLDOWN = 30     # Seconds between warnings
-    
     @classmethod
     def _check_vram_usage(cls, device_or_id=0):
         """Monitor VRAM usage and warn if getting close to capacity.
@@ -336,7 +338,14 @@ class BubbleDetector:
         
         # GPU availability
         self.use_gpu = TORCH_AVAILABLE and torch.cuda.is_available()
-        self.device = 'cuda' if self.use_gpu else 'cpu'
+        # Pin to a concrete CUDA device index for stability
+        self.cuda_index = 0
+        if self.use_gpu:
+            try:
+                self.cuda_index = torch.cuda.current_device()
+            except Exception:
+                self.cuda_index = 0
+        self.device = f"cuda:{self.cuda_index}" if self.use_gpu else 'cpu'
         
         # Quantization/precision settings
         adv_cfg = self.config.get('manga_settings', {}).get('advanced', {}) if isinstance(self.config, dict) else {}
@@ -1008,9 +1017,14 @@ class BubbleDetector:
             # Ensure CUDA is properly initialized
             if self.use_gpu and torch.cuda.is_available():
                 try:
-                    # Clear CUDA cache first
-                    torch.cuda.empty_cache()
-                    device = torch.device('cuda')
+                    # Select explicit CUDA device and avoid risky cache ops
+                    device = torch.device(f'cuda:{self.cuda_index}')
+                    try:
+                        if BubbleDetector._ENABLE_CUDA_CACHE_OPS:
+                            torch.cuda.set_device(self.cuda_index)
+                            torch.cuda.empty_cache()
+                    except Exception as cache_err:
+                        logger.debug(f"Skipping CUDA cache ops: {cache_err}")
                     
                     # Get model's current device
                     model_device = next(self.rtdetr_model.parameters()).device
@@ -1020,21 +1034,38 @@ class BubbleDetector:
                         logger.info("Moving RT-DETR model to GPU...")
                         self.rtdetr_model = self.rtdetr_model.to(device)
                         
-                    # Move inputs to GPU directly (already initialized)
+                # First ensure all inputs are FP32
+                    for k, v in inputs.items():
+                        if isinstance(v, torch.Tensor) and v.is_floating_point():
+                            inputs[k] = v.float()
+                    
+                    # Now try to move to GPU with model's dtype
+                    try:
+                        model_param_dtype = next(self.rtdetr_model.parameters()).dtype
+                    except Exception:
+                        model_param_dtype = torch.float32  # Start with FP32
+                    
+                    # Move to device first
                     for k, v in inputs.items():
                         if isinstance(v, torch.Tensor):
-                            inputs[k] = v.to(device=device, dtype=self.rtdetr_model.dtype)
+                            inputs[k] = v.to(device=device)
                     
-                    logger.info("✓ Using GPU for RT-DETR detection")
+                    # Then try converting to model dtype if different from FP32
+                    if model_param_dtype != torch.float32:
+                        try:
+                            for k, v in inputs.items():
+                                if isinstance(v, torch.Tensor) and v.is_floating_point():
+                                    inputs[k] = v.to(dtype=model_param_dtype)
+                        except Exception as dtype_err:
+                            logger.warning(f"Could not convert to {model_param_dtype}, keeping FP32: {dtype_err}")
+                    
+                    logger.info(f"✓ Using GPU for RT-DETR detection on cuda:{self.cuda_index}")
                 except Exception as e:
                     logger.error(f"GPU setup failed, falling back to CPU: {e}")
                     self.use_gpu = False  # Disable GPU for future calls
                     device = torch.device('cpu')
-                    # Move everything to CPU
-                    self.rtdetr_model = self.rtdetr_model.cpu()
-                    for k, v in inputs.items():
-                        if isinstance(v, torch.Tensor):
-                            inputs[k] = v.cpu().float()
+                    # Do not fallback to CPU here; surface the error for proper handling
+                    raise
             else:
                 device = torch.device('cpu')
                 # Already on CPU, just normalize dtypes
@@ -1069,22 +1100,26 @@ class BubbleDetector:
                             inputs[k] = v.to(device)
                 
                 if device.type == "cuda":
-                    # Clear cache before inference
-                    torch.cuda.empty_cache()
-                    torch.cuda.synchronize()
+                    # Set explicit device; skip cache ops unless enabled
+                    try:
+                        torch.cuda.set_device(self.cuda_index)
+                        if BubbleDetector._ENABLE_CUDA_CACHE_OPS:
+                            torch.cuda.empty_cache()
+                    except Exception as cache_err:
+                        logger.warning(f"CUDA device/cache ops issue: {cache_err}; aborting this RT-DETR run")
+                        raise
                     # Check VRAM usage
-                    self._check_vram_usage(getattr(self, 'device_id', device))
+                    self._check_vram_usage(self.cuda_index)
                     
                     # Use autocast matching model dtype when appropriate
-                    use_amp = model_dtype in (getattr(torch, 'float16', None), getattr(torch, 'bfloat16', None))
+                    bf16_ok = hasattr(torch.cuda, 'is_bf16_supported') and torch.cuda.is_bf16_supported()
+                    use_amp = (model_dtype == getattr(torch, 'float16', None)) or (model_dtype == getattr(torch, 'bfloat16', None) and bf16_ok)
                     if use_amp:
-                        with torch.inference_mode(), torch.cuda.amp.autocast(dtype=model_dtype):
+                        with torch.inference_mode(), torch.cuda.amp.autocast(dtype=torch.float16 if model_dtype==torch.float16 else (torch.bfloat16 if bf16_ok else torch.float16)):
                             outputs = self.rtdetr_model(**inputs)
-                            torch.cuda.synchronize()
                     else:
                         with torch.inference_mode():
                             outputs = self.rtdetr_model(**inputs)
-                            torch.cuda.synchronize()
                 else:
                     with torch.inference_mode():
                         outputs = self.rtdetr_model(**inputs)
@@ -1093,12 +1128,15 @@ class BubbleDetector:
                 # If we're on GPU and hit an error, try one more time after cache clear
                 if device.type == "cuda":
                     try:
-                        logger.info("Retrying GPU inference after cache clear...")
-                        torch.cuda.empty_cache()
-                        torch.cuda.synchronize()
-                        with torch.inference_mode(), torch.cuda.amp.autocast():
+                        logger.info("Retrying GPU inference on explicit device...")
+                        try:
+                            torch.cuda.set_device(self.cuda_index)
+                            if BubbleDetector._ENABLE_CUDA_CACHE_OPS:
+                                torch.cuda.empty_cache()
+                        except Exception:
+                            pass
+                        with torch.inference_mode():
                             outputs = self.rtdetr_model(**inputs)
-                            torch.cuda.synchronize()
                     except Exception as retry_err:
                         logger.error(f"GPU retry also failed: {retry_err}")
                         raise
