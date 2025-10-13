@@ -69,9 +69,9 @@ if IS_FROZEN:
         import transformers
         # Try specific imports
         try:
-            from transformers import RTDetrV2ForObjectDetection, RTDetrImageProcessor
+            from transformers import RTDetrForObjectDetection, RTDetrImageProcessor
             TRANSFORMERS_AVAILABLE = True
-            logger.info("Transformers RT-DETR V2 available")
+            logger.info("✓ Transformers RT-DETR loaded in frozen environment")
         except ImportError:
             # Try alternative import
             try:
@@ -146,93 +146,6 @@ class BubbleDetector:
     Supports multiple model formats and provides configurable detection.
     Backward compatible with existing code while adding RT-DETR support.
     """
-    
-    # CUDA behavior toggles
-    _ENABLE_CUDA_CACHE_OPS = False  # set True to enable empty_cache/synchronize calls
-    
-    # VRAM monitoring settings
-    _VRAM_WARNING_THRESHOLD = 0.90  # Warn when VRAM usage is above 90%
-    _last_vram_warning = 0          # Track last warning time to avoid spam
-    _VRAM_WARNING_COOLDOWN = 30     # Seconds between warnings
-    @classmethod
-    def _check_vram_usage(cls, device_or_id=0):
-        """Monitor VRAM usage and warn if getting close to capacity.
-        Accepts either a CUDA device index (int) or a torch.device.
-        """
-        try:
-            if not torch.cuda.is_available():
-                return
-
-            # Normalize device to an index
-            device_index = None
-            try:
-                # If int, treat as index
-                if isinstance(device_or_id, int):
-                    device_index = device_or_id
-                # If torch.device with cuda type
-                elif hasattr(device_or_id, 'type') and getattr(device_or_id, 'type', None) == 'cuda':
-                    device_index = getattr(device_or_id, 'index', None)
-                # Fallback to current device
-                if device_index is None:
-                    device_index = torch.cuda.current_device()
-            except Exception:
-                device_index = 0
-
-            import time
-            current_time = time.time()
-            if current_time - cls._last_vram_warning < cls._VRAM_WARNING_COOLDOWN:
-                return
-
-            total = torch.cuda.get_device_properties(device_index).total_memory
-            reserved = torch.cuda.memory_reserved(device_index)
-            allocated = torch.cuda.memory_allocated(device_index)
-            used = max(reserved, allocated)
-            usage_percent = used / total if total > 0 else 0.0
-
-            if usage_percent >= cls._VRAM_WARNING_THRESHOLD:
-                free_mb = (total - used) / (1024 * 1024)
-                total_mb = total / (1024 * 1024)
-                logger.warning(
-                    f"VRAM usage high ({usage_percent:.1%})! Only {free_mb:.0f}MB free out of {total_mb:.0f}MB. "
-                    "Consider reducing batch size, lowering precision, or staggering model loads."
-                )
-                cls._last_vram_warning = current_time
-        except Exception as e:
-            logger.debug(f"VRAM check failed: {e}")
-    
-    def _resolve_precision_dtype(self, device):
-        """Return torch.dtype based on advanced.precision toggle and device.
-        Values accepted: 'auto', 'fp32'/'float32', 'fp16'/'float16', 'bf16'/'bfloat16'.
-        auto => fp16 on CUDA, fp32 on CPU.
-        fp16/bf16 on CPU are coerced to fp32 for safety.
-        """
-        try:
-            if not TORCH_AVAILABLE or torch is None:
-                return None
-            prec = None
-            # Prefer explicit setting if present
-            # self.quantize_dtype may be set; also advanced.torch_precision -> self.torch_precision may exist in other modules
-            prec = str(getattr(self, 'quantize_dtype', 'auto') or 'auto').lower()
-            if prec == 'auto':
-                return torch.float16 if (device and getattr(device, 'type', 'cpu') == 'cuda') else torch.float32
-            if prec in ('fp32', 'float32', '32', 'f32'):
-                return torch.float32
-            if prec in ('fp16', 'float16', '16', 'f16'):
-                if device and getattr(device, 'type', 'cpu') == 'cpu':
-                    return torch.float32
-                return torch.float16
-            if prec in ('bf16', 'bfloat16'):
-                if device and getattr(device, 'type', 'cpu') == 'cpu':
-                    return torch.float32
-                # Prefer bfloat16 only if supported; otherwise fallback to float16
-                try:
-                    return torch.bfloat16
-                except Exception:
-                    return torch.float16
-            # Fallback
-            return torch.float32
-        except Exception:
-            return torch.float32
     
     # Process-wide shared RT-DETR to avoid concurrent meta-device loads
     _rtdetr_init_lock = threading.Lock()
@@ -338,14 +251,7 @@ class BubbleDetector:
         
         # GPU availability
         self.use_gpu = TORCH_AVAILABLE and torch.cuda.is_available()
-        # Pin to a concrete CUDA device index for stability
-        self.cuda_index = 0
-        if self.use_gpu:
-            try:
-                self.cuda_index = torch.cuda.current_device()
-            except Exception:
-                self.cuda_index = 0
-        self.device = f"cuda:{self.cuda_index}" if self.use_gpu else 'cpu'
+        self.device = 'cuda' if self.use_gpu else 'cpu'
         
         # Quantization/precision settings
         adv_cfg = self.config.get('manga_settings', {}).get('advanced', {}) if isinstance(self.config, dict) else {}
@@ -710,7 +616,7 @@ class BubbleDetector:
                 
                 # First attempt: load directly to target (CUDA if available)
                 try:
-                        self.rtdetr_model = RTDetrV2ForObjectDetection.from_pretrained(
+                    self.rtdetr_model = RTDetrForObjectDetection.from_pretrained(
                         model_path if model_path else repo_id,
                         **from_kwargs,
                     )
@@ -1011,172 +917,44 @@ class BubbleDetector:
             # Prepare image for model
             inputs = self.rtdetr_processor(images=pil_image, return_tensors="pt")
             
-            if not TORCH_AVAILABLE or not torch:
-                raise RuntimeError("PyTorch not available")
-
-            # Ensure CUDA is properly initialized
-            if self.use_gpu and torch.cuda.is_available():
+            # Move inputs to the same device as the model and match model dtype for floating tensors
+            model_device = next(self.rtdetr_model.parameters()).device if self.rtdetr_model is not None else (torch.device('cpu') if TORCH_AVAILABLE else 'cpu')
+            model_dtype = None
+            if TORCH_AVAILABLE and self.rtdetr_model is not None:
                 try:
-                    # Select explicit CUDA device and avoid risky cache ops
-                    device = torch.device(f'cuda:{self.cuda_index}')
-                    try:
-                        if BubbleDetector._ENABLE_CUDA_CACHE_OPS:
-                            torch.cuda.set_device(self.cuda_index)
-                            torch.cuda.empty_cache()
-                    except Exception as cache_err:
-                        logger.debug(f"Skipping CUDA cache ops: {cache_err}")
-                    
-                    # Get model's current device
-                    model_device = next(self.rtdetr_model.parameters()).device
-                    
-                    # If model isn't on GPU yet, move it
-                    if model_device.type != 'cuda':
-                        logger.info("Moving RT-DETR model to GPU...")
-                        self.rtdetr_model = self.rtdetr_model.to(device)
-                        
-                # First ensure all inputs are FP32
-                    for k, v in inputs.items():
-                        if isinstance(v, torch.Tensor) and v.is_floating_point():
-                            inputs[k] = v.float()
-                    
-                    # Now try to move to GPU with model's dtype
-                    try:
-                        model_param_dtype = next(self.rtdetr_model.parameters()).dtype
-                    except Exception:
-                        model_param_dtype = torch.float32  # Start with FP32
-                    
-                    # Move to device first
-                    for k, v in inputs.items():
-                        if isinstance(v, torch.Tensor):
-                            inputs[k] = v.to(device=device)
-                    
-                    # Then try converting to model dtype if different from FP32
-                    if model_param_dtype != torch.float32:
-                        try:
-                            for k, v in inputs.items():
-                                if isinstance(v, torch.Tensor) and v.is_floating_point():
-                                    inputs[k] = v.to(dtype=model_param_dtype)
-                        except Exception as dtype_err:
-                            logger.warning(f"Could not convert to {model_param_dtype}, keeping FP32: {dtype_err}")
-                    
-                    logger.info(f"✓ Using GPU for RT-DETR detection on cuda:{self.cuda_index}")
-                except Exception as e:
-                    logger.error(f"GPU setup failed, falling back to CPU: {e}")
-                    self.use_gpu = False  # Disable GPU for future calls
-                    device = torch.device('cpu')
-                    # Do not fallback to CPU here; surface the error for proper handling
-                    raise
-            else:
-                device = torch.device('cpu')
-                # Already on CPU, just normalize dtypes
-                for k, v in inputs.items():
-                    if isinstance(v, torch.Tensor):
-                        inputs[k] = v.float()
-
-            # Skip CUDA test - we already handled device setup
-
-            # Model and inputs are already on the correct device from earlier setup
-
-            logger.info(f"Using device: {device} (CUDA available: {torch.cuda.is_available()})")
-            # Enforce precision policy from settings
-            desired_dtype = self._resolve_precision_dtype(device)
-            try:
-                self.rtdetr_model = self.rtdetr_model.to(device=device, dtype=desired_dtype).eval()
-            except Exception as _cast_err:
-                # If dtype cast fails (e.g., bf16 unsupported), fallback to fp32
-                logger.warning(f"Model dtype cast to {desired_dtype} failed: {_cast_err}; falling back to fp32")
-                self.rtdetr_model = self.rtdetr_model.to(device=device, dtype=torch.float32).eval()
+                    model_dtype = next(self.rtdetr_model.parameters()).dtype
+                except Exception:
+                    model_dtype = None
             
-            # Use autocast for mixed precision on GPU
-            # Run inference with proper CUDA memory management
-            try:
-                # Align floating inputs to model dtype; keep integer tensors as-is
-                model_dtype = next(self.rtdetr_model.parameters()).dtype if TORCH_AVAILABLE and self.rtdetr_model is not None else None
+            if TORCH_AVAILABLE:
+                new_inputs = {}
                 for k, v in inputs.items():
                     if isinstance(v, torch.Tensor):
-                        if v.is_floating_point() and model_dtype is not None:
-                            inputs[k] = v.to(device=device, dtype=model_dtype)
-                        else:
-                            inputs[k] = v.to(device)
-                
-                if device.type == "cuda":
-                    # Set explicit device; skip cache ops unless enabled
-                    try:
-                        torch.cuda.set_device(self.cuda_index)
-                        if BubbleDetector._ENABLE_CUDA_CACHE_OPS:
-                            torch.cuda.empty_cache()
-                    except Exception as cache_err:
-                        logger.warning(f"CUDA device/cache ops issue: {cache_err}; aborting this RT-DETR run")
-                        raise
-                    # Check VRAM usage
-                    self._check_vram_usage(self.cuda_index)
-                    
-                    # Use autocast matching model dtype when appropriate
-                    bf16_ok = hasattr(torch.cuda, 'is_bf16_supported') and torch.cuda.is_bf16_supported()
-                    use_amp = (model_dtype == getattr(torch, 'float16', None)) or (model_dtype == getattr(torch, 'bfloat16', None) and bf16_ok)
-                    if use_amp:
-                        with torch.inference_mode(), torch.cuda.amp.autocast(dtype=torch.float16 if model_dtype==torch.float16 else (torch.bfloat16 if bf16_ok else torch.float16)):
-                            outputs = self.rtdetr_model(**inputs)
-                    else:
-                        with torch.inference_mode():
-                            outputs = self.rtdetr_model(**inputs)
-                else:
-                    with torch.inference_mode():
-                        outputs = self.rtdetr_model(**inputs)
-            except Exception as e:
-                logger.error(f"Inference failed on {device}: {e}")
-                # If we're on GPU and hit an error, try one more time after cache clear
-                if device.type == "cuda":
-                    try:
-                        logger.info("Retrying GPU inference on explicit device...")
-                        try:
-                            torch.cuda.set_device(self.cuda_index)
-                            if BubbleDetector._ENABLE_CUDA_CACHE_OPS:
-                                torch.cuda.empty_cache()
-                        except Exception:
-                            pass
-                        with torch.inference_mode():
-                            outputs = self.rtdetr_model(**inputs)
-                    except Exception as retry_err:
-                        logger.error(f"GPU retry also failed: {retry_err}")
-                        raise
-                logger.warning(f"Autocast path failed ({e}); retrying on CPU")
-                device = torch.device('cpu')
-                self.rtdetr_model = self.rtdetr_model.to(device).eval()
-                # Rebuild inputs on CPU FP32
-                rebuilt = {}
-                for k, v in inputs.items():
-                    if isinstance(v, torch.Tensor):
-                        rebuilt[k] = v.detach().cpu().float()
-                    else:
-                        rebuilt[k] = v
-                inputs = rebuilt
-                outputs = self.rtdetr_model(**inputs)
-            else:
-                outputs = self.rtdetr_model(**inputs)
+                        v = v.to(model_device)
+                        if model_dtype is not None and torch.is_floating_point(v):
+                            v = v.to(model_dtype)
+                    new_inputs[k] = v
+                inputs = new_inputs
             
-            # Post-process results
+            # Run inference with autocast when model is half/bfloat16 on CUDA
+            use_amp = TORCH_AVAILABLE and hasattr(model_device, 'type') and model_device.type == 'cuda' and (model_dtype in (torch.float16, torch.bfloat16))
+            autocast_dtype = model_dtype if model_dtype in (torch.float16, torch.bfloat16) else None
+            
             with torch.no_grad():
-                target_sizes = torch.tensor([pil_image.size[::-1]], device=device) if TORCH_AVAILABLE else None
-                
-                results = self.rtdetr_processor.post_process_object_detection(
-                    outputs,
-                    target_sizes=target_sizes,
-                    threshold=confidence
-                )[0]
-                if TORCH_AVAILABLE and device.type == "cuda":
-                    target_sizes = target_sizes.to(device)
+                if use_amp and autocast_dtype is not None:
+                    with torch.autocast('cuda', dtype=autocast_dtype):
+                        outputs = self.rtdetr_model(**inputs)
                 else:
                     outputs = self.rtdetr_model(**inputs)
                 
-            # Brief pause for stability after inference
+                # Brief pause for stability after inference
                 time.sleep(0.1)
                 logger.debug("💤 RT-DETR inference pausing briefly for stability")
             
             # Post-process results
             target_sizes = torch.tensor([pil_image.size[::-1]]) if TORCH_AVAILABLE else None
-            if TORCH_AVAILABLE and device.type == "cuda":
-                target_sizes = target_sizes.to(device)
+            if TORCH_AVAILABLE and hasattr(model_device, 'type') and model_device.type == "cuda":
+                target_sizes = target_sizes.to(model_device)
             
             results = self.rtdetr_processor.post_process_object_detection(
                 outputs,

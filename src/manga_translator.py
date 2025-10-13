@@ -1322,11 +1322,12 @@ class MangaTranslator:
         """Release ALL model references and caches to reduce RAM after translation.
         This is the COMPREHENSIVE cleanup that ensures all models are unloaded from RAM.
         """
-        # Check if auto cleanup is enabled in settings
-        auto_cleanup_enabled = self.manga_settings.get('advanced', {}).get('auto_cleanup_models', False)
-        if not auto_cleanup_enabled:
+        # Check if unload is enabled in settings before proceeding
+        unload_enabled = self.manga_settings.get('advanced', {}).get('unload_models_after_translation', False)
+        if not unload_enabled:
+            self._log("⏭️ Skipping model cleanup - unload is disabled in settings", "info")
             return
-
+            
         self._log("🧹 Starting comprehensive model cleanup to free RAM...", "info")
         
         try:

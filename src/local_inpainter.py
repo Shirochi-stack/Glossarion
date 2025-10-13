@@ -2611,105 +2611,16 @@ class LocalInpainter:
                     image_tensor = torch.from_numpy(image_norm).permute(2, 0, 1).unsqueeze(0).float()
                     mask_tensor = torch.from_numpy(mask_binary).unsqueeze(0).unsqueeze(0).float()
                     
-                    # Move to device with proper type handling
-                    if TORCH_AVAILABLE and torch is not None:
-                        try:
-                            # Determine model dtype
-                            model_dtype = None
-                            if self.model is not None:
-                                try:
-                                    for param in self.model.parameters():
-                                        if param is not None:
-                                            model_dtype = param.dtype
-                                            break
-                                except Exception:
-                                    pass
-                            
-                            # If on GPU and no dtype found, default to FP16
-                            if model_dtype is None and self.device == 'cuda':
-                                model_dtype = torch.float16
-                            elif model_dtype is None:
-                                model_dtype = torch.float32
-                            
-                            # Handle tensor conversion
-                            try:
-                                # First ensure we're on CPU with float32
-                                image_tensor = image_tensor.cpu().float()
-                                # Convert to target precision
-                                if torch.is_floating_point(image_tensor):
-                                    image_tensor = image_tensor.to(dtype=model_dtype)
-                                # Move to target device
-                                image_tensor = image_tensor.to(device=self.device)
-                            except Exception as e:
-                                logger.warning(f"Stepwise tensor conversion failed: {e}")
-                                # Fallback: try direct conversion
-                                try:
-                                    image_tensor = image_tensor.to(device=self.device, dtype=model_dtype)
-                                except Exception as e2:
-                                    logger.warning(f"Direct tensor conversion failed: {e2}")
-                                    # Last resort: stay on CPU with float32
-                                    image_tensor = image_tensor.cpu().float()
-                        except Exception as e:
-                            logger.warning(f"Tensor processing error: {e}")
-                            # Emergency fallback: ensure we have a valid tensor
-                            image_tensor = image_tensor.cpu().float()
-                    # Reset CUDA state and clear cache
-                    if TORCH_AVAILABLE and torch is not None and torch.cuda.is_available():
-                        try:
-                            torch.cuda.empty_cache()
-                            torch.cuda.synchronize()
-                        except Exception as e:
-                            logger.warning(f"CUDA state reset failed: {e}")
-
-                    # Initialize everything on CPU first
-                    try:
-                        mask_tensor = mask_tensor.detach().cpu().float()
-                        image_tensor = image_tensor.detach().cpu().float()
-                        mask_tensor = torch.clamp(mask_tensor, 0.0, 1.0)
-                    except Exception as e:
-                        logger.warning(f"CPU tensor initialization failed: {e}")
-                        return image
-
-                    if not TORCH_AVAILABLE or torch is None:
-                        return image
-
-                    try:
-                        # Align tensors to the model's actual device and dtype
-                        try:
-                            first_param = next(self.model.parameters())
-                            model_device = first_param.device
-                            model_dtype = first_param.dtype
-                        except Exception:
-                            # TorchScript models may not expose parameters consistently
-                            model_device = torch.device('cuda') if (self.use_gpu and torch.cuda.is_available()) else torch.device('cpu')
-                            model_dtype = torch.float32
-                        
-                        def move_like_model(tensor, name):
-                            try:
-                                if tensor.is_floating_point():
-                                    return tensor.to(device=model_device, dtype=model_dtype)
-                                else:
-                                    return tensor.to(device=model_device)
-                            except Exception as e:
-                                logger.warning(f"Failed to move {name} to {model_device}: {e}")
-                                return tensor.detach().cpu().float() if tensor.is_floating_point() else tensor.detach().cpu()
-                        
-                        mask_tensor = move_like_model(mask_tensor, "mask")
-                        image_tensor = move_like_model(image_tensor, "image")
-                        
-                        logger.debug(f"Mask tensor: device={mask_tensor.device}, dtype={mask_tensor.dtype}")
-                        logger.debug(f"Image tensor: device={image_tensor.device}, dtype={image_tensor.dtype}")
-
-                    except Exception as e:
-                        logger.error(f"Tensor preparation failed: {e}")
-                        # Ensure tensors are in a usable state
-                        mask_tensor = mask_tensor.cpu().float()
-                        image_tensor = image_tensor.cpu().float()
+                    # Move to device
+                    image_tensor = image_tensor.to(self.device)
+                    mask_tensor = mask_tensor.to(self.device)
                     
-                    # Optional precision adjustment is disabled here to avoid dtype/device mismatches
-                    if False and self.quantize_enabled and self.use_gpu:
+                    # Optional FP16 on GPU for lower VRAM
+                    if self.quantize_enabled and self.use_gpu:
                         try:
-                            pass
+                            if self.torch_precision == 'fp16' or self.torch_precision == 'auto':
+                                image_tensor = image_tensor.half()
+                                mask_tensor = mask_tensor.half()
                         except Exception:
                             pass
                     
