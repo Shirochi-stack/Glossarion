@@ -233,14 +233,9 @@ class BubbleDetector:
             self.max_det_yolo = 100
             self.max_det_rtdetr = 100
         
-        # Model directory for all models
-        self.models_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), 'models'))
-        os.makedirs(self.models_dir, exist_ok=True)
-        # Use models dir for cache as well
-        os.environ['HF_HOME'] = self.models_dir
-        os.environ['TRANSFORMERS_CACHE'] = os.path.join(self.models_dir, 'transformers')
-        os.environ['TORCH_HOME'] = self.models_dir
-        self.cache_dir = self.models_dir
+        # Cache directory for ONNX conversions
+        self.cache_dir = os.environ.get('BUBBLE_CACHE_DIR', 'models')
+        os.makedirs(self.cache_dir, exist_ok=True)
         
         # RT-DETR concurrency setting from config
         try:
@@ -360,17 +355,9 @@ class BubbleDetector:
             if model_path and (('/' in model_path) and not os.path.exists(model_path)):
                 try:
                     from huggingface_hub import hf_hub_download
-                    os.makedirs(self.models_dir, exist_ok=True)
-                    dest_dir = os.path.join(self.models_dir, model_path.replace('/', '_'))
-                    os.makedirs(dest_dir, exist_ok=True)
-                    logger.info(f"📥 Resolving repo '{model_path}' to detector.onnx in {dest_dir}...")
-                    resolved = hf_hub_download(
-                        repo_id=model_path,
-                        filename='detector.onnx',
-                        cache_dir=self.models_dir,
-                        local_dir=dest_dir,
-                        local_dir_use_symlinks=False
-                    )
+                    os.makedirs(self.cache_dir, exist_ok=True)
+                    logger.info(f"📥 Resolving repo '{model_path}' to detector.onnx in {self.cache_dir}...")
+                    resolved = hf_hub_download(repo_id=model_path, filename='detector.onnx', cache_dir=self.cache_dir, local_dir=self.cache_dir, local_dir_use_symlinks=False)
                     if resolved and os.path.exists(resolved):
                         model_path = resolved
                         logger.info(f"✅ Downloaded detector.onnx to: {model_path}")
@@ -590,20 +577,6 @@ class BubbleDetector:
                 
                 # Use custom model_id if provided, otherwise use default
                 repo_id = model_id if model_id else self.rtdetr_repo
-
-                # If caller did not pass a local model_path, auto-detect a local install in models root
-                if not model_path:
-                    try:
-                        root = Path(self.models_dir)
-                        cfg = root / 'config.json'
-                        weights_ok = (root / 'model.safetensors').exists() or (root / 'pytorch_model.bin').exists()
-                        proc_ok = (root / 'preprocessor_config.json').exists() or (root / 'processor_config.json').exists()
-                        if cfg.exists() and weights_ok and proc_ok:
-                            model_path = str(root)
-                            logger.info(f"📥 Using local RT-DETR from models root: {model_path}")
-                    except Exception:
-                        pass
-
                 logger.info(f"📥 Loading RT-DETR model from {repo_id}...")
 
                 # Ensure TorchDynamo/compile doesn't interfere on some builds
@@ -612,70 +585,6 @@ class BubbleDetector:
                 except Exception:
                     pass
                 
-                # Prefer local-only loading from models/ to avoid stale ~/.cache entries
-                try:
-                    os.environ.setdefault('TRANSFORMERS_OFFLINE', '1')
-                    os.environ.setdefault('HF_HUB_DISABLE_TELEMETRY', '1')
-                except Exception:
-                    pass
-
-                # Resolve local model path under models/ if available (no ~/.cache usage)
-                resolved_local_dir = None
-                try:
-                    from pathlib import Path as _P
-                    base = _P(self.models_dir)
-                    formatted = repo_id.replace('/', '--')
-                    # 1) Prefer latest HF snapshot layout: models--<org>--<name>*/snapshots/*
-                    candidates = list(base.glob(f"models--{formatted}*/snapshots/*"))
-                    # 2) Also support plain folder layouts users may have copied manually
-                    alt_candidates = [
-                        base / repo_id.replace('/', os.sep),                       # models/org/name
-                        base / repo_id.split('/')[-1],                             # models/name
-                        base / formatted                                          # models/models--org--name
-                    ]
-                    for d in alt_candidates:
-                        try:
-                            if d.exists() and d.is_dir():
-                                candidates.append(d)
-                        except Exception:
-                            pass
-                    if candidates:
-                        # Pick most recent by modification time among existing dirs
-                        existing = []
-                        for p in candidates:
-                            try:
-                                if p.exists():
-                                    existing.append(p)
-                            except Exception:
-                                pass
-                        if existing:
-                            existing.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-                            resolved_local_dir = str(existing[0])
-                            logger.info(f"📁 Using local RT-DETR model path: {resolved_local_dir}")
-                except Exception as _e:
-                    logger.debug(f"Failed to resolve local model path: {_e}")
-
-                # If still not found, check for ONNX in models dir and initialize ONNX backend directly
-                if resolved_local_dir is None and ONNX_AVAILABLE:
-                    try:
-                        from glob import glob as _glob
-                        onnx_matches = _glob(os.path.join(self.models_dir, "rtdetr*.onnx"))
-                        if onnx_matches:
-                            onnx_path = onnx_matches[0]
-                            logger.info(f"📦 Found RT-DETR ONNX in models dir: {onnx_path}")
-                            if self._init_rtdetr_onnx(onnx_path):
-                                return True
-                    except Exception as _e:
-                        logger.debug(f"ONNX fallback probe failed: {_e}")
-
-                # If we still have no local dir and no model_path, do not attempt network; error out with guidance
-                if resolved_local_dir is None and not model_path:
-                    logger.error("❌ RT-DETR not found in models directory and offline mode is enforced.")
-                    logger.error(f"   Looked under: {self.models_dir}")
-                    logger.error("   Please place the model locally (HF snapshot or ONNX) and try again.")
-                    self.rtdetr_loaded = False
-                    return False
-
                 # Decide device strategy
                 gpu_available = bool(TORCH_AVAILABLE and hasattr(torch, 'cuda') and torch.cuda.is_available())
                 device_map = 'auto' if gpu_available else None
@@ -688,13 +597,11 @@ class BubbleDetector:
                         dtype = None
                 low_cpu = True if gpu_available else False
                 
-                # Load processor (once) strictly from local cache if possible
-                # IMPORTANT: if a local model_path is provided, use it directly (do NOT use repo_id)
+                # Load processor (once)
                 self.rtdetr_processor = RTDetrImageProcessor.from_pretrained(
-                    model_path if model_path else repo_id,
+                    repo_id,
                     size={"width": 640, "height": 640},
-                    cache_dir=self.cache_dir if not model_path else None,
-                    local_files_only=True
+                    cache_dir=self.cache_dir if not model_path else None
                 )
                 
                 # Prepare kwargs for from_pretrained
@@ -702,39 +609,30 @@ class BubbleDetector:
                     'cache_dir': self.cache_dir if not model_path else None,
                     'low_cpu_mem_usage': low_cpu,
                     'device_map': device_map,
-                    'local_files_only': True,
                 }
                 # Note: dtype is handled via torch_dtype parameter in newer transformers
                 if dtype is not None:
                     from_kwargs['torch_dtype'] = dtype
                 
-                # First attempt: load directly to target (CUDA if available) from resolved local dir if present
+                # First attempt: load directly to target (CUDA if available)
                 try:
-                    load_ref = model_path or resolved_local_dir or repo_id
                     self.rtdetr_model = RTDetrForObjectDetection.from_pretrained(
-                        load_ref,
+                        model_path if model_path else repo_id,
                         **from_kwargs,
                     )
                 except Exception as primary_err:
-                    # If this is a PyO3 multi-init error, do not attempt a second init in this process
-                    if 'PyO3 modules compiled for CPython 3.8 or older may only be initialized once' in str(primary_err):
-                        logger.error("❌ RT-DETR failed due to PyO3 single-init constraint. Won't retry in this process.")
-                        logger.error("   Tip: Clear old HuggingFace caches and restart the process.")
-                        raise
                     # Fallback to a simple CPU load (no device move) if CUDA path fails
-                    logger.warning(f"RT-DETR primary load failed ({primary_err}); retrying on CPU with local-only cache...")
+                    logger.warning(f"RT-DETR primary load failed ({primary_err}); retrying on CPU...")
                     from_kwargs_fallback = {
                         'cache_dir': self.cache_dir if not model_path else None,
                         'low_cpu_mem_usage': False,
                         'device_map': None,
-                        'local_files_only': True,
                     }
                     if TORCH_AVAILABLE:
                         from_kwargs_fallback['torch_dtype'] = torch.float32
-                    load_ref = model_path or resolved_local_dir or repo_id
                     self.rtdetr_model = RTDetrForObjectDetection.from_pretrained(
-                        load_ref,
-                        **from_kwargs_fallback
+                        model_path if model_path else repo_id,
+                        **from_kwargs_fallback,
                     )
                 
                 # Optional dynamic quantization for linear layers (CPU only)
@@ -828,8 +726,8 @@ class BubbleDetector:
             # Use provided model_id or default
             repo_id = model_id if model_id else self.rtdetr_repo
             
-            # Check models directory
-            cache_dir = Path(self.models_dir)
+            # Check HuggingFace cache
+            cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
             model_id_formatted = repo_id.replace("/", "--")
             
             # Look for model folder
@@ -1736,25 +1634,10 @@ class BubbleDetector:
 
             # Download files into models/ and avoid symlinks so the file is visible there
             try:
-                dest_dir = os.path.join(self.models_dir, repo.replace('/', '_'))
-                os.makedirs(dest_dir, exist_ok=True)
-                _ = hf_hub_download(
-                    repo_id=repo,
-                    filename='config.json',
-                    cache_dir=self.models_dir,
-                    local_dir=dest_dir,
-                    local_dir_use_symlinks=False
-                )
+                _ = hf_hub_download(repo_id=repo, filename='config.json', cache_dir=cache_dir, local_dir=cache_dir, local_dir_use_symlinks=False)
             except Exception:
                 pass
-            dest_dir = os.path.join(self.models_dir, repo.replace('/', '_'))
-            onnx_fp = hf_hub_download(
-                repo_id=repo,
-                filename='detector.onnx',
-                cache_dir=self.models_dir,
-                local_dir=dest_dir,
-                local_dir_use_symlinks=False
-            )
+            onnx_fp = hf_hub_download(repo_id=repo, filename='detector.onnx', cache_dir=cache_dir, local_dir=cache_dir, local_dir_use_symlinks=False)
             BubbleDetector._rtdetr_onnx_model_path = onnx_fp
 
             # Pick providers: prefer CUDA if available; otherwise CPU. Do NOT use DML.

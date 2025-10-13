@@ -1,13 +1,17 @@
 # Chapter_Extractor.py - Module-level chapter extraction functions
 import os
-import sys
 import re
+import sys
 import json
 import threading
 import time
 import shutil
 import hashlib
 import warnings
+from TransateKRtoEN import PatternManager
+
+# Initialize PatternManager at module level for ProcessPoolExecutor compatibility
+PM = PatternManager()
 from bs4 import BeautifulSoup
 try:
     from bs4 import XMLParsedAsHTMLWarning

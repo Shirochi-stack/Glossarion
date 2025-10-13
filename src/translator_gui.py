@@ -6919,27 +6919,22 @@ Important rules:
         """Detect when user manually scrolls up in the log"""
         try:
             scrollbar = self.log_text.verticalScrollBar()
-            # Check if we're at the bottom (with small margin)
+            # If user scrolled up (not at bottom), mark it
             at_bottom = value >= scrollbar.maximum() - 10
             
-            # Get previous states with defaults
+            # Only mark as user scrolled if we were previously at bottom and now we're not
+            # This prevents false positives when content is added and scrollbar max changes
             was_at_bottom = getattr(self, '_was_at_bottom', True)
-            user_scrolled = getattr(self, '_user_scrolled_up', False)
             
-            if was_at_bottom and not at_bottom:
-                # User just scrolled up from bottom - enable manual scroll mode
+            if not at_bottom and was_at_bottom:
+                # User intentionally scrolled up from the bottom
                 self._user_scrolled_up = True
-                logger.debug("Manual scroll mode enabled")
-            elif at_bottom and user_scrolled:
-                # User scrolled back to bottom - disable manual scroll mode
+            elif at_bottom:
+                # User scrolled back to bottom, resume auto-scroll
                 self._user_scrolled_up = False
-                logger.debug("Manual scroll mode disabled - resuming auto-scroll")
             
-            # Always track the last known position
+            # Track current state for next comparison
             self._was_at_bottom = at_bottom
-            
-            # Store actual scroll value for better position tracking
-            self._last_scroll_value = value
         except Exception:
             pass
     
@@ -7059,8 +7054,9 @@ Important rules:
                    # Only auto-scroll if delay passed AND user hasn't scrolled up
                    if (_time.time() >= getattr(self, '_autoscroll_delay_until', 0) and 
                        not getattr(self, '_user_scrolled_up', False)):
-                        scrollbar = self.log_text.verticalScrollBar()
-                        scrollbar.setValue(scrollbar.maximum())
+                       scrollbar = self.log_text.verticalScrollBar()
+                       if at_bottom or True:
+                           scrollbar.setValue(scrollbar.maximum())
                    # Force immediate update of the widget
                    self.log_text.update()
                    self.log_text.repaint()
