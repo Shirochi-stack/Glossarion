@@ -918,21 +918,35 @@ class BubbleDetector:
             inputs = self.rtdetr_processor(images=pil_image, return_tensors="pt")
             
             # Move inputs to the same device as the model and match model dtype for floating tensors
-            model_device = next(self.rtdetr_model.parameters()).device if self.rtdetr_model is not None else (torch.device('cpu') if TORCH_AVAILABLE else 'cpu')
+            model_device = None
             model_dtype = None
             if TORCH_AVAILABLE and self.rtdetr_model is not None:
                 try:
-                    model_dtype = next(self.rtdetr_model.parameters()).dtype
+                    # Get first parameter that's not None and has a device attribute
+                    for param in self.rtdetr_model.parameters():
+                        if param is not None and hasattr(param, 'device'):
+                            model_device = param.device
+                            model_dtype = param.dtype
+                            break
                 except Exception:
-                    model_dtype = None
+                    pass
+            
+            if model_device is None:
+                model_device = torch.device('cpu') if TORCH_AVAILABLE else 'cpu'
             
             if TORCH_AVAILABLE:
                 new_inputs = {}
                 for k, v in inputs.items():
                     if isinstance(v, torch.Tensor):
-                        v = v.to(model_device)
-                        if model_dtype is not None and torch.is_floating_point(v):
-                            v = v.to(model_dtype)
+                        # First move to device, then optionally cast dtype
+                        try:
+                            v = v.to(device=model_device)
+                            if model_dtype is not None and torch.is_floating_point(v):
+                                v = v.to(dtype=model_dtype)
+                        except Exception as e:
+                            logger.warning(f"Failed to move tensor to device {model_device}: {e}")
+                            # Fallback to CPU
+                            v = v.cpu()
                     new_inputs[k] = v
                 inputs = new_inputs
             
