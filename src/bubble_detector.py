@@ -343,7 +343,13 @@ class BubbleDetector:
             # If given a Hugging Face repo ID (e.g., 'owner/name'), fetch detector.onnx into models/
             if model_path and (('/' in model_path) and not os.path.exists(model_path)):
                 try:
-                    from huggingface_hub import hf_hub_download
+                    # Import from huggingface_hub directly
+                    try:
+                        from huggingface_hub import hf_hub_download
+                    except ImportError as e:
+                        logger.error(f"Failed to import from huggingface_hub: {e}\nPlease install with: pip install -U huggingface_hub")
+                        return False
+                    
                     os.makedirs(self.cache_dir, exist_ok=True)
                     logger.info(f"📥 Resolving repo '{model_path}' to detector.onnx in {self.cache_dir}...")
                     resolved = hf_hub_download(repo_id=model_path, filename='detector.onnx', cache_dir=self.cache_dir, local_dir=self.cache_dir, local_dir_use_symlinks=False)
@@ -1892,7 +1898,7 @@ class BubbleDetector:
 # Standalone utility functions
 def download_model_from_huggingface(repo_id: str = "ogkalu/comic-speech-bubble-detector-yolov8m",
                                    filename: str = "comic-speech-bubble-detector-yolov8m.pt",
-                                   cache_dir: str = "models") -> str:
+                                   cache_dir: str = "models") -> Optional[str]:
     """
     Download model from Hugging Face Hub.
     
@@ -1902,28 +1908,25 @@ def download_model_from_huggingface(repo_id: str = "ogkalu/comic-speech-bubble-d
         cache_dir: Local directory to cache the model
         
     Returns:
-        Path to downloaded model file
+        Path to downloaded model file (or None on failure)
     """
     try:
         from huggingface_hub import hf_hub_download
-        
+    except ImportError as e:
+        logger.error(f"Failed to import from huggingface_hub: {e}\nPlease install with: pip install -U huggingface_hub")
+        return None
+    try:
         os.makedirs(cache_dir, exist_ok=True)
-        
         logger.info(f"📥 Downloading {filename} from {repo_id}...")
-        
         model_path = hf_hub_download(
             repo_id=repo_id,
             filename=filename,
             cache_dir=cache_dir,
-            local_dir=cache_dir
+            local_dir=cache_dir,
+            local_dir_use_symlinks=False
         )
-        
         logger.info(f"✅ Model downloaded to: {model_path}")
         return model_path
-        
-    except ImportError:
-        logger.error("huggingface-hub package required. Install with: pip install huggingface-hub")
-        return None
     except Exception as e:
         logger.error(f"Download failed: {e}")
         return None
