@@ -136,12 +136,14 @@ class BubbleDetector:
     Backward compatible with existing code while adding RT-DETR support.
     """
     
-    # Process-wide shared RT-DETR to avoid concurrent meta-device loads
+    # Process-wide device coordination for RT-DETR
     _rtdetr_init_lock = threading.Lock()
+    _rtdetr_device_lock = threading.Lock()  # Serialize device access
     _rtdetr_shared_model = None
     _rtdetr_shared_processor = None
     _rtdetr_loaded = False
     _rtdetr_repo_id = 'ogkalu/comic-text-and-bubble-detector'
+    _rtdetr_device = None  # Track active CUDA device
     
     # Shared RT-DETR (ONNX) across process to avoid device/context storms
     _rtdetr_onnx_init_lock = threading.Lock()
@@ -159,12 +161,10 @@ class BubbleDetector:
     _rtdetr_onnx_sema_initialized = False
     
     def __init__(self, config_path: str = "config.json"):
-        """
-        Initialize the bubble detector.
-        
-        Args:
-            config_path: Path to configuration file
-        """
+        """Initialize the bubble detector with CUDA DSA support."""
+        # CRITICAL: Enable CUDA debugging and DSA
+        os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+        os.environ['TORCH_USE_CUDA_DSA'] = '1'
         # Set thread limits early if environment indicates single-threaded mode
         try:
             if os.environ.get('OMP_NUM_THREADS') == '1':
@@ -533,8 +533,9 @@ class BubbleDetector:
         Returns:
             True if successful, False otherwise
         """
-        # Enable CUDA debug sync mode
+        # Enable CUDA debugging
         os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+        os.environ['TORCH_USE_CUDA_DSA'] = '1'  # Enable device-side assertions
 
         if not TRANSFORMERS_AVAILABLE:
             logger.error("Transformers library required for RT-DETR. Install with: pip install transformers")
@@ -931,24 +932,42 @@ class BubbleDetector:
                     target_device = torch.device('cpu')
 
             if TORCH_AVAILABLE and self.rtdetr_model is not None:
-                # Lock and sync with model device/dtype
-                with torch.no_grad():
-                    # Get ACTUAL model device/dtype
-                    model_param = next(self.rtdetr_model.parameters())
-                    target_device = model_param.device
-                    target_dtype = model_param.dtype
-                    
-                    # First move ALL tensors to right device
-                    inputs = {k: (v.to(device=target_device) if isinstance(v, torch.Tensor) else v)
-                            for k, v in inputs.items()}
-                    
-                    # Then match model's dtype
-                    inputs = {k: (v.to(dtype=target_dtype) if isinstance(v, torch.Tensor) else v)
-                            for k, v in inputs.items()}
-                    
-                    # Force CUDA sync if needed
-                    if str(target_device).startswith('cuda'):
-                        torch.cuda.synchronize(target_device)
+                # CRITICAL: Inputs MUST match model dtype
+                model_param = next(self.rtdetr_model.parameters())
+                model_device = model_param.device
+                model_dtype = model_param.dtype
+                
+                # Match both device and dtype in one operation
+                inputs = {k: (v.to(device=model_device, dtype=model_dtype) if isinstance(v, torch.Tensor) else v)
+                         for k, v in inputs.items()}
+                
+                # Force sync for CUDA
+                if model_device.type == 'cuda':
+                    torch.cuda.synchronize(model_device)
+
+                    try:
+                        if getattr(device, 'type', 'cpu') == 'cuda' and torch.cuda.is_available():
+                            inputs = _move_inputs(device, dtype)
+                            # Best-effort sync; guard against invalid context
+                            try:
+                                if torch.cuda.is_initialized():
+                                    torch.cuda.synchronize(device)
+                            except Exception:
+                                pass
+                            target_device = device
+                        else:
+                            inputs = _move_inputs(torch.device('cpu'), torch.float32 if TORCH_AVAILABLE else None)
+                            target_device = torch.device('cpu') if TORCH_AVAILABLE else 'cpu'
+                    except Exception as move_err:
+                        # Global fallback: move model to CPU and retry inputs on CPU
+                        self._log(f"CUDA move failed ({move_err}); falling back to CPU", "warning")
+                        try:
+                            if hasattr(self.rtdetr_model, 'to'):
+                                self.rtdetr_model.to('cpu')
+                        except Exception:
+                            pass
+                        inputs = _move_inputs(torch.device('cpu'), torch.float32 if TORCH_AVAILABLE else None)
+                        target_device = torch.device('cpu') if TORCH_AVAILABLE else 'cpu'
             
             # Run inference with AMP only for half/bfloat16 models
             with torch.no_grad():

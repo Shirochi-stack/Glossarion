@@ -574,8 +574,9 @@ class LocalInpainter:
     }
     
     def __init__(self, config_path="config.json"):
-        # Enable CUDA debug sync mode
+        # Enable CUDA debugging
         os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+        os.environ['TORCH_USE_CUDA_DSA'] = '1'  # Enable device-side assertions
 
         # Set thread limits early if environment indicates single-threaded mode
         try:
