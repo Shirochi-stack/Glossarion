@@ -917,59 +917,57 @@ class BubbleDetector:
             # Prepare image for model
             inputs = self.rtdetr_processor(images=pil_image, return_tensors="pt")
             
-            # Move inputs to the same device as the model and match model dtype for floating tensors
-            # First ensure model is on correct device and get its properties
-            model_device = torch.device('cuda' if self.use_gpu else 'cpu')
-            model_dtype = torch.float16 if self.use_gpu else torch.float32
+            if not TORCH_AVAILABLE or not torch:
+                raise RuntimeError("PyTorch not available")
             
-            # Ensure model is on the correct device
-            if TORCH_AVAILABLE and self.rtdetr_model is not None:
-                try:
-                    self.rtdetr_model = self.rtdetr_model.to(device=model_device)
-                    logger.debug(f"Model moved to {model_device}")
-                    
-                    # Verify model device and get dtype
-                    for name, param in self.rtdetr_model.named_parameters():
-                        if param is not None:
-                            model_device = param.device
-                            model_dtype = param.dtype
-                            logger.debug(f"Model parameters on {model_device} with dtype {model_dtype}")
-                            break
-                except Exception as e:
-                    logger.warning(f"Failed to move model or get properties: {e}")
+            device = torch.device('cuda' if self.use_gpu else 'cpu')
+            logger.info(f"Using device: {device}")
             
-            if TORCH_AVAILABLE:
-                # Process input tensors
-                new_inputs = {}
-                for k, v in inputs.items():
-                    if isinstance(v, torch.Tensor):
-                        try:
-                            # Single-step conversion to target device and dtype
-                            logger.debug(f"Converting tensor {k} from {v.device} {v.dtype} to {model_device} {model_dtype}")
-                            v = v.to(device=model_device, dtype=model_dtype)
-                            logger.debug(f"Tensor {k} now on {v.device} with dtype {v.dtype}")
-                        except Exception as e:
-                            logger.warning(f"Failed to convert tensor {k}: {e}")
-                            try:
-                                # Fallback: try two-step conversion
-                                logger.debug(f"Attempting two-step conversion for {k}")
-                                v = v.to(dtype=model_dtype)
-                                v = v.to(device=model_device)
-                            except Exception as e2:
-                                logger.warning(f"Two-step conversion failed for {k}: {e2}")
-                                # Last resort: keep on CPU with model's dtype
-                                v = v.cpu().to(dtype=model_dtype)
-                    new_inputs[k] = v
-                inputs = new_inputs
+            # Force model to target device in eval mode
+            self.rtdetr_model = self.rtdetr_model.to(device).eval()
+            
+            # Convert input tensors to FP32 on target device
+            new_inputs = {}
+            for k, v in inputs.items():
+                if isinstance(v, torch.Tensor):
+                    # Convert to FP32 first
+                    v = v.float()
+                    # Move to target device
+                    v = v.to(device)
+                new_inputs[k] = v
+            inputs = new_inputs
+            
+            # Verify all inputs are on correct device
+            for k, v in inputs.items():
+                if isinstance(v, torch.Tensor):
+                    # Compare device types instead of direct device comparison
+                    if v.device.type != device.type:
+                        logger.warning(f"Moving tensor {k} from {v.device} to {device}")
+                        v = v.to(device)
+                        inputs[k] = v
+            
+            # Use autocast for mixed precision on GPU
+            if self.use_gpu:
+                logger.debug("Using autocast for mixed precision")
+                ctx = torch.cuda.amp.autocast()
+                ctx.__enter__()
+            else:
+                ctx = None
+            
+            try:
+                # Run model with mixed precision if on GPU
+                outputs = self.rtdetr_model(**inputs)
             
             # Run inference with autocast when model is half/bfloat16 on CUDA
-            use_amp = TORCH_AVAILABLE and hasattr(model_device, 'type') and model_device.type == 'cuda' and (model_dtype in (torch.float16, torch.bfloat16))
-            autocast_dtype = model_dtype if model_dtype in (torch.float16, torch.bfloat16) else None
-            
+            finally:
+                if ctx is not None:
+                    ctx.__exit__(None, None, None)
+                    
             with torch.no_grad():
-                if use_amp and autocast_dtype is not None:
-                    with torch.autocast('cuda', dtype=autocast_dtype):
-                        outputs = self.rtdetr_model(**inputs)
+                # Process outputs after running model
+                target_sizes = torch.tensor([pil_image.size[::-1]]) if TORCH_AVAILABLE else None
+                if TORCH_AVAILABLE and hasattr(model_device, 'type') and model_device.type == "cuda":
+                    target_sizes = target_sizes.to(device)
                 else:
                     outputs = self.rtdetr_model(**inputs)
                 
