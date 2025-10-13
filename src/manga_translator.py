@@ -143,6 +143,121 @@ def is_mostly_contained(bigger_rect: Tuple, smaller_rect: Tuple, threshold: floa
     overlap_ratio = intersection_area / smaller_area
     return overlap_ratio >= threshold
 
+def merge_overlapping_boxes(
+    bboxes: List[Tuple],
+    containment_threshold: float = 0.3,
+    overlap_threshold: float = 0.5,
+) -> List[Tuple]:
+    """
+    Merge boxes that are mostly contained within each other, and
+    prune out duplicates/overlaps immediately as you go.
+    
+    This is CRITICAL for RT-DETR which often detects nested/overlapping regions.
+    Based on comic-translate's merge_overlapping_boxes implementation.
+    
+    Args:
+        bboxes: List of bounding boxes (x, y, w, h)
+        containment_threshold: Threshold for containment-based merging
+        overlap_threshold: Threshold for overlap-based filtering
+    
+    Returns:
+        List of merged and filtered bounding boxes
+    """
+    if not bboxes:
+        return []
+    
+    # Helper: Convert (x,y,w,h) to (x1,y1,x2,y2) for easier overlap checking
+    def to_xyxy(bbox):
+        x, y, w, h = bbox
+        return [x, y, x+w, y+h]
+    
+    # Helper: Convert (x1,y1,x2,y2) back to (x,y,w,h)
+    def to_xywh(bbox):
+        x1, y1, x2, y2 = bbox
+        return (x1, y1, x2-x1, y2-y1)
+    
+    # Helper: Merge two boxes (in xyxy format)
+    def merge_boxes(box1, box2):
+        return [
+            min(box1[0], box2[0]),
+            min(box1[1], box2[1]),
+            max(box1[2], box2[2]),
+            max(box1[3], box2[3])
+        ]
+    
+    # Helper: Check if inner box is mostly contained in outer box
+    def is_mostly_contained_boxes(outer_box, inner_box, threshold):
+        ix1, iy1, ix2, iy2 = inner_box
+        ox1, oy1, ox2, oy2 = outer_box
+        
+        inner_area = (ix2 - ix1) * (iy2 - iy1)
+        if inner_area == 0:
+            return False
+        
+        # Calculate intersection
+        intersection_area = max(0, min(ix2, ox2) - max(ix1, ox1)) * max(0, min(iy2, oy2) - max(iy1, oy1))
+        
+        return intersection_area / inner_area >= threshold
+    
+    # Helper: Calculate IoU
+    def calculate_iou(rect1, rect2):
+        x1 = max(rect1[0], rect2[0])
+        y1 = max(rect1[1], rect2[1])
+        x2 = min(rect1[2], rect2[2])
+        y2 = min(rect1[3], rect2[3])
+        
+        intersection_area = max(0, x2 - x1) * max(0, y2 - y1)
+        
+        rect1_area = (rect1[2] - rect1[0]) * (rect1[3] - rect1[1])
+        rect2_area = (rect2[2] - rect2[0]) * (rect2[3] - rect2[1])
+        
+        union_area = rect1_area + rect2_area - intersection_area
+        
+        return intersection_area / union_area if union_area != 0 else 0
+    
+    # Helper: Check if boxes overlap
+    def do_rectangles_overlap(rect1, rect2, iou_threshold):
+        return calculate_iou(rect1, rect2) >= iou_threshold
+    
+    # Convert all bboxes to xyxy format for processing
+    bboxes_xyxy = [to_xyxy(bbox) for bbox in bboxes]
+    
+    accepted = []
+    
+    for i, box in enumerate(bboxes_xyxy):
+        # 1) Merge this box against all others based on containment:
+        merged = box.copy()
+        for j, other in enumerate(bboxes_xyxy):
+            if i == j:
+                continue
+            if (is_mostly_contained_boxes(merged, other, containment_threshold)
+             or is_mostly_contained_boxes(other, merged, containment_threshold)):
+                merged = merge_boxes(merged, other)
+        
+        # 2) On-the-fly pruning: see if `merged` overlaps or duplicates any accepted box
+        conflict = False
+        for acc in accepted:
+            if merged == acc or do_rectangles_overlap(merged, acc, overlap_threshold):
+                conflict = True
+                break
+        
+        if conflict:
+            # skip this one entirely
+            continue
+        
+        # 3) Remove any already-accepted boxes that overlap too much with the new merged box
+        accepted = [
+            acc for acc in accepted
+            if not (acc == merged or do_rectangles_overlap(merged, acc, overlap_threshold))
+        ]
+        
+        # 4) Finally accept the new box
+        accepted.append(merged)
+    
+    # Convert back to (x,y,w,h) format
+    return [to_xywh(bbox) for bbox in accepted]
+
+
 def match_ocr_to_rtdetr_blocks(ocr_lines: List, rtdetr_blocks: List[Tuple], source_lang: str = 'ja', debug: bool = False) -> List[Dict]:
     """
     Match OCR text lines to RT-DETR detected blocks (comic-translate approach).
@@ -2807,6 +2922,37 @@ class MangaTranslator:
                                 idx += 1
                         
                         if all_regions:
+                            # CRITICAL: Merge overlapping/nested RT-DETR blocks BEFORE OCR processing
+                            # This prevents duplicate OCR on the same text (e.g., table of contents with nested boxes)
+                            original_count = len(all_regions)
+                            all_regions_merged = merge_overlapping_boxes(all_regions, containment_threshold=0.3, overlap_threshold=0.5)
+                            if len(all_regions_merged) < original_count:
+                                self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions_merged)} unique blocks (removed {original_count - len(all_regions_merged)} overlaps)")
+                            
+                            # Update all_regions with merged boxes and rebuild region_types mapping
+                            # Note: After merge, we need to reassign region types based on original types
+                            # For simplicity, check each merged box against original boxes to determine type
+                            new_region_types = {}
+                            for new_idx, merged_bbox in enumerate(all_regions_merged):
+                                # Check which original boxes this merged box came from
+                                mx, my, mw, mh = merged_bbox
+                                # Default to text_bubble, but if any contributing box was free_text, mark as free_text
+                                merged_type = 'text_bubble'
+                                for orig_idx, orig_bbox in enumerate(all_regions):
+                                    ox, oy, ow, oh = orig_bbox
+                                    # Check if original box overlaps significantly with merged box
+                                    overlap_x = max(0, min(mx+mw, ox+ow) - max(mx, ox))
+                                    overlap_y = max(0, min(my+mh, oy+oh) - max(my, oy))
+                                    if overlap_x > 0 and overlap_y > 0:
+                                        # Original box contributes to this merged box
+                                        if region_types.get(orig_idx) == 'free_text':
+                                            merged_type = 'free_text'
+                                            break
+                                new_region_types[new_idx] = merged_type
+                            
+                            all_regions = all_regions_merged
+                            region_types = new_region_types
+                            
                             self._log(f"📊 RT-DETR detected {len(all_regions)} text regions, OCR-ing each with Google Vision")
                             
                             # Load image for cropping
@@ -3252,6 +3398,15 @@ class MangaTranslator:
                         if not all_regions:
                             self._log("⚠️ No RT-DETR text regions found")
                         else:
+                            # CRITICAL: Merge overlapping/nested RT-DETR blocks BEFORE matching with OCR
+                            # RT-DETR often detects both large containing boxes and smaller nested boxes
+                            # (e.g., a big table of contents box + individual entry boxes)
+                            # Without merging, we get duplicate text rendered for every overlapping block
+                            original_count = len(all_regions)
+                            all_regions = merge_overlapping_boxes(all_regions, containment_threshold=0.3, overlap_threshold=0.5)
+                            if len(all_regions) < original_count:
+                                self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions)} unique blocks (removed {original_count - len(all_regions)} overlaps)")
+                            
                             # Step 1: Run OCR on FULL IMAGE (comic-translate approach)
                             # This is MUCH better for Azure Vision:
                             # - Preserves document layout context
@@ -4015,6 +4170,12 @@ class MangaTranslator:
                             # if 'bubbles' in rtdetr_detections:  # <-- REMOVE THIS
                             #     all_regions.extend(rtdetr_detections.get('bubbles', []))
                             
+                            # CRITICAL: Merge overlapping/nested RT-DETR blocks BEFORE OCR processing
+                            original_count = len(all_regions)
+                            all_regions = merge_overlapping_boxes(all_regions, containment_threshold=0.3, overlap_threshold=0.5)
+                            if len(all_regions) < original_count:
+                                self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions)} unique blocks (removed {original_count - len(all_regions)} overlaps)")
+                            
                             self._log(f"📊 Processing {len(all_regions)} text-containing regions (skipping empty bubbles)")
                             
                             # Clear detection results after extracting regions
@@ -4074,6 +4235,12 @@ class MangaTranslator:
                             if 'text_free' in rtdetr_detections:
                                 all_regions.extend(rtdetr_detections.get('text_free', []))
                             
+                            # CRITICAL: Merge overlapping/nested RT-DETR blocks BEFORE OCR processing
+                            original_count = len(all_regions)
+                            all_regions = merge_overlapping_boxes(all_regions, containment_threshold=0.3, overlap_threshold=0.5)
+                            if len(all_regions) < original_count:
+                                self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions)} unique blocks (removed {original_count - len(all_regions)} overlaps)")
+                            
                             self._log(f"📊 Processing {len(all_regions)} text regions with Qwen2-VL")
                             
                             # Check if parallel processing is enabled
@@ -4121,6 +4288,12 @@ class MangaTranslator:
                                 all_regions.extend(rtdetr_detections.get('text_bubbles', []))
                             if 'text_free' in rtdetr_detections:
                                 all_regions.extend(rtdetr_detections.get('text_free', []))
+                            
+                            # CRITICAL: Merge overlapping/nested RT-DETR blocks BEFORE sorting/processing
+                            original_count = len(all_regions)
+                            all_regions = merge_overlapping_boxes(all_regions, containment_threshold=0.3, overlap_threshold=0.5)
+                            if len(all_regions) < original_count:
+                                self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions)} unique blocks (removed {original_count - len(all_regions)} overlaps)")
                             
                             # Sort regions by manga reading order (comic-translate style)
                             if all_regions:
@@ -4205,6 +4378,12 @@ class MangaTranslator:
                             if 'text_free' in rtdetr_detections:
                                 all_regions.extend(rtdetr_detections.get('text_free', []))
                             
+                            # CRITICAL: Merge overlapping/nested RT-DETR blocks BEFORE sorting/processing
+                            original_count = len(all_regions)
+                            all_regions = merge_overlapping_boxes(all_regions, containment_threshold=0.3, overlap_threshold=0.5)
+                            if len(all_regions) < original_count:
+                                self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions)} unique blocks (removed {original_count - len(all_regions)} overlaps)")
+                            
                             # Sort regions by manga reading order (comic-translate style)
                             if all_regions:
                                 source_lang = ocr_settings.get('language_hints', ['ja'])[0] if ocr_settings.get('language_hints') else 'ja'
@@ -4279,6 +4458,12 @@ class MangaTranslator:
                             if 'text_free' in rtdetr_detections:
                                 all_regions.extend(rtdetr_detections.get('text_free', []))
                             
+                            # CRITICAL: Merge overlapping/nested RT-DETR blocks BEFORE sorting/processing
+                            original_count = len(all_regions)
+                            all_regions = merge_overlapping_boxes(all_regions, containment_threshold=0.3, overlap_threshold=0.5)
+                            if len(all_regions) < original_count:
+                                self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions)} unique blocks (removed {original_count - len(all_regions)} overlaps)")
+                            
                             # Sort regions by manga reading order (comic-translate style)
                             if all_regions:
                                 source_lang = ocr_settings.get('language_hints', ['ja'])[0] if ocr_settings.get('language_hints') else 'ja'
@@ -4336,6 +4521,12 @@ class MangaTranslator:
                                 all_regions.extend(rtdetr_detections.get('text_bubbles', []))
                             if 'text_free' in rtdetr_detections:
                                 all_regions.extend(rtdetr_detections.get('text_free', []))
+                            
+                            # CRITICAL: Merge overlapping/nested RT-DETR blocks BEFORE sorting/processing
+                            original_count = len(all_regions)
+                            all_regions = merge_overlapping_boxes(all_regions, containment_threshold=0.3, overlap_threshold=0.5)
+                            if len(all_regions) < original_count:
+                                self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions)} unique blocks (removed {original_count - len(all_regions)} overlaps)")
                             
                             # Sort regions by manga reading order (comic-translate style)
                             if all_regions:
@@ -4397,6 +4588,12 @@ class MangaTranslator:
                             if not all_regions:
                                 self._log("⚠️ No RT-DETR text regions found")
                             else:
+                                # CRITICAL: Merge overlapping/nested RT-DETR blocks BEFORE matching with OCR
+                                original_count = len(all_regions)
+                                all_regions = merge_overlapping_boxes(all_regions, containment_threshold=0.3, overlap_threshold=0.5)
+                                if len(all_regions) < original_count:
+                                    self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions)} unique blocks (removed {original_count - len(all_regions)} overlaps)")
+                                
                                 # Step 1: Run OCR on FULL IMAGE (comic-translate approach)
                                 # This is MUCH better for Azure Document Intelligence:
                                 # - Preserves document layout context
@@ -4617,6 +4814,12 @@ class MangaTranslator:
                             if not all_regions:
                                 self._log("⚠️ No RT-DETR text regions found")
                             else:
+                                # CRITICAL: Merge overlapping/nested RT-DETR blocks BEFORE matching with OCR
+                                original_count = len(all_regions)
+                                all_regions = merge_overlapping_boxes(all_regions, containment_threshold=0.3, overlap_threshold=0.5)
+                                if len(all_regions) < original_count:
+                                    self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions)} unique blocks (removed {original_count - len(all_regions)} overlaps)")
+                                
                                 # Step 1: Run OCR on FULL IMAGE (comic-translate approach)
                                 self._log(f"📊 Step 1: Running RapidOCR on full image to detect text lines")
                                 full_image_ocr = self.ocr_manager.detect_text(
