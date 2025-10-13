@@ -2612,7 +2612,14 @@ class LocalInpainter:
                     mask_tensor = torch.from_numpy(mask_binary).unsqueeze(0).unsqueeze(0).float()
                     
                     # Move to device
-                    image_tensor = image_tensor.to(self.device)
+                    # First convert to float32 on CPU, then move to device and match model dtype
+                    image_tensor = image_tensor.cpu().float().to(device=self.device)
+                    if TORCH_AVAILABLE and torch is not None and self.model is not None:
+                        try:
+                            model_dtype = next(self.model.parameters()).dtype
+                            image_tensor = image_tensor.to(dtype=model_dtype)
+                        except Exception as e:
+                            logger.warning(f"Could not match model dtype: {e}")
                     mask_tensor = mask_tensor.to(self.device)
                     
                     # Optional FP16 on GPU for lower VRAM

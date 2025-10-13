@@ -935,12 +935,16 @@ class BubbleDetector:
                 model_device = torch.device('cpu') if TORCH_AVAILABLE else 'cpu'
             
             if TORCH_AVAILABLE:
+                # First move tensors to CPU, convert to float32, then move to target device and dtype
                 new_inputs = {}
                 for k, v in inputs.items():
                     if isinstance(v, torch.Tensor):
-                        # First move to device, then optionally cast dtype
                         try:
+                            # Start fresh on CPU with float32
+                            v = v.cpu().float()
+                            # Then move to target device
                             v = v.to(device=model_device)
+                            # Finally convert to target dtype if needed
                             if model_dtype is not None and torch.is_floating_point(v):
                                 v = v.to(dtype=model_dtype)
                         except Exception as e:
