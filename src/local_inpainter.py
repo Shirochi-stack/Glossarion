@@ -2611,15 +2611,48 @@ class LocalInpainter:
                     image_tensor = torch.from_numpy(image_norm).permute(2, 0, 1).unsqueeze(0).float()
                     mask_tensor = torch.from_numpy(mask_binary).unsqueeze(0).unsqueeze(0).float()
                     
-                    # Move to device
-                    # First convert to float32 on CPU, then move to device and match model dtype
-                    image_tensor = image_tensor.cpu().float().to(device=self.device)
-                    if TORCH_AVAILABLE and torch is not None and self.model is not None:
+                    # Move to device with proper type handling
+                    if TORCH_AVAILABLE and torch is not None:
                         try:
-                            model_dtype = next(self.model.parameters()).dtype
-                            image_tensor = image_tensor.to(dtype=model_dtype)
+                            # Determine model dtype
+                            model_dtype = None
+                            if self.model is not None:
+                                try:
+                                    for param in self.model.parameters():
+                                        if param is not None:
+                                            model_dtype = param.dtype
+                                            break
+                                except Exception:
+                                    pass
+                            
+                            # If on GPU and no dtype found, default to FP16
+                            if model_dtype is None and self.device == 'cuda':
+                                model_dtype = torch.float16
+                            elif model_dtype is None:
+                                model_dtype = torch.float32
+                            
+                            # Handle tensor conversion
+                            try:
+                                # First ensure we're on CPU with float32
+                                image_tensor = image_tensor.cpu().float()
+                                # Convert to target precision
+                                if torch.is_floating_point(image_tensor):
+                                    image_tensor = image_tensor.to(dtype=model_dtype)
+                                # Move to target device
+                                image_tensor = image_tensor.to(device=self.device)
+                            except Exception as e:
+                                logger.warning(f"Stepwise tensor conversion failed: {e}")
+                                # Fallback: try direct conversion
+                                try:
+                                    image_tensor = image_tensor.to(device=self.device, dtype=model_dtype)
+                                except Exception as e2:
+                                    logger.warning(f"Direct tensor conversion failed: {e2}")
+                                    # Last resort: stay on CPU with float32
+                                    image_tensor = image_tensor.cpu().float()
                         except Exception as e:
-                            logger.warning(f"Could not match model dtype: {e}")
+                            logger.warning(f"Tensor processing error: {e}")
+                            # Emergency fallback: ensure we have a valid tensor
+                            image_tensor = image_tensor.cpu().float()
                     mask_tensor = mask_tensor.to(self.device)
                     
                     # Optional FP16 on GPU for lower VRAM

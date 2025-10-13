@@ -918,44 +918,47 @@ class BubbleDetector:
             inputs = self.rtdetr_processor(images=pil_image, return_tensors="pt")
             
             # Move inputs to the same device as the model and match model dtype for floating tensors
-            # Get model device and dtype
-            model_device = None
-            model_dtype = None
+            # First ensure model is on correct device and get its properties
+            model_device = torch.device('cuda' if self.use_gpu else 'cpu')
+            model_dtype = torch.float16 if self.use_gpu else torch.float32
+            
+            # Ensure model is on the correct device
             if TORCH_AVAILABLE and self.rtdetr_model is not None:
                 try:
+                    self.rtdetr_model = self.rtdetr_model.to(device=model_device)
+                    logger.debug(f"Model moved to {model_device}")
+                    
+                    # Verify model device and get dtype
                     for name, param in self.rtdetr_model.named_parameters():
                         if param is not None:
                             model_device = param.device
                             model_dtype = param.dtype
+                            logger.debug(f"Model parameters on {model_device} with dtype {model_dtype}")
                             break
-                except Exception:
-                    pass
-            
-            if model_device is None:
-                model_device = torch.device('cuda' if self.use_gpu else 'cpu')
-            if model_dtype is None and self.use_gpu:
-                model_dtype = torch.float16  # Default to FP16 on GPU for RT-DETR
+                except Exception as e:
+                    logger.warning(f"Failed to move model or get properties: {e}")
             
             if TORCH_AVAILABLE:
-                # Process input tensors with proper type conversion
+                # Process input tensors
                 new_inputs = {}
                 for k, v in inputs.items():
                     if isinstance(v, torch.Tensor):
                         try:
-                            # Reset to float32 on CPU first
-                            v = v.cpu().float()
-                            # Convert to target precision before moving to GPU
-                            if model_dtype is not None and torch.is_floating_point(v):
-                                v = v.to(dtype=model_dtype)
-                            # Finally move to target device
-                            v = v.to(device=model_device)
+                            # Single-step conversion to target device and dtype
+                            logger.debug(f"Converting tensor {k} from {v.device} {v.dtype} to {model_device} {model_dtype}")
+                            v = v.to(device=model_device, dtype=model_dtype)
+                            logger.debug(f"Tensor {k} now on {v.device} with dtype {v.dtype}")
                         except Exception as e:
-                            logger.warning(f"Failed to process tensor {k}: {e}")
-                            # Emergency fallback - try basic device move
+                            logger.warning(f"Failed to convert tensor {k}: {e}")
                             try:
-                                v = v.to(device=model_device, dtype=model_dtype if model_dtype is not None else v.dtype)
-                            except Exception:
-                                v = v.cpu()
+                                # Fallback: try two-step conversion
+                                logger.debug(f"Attempting two-step conversion for {k}")
+                                v = v.to(dtype=model_dtype)
+                                v = v.to(device=model_device)
+                            except Exception as e2:
+                                logger.warning(f"Two-step conversion failed for {k}: {e2}")
+                                # Last resort: keep on CPU with model's dtype
+                                v = v.cpu().to(dtype=model_dtype)
                     new_inputs[k] = v
                 inputs = new_inputs
             
