@@ -683,22 +683,14 @@ def open_other_settings(self):
     main_layout.setContentsMargins(5, 5, 5, 5)  # Set uniform margins
     main_layout.setSpacing(8)  # Set spacing between widgets
 
-    # Set up icon path for both Python and .exe environments
-    try:
-        arrow_url = 'Halgakos.ico'  # Default for Python environment
-        if getattr(sys, 'frozen', False):
-            # In .exe environment, use absolute path
-            icon_path = os.path.join(sys._MEIPASS, 'Halgakos.ico')
-            if os.path.exists(icon_path):
-                from PySide6.QtCore import QUrl
-                arrow_url = QUrl.fromLocalFile(icon_path).toString()
-    except Exception:
-        arrow_url = 'Halgakos.ico'
+    # Set up icon path
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
 
     # Apply global stylesheet for blue checkboxes (from manga integration)
+    # Back to regular string concatenation which was working before
     checkbox_radio_style = """
         QComboBox::down-arrow {
-            image: url(%s);
+            image: url(""" + icon_path.replace('\\', '/') + """);
             width: 16px;
             height: 16px;
         }
@@ -758,7 +750,7 @@ def open_other_settings(self):
     scroll = QScrollArea()
     scroll.setWidgetResizable(True)
     container = QWidget()
-    container.setStyleSheet(checkbox_radio_style % arrow_url)  # Apply global stylesheet with arrow icon
+    container.setStyleSheet(checkbox_radio_style)  # Apply global stylesheet
     grid = QGridLayout(container)
     grid.setColumnStretch(0, 1)
     grid.setColumnStretch(1, 1)

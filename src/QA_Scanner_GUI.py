@@ -1602,6 +1602,9 @@ class QAScannerMixin:
         # Create settings dialog
         dialog = QDialog(parent_dialog)
         # Apply basic dark stylesheet IMMEDIATELY to prevent white flash
+        # Set up icon path
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+        
         dialog.setStyleSheet("""
             QDialog {
                 background-color: #2d2d2d;
@@ -1648,7 +1651,7 @@ class QAScannerMixin:
                 border-left: 1px solid #555;
             }
             QComboBox::down-arrow {
-                image: url(Halgakos.ico);
+                image: url(""" + icon_path.replace('\\', '/') + """);
                 width: 16px;
                 height: 16px;
             }

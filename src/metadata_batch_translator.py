@@ -1174,6 +1174,20 @@ class MetadataBatchTranslatorUI:
         self.output_lang_combo.setEditable(True)
         self.output_lang_combo.setCurrentText(self.gui.config.get('output_language', 'English'))
         self.output_lang_combo.setFixedWidth(250)
+            
+        # Set up icon path
+        try:
+            if getattr(sys, 'frozen', False):
+                # In .exe environment
+                icon_path = os.path.join(sys._MEIPASS, 'Halgakos.ico')
+            else:
+                # In Python environment
+                icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+                if not os.path.exists(icon_path):
+                    icon_path = os.path.join(os.getcwd(), 'Halgakos.ico')
+        except Exception:
+            icon_path = os.path.join(os.getcwd(), 'Halgakos.ico')
+            
         self.output_lang_combo.setStyleSheet("""
             QComboBox {
                 background-color: #1e1e1e;

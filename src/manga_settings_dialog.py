@@ -516,6 +516,9 @@ class MangaSettingsDialog(QDialog):
             pass  # Fail silently if icon can't be loaded
             
         # Apply overall dark theme styling
+        # Set up icon path
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+        
         self.setStyleSheet("""
             QDialog {
                 background-color: #1e1e1e;
@@ -594,7 +597,7 @@ class MangaSettingsDialog(QDialog):
                 border-left: 1px solid #3a3a3a;
             }
             QComboBox::down-arrow {
-                image: url(Halgakos.ico);
+                image: url(""" + icon_path.replace('\\', '/') + """);
                 width: 16px;
                 height: 16px;
             }
