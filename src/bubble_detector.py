@@ -949,36 +949,33 @@ class BubbleDetector:
             # Use autocast for mixed precision on GPU
             if device.type == "cuda":
                 logger.debug("Using autocast for mixed precision")
-                ctx = torch.cuda.amp.autocast()
-                ctx.__enter__()
+                with torch.cuda.amp.autocast():
+                    outputs = self.rtdetr_model(**inputs)
             else:
-                ctx = None
-            
-            try:
-                # Run model with mixed precision if on GPU
                 outputs = self.rtdetr_model(**inputs)
             
-            # Run inference with autocast when model is half/bfloat16 on CUDA
-            finally:
-                if ctx is not None:
-                    ctx.__exit__(None, None, None)
-                    
+            # Post-process results
             with torch.no_grad():
-                # Process outputs after running model
-                target_sizes = torch.tensor([pil_image.size[::-1]]) if TORCH_AVAILABLE else None
+                target_sizes = torch.tensor([pil_image.size[::-1]], device=device) if TORCH_AVAILABLE else None
+                
+                results = self.rtdetr_processor.post_process_object_detection(
+                    outputs,
+                    target_sizes=target_sizes,
+                    threshold=confidence
+                )[0]
                 if TORCH_AVAILABLE and device.type == "cuda":
                     target_sizes = target_sizes.to(device)
                 else:
                     outputs = self.rtdetr_model(**inputs)
                 
-                # Brief pause for stability after inference
+            # Brief pause for stability after inference
                 time.sleep(0.1)
                 logger.debug("💤 RT-DETR inference pausing briefly for stability")
             
             # Post-process results
             target_sizes = torch.tensor([pil_image.size[::-1]]) if TORCH_AVAILABLE else None
-            if TORCH_AVAILABLE and hasattr(model_device, 'type') and model_device.type == "cuda":
-                target_sizes = target_sizes.to(model_device)
+            if TORCH_AVAILABLE and device.type == "cuda":
+                target_sizes = target_sizes.to(device)
             
             results = self.rtdetr_processor.post_process_object_detection(
                 outputs,
