@@ -143,6 +143,108 @@ def is_mostly_contained(bigger_rect: Tuple, smaller_rect: Tuple, threshold: floa
     overlap_ratio = intersection_area / smaller_area
     return overlap_ratio >= threshold
 
+def set_should_inpaint_from_bubble_type(region, ocr_settings, main_gui):
+    """
+    Set region.should_inpaint based on region.bubble_type and the detect_free_text toggle.
+    
+    Simple helper that checks:
+    - If bubble_type is 'free_text': respect the detect_free_text toggle
+    - Otherwise (text_bubble, etc.): always inpaint
+    
+    Args:
+        region: TextRegion object with bubble_type attribute
+        ocr_settings: OCR settings dictionary
+        main_gui: Main GUI reference for live settings
+    
+    Returns:
+        None (modifies region.should_inpaint in-place)
+    """
+    if getattr(region, 'bubble_type', None) == 'free_text':
+        # Read from live GUI config for immediate setting changes
+        live_detect_free = None
+        try:
+            if main_gui and hasattr(main_gui, 'config'):
+                live_detect_free = main_gui.config.get('manga_settings', {}).get('ocr', {}).get('detect_free_text')
+        except Exception:
+            live_detect_free = None
+        # Fallback to ocr_settings if GUI not available
+        cfg_detect_free = ocr_settings.get('detect_free_text', True) if isinstance(ocr_settings, dict) else True
+        detect_free = cfg_detect_free if (live_detect_free is None) else bool(live_detect_free)
+        region.should_inpaint = bool(detect_free)
+    else:
+        # Text bubbles and other types always get inpainted
+        region.should_inpaint = True
+
+
+def classify_rtdetr_region_and_set_inpaint(region, bbox, rtdetr_detections, ocr_settings, main_gui, log_func=None):
+    """
+    Classify a region based on RT-DETR detection class and set should_inpaint flag.
+    
+    Args:
+        region: TextRegion object to classify
+        bbox: Bounding box tuple (x, y, w, h)
+        rtdetr_detections: Dictionary with 'text_bubbles', 'text_free', 'bubbles' keys
+        ocr_settings: OCR settings dictionary
+        main_gui: Main GUI reference for live settings
+        log_func: Optional logging function
+    
+    Returns:
+        None (modifies region in-place)
+    """
+    # Helper to normalize boxes to int tuples
+    def _norm_box(b):
+        try:
+            x, y, w, h = b[:4]
+            return (int(round(x)), int(round(y)), int(round(w)), int(round(h)))
+        except Exception:
+            return tuple(b)
+    
+    # Build quick-lookup sets for class membership
+    text_bubble_set = set(_norm_box(b) for b in rtdetr_detections.get('text_bubbles', []) or [])
+    free_text_set = set(_norm_box(b) for b in rtdetr_detections.get('text_free', []) or [])
+    empty_bubble_set = set(_norm_box(b) for b in rtdetr_detections.get('bubbles', []) or [])
+    
+    # Normalize the input bbox
+    norm_bbox = _norm_box(bbox)
+    
+    # Classify by RT-DETR class membership
+    if norm_bbox in free_text_set:
+        # Always read from live GUI config for immediate setting changes
+        live_detect_free = None
+        try:
+            # First try getting from live GUI config
+            if main_gui and hasattr(main_gui, 'config'):
+                live_detect_free = main_gui.config.get('manga_settings', {}).get('ocr', {}).get('detect_free_text')
+        except Exception:
+            live_detect_free = None
+        # Fallback to local settings if GUI not available
+        cfg_detect_free = ocr_settings.get('detect_free_text', True) if isinstance(ocr_settings, dict) else True
+        detect_free = cfg_detect_free if (live_detect_free is None) else bool(live_detect_free)
+        
+        region.region_type = 'free_text'
+        region.bubble_type = 'free_text'
+        region.should_inpaint = bool(detect_free)
+        
+        if log_func:
+            if detect_free:
+                log_func(f"📝 Classified RT-DETR block as FREE TEXT (ENABLED): {norm_bbox}", "info")
+            else:
+                log_func(f"📝 Classified RT-DETR block as FREE TEXT (DISABLED by toggle) — will NOT inpaint: {norm_bbox}", "info")
+    elif norm_bbox in text_bubble_set or norm_bbox in empty_bubble_set:
+        region.region_type = 'text_bubble'
+        region.bubble_type = 'text_bubble'
+        region.should_inpaint = True
+        if log_func:
+            log_func(f"💬 Classified RT-DETR block as TEXT BUBBLE: {norm_bbox}", "info")
+    else:
+        # Fallback - default to text_bubble with inpainting
+        region.region_type = 'text_block'
+        region.bubble_type = 'text_bubble'
+        region.should_inpaint = True
+        if log_func:
+            log_func(f"⚠️ RT-DETR block not found in class sets, defaulting to text_bubble: {norm_bbox}", "warning")
+
+
 def merge_overlapping_boxes(
     bboxes: List[Tuple],
     containment_threshold: float = 0.3,
@@ -3045,6 +3147,11 @@ class MangaTranslator:
                                             )
                                             # Assign bubble_type from RT-DETR detection
                                             region.bubble_type = region_types.get(region_idx, 'text_bubble')
+                                            # Set should_inpaint based on bubble_type and toggle
+                                            set_should_inpaint_from_bubble_type(
+                                                region, ocr_settings,
+                                                self.main_gui if hasattr(self, 'main_gui') else None
+                                            )
                                             if not getattr(self, 'concise_logs', False):
                                                 self._log(f"✅ Region {i}/{len(all_regions)} ({region.bubble_type}): {region_text[:50]}...")
                                             return region
@@ -3108,6 +3215,11 @@ class MangaTranslator:
                                                         # Reclassify as free text
                                                         old_type = region.bubble_type
                                                         region.bubble_type = 'free_text'
+                                                        # Set should_inpaint based on free text toggle
+                                                        set_should_inpaint_from_bubble_type(
+                                                            region, ocr_settings,
+                                                            self.main_gui if hasattr(self, 'main_gui') else None
+                                                        )
                                                         reclassified_count += 1
                                                         self._log(f"      ✅ RECLASSIFIED '{region.text[:30]}...' from {old_type} to free_text", "info")
                                                         break
@@ -3172,7 +3284,11 @@ class MangaTranslator:
                                                         region_type='text_block'
                                                     )
                                                     merged_region.bubble_type = 'free_text'
-                                                    merged_region.should_inpaint = True
+                                                    # Set should_inpaint based on free text toggle
+                                                    set_should_inpaint_from_bubble_type(
+                                                        merged_region, ocr_settings,
+                                                        self.main_gui if hasattr(self, 'main_gui') else None
+                                                    )
                                                     merged_free_text.append(merged_region)
                                                     self._log(f"🔀 Merged {len(group)} free_text regions into one: '{merged_text[:50]}...'", "debug")
                                                 else:
@@ -3501,36 +3617,12 @@ class MangaTranslator:
                                     # Use RT-DETR bubble bounds for rendering
                                     region.bubble_bounds = bbox
 
-                                    # Classify by RT-DETR class membership
-                                    if bbox in free_text_set:
-                                        # Always read from live GUI config for immediate setting changes
-                                        live_detect_free = None
-                                        try:
-                                            # First try getting from live GUI config
-                                            if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'config'):
-                                                live_detect_free = self.main_gui.config.get('manga_settings', {}).get('ocr', {}).get('detect_free_text')
-                                        except Exception:
-                                            live_detect_free = None
-                                        # Fallback to local settings if GUI not available
-                                        cfg_detect_free = ocr_settings.get('detect_free_text', True) if isinstance(ocr_settings, dict) else True
-                                        detect_free = cfg_detect_free if (live_detect_free is None) else bool(live_detect_free)
-                                        self._log(f"   • Free text detection: {detect_free} (from {'GUI' if live_detect_free is not None else 'config'})", "debug")
-
-                                        region.region_type = 'free_text'
-                                        region.bubble_type = 'free_text'
-                                        region.should_inpaint = bool(detect_free)
-                                        if detect_free:
-                                            self._log(f"📝 Classified RT-DETR block as FREE TEXT (ENABLED): {bbox}", "info")
-                                        else:
-                                            self._log(f"📝 Classified RT-DETR block as FREE TEXT (DISABLED by toggle) — will NOT inpaint: {bbox}", "info")
-                                    elif bbox in text_bubble_set or bbox in empty_bubble_set:
-                                        region.region_type = 'text_bubble'
-                                        region.bubble_type = 'text_bubble'
-                                        region.should_inpaint = True
-                                        self._log(f"💬 Classified RT-DETR block as TEXT BUBBLE: {bbox}", "info")
-                                    else:
-                                        # Fallback
-                                        self._log(f"⚠️ RT-DETR block not found in class sets, leaving as text_block: {bbox}", "warning")
+                                    # Classify by RT-DETR class membership and set should_inpaint
+                                    classify_rtdetr_region_and_set_inpaint(
+                                        region, bbox, rtdetr_detections, ocr_settings, 
+                                        self.main_gui if hasattr(self, 'main_gui') else None,
+                                        log_func=self._log
+                                    )
 
                                     regions.append(region)
                                 
@@ -4178,8 +4270,10 @@ class MangaTranslator:
                             
                             self._log(f"📊 Processing {len(all_regions)} text-containing regions (skipping empty bubbles)")
                             
-                            # Clear detection results after extracting regions
-                            rtdetr_detections = None
+                            # CRITICAL: Preserve rtdetr_detections for classification during TextRegion conversion
+                            # Store in instance variable so we can classify regions later
+                            self._current_rtdetr_detections = rtdetr_detections
+                            self._log(f"🔑 Preserved RT-DETR detections for free text classification", "debug")
                             
                             # Check if parallel processing is enabled
                             if self.parallel_processing and len(all_regions) > 1:
@@ -4242,6 +4336,10 @@ class MangaTranslator:
                                 self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions)} unique blocks (removed {original_count - len(all_regions)} overlaps)")
                             
                             self._log(f"📊 Processing {len(all_regions)} text regions with Qwen2-VL")
+                            
+                            # CRITICAL: Preserve rtdetr_detections for classification during TextRegion conversion
+                            self._current_rtdetr_detections = rtdetr_detections
+                            self._log(f"🔑 Preserved RT-DETR detections for free text classification", "debug")
                             
                             # Check if parallel processing is enabled
                             if self.parallel_processing and len(all_regions) > 1:
@@ -4308,8 +4406,9 @@ class MangaTranslator:
                             
                             self._log(f"📊 Processing {len(all_regions)} text regions with Custom API")
                             
-                            # Clear detections after extracting regions
-                            rtdetr_detections = None
+                            # CRITICAL: Preserve rtdetr_detections for classification during TextRegion conversion
+                            self._current_rtdetr_detections = rtdetr_detections
+                            self._log(f"🔑 Preserved RT-DETR detections for free text classification", "debug")
                             
                             # Decide parallelization for custom-api:
                             # Use API batch mode OR local parallel toggle so that API calls can run in parallel
@@ -4335,6 +4434,7 @@ class MangaTranslator:
                             
                             # Clear regions list after processing
                             all_regions = None
+                            # Note: rtdetr_detections preserved in self._current_rtdetr_detections
                     else:
                         # Process full image without bubble detection
                         self._log("📝 Processing full image with Custom API")
@@ -4396,6 +4496,10 @@ class MangaTranslator:
                                 self._log(f"📖 Sorted {len(all_regions)} RT-DETR regions ({direction})")
                             
                             self._log(f"📊 Processing {len(all_regions)} text regions with EasyOCR")
+                            
+                            # CRITICAL: Preserve rtdetr_detections for classification during TextRegion conversion
+                            self._current_rtdetr_detections = rtdetr_detections
+                            self._log(f"🔑 Preserved RT-DETR detections for free text classification", "debug")
                             
                             # Check if parallel processing is enabled
                             if self.parallel_processing and len(all_regions) > 1:
@@ -4477,6 +4581,10 @@ class MangaTranslator:
                             
                             self._log(f"📊 Processing {len(all_regions)} text regions with PaddleOCR")
                             
+                            # CRITICAL: Preserve rtdetr_detections for classification during TextRegion conversion
+                            self._current_rtdetr_detections = rtdetr_detections
+                            self._log(f"🔑 Preserved RT-DETR detections for free text classification", "debug")
+                            
                             # Check if parallel processing is enabled
                             if self.parallel_processing and len(all_regions) > 1:
                                 self._log(f"🚀 Using PARALLEL OCR for {len(all_regions)} regions with PaddleOCR")
@@ -4540,6 +4648,10 @@ class MangaTranslator:
                                 self._log(f"📖 Sorted {len(all_regions)} RT-DETR regions ({direction})")
                             
                             self._log(f"📊 Processing {len(all_regions)} text regions with DocTR")
+                            
+                            # CRITICAL: Preserve rtdetr_detections for classification during TextRegion conversion
+                            self._current_rtdetr_detections = rtdetr_detections
+                            self._log(f"🔑 Preserved RT-DETR detections for free text classification", "debug")
                             
                             # Check if parallel processing is enabled
                             if self.parallel_processing and len(all_regions) > 1:
@@ -4635,8 +4747,21 @@ class MangaTranslator:
                                                                (bbox[0]+bbox[2], bbox[1]+bbox[3]), (bbox[0], bbox[1]+bbox[3])]
                                                 self.confidence = 0.9  # High confidence since RT-DETR detected it
                                                 self.bubble_bounds = bbox  # Use RT-DETR bounds for rendering
+                                                # Initialize attributes for classification
+                                                self.region_type = 'text_block'
+                                                self.bubble_type = 'text_bubble'
+                                                self.should_inpaint = True
                                         
                                         result = OCRResult(block_data['text'], block_data['bbox'])
+                                        
+                                        # CRITICAL: Classify by RT-DETR class and set should_inpaint flag
+                                        # This enables free text inpainting exclusion
+                                        classify_rtdetr_region_and_set_inpaint(
+                                            result, result.bbox, rtdetr_detections, ocr_settings,
+                                            self.main_gui if hasattr(self, 'main_gui') else None,
+                                            log_func=self._log
+                                        )
+                                        
                                         ocr_results.append(result)
                                     
                                     self._log(f"✅ Matched text to {len(ocr_results)} RT-DETR blocks (comic-translate style)")
@@ -4852,8 +4977,21 @@ class MangaTranslator:
                                                                    (bbox[0]+bbox[2], bbox[1]+bbox[3]), (bbox[0], bbox[1]+bbox[3])]
                                                     self.confidence = 0.9  # High confidence since RT-DETR detected it
                                                     self.bubble_bounds = bbox  # Use RT-DETR bounds for rendering
+                                                    # Initialize attributes for classification
+                                                    self.region_type = 'text_block'
+                                                    self.bubble_type = 'text_bubble'
+                                                    self.should_inpaint = True
                                             
                                             result = OCRResult(block_data['text'], block_data['bbox'])
+                                            
+                                            # CRITICAL: Classify by RT-DETR class and set should_inpaint flag
+                                            # This enables free text inpainting exclusion
+                                            classify_rtdetr_region_and_set_inpaint(
+                                                result, result.bbox, rtdetr_detections, ocr_settings,
+                                                self.main_gui if hasattr(self, 'main_gui') else None,
+                                                log_func=self._log
+                                            )
+                                            
                                             ocr_results.append(result)
                                     
                                     self._log(f"✅ Matched text to {len(ocr_results)} RT-DETR blocks (comic-translate style)")
@@ -4863,8 +5001,9 @@ class MangaTranslator:
                                 else:
                                     self._log("⚠️ RapidOCR found no text lines in full image")
                             
-                            # Clear detections
-                            rtdetr_detections = None
+                            # CRITICAL: Preserve rtdetr_detections for classification during TextRegion conversion
+                            self._current_rtdetr_detections = rtdetr_detections
+                            self._log(f"🔑 Preserved RT-DETR detections for free text classification", "debug")
                             all_regions = None
                     else:
                         # Process full image without bubble detection
@@ -4935,6 +5074,18 @@ class MangaTranslator:
                             self._log(f"   ℹ️ OCR result has no bubble_bounds attribute", "debug")
                     
                     region = TextRegion(**region_kwargs)
+                    
+                    # CRITICAL: Apply RT-DETR classification if detections were preserved
+                    # This enables free text inpainting exclusion for cropped-region providers
+                    if hasattr(self, '_current_rtdetr_detections') and self._current_rtdetr_detections:
+                        # Get the bbox to classify (prefer bubble_bounds if available)
+                        classify_bbox = result.bubble_bounds if hasattr(result, 'bubble_bounds') and result.bubble_bounds else result.bbox
+                        classify_rtdetr_region_and_set_inpaint(
+                            region, classify_bbox, self._current_rtdetr_detections, ocr_settings,
+                            self.main_gui if hasattr(self, 'main_gui') else None,
+                            log_func=self._log
+                        )
+                    
                     regions.append(region)
                     if not getattr(self, 'concise_logs', False):
                         self._log(f"   Found text ({result.confidence:.2f}): {cleaned_result_text[:50]}...")
@@ -4985,6 +5136,10 @@ class MangaTranslator:
                 regions = self._merge_nearby_regions(regions, threshold=merge_threshold)
             
             self._log(f"✅ Detected {len(regions)} text regions after merging")
+            
+            # Clear preserved RT-DETR detections to avoid persistence across images
+            if hasattr(self, '_current_rtdetr_detections'):
+                self._current_rtdetr_detections = None
             
             # Apply manga reading order sorting (comic-translate style)
             # This ensures proper translation mapping for all providers
@@ -5437,7 +5592,11 @@ class MangaTranslator:
                 )
                 try:
                     region.bubble_type = 'free_text' if roi.get('type') == 'free_text' else 'text_bubble'
-                    region.should_inpaint = True
+                    # Set should_inpaint based on bubble_type and toggle
+                    set_should_inpaint_from_bubble_type(
+                        region, ocr_settings,
+                        self.main_gui if hasattr(self, 'main_gui') else None
+                    )
                 except Exception:
                     pass
                 results.append(region)
@@ -5523,7 +5682,11 @@ class MangaTranslator:
                 )
                 try:
                     region.bubble_type = 'free_text' if roi.get('type') == 'free_text' else 'text_bubble'
-                    region.should_inpaint = True
+                    # Set should_inpaint based on bubble_type and toggle
+                    set_should_inpaint_from_bubble_type(
+                        region, ocr_settings,
+                        self.main_gui if hasattr(self, 'main_gui') else None
+                    )
                 except Exception:
                     pass
                 results.append(region)
@@ -5561,7 +5724,11 @@ class MangaTranslator:
                 )
                 try:
                     region.bubble_type = 'free_text' if roi.get('type') == 'free_text' else 'text_bubble'
-                    region.should_inpaint = True
+                    # Set should_inpaint based on bubble_type and toggle
+                    set_should_inpaint_from_bubble_type(
+                        region, ocr_settings,
+                        self.main_gui if hasattr(self, 'main_gui') else None
+                    )
                 except Exception:
                     pass
                 cached_regions.append(region)
@@ -5650,7 +5817,11 @@ class MangaTranslator:
                 )
                 try:
                     region.bubble_type = 'free_text' if roi.get('type') == 'free_text' else 'text_bubble'
-                    region.should_inpaint = True
+                    # Set should_inpaint based on bubble_type and toggle
+                    set_should_inpaint_from_bubble_type(
+                        region, ocr_settings,
+                        self.main_gui if hasattr(self, 'main_gui') else None
+                    )
                 except Exception:
                     pass
                 return region
