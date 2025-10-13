@@ -4409,24 +4409,144 @@ class MangaTranslator:
                                     # Convert matched blocks to OCR results
                                     ocr_results = []
                                     for block_data in matched_blocks:
-                                        if block_data['text'].strip():  # Only include blocks with text
-                                            # Create OCR result object
-                                            class OCRResult:
-                                                def __init__(self, text, bbox):
-                                                    self.text = text
-                                                    self.bbox = bbox
-                                                    self.vertices = [(bbox[0], bbox[1]), (bbox[0]+bbox[2], bbox[1]),
-                                                                   (bbox[0]+bbox[2], bbox[1]+bbox[3]), (bbox[0], bbox[1]+bbox[3])]
-                                                    self.confidence = 0.9  # High confidence since RT-DETR detected it
-                                                    self.bubble_bounds = bbox  # Use RT-DETR bounds for rendering
-                                            
-                                            result = OCRResult(block_data['text'], block_data['bbox'])
-                                            ocr_results.append(result)
+                                        # CRITICAL: Include ALL blocks (even empty ones) for fallback OCR
+                                        # Empty blocks will be processed by fallback OCR
+                                        # Create OCR result object
+                                        class OCRResult:
+                                            def __init__(self, text, bbox):
+                                                self.text = text
+                                                self.bbox = bbox
+                                                self.vertices = [(bbox[0], bbox[1]), (bbox[0]+bbox[2], bbox[1]),
+                                                               (bbox[0]+bbox[2], bbox[1]+bbox[3]), (bbox[0], bbox[1]+bbox[3])]
+                                                self.confidence = 0.9  # High confidence since RT-DETR detected it
+                                                self.bubble_bounds = bbox  # Use RT-DETR bounds for rendering
+                                        
+                                        result = OCRResult(block_data['text'], block_data['bbox'])
+                                        ocr_results.append(result)
                                     
                                     self._log(f"✅ Matched text to {len(ocr_results)} RT-DETR blocks (comic-translate style)")
+                                    empty_blocks_count = sum(1 for r in ocr_results if not r.text.strip())
+                                    if empty_blocks_count > 0:
+                                        self._log(f"⚠️ {empty_blocks_count} blocks have NO matched OCR text — will try fallback OCR")
                                     for i, result in enumerate(ocr_results, 1):
                                         line_count = len(matched_blocks[i-1]['lines']) if i <= len(matched_blocks) else 0
                                         self._log(f"   Block {i}: {line_count} lines → '{result.text[:50]}...'")
+                                    
+                                    # FALLBACK OCR FOR EMPTY BLOCKS
+                                    # If some RT-DETR blocks got NO OCR matches (empty text), re-run Azure Document Intelligence on cropped regions
+                                    # This catches small text that full-image OCR missed
+                                    if empty_blocks_count > 0:
+                                        self._log(f"🔍 Step 3: Running fallback OCR for {empty_blocks_count} empty blocks")
+                                        
+                                        # Load the original image for cropping
+                                        import cv2
+                                        original_image = cv2.imread(image_path)
+                                        if original_image is None:
+                                            self._log("❌ Failed to load original image for fallback OCR", "error")
+                                        else:
+                                            # Get the Azure Document Intelligence client from OCR manager
+                                            doc_intel_provider = self.ocr_manager.get_provider('azure-document-intelligence')
+                                            if doc_intel_provider and hasattr(doc_intel_provider, 'client'):
+                                                
+                                                for idx, result in enumerate(ocr_results):
+                                                    if result.text.strip():  # Skip blocks that already have text
+                                                        continue
+                                                    
+                                                    # Get block bounding box
+                                                    x, y, w, h = result.bbox
+                                                    
+                                                    # Crop the region (with padding for better OCR)
+                                                    img_h, img_w = original_image.shape[:2]
+                                                    padding_ratio = 0.1
+                                                    pad_w = int(w * padding_ratio)
+                                                    pad_h = int(h * padding_ratio)
+                                                    
+                                                    # Expand bounding box with padding
+                                                    crop_x = max(0, x - pad_w)
+                                                    crop_y = max(0, y - pad_h)
+                                                    crop_w = min(img_w - crop_x, w + 2 * pad_w)
+                                                    crop_h = min(img_h - crop_y, h + 2 * pad_h)
+                                                    
+                                                    # Crop the region
+                                                    cropped = original_image[crop_y:crop_y+crop_h, crop_x:crop_x+crop_w].copy()
+                                                    
+                                                    # Upscale if too small (small text may not be detected by full-image OCR)
+                                                    MIN_SIZE = 100
+                                                    actual_h, actual_w = cropped.shape[:2]
+                                                    if actual_h < MIN_SIZE or actual_w < MIN_SIZE:
+                                                        scale_factor = max(MIN_SIZE / actual_w, MIN_SIZE / actual_h)
+                                                        new_w = int(actual_w * scale_factor)
+                                                        new_h = int(actual_h * scale_factor)
+                                                        cropped = cv2.resize(cropped, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+                                                        self._log(f"   Block {idx+1}: Upscaled from {actual_w}x{actual_h} to {new_w}x{new_h}")
+                                                    
+                                                    # Encode cropped image to JPEG
+                                                    _, encoded = cv2.imencode('.jpg', cropped, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                                                    cropped_bytes = encoded.tobytes()
+                                                    
+                                                    try:
+                                                        # Run Azure Document Intelligence on this specific crop
+                                                        # Get language hint for better accuracy
+                                                        language_hints = ocr_settings.get('language_hints', ['ja'])
+                                                        locale_hint = language_hints[0] if language_hints else 'ja'
+                                                        
+                                                        # Map to Azure locale codes
+                                                        locale_map = {
+                                                            'ja': 'ja', 'ko': 'ko', 'zh': 'zh-Hans',
+                                                            'zh-Hans': 'zh-Hans', 'zh-Hant': 'zh-Hant',
+                                                            'en': 'en', 'ar': 'ar', 'he': 'he'
+                                                        }
+                                                        locale = locale_map.get(locale_hint, locale_hint)
+                                                        
+                                                        # Call Document Intelligence API
+                                                        if locale:
+                                                            poller = doc_intel_provider.client.begin_analyze_document(
+                                                                "prebuilt-read",
+                                                                document=cropped_bytes,
+                                                                locale=locale
+                                                            )
+                                                        else:
+                                                            poller = doc_intel_provider.client.begin_analyze_document(
+                                                                "prebuilt-read",
+                                                                document=cropped_bytes
+                                                            )
+                                                        
+                                                        crop_result = poller.result()
+                                                        
+                                                        # Extract text from crop result
+                                                        crop_texts = []
+                                                        if crop_result.pages:
+                                                            for page in crop_result.pages:
+                                                                if hasattr(page, 'lines') and page.lines:
+                                                                    for line in page.lines:
+                                                                        if line.content:
+                                                                            crop_texts.append(line.content.strip())
+                                                        
+                                                        if crop_texts:
+                                                            # Success! Replace empty text with fallback OCR result
+                                                            source_lang = ocr_settings.get('language_hints', ['ja'])[0] if ocr_settings.get('language_hints') else 'ja'
+                                                            if source_lang in ['ja', 'zh', 'ko']:
+                                                                fallback_text = ''.join(crop_texts)  # No spaces for CJK
+                                                            else:
+                                                                fallback_text = ' '.join(crop_texts)  # Spaces for others
+                                                            
+                                                            result.text = fallback_text
+                                                            self._log(f"   ✅ Block {idx+1}: Fallback OCR detected text: '{fallback_text[:50]}...'")
+                                                        else:
+                                                            self._log(f"   ⚠️ Block {idx+1}: Fallback OCR found no text")
+                                                    
+                                                    except Exception as e:
+                                                        self._log(f"   ❌ Block {idx+1}: Fallback OCR failed: {str(e)}", "warning")
+                                                        continue
+                                            else:
+                                                self._log("⚠️ Azure Document Intelligence client not available for fallback OCR", "warning")
+                                    
+                                    # FINAL CLEANUP: Remove any blocks that are STILL empty after fallback OCR
+                                    original_count = len(ocr_results)
+                                    ocr_results = [r for r in ocr_results if r.text.strip()]
+                                    removed_count = original_count - len(ocr_results)
+                                    if removed_count > 0:
+                                        self._log(f"🧹 Removed {removed_count} empty bubbles after fallback OCR")
                                 else:
                                     self._log("⚠️ Azure Document Intelligence found no text lines in full image")
                             
