@@ -2653,7 +2653,40 @@ class LocalInpainter:
                             logger.warning(f"Tensor processing error: {e}")
                             # Emergency fallback: ensure we have a valid tensor
                             image_tensor = image_tensor.cpu().float()
-                    mask_tensor = mask_tensor.to(self.device)
+                    # Move mask to device with proper type handling (mirror image tensor path)
+                    if TORCH_AVAILABLE and torch is not None:
+                        try:
+                            # Determine model dtype (fallbacks applied if unavailable)
+                            model_dtype = None
+                            if self.model is not None:
+                                try:
+                                    for param in self.model.parameters():
+                                        if param is not None:
+                                            model_dtype = param.dtype
+                                            break
+                                except Exception:
+                                    pass
+                            if model_dtype is None and getattr(self.device, 'type', 'cpu') == 'cuda':
+                                model_dtype = torch.float16
+                            elif model_dtype is None:
+                                model_dtype = torch.float32
+                            # Ensure mask is float32 on CPU first, normalized to [0,1]
+                            mask_tensor = mask_tensor.cpu().float()
+                            mask_tensor = torch.clamp(mask_tensor, 0.0, 1.0)
+                            # Convert to target precision
+                            if torch.is_floating_point(mask_tensor):
+                                mask_tensor = mask_tensor.to(dtype=model_dtype)
+                            # Move to target device
+                            mask_tensor = mask_tensor.to(device=self.device)
+                        except Exception as e:
+                            logger.warning(f"Stepwise mask tensor conversion failed: {e}")
+                            # Fallback: try direct conversion
+                            try:
+                                mask_tensor = mask_tensor.to(device=self.device, dtype=model_dtype if 'model_dtype' in locals() and model_dtype is not None else torch.float32)
+                            except Exception as e2:
+                                logger.warning(f"Direct mask tensor conversion failed: {e2}")
+                                # Last resort: keep on CPU float32
+                                mask_tensor = mask_tensor.cpu().float()
                     
                     # Optional FP16 on GPU for lower VRAM
                     if self.quantize_enabled and self.use_gpu:
