@@ -68,21 +68,13 @@ if IS_FROZEN:
     try:
         import transformers
         # Try specific imports
-        try:
-            from transformers import RTDetrForObjectDetection, RTDetrImageProcessor
-            TRANSFORMERS_AVAILABLE = True
-            logger.info("✓ Transformers RT-DETR loaded in frozen environment")
-        except ImportError:
-            # Try alternative import
-            try:
-                from transformers import AutoModel, AutoImageProcessor
-                RTDetrForObjectDetection = AutoModel
-                RTDetrImageProcessor = AutoImageProcessor
-                TRANSFORMERS_AVAILABLE = True
-                logger.info("✓ Transformers loaded with AutoModel fallback")
-            except:
-                TRANSFORMERS_AVAILABLE = False
-                logger.warning("Transformers RT-DETR not available in frozen environment")
+        from transformers import RTDetrV2ForObjectDetection, RTDetrImageProcessor
+        RTDetrForObjectDetection = RTDetrV2ForObjectDetection
+        TRANSFORMERS_AVAILABLE = True
+        logger.info("✓ Transformers RT-DETR v2 loaded in frozen environment")
+    except ImportError:
+        TRANSFORMERS_AVAILABLE = False
+        logger.warning("Transformers RT-DETR v2 not available in frozen environment")
     except Exception as e:
         logger.warning(f"Transformers not available in frozen environment: {e}")
         TRANSFORMERS_AVAILABLE = False
@@ -106,16 +98,13 @@ else:
         logger.warning("PyTorch not available or incomplete")
 
     try:
-        from transformers import RTDetrForObjectDetection, RTDetrImageProcessor
-        try:
-            from transformers import RTDetrV2ForObjectDetection
-            RTDetrForObjectDetection = RTDetrV2ForObjectDetection
-        except ImportError:
-            pass
+        from transformers import RTDetrV2ForObjectDetection, RTDetrImageProcessor
+        RTDetrForObjectDetection = RTDetrV2ForObjectDetection
         TRANSFORMERS_AVAILABLE = True
-    except:
+        logger.info("✓ Transformers RT-DETR v2 loaded")
+    except ImportError as e:
         TRANSFORMERS_AVAILABLE = False
-        logger.info("Transformers not available for RT-DETR")
+        logger.warning(f"Transformers RT-DETR v2 not available: {e}")
 
 # Configure ORT memory behavior before importing
 try:
