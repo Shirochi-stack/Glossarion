@@ -34,7 +34,9 @@ YOLO = None
 torch = None
 TORCH_AVAILABLE = False
 ONNX_AVAILABLE = False
+ULTRA_RTDETR_AVAILABLE = False
 TRANSFORMERS_AVAILABLE = False
+RTDETR = None
 RTDetrForObjectDetection = None
 RTDetrImageProcessor = None
 PIL_AVAILABLE = False
@@ -64,28 +66,25 @@ if IS_FROZEN:
             logger.warning(f"Ultralytics not available in frozen environment: {e}")
             YOLO_AVAILABLE = False
     
-    # Try transformers
+    # Try both Ultralytics and Transformers RT-DETR
     try:
-        import transformers
-        # Try specific imports
-        try:
-            from transformers import RTDetrForObjectDetection, RTDetrImageProcessor
-            TRANSFORMERS_AVAILABLE = True
-            logger.info("✓ Transformers RT-DETR loaded in frozen environment")
-        except ImportError:
-            # Try alternative import
-            try:
-                from transformers import AutoModel, AutoImageProcessor
-                RTDetrForObjectDetection = AutoModel
-                RTDetrImageProcessor = AutoImageProcessor
-                TRANSFORMERS_AVAILABLE = True
-                logger.info("✓ Transformers loaded with AutoModel fallback")
-            except:
-                TRANSFORMERS_AVAILABLE = False
-                logger.warning("Transformers RT-DETR not available in frozen environment")
+        from ultralytics import RTDETR
+        ULTRA_RTDETR_AVAILABLE = True
+        logger.info("✓ Ultralytics RT-DETR loaded in frozen environment")
     except Exception as e:
-        logger.warning(f"Transformers not available in frozen environment: {e}")
+        logger.warning(f"Ultralytics RT-DETR not available in frozen environment: {e}")
+        ULTRA_RTDETR_AVAILABLE = False
+        RTDETR = None
+        
+    try:
+        from transformers import RTDetrForObjectDetection, RTDetrImageProcessor
+        TRANSFORMERS_AVAILABLE = True
+        logger.info("✓ Transformers RT-DETR loaded in frozen environment")
+    except Exception as e:
+        logger.warning(f"Transformers RT-DETR not available in frozen environment: {e}")
         TRANSFORMERS_AVAILABLE = False
+        RTDetrForObjectDetection = None
+        RTDetrImageProcessor = None
 else:
     # Normal environment - original import logic
     try:
@@ -105,17 +104,25 @@ else:
         torch = None
         logger.warning("PyTorch not available or incomplete")
 
+    # Try both Ultralytics and Transformers RT-DETR
+    try:
+        from ultralytics import RTDETR
+        ULTRA_RTDETR_AVAILABLE = True
+        logger.info("Ultralytics RT-DETR available")
+    except Exception as e:
+        ULTRA_RTDETR_AVAILABLE = False
+        RTDETR = None
+        logger.info(f"Ultralytics RT-DETR not available: {e}")
+        
     try:
         from transformers import RTDetrForObjectDetection, RTDetrImageProcessor
-        try:
-            from transformers import RTDetrV2ForObjectDetection
-            RTDetrForObjectDetection = RTDetrV2ForObjectDetection
-        except ImportError:
-            pass
         TRANSFORMERS_AVAILABLE = True
-    except:
+        logger.info("Transformers RT-DETR available")
+    except Exception as e:
         TRANSFORMERS_AVAILABLE = False
-        logger.info("Transformers not available for RT-DETR")
+        RTDetrForObjectDetection = None
+        RTDetrImageProcessor = None
+        logger.info(f"Transformers RT-DETR not available: {e}")
 
 # Configure ORT memory behavior before importing
 try:
@@ -207,6 +214,7 @@ class BubbleDetector:
         self.rtdetr_model = None
         self.rtdetr_processor = None
         self.rtdetr_loaded = False
+        self.rtdetr_backend = None  # 'ultralytics' or 'transformers'
         self.rtdetr_repo = 'ogkalu/comic-text-and-bubble-detector'
 
         # RT-DETR (ONNX) backend components
@@ -544,8 +552,8 @@ class BubbleDetector:
         Returns:
             True if successful, False otherwise
         """
-        if not TRANSFORMERS_AVAILABLE:
-            logger.error("Transformers library required for RT-DETR. Install with: pip install transformers")
+        if not (ULTRA_RTDETR_AVAILABLE or TRANSFORMERS_AVAILABLE):
+            logger.error("RT-DETR requires either Ultralytics (RTDETR) or Transformers (RTDetrForObjectDetection). Install one: pip install ultralytics or pip install transformers")
             return False
         
         if not PIL_AVAILABLE:
@@ -564,93 +572,85 @@ class BubbleDetector:
             logger.info("RT-DETR model attached from shared cache")
             return True
         
-        # Serialize the ENTIRE loading sequence to avoid concurrent init issues
+        # Serialize loading to avoid concurrent init issues
         with BubbleDetector._rtdetr_init_lock:
             try:
                 # Re-check after acquiring lock
                 if BubbleDetector._rtdetr_loaded and not force_reload:
                     self.rtdetr_model = BubbleDetector._rtdetr_shared_model
-                    self.rtdetr_processor = BubbleDetector._rtdetr_shared_processor
                     self.rtdetr_loaded = True
-                    logger.info("RT-DETR model attached from shared cache (post-lock)")
+                    logger.info("RT-DETR model attached from shared cache")
                     return True
                 
                 # Use custom model_id if provided, otherwise use default
                 repo_id = model_id if model_id else self.rtdetr_repo
                 logger.info(f"📥 Loading RT-DETR model from {repo_id}...")
-
-                # Ensure TorchDynamo/compile doesn't interfere on some builds
+                
+                loaded_ultralytics = False
+                # If a local .pt or an Ultralytics id is provided, try Ultralytics first
+                if ULTRA_RTDETR_AVAILABLE and (model_path and (model_path.endswith('.pt') or os.path.exists(model_path))):
+                    try:
+                        logger.info(f"Trying Ultralytics RTDETR with local path: {model_path}")
+                        self.rtdetr_model = RTDETR(model_path)
+                        self.rtdetr_backend = 'ultralytics'
+                        loaded_ultralytics = True
+                    except Exception as e:
+                        logger.warning(f"Ultralytics RTDETR local load failed: {e}")
+                elif ULTRA_RTDETR_AVAILABLE and not model_path:
+                    # Only try named models if no explicit path is given
+                    try:
+                        logger.info(f"Trying Ultralytics RTDETR with id: {repo_id}")
+                        self.rtdetr_model = RTDETR(repo_id)
+                        self.rtdetr_backend = 'ultralytics'
+                        loaded_ultralytics = True
+                    except Exception as e:
+                        logger.info(f"Ultralytics RTDETR id load failed (expected if repo isn't Ultralytics format): {e}")
+                
+                # If Ultralytics failed or wasn't applicable, try Transformers from HF repo
+                if not loaded_ultralytics:
+                    if not TRANSFORMERS_AVAILABLE:
+                        logger.error("Transformers backend not available to load HF RT-DETR repo.")
+                        return False
+                    try:
+                        logger.info(f"Loading Transformers RT-DETR from HF repo: {repo_id}")
+                        self.rtdetr_processor = RTDetrImageProcessor.from_pretrained(
+                            repo_id,
+                            cache_dir=self.cache_dir if not model_path else None
+                        )
+                        self.rtdetr_model = RTDetrForObjectDetection.from_pretrained(
+                            repo_id,
+                            cache_dir=self.cache_dir if not model_path else None
+                        )
+                        self.rtdetr_backend = 'transformers'
+                    except Exception as e:
+                        logger.error(f"Transformers RT-DETR load failed: {e}")
+                        return False
+                
+                # Move to GPU if available (Ultralytics path only)
+                if self.use_gpu and TORCH_AVAILABLE and ULTRA_RTDETR_AVAILABLE and hasattr(self.rtdetr_model, 'to'):
+                    try:
+                        self.rtdetr_model.to('cuda')
+                    except Exception as gpu_err:
+                        logger.warning(f"Could not move RT-DETR model to GPU: {gpu_err}")
+                
+                # Set to eval mode
                 try:
-                    os.environ.setdefault('TORCHDYNAMO_DISABLE', '1')
+                    if hasattr(self.rtdetr_model, 'model'):
+                        self.rtdetr_model.model.eval()
+                    elif hasattr(self.rtdetr_model, 'eval'):
+                        self.rtdetr_model.eval()
                 except Exception:
                     pass
                 
-                # Decide device strategy
-                gpu_available = bool(TORCH_AVAILABLE and hasattr(torch, 'cuda') and torch.cuda.is_available())
-                device_map = 'auto' if gpu_available else None
-                # Choose dtype
-                dtype = None
-                if TORCH_AVAILABLE:
+                # Optional FP16 precision on GPU (Ultralytics path only)
+                if ULTRA_RTDETR_AVAILABLE and self.quantize_enabled and self.use_gpu and TORCH_AVAILABLE:
                     try:
-                        dtype = torch.float16 if gpu_available else torch.float32
-                    except Exception:
-                        dtype = None
-                low_cpu = True if gpu_available else False
-                
-                # Load processor (once)
-                self.rtdetr_processor = RTDetrImageProcessor.from_pretrained(
-                    repo_id,
-                    size={"width": 640, "height": 640},
-                    cache_dir=self.cache_dir if not model_path else None
-                )
-                
-                # Prepare kwargs for from_pretrained
-                from_kwargs = {
-                    'cache_dir': self.cache_dir if not model_path else None,
-                    'low_cpu_mem_usage': low_cpu,
-                    'device_map': device_map,
-                }
-                # Note: dtype is handled via torch_dtype parameter in newer transformers
-                if dtype is not None:
-                    from_kwargs['torch_dtype'] = dtype
-                
-                # First attempt: load directly to target (CUDA if available)
-                try:
-                    self.rtdetr_model = RTDetrForObjectDetection.from_pretrained(
-                        model_path if model_path else repo_id,
-                        **from_kwargs,
-                    )
-                except Exception as primary_err:
-                    # Fallback to a simple CPU load (no device move) if CUDA path fails
-                    logger.warning(f"RT-DETR primary load failed ({primary_err}); retrying on CPU...")
-                    from_kwargs_fallback = {
-                        'cache_dir': self.cache_dir if not model_path else None,
-                        'low_cpu_mem_usage': False,
-                        'device_map': None,
-                    }
-                    if TORCH_AVAILABLE:
-                        from_kwargs_fallback['torch_dtype'] = torch.float32
-                    self.rtdetr_model = RTDetrForObjectDetection.from_pretrained(
-                        model_path if model_path else repo_id,
-                        **from_kwargs_fallback,
-                    )
-                
-                # Optional dynamic quantization for linear layers (CPU only)
-                if self.quantize_enabled and TORCH_AVAILABLE and (not gpu_available):
-                    try:
-                        try:
-                            import torch.ao.quantization as tq
-                            quantize_dynamic = tq.quantize_dynamic  # type: ignore
-                        except Exception:
-                            import torch.quantization as tq  # type: ignore
-                            quantize_dynamic = tq.quantize_dynamic  # type: ignore
-                        self.rtdetr_model = quantize_dynamic(self.rtdetr_model, {torch.nn.Linear}, dtype=torch.qint8)
-                        logger.info("🔻 Applied dynamic INT8 quantization to RT-DETR linear layers (CPU)")
-                    except Exception as qe:
-                        logger.warning(f"RT-DETR dynamic quantization skipped: {qe}")
-                
-                # Finalize
-                self.rtdetr_model.eval()
+                        m = self.rtdetr_model.model if hasattr(self.rtdetr_model, 'model') else self.rtdetr_model
+                        if hasattr(m, 'half'):
+                            m.half()
+                            logger.info("🔻 Applied FP16 precision to RT-DETR model (GPU)")
+                    except Exception as _e:
+                        logger.warning(f"Could not switch RT-DETR model to FP16: {_e}")
 
                 # Sanity check: ensure no parameter is left on 'meta' device
                 try:
@@ -670,37 +670,40 @@ class BubbleDetector:
                 BubbleDetector._rtdetr_repo_id = repo_id
 
                 self.rtdetr_loaded = True
+
+                # Cache model
+                BubbleDetector._rtdetr_shared_model = self.rtdetr_model
+                BubbleDetector._rtdetr_loaded = True
+                BubbleDetector._rtdetr_repo_id = repo_id
                 
-                # Save the model ID that was used
+                # Save config
                 self.config['rtdetr_loaded'] = True
                 self.config['rtdetr_model_id'] = repo_id
                 self._save_config()
                 
-                loc = 'CUDA' if gpu_available else 'CPU'
+                loc = 'CUDA' if self.use_gpu else 'CPU'
                 logger.info(f"✅ RT-DETR model loaded successfully ({loc})")
                 logger.info("   Classes: Empty bubbles, Text bubbles, Free text")
                 
-                # Auto-convert to ONNX for RT-DETR only if explicitly enabled
+                # Auto-convert to ONNX if enabled
                 if os.environ.get('AUTO_CONVERT_RTDETR_ONNX', 'false').lower() == 'true':
                     onnx_path = os.path.join(self.cache_dir, 'rtdetr_comic.onnx')
                     if self.convert_to_onnx('rtdetr', onnx_path):
                         logger.info("🚀 RT-DETR converted to ONNX for faster inference")
-                        # Store ONNX path for later use
                         self.config['rtdetr_onnx_path'] = onnx_path
                         self._save_config()
-                        # Optionally quantize ONNX for reduced RAM
-                        if self.onnx_quantize_enabled:
-                            try:
-                                from onnxruntime.quantization import quantize_dynamic, QuantType
-                                quant_path = os.path.splitext(onnx_path)[0] + ".int8.onnx"
-                                if not os.path.exists(quant_path) or os.environ.get('FORCE_ONNX_REBUILD', 'false').lower() == 'true':
-                                    logger.info("🔻 Quantizing RT-DETR ONNX to INT8 (dynamic)...")
-                                    quantize_dynamic(model_input=onnx_path, model_output=quant_path, weight_type=QuantType.QInt8, op_types_to_quantize=['Conv', 'MatMul'])
-                                self.config['rtdetr_onnx_quantized_path'] = quant_path
-                                self._save_config()
-                                logger.info(f"✅ Quantized RT-DETR ONNX saved to: {quant_path}")
-                            except Exception as qe:
-                                logger.warning(f"ONNX quantization for RT-DETR skipped: {qe}")
+                        # Optionally quantize the ONNX model
+                        try:
+                            from onnxruntime.quantization import quantize_dynamic, QuantType
+                            quant_path = os.path.splitext(onnx_path)[0] + ".int8.onnx"
+                            if not os.path.exists(quant_path) or os.environ.get('FORCE_ONNX_REBUILD', 'false').lower() == 'true':
+                                logger.info("🔻 Quantizing RT-DETR ONNX to INT8 (dynamic)...")
+                                quantize_dynamic(model_input=onnx_path, model_output=quant_path, weight_type=QuantType.QInt8, op_types_to_quantize=['Conv', 'MatMul'])
+                            self.config['rtdetr_onnx_quantized_path'] = quant_path
+                            self._save_config()
+                            logger.info(f"✅ Quantized RT-DETR ONNX saved to: {quant_path}")
+                        except Exception as qe:
+                            logger.warning(f"ONNX quantization for RT-DETR skipped: {qe}")
                     else:
                         logger.info("ℹ️ Skipping RT-DETR ONNX export (converter not supported in current environment)")
                 
@@ -914,77 +917,49 @@ class BubbleDetector:
             image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             pil_image = Image.fromarray(image_rgb)
             
-            # Prepare image for model
-            inputs = self.rtdetr_processor(images=pil_image, return_tensors="pt")
-            
-            # Move inputs to the same device as the model and match model dtype for floating tensors
-            model_device = next(self.rtdetr_model.parameters()).device if self.rtdetr_model is not None else (torch.device('cpu') if TORCH_AVAILABLE else 'cpu')
-            model_dtype = None
-            if TORCH_AVAILABLE and self.rtdetr_model is not None:
-                try:
-                    model_dtype = next(self.rtdetr_model.parameters()).dtype
-                except Exception:
-                    model_dtype = None
-            
-            if TORCH_AVAILABLE:
-                new_inputs = {}
-                for k, v in inputs.items():
-                    if isinstance(v, torch.Tensor):
-                        v = v.to(model_device)
-                        if model_dtype is not None and torch.is_floating_point(v):
-                            v = v.to(model_dtype)
-                    new_inputs[k] = v
-                inputs = new_inputs
-            
-            # Run inference with autocast when model is half/bfloat16 on CUDA
-            use_amp = TORCH_AVAILABLE and hasattr(model_device, 'type') and model_device.type == 'cuda' and (model_dtype in (torch.float16, torch.bfloat16))
-            autocast_dtype = model_dtype if model_dtype in (torch.float16, torch.bfloat16) else None
-            
-            with torch.no_grad():
-                if use_amp and autocast_dtype is not None:
-                    with torch.autocast('cuda', dtype=autocast_dtype):
-                        outputs = self.rtdetr_model(**inputs)
-                else:
-                    outputs = self.rtdetr_model(**inputs)
-                
-                # Brief pause for stability after inference
-                time.sleep(0.1)
-                logger.debug("💤 RT-DETR inference pausing briefly for stability")
-            
-            # Post-process results
-            target_sizes = torch.tensor([pil_image.size[::-1]]) if TORCH_AVAILABLE else None
-            if TORCH_AVAILABLE and hasattr(model_device, 'type') and model_device.type == "cuda":
-                target_sizes = target_sizes.to(model_device)
-            
-            results = self.rtdetr_processor.post_process_object_detection(
-                outputs,
-                target_sizes=target_sizes,
-                threshold=confidence
-            )[0]
-            
-            # Apply per-detector cap if configured
-            cap = getattr(self, 'max_det_rtdetr', self.default_max_detections)
-            if cap and len(results['boxes']) > cap:
-                # Keep top-scoring first
-                scores = results['scores']
-                top_idx = scores.topk(k=cap).indices if hasattr(scores, 'topk') else range(cap)
-                results = {
-                    'boxes': [results['boxes'][i] for i in top_idx],
-                    'scores': [results['scores'][i] for i in top_idx],
-                    'labels': [results['labels'][i] for i in top_idx]
-                }
-            
-            logger.info(f"📊 RT-DETR found {len(results['boxes'])} detections above {confidence:.2f} confidence")
-
-            # Apply NMS to remove duplicate detections
-            # Group detections by class
             class_detections = {self.CLASS_BUBBLE: [], self.CLASS_TEXT_BUBBLE: [], self.CLASS_TEXT_FREE: []}
-            
-            for box, score, label in zip(results['boxes'], results['scores'], results['labels']):
-                x1, y1, x2, y2 = map(float, box.tolist())
-                label_id = label.item()
-                if label_id in class_detections:
-                    class_detections[label_id].append((x1, y1, x2, y2, float(score.item())))
+
+            if self.rtdetr_backend == 'ultralytics':
+                # Ultralytics path
+                results = self.rtdetr_model(pil_image, conf=confidence, verbose=False)
+                logger.info(f"📋 RT-DETR (Ultralytics) found {len(results)} detections above {confidence:.2f} confidence")
+                for r in results:
+                    boxes = r.boxes
+                    for box in boxes:
+                        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                        conf = float(box.conf[0])
+                        cls = int(box.cls[0])
+                        if cls in class_detections:
+                            class_detections[cls].append((x1, y1, x2, y2, conf))
+            else:
+                # Transformers path
+                # Convert PIL image to numpy array first
+                image_np = np.array(pil_image)
+                # Prepare inputs
+                inputs = self.rtdetr_processor(images=image_np, return_tensors="pt")
+                if TORCH_AVAILABLE:
+                    for k, v in inputs.items():
+                        if isinstance(v, torch.Tensor):
+                            inputs[k] = v.to(self.device)
+                # Run inference
+                with torch.no_grad():
+                    outputs = self.rtdetr_model(**inputs)
+                # Post-process
+                target_sizes = torch.tensor([pil_image.size[::-1]]) if TORCH_AVAILABLE else None
+                if TORCH_AVAILABLE and self.device == 'cuda':
+                    target_sizes = target_sizes.to(self.device)
+                processed = self.rtdetr_processor.post_process_object_detection(
+                    outputs,
+                    target_sizes=target_sizes,
+                    threshold=confidence
+                )[0]
+                logger.info(f"📋 RT-DETR (Transformers) found {len(processed['boxes'])} detections above {confidence:.2f} confidence")
+                for box, score, label in zip(processed['boxes'], processed['scores'], processed['labels']):
+                    x1, y1, x2, y2 = map(float, box.tolist())
+                    conf = float(score.item())
+                    cls = int(label.item())
+                    if cls in class_detections:
+                        class_detections[cls].append((x1, y1, x2, y2, conf))
             
             # Apply NMS per class to remove duplicates
             def compute_iou(box1, box2):
@@ -1454,12 +1429,24 @@ class BubbleDetector:
                     self.rtdetr_onnx_session = None
             except Exception:
                 pass
-            for attr in ['model', 'rtdetr_model', 'rtdetr_processor']:
+            
+            # Special cleanup for ultralytics models
+            for attr in ['model', 'rtdetr_model']:
                 try:
-                    if hasattr(self, attr):
+                    model = getattr(self, attr, None)
+                    if model is not None:
+                        # Clear CUDA cache if model was on GPU
+                        if hasattr(model, 'model') and hasattr(model.model, 'cuda'):
+                            try:
+                                model.model.cpu()
+                            except Exception:
+                                pass
+                        # Remove model reference
                         setattr(self, attr, None)
                 except Exception:
                     pass
+            
+            # Clear flags
             for flag in ['model_loaded', 'rtdetr_loaded', 'rtdetr_onnx_loaded']:
                 try:
                     if hasattr(self, flag):
