@@ -1052,6 +1052,9 @@ class MetadataBatchTranslatorUI:
             
     def _create_advanced_prompts_tab(self, parent):
         """Create tab for advanced prompt settings"""
+        # Set up icon path for combobox at the start
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+        
         tab_layout = QVBoxLayout(parent)
         tab_layout.setContentsMargins(20, 20, 20, 20)
         
@@ -1211,7 +1214,7 @@ class MetadataBatchTranslatorUI:
                 background-color: rgba(255, 255, 255, 0.1);
             }
             QComboBox::down-arrow {
-                image: url(Halgakos.ico);
+                image: url(""" + icon_path.replace('\\', '/') + """);
                 width: 16px;
                 height: 16px;
             }
