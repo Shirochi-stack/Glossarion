@@ -39,6 +39,15 @@ RTDetrForObjectDetection = None
 RTDetrImageProcessor = None
 PIL_AVAILABLE = False
 
+# Import huggingface_hub first to ensure consistent import pattern
+try:
+    from huggingface_hub import hf_hub_download
+    logger.info("✓ huggingface_hub loaded")
+except ImportError as e:
+    logger.warning(f"huggingface_hub not available: {e}")
+    logger.warning("Install with: pip install -U huggingface_hub")
+    hf_hub_download = None
+
 # Try to import YOLO dependencies with better error handling
 if IS_FROZEN:
     # In frozen environment, try harder to import
@@ -343,11 +352,9 @@ class BubbleDetector:
             # If given a Hugging Face repo ID (e.g., 'owner/name'), fetch detector.onnx into models/
             if model_path and (('/' in model_path) and not os.path.exists(model_path)):
                 try:
-                    # Import from huggingface_hub directly
-                    try:
-                        from huggingface_hub import hf_hub_download
-                    except ImportError as e:
-                        logger.error(f"Failed to import from huggingface_hub: {e}\nPlease install with: pip install -U huggingface_hub")
+                    # Check if huggingface_hub is available
+                    if hf_hub_download is None:
+                        logger.error("huggingface_hub not available. Please install with: pip install -U huggingface_hub")
                         return False
                     
                     os.makedirs(self.cache_dir, exist_ok=True)
@@ -1637,10 +1644,8 @@ class BubbleDetector:
                 return True
 
             repo = model_id or self.rtdetr_onnx_repo
-            try:
-                from huggingface_hub import hf_hub_download
-            except Exception as e:
-                logger.error(f"huggingface-hub required to fetch RT-DETR ONNX: {e}")
+            if hf_hub_download is None:
+                logger.error("huggingface_hub required to fetch RT-DETR ONNX. Install with: pip install -U huggingface_hub")
                 return False
 
             # Ensure local models dir (use configured cache_dir directly: e.g., 'models')
