@@ -2653,40 +2653,48 @@ class LocalInpainter:
                             logger.warning(f"Tensor processing error: {e}")
                             # Emergency fallback: ensure we have a valid tensor
                             image_tensor = image_tensor.cpu().float()
-                    # Move mask to device with proper type handling (mirror image tensor path)
+                    # For JIT models, we need to match the model's device and dtype exactly
                     if TORCH_AVAILABLE and torch is not None:
                         try:
-                            # Determine model dtype (fallbacks applied if unavailable)
-                            model_dtype = None
-                            if self.model is not None:
-                                try:
-                                    for param in self.model.parameters():
-                                        if param is not None:
-                                            model_dtype = param.dtype
-                                            break
-                                except Exception:
-                                    pass
-                            if model_dtype is None and getattr(self.device, 'type', 'cpu') == 'cuda':
-                                model_dtype = torch.float16
-                            elif model_dtype is None:
-                                model_dtype = torch.float32
-                            # Ensure mask is float32 on CPU first, normalized to [0,1]
-                            mask_tensor = mask_tensor.cpu().float()
-                            mask_tensor = torch.clamp(mask_tensor, 0.0, 1.0)
-                            # Convert to target precision
-                            if torch.is_floating_point(mask_tensor):
-                                mask_tensor = mask_tensor.to(dtype=model_dtype)
-                            # Move to target device
-                            mask_tensor = mask_tensor.to(device=self.device)
-                        except Exception as e:
-                            logger.warning(f"Stepwise mask tensor conversion failed: {e}")
-                            # Fallback: try direct conversion
-                            try:
-                                mask_tensor = mask_tensor.to(device=self.device, dtype=model_dtype if 'model_dtype' in locals() and model_dtype is not None else torch.float32)
-                            except Exception as e2:
-                                logger.warning(f"Direct mask tensor conversion failed: {e2}")
-                                # Last resort: keep on CPU float32
+                            # Get device and dtype from model
+                            if hasattr(self.model, '_parameters'):
+                                # Regular PyTorch model
+                                target_device = None
+                                target_dtype = None
+                                for param in self.model.parameters():
+                                    if param is not None:
+                                        target_device = param.device
+                                        target_dtype = param.dtype
+                                        break
+                                
+                                if target_device is not None:
+                                    # Regular model path: normalize and convert mask
+                                    mask_tensor = mask_tensor.cpu().float()
+                                    mask_tensor = torch.clamp(mask_tensor, 0.0, 1.0)
+                                    mask_tensor = mask_tensor.to(device=target_device, dtype=target_dtype)
+                                    image_tensor = image_tensor.to(device=target_device, dtype=target_dtype)
+                            else:
+                                # JIT model - force CPU float32 first
                                 mask_tensor = mask_tensor.cpu().float()
+                                image_tensor = image_tensor.cpu().float()
+                                mask_tensor = torch.clamp(mask_tensor, 0.0, 1.0)
+                                
+                                # Then move both tensors to target device
+                                if self.use_gpu:
+                                    mask_tensor = mask_tensor.cuda()
+                                    image_tensor = image_tensor.cuda()
+                        except Exception as e:
+                            logger.warning(f"Tensor device/dtype matching failed: {e}")
+                            # Fallback: ensure both tensors are on same device as float32
+                            try:
+                                device = self.device if self.device is not None else 'cpu'
+                                mask_tensor = mask_tensor.to(device=device, dtype=torch.float32)
+                                image_tensor = image_tensor.to(device=device, dtype=torch.float32)
+                            except Exception as e2:
+                                logger.warning(f"Fallback tensor conversion failed: {e2}")
+                                # Last resort: keep everything on CPU
+                                mask_tensor = mask_tensor.cpu().float()
+                                image_tensor = image_tensor.cpu().float()
                     
                     # Optional FP16 on GPU for lower VRAM
                     if self.quantize_enabled and self.use_gpu:
