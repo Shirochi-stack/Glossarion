@@ -7938,7 +7938,7 @@ class MangaTranslator:
                             self._log(f"📏 Auto dilation by provider (Google, no RT-DETR): {base_dilation_size}px", "info")
                 else:
                     # Default for other providers
-                    base_dilation_size = 15
+                    base_dilation_size = 0
                     self._log(f"📏 Auto dilation by provider ({ocr_provider}): {base_dilation_size}px", "info")
             except Exception:
                 pass
