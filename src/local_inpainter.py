@@ -412,6 +412,14 @@ class FFCInpaintModel(BaseModel):  # Use BaseModel instead of nn.Module
             self._pytorch_available = False
             return
             
+        # Clear CUDA cache and sync before init
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            except Exception:
+                pass
+            
         # Additional safety check for nn being None
         if nn is None:
             super().__init__()
@@ -479,6 +487,13 @@ class FFCInpaintModel(BaseModel):  # Use BaseModel instead of nn.Module
         if not self._pytorch_available:
             logger.error("PyTorch not available for forward pass")
             raise RuntimeError("PyTorch not available for forward pass")
+            
+        # Force sync before forward pass
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.synchronize()
+            except Exception:
+                pass
             
         if not TORCH_AVAILABLE or torch is None:
             logger.error("PyTorch not available for forward pass")
@@ -559,6 +574,9 @@ class LocalInpainter:
     }
     
     def __init__(self, config_path="config.json"):
+        # Enable CUDA debug sync mode
+        os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+
         # Set thread limits early if environment indicates single-threaded mode
         try:
             if os.environ.get('OMP_NUM_THREADS') == '1':
@@ -1370,15 +1388,28 @@ class LocalInpainter:
     def _to_device_safe(self, tensor):
         """Safely move a tensor to the configured device with retries and fallbacks.
         - Ensures contiguity
-        - Recovers from transient CUDA errors by clearing caches
-        - Falls back to CPU if GPU move consistently fails
+        - Syncs tensor with model's device and dtype
+        - Handles shared model pools and threads
         """
         try:
-            if not TORCH_AVAILABLE or not self.use_gpu or self.device is None:
+            if not TORCH_AVAILABLE or not self.use_gpu or self.device is None or not hasattr(self, 'model'):
                 return tensor.contiguous()
-            # Match the exact device and dtype from the model instance
-            model_param = next(self.model.parameters())
-            return tensor.contiguous().to(device=model_param.device, dtype=model_param.dtype)
+
+            # First check if model has changed devices (from pool)
+            if hasattr(self.model, 'parameters'):
+                with torch.no_grad():
+                    model_param = next(self.model.parameters())
+                    target_device = model_param.device
+                    target_dtype = model_param.dtype
+
+                # Move to device and convert dtype in one shot
+                result = tensor.contiguous().to(device=target_device, dtype=target_dtype)
+                
+                # Force sync for CUDA
+                if str(target_device).startswith('cuda'):
+                    torch.cuda.synchronize(target_device)
+                
+                return result
         except RuntimeError as e:
             # Attempt recovery once
             try:

@@ -533,6 +533,9 @@ class BubbleDetector:
         Returns:
             True if successful, False otherwise
         """
+        # Enable CUDA debug sync mode
+        os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+
         if not TRANSFORMERS_AVAILABLE:
             logger.error("Transformers library required for RT-DETR. Install with: pip install transformers")
             return False
@@ -928,18 +931,29 @@ class BubbleDetector:
                     target_device = torch.device('cpu')
 
             if TORCH_AVAILABLE and self.rtdetr_model is not None:
-                # Get device and dtype from actual model instance
-                model_param = next(self.rtdetr_model.parameters())
-                inputs = {k: (v.to(device=model_param.device, dtype=model_param.dtype) if isinstance(v, torch.Tensor) else v)
-                         for k, v in inputs.items()}
+                # Lock and sync with model device/dtype
+                with torch.no_grad():
+                    # Get ACTUAL model device/dtype
+                    model_param = next(self.rtdetr_model.parameters())
+                    target_device = model_param.device
+                    target_dtype = model_param.dtype
+                    
+                    # First move ALL tensors to right device
+                    inputs = {k: (v.to(device=target_device) if isinstance(v, torch.Tensor) else v)
+                            for k, v in inputs.items()}
+                    
+                    # Then match model's dtype
+                    inputs = {k: (v.to(dtype=target_dtype) if isinstance(v, torch.Tensor) else v)
+                            for k, v in inputs.items()}
+                    
+                    # Force CUDA sync if needed
+                    if str(target_device).startswith('cuda'):
+                        torch.cuda.synchronize(target_device)
             
-            # Run inference with autocast when model is half/bfloat16 on CUDA
-            use_amp = TORCH_AVAILABLE and hasattr(model_device, 'type') and model_device.type == 'cuda' and (model_dtype in (torch.float16, torch.bfloat16))
-            autocast_dtype = model_dtype if model_dtype in (torch.float16, torch.bfloat16) else None
-            
+            # Run inference with AMP only for half/bfloat16 models
             with torch.no_grad():
-                if use_amp and autocast_dtype is not None:
-                    with torch.autocast('cuda', dtype=autocast_dtype):
+                if model_dtype in (torch.float16, torch.bfloat16) and str(target_device).startswith('cuda'):
+                    with torch.cuda.amp.autocast(dtype=model_dtype):
                         outputs = self.rtdetr_model(**inputs)
                 else:
                     outputs = self.rtdetr_model(**inputs)

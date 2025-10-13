@@ -601,6 +601,35 @@ class XHTMLConverter:
             html_content = re.sub(r'<([A-Za-z][\w.-]*:[\w.-]*)\s*([^>]*)/>', _escape_story_tag_entities, html_content)
             html_content = re.sub(r'<([A-Za-z][\w.-]*:[\w.-]*)\s*([^>]*)>', _escape_story_tag_entities, html_content)
             html_content = re.sub(r'</([A-Za-z][\w.-]*:[\w.-]*)\s*>', _escape_story_tag_entities, html_content)
+
+            # PREVENT malformed "fake tags" like <You are a farmer.> from being parsed as tags
+            # We only target angle-bracketed text that has spaces and NO '=' (so it's not real attributes)
+            # and ends with either '>' or the entity '&gt;'.
+            def _escape_plaintext_angle_brackets(txt: str) -> str:
+                def repl(m):
+                    inner = m.group(1)
+                    # If looks like a real tag (has '=' or '/') keep it
+                    if '=' in inner or inner.strip().startswith(('/', '!', '?')):
+                        return m.group(0)
+                    # If the first token is a known HTML tag name, keep it
+                    first = inner.strip().split()[0].lower()
+                    known = {
+                        'p','div','span','br','hr','img','a','h1','h2','h3','h4','h5','h6','ul','ol','li','pre','code','em','strong',
+                        'table','thead','tbody','tr','td','th','blockquote','section','article','header','footer','nav','figure','figcaption'
+                    }
+                    if first in known:
+                        return m.group(0)
+                    # Otherwise, treat as narrative text in angle brackets and escape
+                    return f'&lt;{inner}&gt;'
+                # Match <...> where there's at least one space inside (indicates sentence-like content)
+                pattern = r'<([^<>]*?\s[^<>]*?)>'
+                txt = re.sub(pattern, repl, txt)
+                # Also handle cases where closing bracket is already an entity
+                pattern_gt = r'<([^<>]*?\s[^<>]*?)&gt;'
+                txt = re.sub(pattern_gt, lambda m: f'&lt;{m.group(1)}&gt;', txt)
+                return txt
+
+            html_content = _escape_plaintext_angle_brackets(html_content)
             
             # Parse with lxml
             from lxml import html as lxml_html, etree
