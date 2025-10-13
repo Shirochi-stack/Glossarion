@@ -8894,6 +8894,65 @@ class MangaTranslator:
             return None
         except Exception:
             return None
+    
+    def _is_truly_custom_font(self) -> bool:
+        """Check if the selected font is a truly custom font (outside authorized locations).
+        
+        Authorized font locations:
+        1. Default font path (Comic Sans MS Bold, Arial, etc.)
+        2. Windows system fonts directory (C:/Windows/Fonts)
+        3. Project fonts directory (./fonts)
+        4. Saved custom fonts in config
+        
+        Only fonts outside these locations are considered 'truly custom' and will
+        have Meiryo font mixing disabled.
+        
+        Returns:
+            True if font is truly custom (should disable mixing)
+            False if font is from authorized location (should allow mixing)
+        """
+        # If no font is selected or it's the default, allow mixing
+        if not self.selected_font_style:
+            return False
+        
+        # If it's the default font, allow mixing
+        if self.selected_font_style == self.font_path:
+            return False
+        
+        import os
+        
+        # Normalize paths for comparison (handle different path separators)
+        selected_path = os.path.normpath(self.selected_font_style).lower()
+        
+        # Check 1: Is it from Windows/Fonts directory?
+        windows_fonts_dir = os.path.normpath("C:/Windows/Fonts").lower()
+        if selected_path.startswith(windows_fonts_dir):
+            return False  # Authorized - allow mixing
+        
+        # Check 2: Is it from the project fonts directory?
+        try:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            project_fonts_dir = os.path.normpath(os.path.join(script_dir, "fonts")).lower()
+            if selected_path.startswith(project_fonts_dir):
+                return False  # Authorized - allow mixing
+        except Exception:
+            pass
+        
+        # Check 3: Is it in the saved custom fonts from config?
+        try:
+            if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'config'):
+                custom_fonts = self.main_gui.config.get('custom_fonts', [])
+                for custom_font in custom_fonts:
+                    if 'path' in custom_font:
+                        saved_path = os.path.normpath(custom_font['path']).lower()
+                        if selected_path == saved_path:
+                            return False  # Authorized - allow mixing
+        except Exception:
+            pass
+        
+        # If we got here, the font is from an unknown location
+        # This is a truly custom font - disable mixing
+        return True
 
     def _is_emote_char(self, ch: str) -> bool:
         """Check if character should use Meiryo font (symbols + CJK + invalid unicode).
@@ -9197,7 +9256,11 @@ class MangaTranslator:
                     font_size, lines = self._fit_text_to_region(tr_text, render_w, render_h, draw, region, use_as_is=True)
                 # Fonts
                 font = self._get_font(font_size)
-                emote_font = self._get_emote_fallback_font(font_size)
+                # Mixed font fallback if available (Meiryo for symbols/CJK)
+                # EXCLUDED for custom fonts outside predefined authorized locations
+                # Authorized locations: Windows/Fonts, project fonts dir, saved custom fonts in config
+                is_using_custom_font = self._is_truly_custom_font()
+                emote_font = None if is_using_custom_font else self._get_emote_fallback_font(font_size)
                 # Layout - use render dimensions (safe area if available)
                 # CRITICAL: Use actual text bbox height for accurate positioning
                 line_height = font_size * 1.2
@@ -9359,8 +9422,9 @@ class MangaTranslator:
                     line_height = max(line_height, actual_line_height * 1.1)
                 
                 # Mixed font fallback if available (Meiryo for symbols/CJK)
-                # EXCLUDED for custom fonts - user chose this font intentionally
-                is_using_custom_font = bool(self.selected_font_style and self.selected_font_style != self.font_path)
+                # EXCLUDED for custom fonts outside predefined authorized locations
+                # Authorized locations: Windows/Fonts, project fonts dir, saved custom fonts in config
+                is_using_custom_font = self._is_truly_custom_font()
                 emote_font = None if is_using_custom_font else self._get_emote_fallback_font(font_size)
                 # Ensure text doesn't overflow vertically - constrain start_y
                 ideal_start_y = render_y + (render_h - total_height) // 2
