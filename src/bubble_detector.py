@@ -910,81 +910,60 @@ class BubbleDetector:
             # Prepare image for model
             inputs = self.rtdetr_processor(images=pil_image, return_tensors="pt")
             
-            # Move inputs to the same device as the model and match model dtype for floating tensors
-            model_device = next(self.rtdetr_model.parameters()).device if self.rtdetr_model is not None else (torch.device('cpu') if TORCH_AVAILABLE else 'cpu')
-            model_dtype = None
-            if TORCH_AVAILABLE and self.rtdetr_model is not None:
-                try:
-                    model_dtype = next(self.rtdetr_model.parameters()).dtype
-                except Exception:
-                    model_dtype = None
-
-            # Determine a safe target device (fallback to CPU if CUDA unavailable or meta tensors)
-            target_device = model_device
-            if TORCH_AVAILABLE:
-                try:
-                    dev_type = getattr(model_device, 'type', str(model_device))
-                    if dev_type == 'meta':
-                        target_device = torch.device('cpu')
-                    elif dev_type == 'cuda' and not torch.cuda.is_available():
-                        target_device = torch.device('cpu')
-                except Exception:
-                    target_device = torch.device('cpu')
-
-            if TORCH_AVAILABLE and self.rtdetr_model is not None:
-                # CRITICAL: Inputs MUST match model dtype
+            # CRITICAL: Get model's exact device and dtype once
+            if not TORCH_AVAILABLE or self.rtdetr_model is None:
+                target_device = 'cpu'
+                model_dtype = None
+            else:
                 model_param = next(self.rtdetr_model.parameters())
-                model_device = model_param.device
+                target_device = model_param.device
                 model_dtype = model_param.dtype
                 
-                # Match both device and dtype in one operation
-                inputs = {k: (v.to(device=model_device, dtype=model_dtype) if isinstance(v, torch.Tensor) else v)
-                         for k, v in inputs.items()}
-                
-                # Force sync for CUDA
-                if model_device.type == 'cuda':
-                    torch.cuda.synchronize(model_device)
-
+                # If CUDA is requested but unavailable, fall back to CPU
+                if target_device.type == 'cuda' and not torch.cuda.is_available():
+                    self._log("CUDA requested but unavailable, falling back to CPU", "warning")
+                    target_device = torch.device('cpu')
                     try:
-                        if getattr(device, 'type', 'cpu') == 'cuda' and torch.cuda.is_available():
-                            inputs = _move_inputs(device, dtype)
-                            # Best-effort sync; guard against invalid context
-                            try:
-                                if torch.cuda.is_initialized():
-                                    torch.cuda.synchronize(device)
-                            except Exception:
-                                pass
-                            target_device = device
-                        else:
-                            inputs = _move_inputs(torch.device('cpu'), torch.float32 if TORCH_AVAILABLE else None)
-                            target_device = torch.device('cpu') if TORCH_AVAILABLE else 'cpu'
-                    except Exception as move_err:
-                        # Global fallback: move model to CPU and retry inputs on CPU
-                        self._log(f"CUDA move failed ({move_err}); falling back to CPU", "warning")
-                        try:
-                            if hasattr(self.rtdetr_model, 'to'):
-                                self.rtdetr_model.to('cpu')
-                        except Exception:
-                            pass
-                        inputs = _move_inputs(torch.device('cpu'), torch.float32 if TORCH_AVAILABLE else None)
-                        target_device = torch.device('cpu') if TORCH_AVAILABLE else 'cpu'
+                        self.rtdetr_model.to('cpu')
+                    except Exception as e:
+                        self._log(f"Failed to move model to CPU: {e}", "warning")
+                
+                # Move all tensor inputs to match model exactly
+                with torch.cuda.device(target_device):  # Ensure correct CUDA context
+                    for k, v in inputs.items():
+                        if isinstance(v, torch.Tensor):
+                            inputs[k] = v.to(device=target_device, dtype=model_dtype, non_blocking=True)
+                    
+                    # Force sync if using CUDA
+                    if target_device.type == 'cuda':
+                        torch.cuda.synchronize(target_device)
             
             # Run inference with AMP only for half/bfloat16 models
             with torch.no_grad():
-                if model_dtype in (torch.float16, torch.bfloat16) and str(target_device).startswith('cuda'):
-                    with torch.cuda.amp.autocast(dtype=model_dtype):
+                try:
+                    if model_dtype in (torch.float16, torch.bfloat16) and getattr(target_device, 'type', '') == 'cuda':
+                        with torch.cuda.device(target_device), torch.cuda.amp.autocast(dtype=model_dtype):
+                            outputs = self.rtdetr_model(**inputs)
+                            torch.cuda.synchronize(target_device)  # Ensure completion
+                    else:
                         outputs = self.rtdetr_model(**inputs)
-                else:
-                    outputs = self.rtdetr_model(**inputs)
+                except RuntimeError as e:
+                    if 'expected device' in str(e).lower() or 'device type' in str(e).lower():
+                        self._log(f"Device mismatch during inference: {e}", "error")
+                        return [] if return_all_bubbles else {'bubbles': [], 'text_bubbles': [], 'text_free': []}
+                    raise
                 
                 # Brief pause for stability after inference
                 time.sleep(0.1)
                 logger.debug("💤 RT-DETR inference pausing briefly for stability")
             
             # Post-process results
-            target_sizes = torch.tensor([pil_image.size[::-1]]) if TORCH_AVAILABLE else None
-            if TORCH_AVAILABLE and getattr(target_device, 'type', 'cpu') == "cuda":
-                target_sizes = target_sizes.to(target_device)
+            if TORCH_AVAILABLE:
+                target_sizes = torch.tensor([pil_image.size[::-1]], device=target_device)
+                if model_dtype in (torch.float16, torch.bfloat16):
+                    target_sizes = target_sizes.to(dtype=model_dtype)
+            else:
+                target_sizes = None
             
             results = self.rtdetr_processor.post_process_object_detection(
                 outputs,

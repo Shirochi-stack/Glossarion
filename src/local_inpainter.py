@@ -2650,6 +2650,16 @@ class LocalInpainter:
                     
                     logger.debug(f"AOT Image shape: {img_torch.shape}, Mask shape: {mask_torch.shape}")
                     
+                    # Ensure tensors exactly match model device/dtype before call (AOT)
+                    try:
+                        model_param = next(self.model.parameters())
+                        img_torch = img_torch.to(device=model_param.device, dtype=model_param.dtype)
+                        mask_torch = mask_torch.to(device=model_param.device, dtype=model_param.dtype)
+                        if getattr(model_param.device, 'type', 'cpu') == 'cuda':
+                            torch.cuda.synchronize(model_param.device)
+                    except Exception:
+                        pass
+
                     # Run inference
                     with torch.no_grad():
                         inpainted = self.model(img_torch, mask_torch)
@@ -2716,6 +2726,16 @@ class LocalInpainter:
                         # Resize mask to match image
                         mask_tensor = F.interpolate(mask_tensor, size=image_tensor.shape[2:], mode='nearest')
                     
+                    # Ensure tensors exactly match model device/dtype before call
+                    try:
+                        model_param = next(self.model.parameters())
+                        image_tensor = image_tensor.to(device=model_param.device, dtype=model_param.dtype)
+                        mask_tensor = mask_tensor.to(device=model_param.device, dtype=model_param.dtype)
+                        if getattr(model_param.device, 'type', 'cpu') == 'cuda':
+                            torch.cuda.synchronize(model_param.device)
+                    except Exception:
+                        pass
+
                     # Run inference with proper error handling
                     with torch.no_grad():
                         try:
