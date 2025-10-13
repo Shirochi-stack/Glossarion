@@ -947,7 +947,7 @@ class BubbleDetector:
                         inputs[k] = v
             
             # Use autocast for mixed precision on GPU
-            if self.use_gpu:
+            if device.type == "cuda":
                 logger.debug("Using autocast for mixed precision")
                 ctx = torch.cuda.amp.autocast()
                 ctx.__enter__()
@@ -966,7 +966,7 @@ class BubbleDetector:
             with torch.no_grad():
                 # Process outputs after running model
                 target_sizes = torch.tensor([pil_image.size[::-1]]) if TORCH_AVAILABLE else None
-                if TORCH_AVAILABLE and hasattr(model_device, 'type') and model_device.type == "cuda":
+                if TORCH_AVAILABLE and device.type == "cuda":
                     target_sizes = target_sizes.to(device)
                 else:
                     outputs = self.rtdetr_model(**inputs)
