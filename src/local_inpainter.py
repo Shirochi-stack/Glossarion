@@ -1376,7 +1376,9 @@ class LocalInpainter:
         try:
             if not TORCH_AVAILABLE or not self.use_gpu or self.device is None:
                 return tensor.contiguous()
-            return tensor.contiguous().to(self.device, non_blocking=False)
+            # Match the exact device and dtype from the model instance
+            model_param = next(self.model.parameters())
+            return tensor.contiguous().to(device=model_param.device, dtype=model_param.dtype)
         except RuntimeError as e:
             # Attempt recovery once
             try:

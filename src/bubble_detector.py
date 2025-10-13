@@ -927,21 +927,11 @@ class BubbleDetector:
                 except Exception:
                     target_device = torch.device('cpu')
 
-            if TORCH_AVAILABLE:
-                new_inputs = {}
-                for k, v in inputs.items():
-                    if isinstance(v, torch.Tensor):
-                        try:
-                            # Only move if devices differ; prefer safe CPU fallback when needed
-                            if getattr(v, 'device', torch.device('cpu')).type != getattr(target_device, 'type', 'cpu'):
-                                v = v.to(device=target_device)
-                            if model_dtype is not None and torch.is_floating_point(v) and v.dtype != model_dtype:
-                                v = v.to(dtype=model_dtype)
-                        except Exception as e:
-                            logger.warning(f"Failed to move tensor to device {target_device}: {e}")
-                            v = v.cpu()
-                    new_inputs[k] = v
-                inputs = new_inputs
+            if TORCH_AVAILABLE and self.rtdetr_model is not None:
+                # Get device and dtype from actual model instance
+                model_param = next(self.rtdetr_model.parameters())
+                inputs = {k: (v.to(device=model_param.device, dtype=model_param.dtype) if isinstance(v, torch.Tensor) else v)
+                         for k, v in inputs.items()}
             
             # Run inference with autocast when model is half/bfloat16 on CUDA
             use_amp = TORCH_AVAILABLE and hasattr(model_device, 'type') and model_device.type == 'cuda' and (model_dtype in (torch.float16, torch.bfloat16))
