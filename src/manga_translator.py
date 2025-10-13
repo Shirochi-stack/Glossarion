@@ -9275,13 +9275,21 @@ class MangaTranslator:
         return result
     
     def _is_free_text_region(self, region) -> bool:
-        """Heuristic: determine if the region is free text (not a bubble).
-        Uses bubble_type when available; otherwise falls back to aspect ratio heuristics.
+        """Determine if the region is free text (not a bubble).
+        Priority order:
+        1) Explicit flags from detector: region.region_type / region.bubble_type
+        2) Fallback geometry heuristic
         """
         try:
-            if hasattr(region, 'bubble_type') and region.bubble_type:
-                return region.bubble_type == 'free_text'
-            # Fallback heuristic
+            # 1) Prefer explicit flags when available (RT-DETR sets both in our pipeline)
+            if hasattr(region, 'region_type') and isinstance(region.region_type, str):
+                if region.region_type.lower() == 'free_text' or region.region_type.lower() == 'free-text' or region.region_type.lower() == 'free text':
+                    return True
+            if hasattr(region, 'bubble_type') and isinstance(region.bubble_type, str):
+                if region.bubble_type.lower() == 'free_text' or region.bubble_type.lower() == 'free-text' or region.bubble_type.lower() == 'free text':
+                    return True
+            
+            # 2) Fallback heuristic when labels are missing
             x, y, w, h = region.bounding_box
             w, h = int(w), int(h)
             if h <= 0:
