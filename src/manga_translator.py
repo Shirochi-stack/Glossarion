@@ -3311,54 +3311,55 @@ class MangaTranslator:
                                 empty_bubble_set = set(_norm_box(b) for b in rtdetr_detections.get('bubbles', []) or [])
 
                                 for block_data in matched_blocks:
-                                    if block_data['text'].strip():  # Only include blocks with text
-                                        bbox = _norm_box(block_data['bbox'])
-                                        # Create TextRegion with RT-DETR bubble bounds
-                                        region = TextRegion(
-                                            text=block_data['text'],
-                                            vertices=[(bbox[0], bbox[1]),
-                                                     (bbox[0]+bbox[2], bbox[1]),
-                                                     (bbox[0]+bbox[2], bbox[1]+bbox[3]),
-                                                     (bbox[0], bbox[1]+bbox[3])],
-                                            bounding_box=bbox,
-                                            confidence=0.0,
-                                            region_type='text_block'
-                                        )
-                                        # Use RT-DETR bubble bounds for rendering
-                                        region.bubble_bounds = bbox
+                                    # CRITICAL: Include ALL blocks (even empty ones) for fallback OCR
+                                    # Empty blocks will be processed by fallback OCR after this loop
+                                    bbox = _norm_box(block_data['bbox'])
+                                    # Create TextRegion with RT-DETR bubble bounds
+                                    region = TextRegion(
+                                        text=block_data['text'],  # May be empty - fallback OCR will fill it
+                                        vertices=[(bbox[0], bbox[1]),
+                                                 (bbox[0]+bbox[2], bbox[1]),
+                                                 (bbox[0]+bbox[2], bbox[1]+bbox[3]),
+                                                 (bbox[0], bbox[1]+bbox[3])],
+                                        bounding_box=bbox,
+                                        confidence=0.0,
+                                        region_type='text_block'
+                                    )
+                                    # Use RT-DETR bubble bounds for rendering
+                                    region.bubble_bounds = bbox
 
-                                        # Classify by RT-DETR class membership
-                                        if bbox in free_text_set:
-                                            # Always read from live GUI config for immediate setting changes
+                                    # Classify by RT-DETR class membership
+                                    if bbox in free_text_set:
+                                        # Always read from live GUI config for immediate setting changes
+                                        live_detect_free = None
+                                        try:
+                                            # First try getting from live GUI config
+                                            if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'config'):
+                                                live_detect_free = self.main_gui.config.get('manga_settings', {}).get('ocr', {}).get('detect_free_text')
+                                        except Exception:
                                             live_detect_free = None
-                                            try:
-                                                # First try getting from live GUI config
-                                                if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'config'):
-                                                    live_detect_free = self.main_gui.config.get('manga_settings', {}).get('ocr', {}).get('detect_free_text')
-                                            except Exception:
-                                                live_detect_free = None
-                                            # Fallback to local settings if GUI not available
-                                            cfg_detect_free = ocr_settings.get('detect_free_text', True) if isinstance(ocr_settings, dict) else True
-                                            detect_free = cfg_detect_free if (live_detect_free is None) else bool(live_detect_free)
-                                            self._log(f"   • Free text detection: {detect_free} (from {'GUI' if live_detect_free is not None else 'config'})", "debug")
+                                        # Fallback to local settings if GUI not available
+                                        cfg_detect_free = ocr_settings.get('detect_free_text', True) if isinstance(ocr_settings, dict) else True
+                                        detect_free = cfg_detect_free if (live_detect_free is None) else bool(live_detect_free)
+                                        self._log(f"   • Free text detection: {detect_free} (from {'GUI' if live_detect_free is not None else 'config'})", "debug")
 
-                                            region.region_type = 'free_text'
-                                            region.bubble_type = 'free_text'
-                                            region.should_inpaint = bool(detect_free)
-                                            if detect_free:
-                                                self._log(f"📝 Classified RT-DETR block as FREE TEXT (ENABLED): {bbox}", "info")
-                                            else:
-                                                self._log(f"📝 Classified RT-DETR block as FREE TEXT (DISABLED by toggle) — will NOT inpaint: {bbox}", "info")
-                                        elif bbox in text_bubble_set or bbox in empty_bubble_set:
-                                            region.region_type = 'text_bubble'
-                                            region.bubble_type = 'text_bubble'
-                                            region.should_inpaint = True
-                                            self._log(f"💬 Classified RT-DETR block as TEXT BUBBLE: {bbox}", "info")
+                                        region.region_type = 'free_text'
+                                        region.bubble_type = 'free_text'
+                                        region.should_inpaint = bool(detect_free)
+                                        if detect_free:
+                                            self._log(f"📝 Classified RT-DETR block as FREE TEXT (ENABLED): {bbox}", "info")
                                         else:
-                                            # Fallback
-                                            self._log(f"⚠️ RT-DETR block not found in class sets, leaving as text_block: {bbox}", "warning")
+                                            self._log(f"📝 Classified RT-DETR block as FREE TEXT (DISABLED by toggle) — will NOT inpaint: {bbox}", "info")
+                                    elif bbox in text_bubble_set or bbox in empty_bubble_set:
+                                        region.region_type = 'text_bubble'
+                                        region.bubble_type = 'text_bubble'
+                                        region.should_inpaint = True
+                                        self._log(f"💬 Classified RT-DETR block as TEXT BUBBLE: {bbox}", "info")
+                                    else:
+                                        # Fallback
+                                        self._log(f"⚠️ RT-DETR block not found in class sets, leaving as text_block: {bbox}", "warning")
 
-                                        regions.append(region)
+                                    regions.append(region)
                                 
                                 self._log(f"✅ Matched text to {len(regions)} RT-DETR blocks (comic-translate style)")
                                 empty_blocks_count = sum(1 for r in regions if not r.text.strip())
@@ -3443,6 +3444,14 @@ class MangaTranslator:
                                             except Exception as e:
                                                 self._log(f"   ❌ Block {idx+1}: Fallback OCR failed: {str(e)}", "warning")
                                                 continue
+                                
+                                # FINAL CLEANUP: Remove any blocks that are STILL empty after fallback OCR
+                                # These are genuinely empty bubbles with no text
+                                original_count = len(regions)
+                                regions = [r for r in regions if r.text.strip()]
+                                removed_count = original_count - len(regions)
+                                if removed_count > 0:
+                                    self._log(f"🧹 Removed {removed_count} genuinely empty blocks (no text after fallback OCR)")
                                 
                                 # Clear detections
                                 rtdetr_detections = None
