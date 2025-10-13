@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Glossarion No Cuda v6.0.4 - PyInstaller Specification File
+Glossarion No Cuda v6.0.5 - PyInstaller Specification File
 Enhanced Translation Tool with QA Scanner, AI Hunter, and Manga Translation
 """
 
@@ -12,7 +12,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'N_Glossarion_NoCuda v6.0.4'  # CHANGED: Updated version
+APP_NAME = 'N_Glossarion_NoCuda v6.0.5'  # CHANGED: Updated version
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = True  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
@@ -50,6 +50,9 @@ for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'charde
 # Main application files
 
 # Main application files
+# Add icon to data
+datas.append(('Halgakos.ico', '.'))
+
 app_files = [
     # Core GUI
     ('translator_gui.py', '.'),
@@ -113,7 +116,6 @@ app_files = [
     ('translate_headers_standalone.py', '.'),
     
     # Resources
-    ('Halgakos.ico', '.'),
 	
 	('enhanced_text_extractor.py', '.'),	
 	
