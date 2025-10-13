@@ -918,13 +918,13 @@ class BubbleDetector:
             inputs = self.rtdetr_processor(images=pil_image, return_tensors="pt")
             
             # Move inputs to the same device as the model and match model dtype for floating tensors
+            # Get model device and dtype
             model_device = None
             model_dtype = None
             if TORCH_AVAILABLE and self.rtdetr_model is not None:
                 try:
-                    # Get first parameter that's not None and has a device attribute
-                    for param in self.rtdetr_model.parameters():
-                        if param is not None and hasattr(param, 'device'):
+                    for name, param in self.rtdetr_model.named_parameters():
+                        if param is not None:
                             model_device = param.device
                             model_dtype = param.dtype
                             break
@@ -932,25 +932,30 @@ class BubbleDetector:
                     pass
             
             if model_device is None:
-                model_device = torch.device('cpu') if TORCH_AVAILABLE else 'cpu'
+                model_device = torch.device('cuda' if self.use_gpu else 'cpu')
+            if model_dtype is None and self.use_gpu:
+                model_dtype = torch.float16  # Default to FP16 on GPU for RT-DETR
             
             if TORCH_AVAILABLE:
-                # First move tensors to CPU, convert to float32, then move to target device and dtype
+                # Process input tensors with proper type conversion
                 new_inputs = {}
                 for k, v in inputs.items():
                     if isinstance(v, torch.Tensor):
                         try:
-                            # Start fresh on CPU with float32
+                            # Reset to float32 on CPU first
                             v = v.cpu().float()
-                            # Then move to target device
-                            v = v.to(device=model_device)
-                            # Finally convert to target dtype if needed
+                            # Convert to target precision before moving to GPU
                             if model_dtype is not None and torch.is_floating_point(v):
                                 v = v.to(dtype=model_dtype)
+                            # Finally move to target device
+                            v = v.to(device=model_device)
                         except Exception as e:
-                            logger.warning(f"Failed to move tensor to device {model_device}: {e}")
-                            # Fallback to CPU
-                            v = v.cpu()
+                            logger.warning(f"Failed to process tensor {k}: {e}")
+                            # Emergency fallback - try basic device move
+                            try:
+                                v = v.to(device=model_device, dtype=model_dtype if model_dtype is not None else v.dtype)
+                            except Exception:
+                                v = v.cpu()
                     new_inputs[k] = v
                 inputs = new_inputs
             
