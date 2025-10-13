@@ -7432,15 +7432,23 @@ class MangaTranslationTab:
                     
                     cursor.insertText(message, format)
                     
-                    # Auto-scroll to bottom unless user manually scrolled up
+                    # More aggressive auto-scroll behavior
                     try:
                         from PySide6.QtGui import QTextCursor as _QtTextCursor
+                        from PySide6.QtCore import QTimer
+                        
+                        # Always move cursor to end first
+                        self.log_text.moveCursor(_QtTextCursor.End)
+                        self.log_text.ensureCursorVisible()
+                        
+                        # Force scroll to bottom with repeated attempts
+                        scrollbar = self.log_text.verticalScrollBar()
+                        scrollbar.setValue(scrollbar.maximum())
+                        
+                        # Schedule additional scroll attempts with delays
                         if not getattr(self, '_user_scrolled_up', False):
-                            # Move cursor to end and ensure visibility
-                            self.log_text.moveCursor(_QtTextCursor.End)
-                            self.log_text.ensureCursorVisible()
-                            scrollbar = self.log_text.verticalScrollBar()
-                            scrollbar.setValue(scrollbar.maximum())  # Force scroll to bottom
+                            for delay in [50, 100, 200]:  # Multiple attempts with increasing delays
+                                QTimer.singleShot(delay, lambda: scrollbar.setValue(scrollbar.maximum()))
                     except Exception:
                         pass
                 except Exception:
