@@ -9332,8 +9332,10 @@ class MangaTranslator:
                     # Use the larger of: computed line_height or actual_line_height
                     line_height = max(line_height, actual_line_height * 1.1)
                 
-                total_height = len(lines) * line_height
-                
+                # Mixed font fallback if available (Meiryo for symbols/CJK)
+                # EXCLUDED for custom fonts - user chose this font intentionally
+                is_using_custom_font = bool(self.selected_font_style and self.selected_font_style != self.font_path)
+                emote_font = None if is_using_custom_font else self._get_emote_fallback_font(font_size)
                 # Ensure text doesn't overflow vertically - constrain start_y
                 ideal_start_y = render_y + (render_h - total_height) // 2
                 # Make sure text starts within render area and doesn't extend past bottom
