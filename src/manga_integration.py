@@ -7338,25 +7338,22 @@ class MangaTranslationTab:
             pass
 
     def _on_log_scroll(self, value):
-        """Detect when user manually scrolls up in the log"""
+        """Detect when user manually scrolls in the log"""
         try:
             scrollbar = self.log_text.verticalScrollBar()
-            # If user scrolled up (not at bottom), mark it
+            # Check if we're at the bottom (with small margin)
             at_bottom = value >= scrollbar.maximum() - 10
-            
-            # Only mark as user scrolled if we were previously at bottom and now we're not
-            # This prevents false positives when content is added and scrollbar max changes
-            was_at_bottom = getattr(self, '_was_at_bottom', True)
-            
-            if not at_bottom and was_at_bottom:
-                # User intentionally scrolled up from the bottom
-                self._user_scrolled_up = True
-            elif at_bottom:
-                # User scrolled back to bottom, resume auto-scroll
+
+            if at_bottom:
+                # User explicitly scrolled to bottom - re-enable auto-scroll
                 self._user_scrolled_up = False
-            
-            # Track current state for next comparison
-            self._was_at_bottom = at_bottom
+                self._was_at_bottom = True
+            else:
+                # Only mark as manually scrolled if we were previously at bottom
+                if getattr(self, '_was_at_bottom', True):
+                    self._user_scrolled_up = True
+                self._was_at_bottom = False
+
         except Exception:
             pass
     
@@ -7438,10 +7435,12 @@ class MangaTranslationTab:
                     # Scroll to bottom (respect delay and manual scrolling)
                     try:
                         import time as _time
-                        # Only auto-scroll if delay passed AND user hasn't scrolled up
-                        if (_time.time() >= getattr(self, '_autoscroll_delay_until', 0) and 
+                        scrollbar = self.log_text.verticalScrollBar()
+                        at_bottom = scrollbar.value() >= scrollbar.maximum() - 10
+                        # Only auto-scroll if already at bottom OR (delay passed AND user hasn't scrolled up)
+                        if at_bottom or (_time.time() >= getattr(self, '_autoscroll_delay_until', 0) and 
                             not getattr(self, '_user_scrolled_up', False)):
-                            self.log_text.ensureCursorVisible()
+                            scrollbar.setValue(scrollbar.maximum()) # Force scroll to actual bottom
                     except Exception:
                         pass
                 except Exception:

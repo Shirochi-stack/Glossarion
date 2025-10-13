@@ -352,6 +352,33 @@ class MangaTranslator:
                 if rec and 'checked_out' in rec:
                     checked_out = rec['checked_out']
                     if self._checked_out_inpainter in checked_out:
+                        # EXTRA SAFETY: drain CUDA state on the inpainter before putting it back
+                        try:
+                            inp = self._checked_out_inpainter
+                            # If this inpainter uses torch and GPU, clear its caches
+                            if hasattr(inp, 'use_gpu') and getattr(inp, 'use_gpu', False):
+                                try:
+                                    import torch
+                                    if torch.cuda.is_available():
+                                        torch.cuda.synchronize()
+                                        torch.cuda.empty_cache()
+                                        torch.cuda.reset_peak_memory_stats()
+                                        try:
+                                            getattr(torch._C, '_cuda_clearCublasWorkspaces')()
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
+                            # Also clear any per-instance temporary tensors if tracked
+                            for attr in ('_tmp_tensors', '_last_tensors'):
+                                try:
+                                    if hasattr(inp, attr):
+                                        setattr(inp, attr, None)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        
                         checked_out.remove(self._checked_out_inpainter)
                         # The spares list stays static - it contains all preloaded instances
                         # We only track which ones are checked out, not which are available
@@ -1120,7 +1147,20 @@ class MangaTranslator:
                 # Return thread-local bubble detector to pool (DO NOT unload)
                 if hasattr(tl, 'bubble_detector') and tl.bubble_detector is not None:
                     try:
-                        # Instead of unloading, return to pool for reuse
+                        # Clear CUDA caches first
+                        try:
+                            import torch
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                                torch.cuda.reset_peak_memory_stats()
+                                try:
+                                    getattr(torch._C, '_cuda_clearCublasWorkspaces')()
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                            
+                        # Return to pool for reuse
                         self._return_bubble_detector_to_pool()
                         # Keep thread-local reference intact for reuse in next image
                         # Only clear if we're truly shutting down the thread

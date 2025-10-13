@@ -1348,6 +1348,51 @@ class LocalInpainter:
         
         return key.replace('.', '_')
     
+    def _try_recover_cuda_oom(self):
+        """Attempt to recover from CUDA OOM by clearing caches"""
+        if not TORCH_AVAILABLE or not self.use_gpu:
+            return
+        try:
+            torch.cuda.synchronize()
+        except Exception:
+            pass
+        try:
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
+            # Optionally try to clear cuBLAS workspace
+            try:
+                getattr(torch._C, '_cuda_clearCublasWorkspaces')()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _to_device_safe(self, tensor):
+        """Safely move a tensor to the configured device with retries and fallbacks.
+        - Ensures contiguity
+        - Recovers from transient CUDA errors by clearing caches
+        - Falls back to CPU if GPU move consistently fails
+        """
+        try:
+            if not TORCH_AVAILABLE or not self.use_gpu or self.device is None:
+                return tensor.contiguous()
+            return tensor.contiguous().to(self.device, non_blocking=False)
+        except RuntimeError as e:
+            # Attempt recovery once
+            try:
+                self._try_recover_cuda_oom()
+            except Exception:
+                pass
+            try:
+                time.sleep(0.02)
+            except Exception:
+                pass
+            try:
+                return tensor.contiguous().to(self.device, non_blocking=False)
+            except RuntimeError as e2:
+                logger.warning(f"CUDA move failed twice; using CPU tensor for this op: {e2}")
+                return tensor.contiguous()
+
     def _load_weights_with_mapping(self, model, state_dict):
         """Load weights with proper mapping"""
         model_dict = model.state_dict()
@@ -1525,6 +1570,9 @@ class LocalInpainter:
                         # Prefer HuggingFace download if repo info is available
                         if 'repo_id' in model_info and 'filename' in model_info:
                             progress_queue.put(('progress', 10, f"Getting {model_name} from Hugging Face..."))
+                            # First try to recover CUDA memory
+                            self._try_recover_cuda_oom()
+            
                             model_path = download_model(
                                 repo_id=model_info['repo_id'],
                                 filename=model_info['filename'],
@@ -2550,9 +2598,9 @@ class LocalInpainter:
                     mask_torch[mask_torch < 0.5] = 0
                     mask_torch[mask_torch >= 0.5] = 1
                     
-                    # Move to device
-                    img_torch = img_torch.to(self.device)
-                    mask_torch = mask_torch.to(self.device)
+                    # Move to device (safely)
+                    img_torch = self._to_device_safe(img_torch)
+                    mask_torch = self._to_device_safe(mask_torch)
                     
                     # Optional FP16 on GPU for lower VRAM
                     if self.quantize_enabled and self.use_gpu:
@@ -2611,9 +2659,9 @@ class LocalInpainter:
                     image_tensor = torch.from_numpy(image_norm).permute(2, 0, 1).unsqueeze(0).float()
                     mask_tensor = torch.from_numpy(mask_binary).unsqueeze(0).unsqueeze(0).float()
                     
-                    # Move to device
-                    image_tensor = image_tensor.to(self.device)
-                    mask_tensor = mask_tensor.to(self.device)
+                    # Move to device (safely)
+                    image_tensor = self._to_device_safe(image_tensor)
+                    mask_tensor = self._to_device_safe(mask_tensor)
                     
                     # Optional FP16 on GPU for lower VRAM
                     if self.quantize_enabled and self.use_gpu:
@@ -2704,8 +2752,8 @@ class LocalInpainter:
                 mask_tensor = torch.from_numpy(mask_norm).unsqueeze(0).unsqueeze(0).float()
                 
                 if self.use_gpu and self.device:
-                    img_tensor = img_tensor.to(self.device)
-                    mask_tensor = mask_tensor.to(self.device)
+                    img_tensor = self._to_device_safe(img_tensor)
+                    mask_tensor = self._to_device_safe(mask_tensor)
                 
                 with torch.no_grad():
                     output = self.model(img_tensor, mask_tensor)

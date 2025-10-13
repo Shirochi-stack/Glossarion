@@ -914,14 +914,32 @@ class BubbleDetector:
                     model_dtype = next(self.rtdetr_model.parameters()).dtype
                 except Exception:
                     model_dtype = None
-            
+
+            # Determine a safe target device (fallback to CPU if CUDA unavailable or meta tensors)
+            target_device = model_device
+            if TORCH_AVAILABLE:
+                try:
+                    dev_type = getattr(model_device, 'type', str(model_device))
+                    if dev_type == 'meta':
+                        target_device = torch.device('cpu')
+                    elif dev_type == 'cuda' and not torch.cuda.is_available():
+                        target_device = torch.device('cpu')
+                except Exception:
+                    target_device = torch.device('cpu')
+
             if TORCH_AVAILABLE:
                 new_inputs = {}
                 for k, v in inputs.items():
                     if isinstance(v, torch.Tensor):
-                        v = v.to(model_device)
-                        if model_dtype is not None and torch.is_floating_point(v):
-                            v = v.to(model_dtype)
+                        try:
+                            # Only move if devices differ; prefer safe CPU fallback when needed
+                            if getattr(v, 'device', torch.device('cpu')).type != getattr(target_device, 'type', 'cpu'):
+                                v = v.to(device=target_device)
+                            if model_dtype is not None and torch.is_floating_point(v) and v.dtype != model_dtype:
+                                v = v.to(dtype=model_dtype)
+                        except Exception as e:
+                            logger.warning(f"Failed to move tensor to device {target_device}: {e}")
+                            v = v.cpu()
                     new_inputs[k] = v
                 inputs = new_inputs
             
@@ -942,8 +960,8 @@ class BubbleDetector:
             
             # Post-process results
             target_sizes = torch.tensor([pil_image.size[::-1]]) if TORCH_AVAILABLE else None
-            if TORCH_AVAILABLE and hasattr(model_device, 'type') and model_device.type == "cuda":
-                target_sizes = target_sizes.to(model_device)
+            if TORCH_AVAILABLE and getattr(target_device, 'type', 'cpu') == "cuda":
+                target_sizes = target_sizes.to(target_device)
             
             results = self.rtdetr_processor.post_process_object_detection(
                 outputs,
