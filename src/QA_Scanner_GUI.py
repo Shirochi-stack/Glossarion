@@ -1670,13 +1670,18 @@ class QAScannerMixin:
         settings_height = int(screen.height() * 0.85)
         dialog.resize(settings_width, settings_height)
         
-        # Set window icon
+        # Set window icon and prepare icon path for comboboxes
         try:
-            ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
-            if os.path.isfile(ico_path):
-                dialog.setWindowIcon(QIcon(ico_path))
+            base_dir = sys._MEIPASS if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
+            icon_path = os.path.join(base_dir, 'Halgakos.ico')
+            if not os.path.exists(icon_path):
+                icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+            if not os.path.exists(icon_path):
+                icon_path = os.path.join(os.getcwd(), 'Halgakos.ico')
+            if os.path.exists(icon_path):
+                dialog.setWindowIcon(QIcon(icon_path))
         except Exception:
-            pass
+            icon_path = os.path.join(os.getcwd(), 'Halgakos.ico')
         
         # Main layout
         main_layout = QVBoxLayout(dialog)

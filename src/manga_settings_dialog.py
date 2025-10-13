@@ -4,6 +4,7 @@ Enhanced settings dialog for manga translation with all settings visible
 """
 
 import os
+import sys
 import json
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, 
                                 QLabel, QPushButton, QCheckBox, QSpinBox, QDoubleSpinBox,
@@ -477,34 +478,6 @@ class MangaSettingsDialog(QDialog):
         """Handle fit style change"""
         self.auto_fit_style = style
         self._save_rendering_settings()
-
-    def _create_grayed_icon(self, icon_path):
-        """Create a grayed-out version of the icon for disabled state"""
-        grayed_path = os.path.join(os.path.dirname(__file__), 'Halgakos_disabled.png')
-        try:
-            # Load the icon
-            pixmap = QPixmap(icon_path)
-            if pixmap.isNull():
-                return ''
-            
-            # Create grayscale version
-            image = pixmap.toImage()
-            for y in range(image.height()):
-                for x in range(image.width()):
-                    pixel = image.pixelColor(x, y)
-                    gray = int(0.299 * pixel.red() + 0.587 * pixel.green() + 0.114 * pixel.blue())
-                    # Make it darker for disabled look
-                    gray = int(gray * 0.4)
-                    pixel.setRgb(gray, gray, gray, pixel.alpha())
-                    image.setPixelColor(x, y, pixel)
-            
-            # Save grayed version
-            grayed_pixmap = QPixmap.fromImage(image)
-            grayed_pixmap.save(grayed_path, 'PNG')
-            return grayed_path
-        except Exception as e:
-            # If grayscale creation fails, just continue without it
-            return ''
     
     def _create_tooltip(self, widget, text):
         """Create a tooltip for a widget - PySide6 version"""
@@ -536,7 +509,7 @@ class MangaSettingsDialog(QDialog):
         
         # Set the halgakos.ico icon
         try:
-            icon_path = os.path.join(os.path.dirname(__file__), 'Halgakos.ico')
+            icon_path = os.path.join(os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
             if os.path.exists(icon_path):
                 self.setWindowIcon(QIcon(icon_path))
         except Exception:

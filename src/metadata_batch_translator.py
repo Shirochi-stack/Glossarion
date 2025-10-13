@@ -151,7 +151,15 @@ class MetadataBatchTranslatorUI:
             dialog.resize(dialog_width, dialog_height)
             
             # Set window icon
-            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
+            # Try several locations to find the icon
+            if getattr(sys, 'frozen', False):
+                # In .exe environment
+                icon_path = os.path.join(sys._MEIPASS, 'Halgakos.ico')
+            else:
+                # In Python environment
+                icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+                if not os.path.exists(icon_path):
+                    icon_path = 'Halgakos.ico'
             if os.path.exists(icon_path):
                 dialog.setWindowIcon(QIcon(icon_path))
             
@@ -1189,7 +1197,7 @@ class MetadataBatchTranslatorUI:
                 background-color: rgba(255, 255, 255, 0.1);
             }
             QComboBox::down-arrow {
-                image: url(halgakos.ico);
+                image: url(Halgakos.ico);
                 width: 16px;
                 height: 16px;
             }

@@ -223,7 +223,7 @@ class HeaderTranslationHelpDialog(QDialog):
         self.setup_ui()
         
         # Set icon if available
-        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+        icon_path = os.path.join(os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
     
@@ -632,9 +632,12 @@ def open_other_settings(self):
     # CRITICAL: Remove size constraints that prevent maximize
     dialog.setSizeGripEnabled(False)
     
-    # Set icon
+    # Set icon with absolute path
     try:
-        dialog.setWindowIcon(QIcon("halgakos.ico"))
+        import sys
+        base_dir = sys._MEIPASS if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
+        icon_path = os.path.join(base_dir, 'Halgakos.ico')
+        dialog.setWindowIcon(QIcon(icon_path))
     except Exception:
         pass
     
@@ -680,8 +683,25 @@ def open_other_settings(self):
     main_layout.setContentsMargins(5, 5, 5, 5)  # Set uniform margins
     main_layout.setSpacing(8)  # Set spacing between widgets
 
+    # Set up icon path for both Python and .exe environments
+    try:
+        arrow_url = 'Halgakos.ico'  # Default for Python environment
+        if getattr(sys, 'frozen', False):
+            # In .exe environment, use absolute path
+            icon_path = os.path.join(sys._MEIPASS, 'Halgakos.ico')
+            if os.path.exists(icon_path):
+                from PySide6.QtCore import QUrl
+                arrow_url = QUrl.fromLocalFile(icon_path).toString()
+    except Exception:
+        arrow_url = 'Halgakos.ico'
+
     # Apply global stylesheet for blue checkboxes (from manga integration)
     checkbox_radio_style = """
+        QComboBox::down-arrow {
+            image: url(%s);
+            width: 16px;
+            height: 16px;
+        }
         QCheckBox {
             color: white;
             spacing: 6px;
@@ -738,7 +758,7 @@ def open_other_settings(self):
     scroll = QScrollArea()
     scroll.setWidgetResizable(True)
     container = QWidget()
-    container.setStyleSheet(checkbox_radio_style)  # Apply global stylesheet
+    container.setStyleSheet(checkbox_radio_style % arrow_url)  # Apply global stylesheet with arrow icon
     grid = QGridLayout(container)
     grid.setColumnStretch(0, 1)
     grid.setColumnStretch(1, 1)
