@@ -3848,10 +3848,16 @@ If you see multiple p-b cookies, use the one with the longest value."""
         if hasattr(self, 'button_run'):
             self.button_run.config(text="⏹ Stop", state="normal")
         
-        # Delay auto-scroll so first log is readable
-        self._start_autoscroll_delay(100)
+        # Delay auto-scroll so first log is readable (set to 0 for immediate scrolling)
+        self._start_autoscroll_delay(0)
         # Show immediate feedback that translation is starting
         self.append_log("🚀 Initializing translation process...")
+        # Force immediate scroll to bottom so user sees the latest output right away
+        try:
+            scrollbar = self.log_text.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
+        except Exception:
+            pass
         # Reset stop notice dedupe flag at start of a run
         self._stop_notice_shown = False
         
@@ -5357,10 +5363,16 @@ If you see multiple p-b cookies, use the one with the longest value."""
             self.glossary_thread = threading.Thread(target=self.run_glossary_extraction_direct, name=thread_name, daemon=True)
             self.glossary_thread.start()
         
-        # Delay auto-scroll so first log is readable
-        self._start_autoscroll_delay(100)
+        # Delay auto-scroll so first log is readable (set to 0 for immediate scrolling)
+        self._start_autoscroll_delay(0)
         # Update button IMMEDIATELY after thread starts (synchronous)
         self.update_run_button()
+        # Force immediate scroll to bottom so user sees the latest output right away
+        try:
+            scrollbar = self.log_text.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
+        except Exception:
+            pass
 
     def run_glossary_extraction_direct(self):
         """Run glossary extraction directly - handles multiple files and different file types"""
@@ -6938,7 +6950,7 @@ Important rules:
         except Exception:
             pass
     
-    def _start_autoscroll_delay(self, ms=500):
+    def _start_autoscroll_delay(self, ms=0):
         try:
             import time as _time
             self._autoscroll_delay_until = _time.time() + (ms / 1000.0)
