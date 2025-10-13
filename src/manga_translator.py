@@ -78,38 +78,26 @@ def does_rectangle_fit(bigger_rect: Tuple, smaller_rect: Tuple) -> bool:
     Based on comic-translate's implementation.
     
     Args:
-        bigger_rect: (x1, y1, x2, y2) or (x, y, w, h) format
-        smaller_rect: (x1, y1, x2, y2) or (x, y, w, h) format
+        bigger_rect: (x, y, w, h) format - RT-DETR block
+        smaller_rect: (x, y, w, h) format - OCR line bbox
     
     Returns:
         True if smaller_rect fits inside bigger_rect
     """
-    # Handle both (x,y,w,h) and (x1,y1,x2,y2) formats
-    if len(bigger_rect) == 4:
-        # Assume (x, y, w, h) if w,h seem reasonable, else (x1,y1,x2,y2)
-        b_x1, b_y1, b_val3, b_val4 = bigger_rect
-        if b_val3 > b_x1 and b_val4 > b_y1:  # Likely (x1,y1,x2,y2)
-            b_x2, b_y2 = b_val3, b_val4
-        else:  # Likely (x, y, w, h)
-            b_x2, b_y2 = b_x1 + b_val3, b_y1 + b_val4
-            
-        s_x1, s_y1, s_val3, s_val4 = smaller_rect
-        if s_val3 > s_x1 and s_val4 > s_y1:  # Likely (x1,y1,x2,y2)
-            s_x2, s_y2 = s_val3, s_val4
-        else:  # Likely (x, y, w, h)
-            s_x2, s_y2 = s_x1 + s_val3, s_y1 + s_val4
-    else:
+    # Both RT-DETR blocks and Azure OCR lines are in (x, y, w, h) format
+    if len(bigger_rect) != 4 or len(smaller_rect) != 4:
         return False
     
-    # Normalize coordinates
-    left1, top1 = min(b_x1, b_x2), min(b_y1, b_y2)
-    right1, bottom1 = max(b_x1, b_x2), max(b_y1, b_y2)
-    left2, top2 = min(s_x1, s_x2), min(s_y1, s_y2)
-    right2, bottom2 = max(s_x1, s_x2), max(s_y1, s_y2)
+    # Convert (x, y, w, h) to (x1, y1, x2, y2)
+    b_x1, b_y1, b_w, b_h = bigger_rect
+    b_x2, b_y2 = b_x1 + b_w, b_y1 + b_h
+    
+    s_x1, s_y1, s_w, s_h = smaller_rect
+    s_x2, s_y2 = s_x1 + s_w, s_y1 + s_h
     
     # Check containment
-    fits_horizontally = left1 <= left2 and right1 >= right2
-    fits_vertically = top1 <= top2 and bottom1 >= bottom2
+    fits_horizontally = b_x1 <= s_x1 and b_x2 >= s_x2
+    fits_vertically = b_y1 <= s_y1 and b_y2 >= s_y2
     
     return fits_horizontally and fits_vertically
 
@@ -155,7 +143,7 @@ def is_mostly_contained(bigger_rect: Tuple, smaller_rect: Tuple, threshold: floa
     overlap_ratio = intersection_area / smaller_area
     return overlap_ratio >= threshold
 
-def match_ocr_to_rtdetr_blocks(ocr_lines: List, rtdetr_blocks: List[Tuple], source_lang: str = 'ja') -> List[Dict]:
+def match_ocr_to_rtdetr_blocks(ocr_lines: List, rtdetr_blocks: List[Tuple], source_lang: str = 'ja', debug: bool = False) -> List[Dict]:
     """
     Match OCR text lines to RT-DETR detected blocks (comic-translate approach).
     
@@ -163,6 +151,7 @@ def match_ocr_to_rtdetr_blocks(ocr_lines: List, rtdetr_blocks: List[Tuple], sour
         ocr_lines: List of OCR results, each with .bbox (x,y,w,h) and .text
         rtdetr_blocks: List of RT-DETR blocks as (x, y, w, h) tuples
         source_lang: Source language for text joining (ja/zh use no spaces)
+        debug: Enable detailed debug logging for matching
     
     Returns:
         List of dicts with {'bbox': (x,y,w,h), 'text': str} for each RT-DETR block
@@ -171,8 +160,9 @@ def match_ocr_to_rtdetr_blocks(ocr_lines: List, rtdetr_blocks: List[Tuple], sour
     results = []
     
     # For each RT-DETR block, find OCR lines that belong to it
-    for block_bbox in rtdetr_blocks:
+    for block_idx, block_bbox in enumerate(rtdetr_blocks):
         matched_lines = []
+        skipped_lines = []
         
         # Check each OCR line
         for ocr_line in ocr_lines:
@@ -182,13 +172,29 @@ def match_ocr_to_rtdetr_blocks(ocr_lines: List, rtdetr_blocks: List[Tuple], sour
                 continue
             
             # Check if line fits in or is mostly contained by block
-            if does_rectangle_fit(block_bbox, line_bbox):
+            fits = does_rectangle_fit(block_bbox, line_bbox)
+            # Comic-translate uses 50% threshold, but we use 30% to catch narrow vertical text
+            # that Azure sometimes detects with very thin bounding boxes
+            contained = is_mostly_contained(block_bbox, line_bbox, threshold=0.3)
+            
+            if fits or contained:
                 matched_lines.append((line_bbox, ocr_line.text))
-            elif is_mostly_contained(block_bbox, line_bbox, threshold=0.5):
-                matched_lines.append((line_bbox, ocr_line.text))
+                if debug:
+                    print(f"  ✅ Block {block_idx+1} matched OCR line: '{ocr_line.text[:50]}' (fits={fits}, contained={contained})")
+                    print(f"     Block bbox: {block_bbox}, Line bbox: {line_bbox}")
+            else:
+                if debug:
+                    skipped_lines.append((line_bbox, ocr_line.text, fits, contained))
         
         if not matched_lines:
             # No text found in this block
+            if debug:
+                print(f"\n  ⚠️ Block {block_idx+1} at {block_bbox}: NO MATCHES")
+                print(f"     Checked {len(skipped_lines)} OCR lines:")
+                for line_bbox, line_text, fits, contained in skipped_lines[:3]:  # Show first 3
+                    print(f"       ❌ '{line_text[:30]}' at {line_bbox} (fits={fits}, contained={contained})")
+                if len(skipped_lines) > 3:
+                    print(f"       ... and {len(skipped_lines)-3} more")
             results.append({'bbox': block_bbox, 'text': '', 'lines': []})
             continue
         
@@ -3263,28 +3269,38 @@ class MangaTranslator:
                             )
                             
                             # Extract text lines from Azure Vision result
+                            # CRITICAL: Use blocks[0] only (comic-translate approach)
+                            # blocks[0] contains ALL text lines in reading order
                             full_image_ocr = []
                             if result.read and result.read.blocks:
-                                for block in result.read.blocks:
-                                    for line in block.lines:
-                                        # Get bounding box from Azure Vision line
-                                        # Azure Vision provides bounding_polygon with points
-                                        if hasattr(line, 'bounding_polygon') and line.bounding_polygon:
-                                            points = line.bounding_polygon
-                                            xs = [p.x for p in points]
-                                            ys = [p.y for p in points]
-                                            x_min, x_max = int(min(xs)), int(max(xs))
-                                            y_min, y_max = int(min(ys)), int(max(ys))
-                                            
-                                            # Create OCR result compatible with ocr_manager format
-                                            from ocr_manager import OCRResult
-                                            ocr_line = OCRResult(
-                                                text=line.text,
-                                                bbox=(x_min, y_min, x_max - x_min, y_max - y_min),
-                                                confidence=0.9,
-                                                vertices=[(int(p.x), int(p.y)) for p in points]
-                                            )
-                                            full_image_ocr.append(ocr_line)
+                                for line in result.read.blocks[0].lines:
+                                    # Get bounding box from Azure Vision line
+                                    # Azure Vision provides bounding_polygon with points
+                                    if hasattr(line, 'bounding_polygon') and line.bounding_polygon:
+                                        points = line.bounding_polygon
+                                        xs = [p.x for p in points]
+                                        ys = [p.y for p in points]
+                                        x_min, x_max = int(min(xs)), int(max(xs))
+                                        y_min, y_max = int(min(ys)), int(max(ys))
+                                        
+                                        # DEBUG: Print actual Azure bbox format for the problematic line
+                                        if '浸かりましょうね' in line.text:
+                                            print(f"\n🔍 DEBUG Azure bbox for '浸かりましょうね':")
+                                            print(f"   Points: {[(int(p.x), int(p.y)) for p in points]}")
+                                            print(f"   xs: {xs}")
+                                            print(f"   ys: {ys}")
+                                            print(f"   x_min={x_min}, x_max={x_max}, y_min={y_min}, y_max={y_max}")
+                                            print(f"   Final bbox (x,y,w,h): ({x_min}, {y_min}, {x_max - x_min}, {y_max - y_min})\n")
+                                        
+                                        # Create OCR result compatible with ocr_manager format
+                                        from ocr_manager import OCRResult
+                                        ocr_line = OCRResult(
+                                            text=line.text,
+                                            bbox=(x_min, y_min, x_max - x_min, y_max - y_min),
+                                            confidence=0.9,
+                                            vertices=[(int(p.x), int(p.y)) for p in points]
+                                        )
+                                        full_image_ocr.append(ocr_line)
                             
                             if full_image_ocr:
                                 self._log(f"✅ Azure Vision detected {len(full_image_ocr)} text lines in full image")
@@ -3292,7 +3308,9 @@ class MangaTranslator:
                                 # Step 2: Match OCR lines to RT-DETR blocks (comic-translate approach)
                                 self._log(f"🔗 Step 2: Matching {len(full_image_ocr)} OCR lines to {len(all_regions)} RT-DETR blocks")
                                 source_lang = ocr_settings.get('language_hints', ['ja'])[0] if ocr_settings.get('language_hints') else 'ja'
-                                matched_blocks = match_ocr_to_rtdetr_blocks(full_image_ocr, all_regions, source_lang)
+                                # Enable debug mode to see why matching fails
+                                debug_matching = True  # Set to False to disable detailed matching logs
+                                matched_blocks = match_ocr_to_rtdetr_blocks(full_image_ocr, all_regions, source_lang, debug=debug_matching)
                                 
                                 # Convert matched blocks to TextRegion format
                                 regions = []
@@ -3447,12 +3465,12 @@ class MangaTranslator:
                                                 )
                                                 
                                                 # Extract text from crop result
+                                                # Use blocks[0] only (comic-translate approach)
                                                 crop_texts = []
                                                 if crop_result.read and crop_result.read.blocks:
-                                                    for block in crop_result.read.blocks:
-                                                        for line in block.lines:
-                                                            if line.text:
-                                                                crop_texts.append(line.text.strip())
+                                                    for line in crop_result.read.blocks[0].lines:
+                                                        if line.text:
+                                                            crop_texts.append(line.text.strip())
                                                 
                                                 if crop_texts:
                                                     # Success! Replace empty text with fallback OCR result
@@ -3725,95 +3743,95 @@ class MangaTranslator:
                     raise RuntimeError("Failed to get response from Azure Image Analysis API after retries")
                 
                 # Process results
+                # Use blocks[0] only (comic-translate approach)
                 total_lines = 0
                 
                 if result.read and result.read.blocks:
-                    for block in result.read.blocks:
-                        for line in block.lines:
-                            # Extract text
-                            line_text = line.text
-                            
-                            # Clean text
-                            cleaned_line_text = self._fix_encoding_issues(line_text)
-                            cleaned_line_text = self._sanitize_unicode_characters(cleaned_line_text)
-                            
-                            # Log cleaning if changes were made
-                            if cleaned_line_text != line_text:
-                                self._log(f"🧹 Cleaned Azure OCR text: '{line_text[:30]}...' → '{cleaned_line_text[:30]}...'", "debug")
-                            
-                            # TEXT FILTERING FOR AZURE
-                            # Skip if text is too short (after cleaning)
-                            if len(cleaned_line_text.strip()) < min_text_length:
-                                if not getattr(self, 'concise_logs', False):
-                                    self._log(f"   Skipping short text ({len(cleaned_line_text)} chars): {cleaned_line_text}")
-                                continue
-                            
-                            # Skip if primarily English and exclude_english is enabled
-                            if exclude_english and self._is_primarily_english(cleaned_line_text):
-                                if not getattr(self, 'concise_logs', False):
-                                    self._log(f"   Skipping English text: {cleaned_line_text[:50]}...")
-                                continue
-                            
-                            # Extract bounding polygon (new API format)
-                            vertices = []
-                            if hasattr(line, 'bounding_polygon') and line.bounding_polygon:
-                                for vertex in line.bounding_polygon:
-                                    if hasattr(vertex, 'x') and hasattr(vertex, 'y'):
-                                        vertices.append((vertex['x'] if isinstance(vertex, dict) else vertex.x, 
-                                                       vertex['y'] if isinstance(vertex, dict) else vertex.y))
-                            
-                            # If we have vertices, use them; otherwise create rectangle from words
-                            if len(vertices) >= 2:
-                                # Calculate rectangular bounding box from vertices
-                                xs = [v[0] for v in vertices]
-                                ys = [v[1] for v in vertices]
-                                x_min, x_max = min(xs), max(xs)
-                                y_min, y_max = min(ys), max(ys)
-                            else:
-                                # Fallback: try to get bbox from words
-                                if hasattr(line, 'words') and line.words:
-                                    all_word_vertices = []
-                                    for word in line.words:
-                                        if hasattr(word, 'bounding_polygon') and word.bounding_polygon:
-                                            for vertex in word.bounding_polygon:
-                                                if hasattr(vertex, 'x') and hasattr(vertex, 'y'):
-                                                    all_word_vertices.append((vertex['x'] if isinstance(vertex, dict) else vertex.x,
-                                                                            vertex['y'] if isinstance(vertex, dict) else vertex.y))
-                                    if all_word_vertices:
-                                        vertices = all_word_vertices
-                                        xs = [v[0] for v in vertices]
-                                        ys = [v[1] for v in vertices]
-                                        x_min, x_max = min(xs), max(xs)
-                                        y_min, y_max = min(ys), max(ys)
-                                    else:
-                                        # Skip if no bbox available
-                                        continue
+                    for line in result.read.blocks[0].lines:
+                        # Extract text
+                        line_text = line.text
+                        
+                        # Clean text
+                        cleaned_line_text = self._fix_encoding_issues(line_text)
+                        cleaned_line_text = self._sanitize_unicode_characters(cleaned_line_text)
+                        
+                        # Log cleaning if changes were made
+                        if cleaned_line_text != line_text:
+                            self._log(f"🧹 Cleaned Azure OCR text: '{line_text[:30]}...' → '{cleaned_line_text[:30]}...'", "debug")
+                        
+                        # TEXT FILTERING FOR AZURE
+                        # Skip if text is too short (after cleaning)
+                        if len(cleaned_line_text.strip()) < min_text_length:
+                            if not getattr(self, 'concise_logs', False):
+                                self._log(f"   Skipping short text ({len(cleaned_line_text)} chars): {cleaned_line_text}")
+                            continue
+                        
+                        # Skip if primarily English and exclude_english is enabled
+                        if exclude_english and self._is_primarily_english(cleaned_line_text):
+                            if not getattr(self, 'concise_logs', False):
+                                self._log(f"   Skipping English text: {cleaned_line_text[:50]}...")
+                            continue
+                        
+                        # Extract bounding polygon (new API format)
+                        vertices = []
+                        if hasattr(line, 'bounding_polygon') and line.bounding_polygon:
+                            for vertex in line.bounding_polygon:
+                                if hasattr(vertex, 'x') and hasattr(vertex, 'y'):
+                                    vertices.append((vertex['x'] if isinstance(vertex, dict) else vertex.x, 
+                                                   vertex['y'] if isinstance(vertex, dict) else vertex.y))
+                        
+                        # If we have vertices, use them; otherwise create rectangle from words
+                        if len(vertices) >= 2:
+                            # Calculate rectangular bounding box from vertices
+                            xs = [v[0] for v in vertices]
+                            ys = [v[1] for v in vertices]
+                            x_min, x_max = min(xs), max(xs)
+                            y_min, y_max = min(ys), max(ys)
+                        else:
+                            # Fallback: try to get bbox from words
+                            if hasattr(line, 'words') and line.words:
+                                all_word_vertices = []
+                                for word in line.words:
+                                    if hasattr(word, 'bounding_polygon') and word.bounding_polygon:
+                                        for vertex in word.bounding_polygon:
+                                            if hasattr(vertex, 'x') and hasattr(vertex, 'y'):
+                                                all_word_vertices.append((vertex['x'] if isinstance(vertex, dict) else vertex.x,
+                                                                        vertex['y'] if isinstance(vertex, dict) else vertex.y))
+                                if all_word_vertices:
+                                    vertices = all_word_vertices
+                                    xs = [v[0] for v in vertices]
+                                    ys = [v[1] for v in vertices]
+                                    x_min, x_max = min(xs), max(xs)
+                                    y_min, y_max = min(ys), max(ys)
                                 else:
                                     # Skip if no bbox available
                                     continue
-                            
-                            # Default high confidence (new API doesn't expose confidence scores)
-                            confidence = 0.95
-                            
-                            # Apply confidence threshold filtering
-                            if confidence >= confidence_threshold:
-                                region = TextRegion(
-                                    text=cleaned_line_text,
-                                    vertices=vertices if len(vertices) >= 4 else [(x_min, y_min), (x_max, y_min), (x_max, y_max), (x_min, y_max)],
-                                    bounding_box=(x_min, y_min, x_max - x_min, y_max - y_min),
-                                    confidence=confidence,
-                                    region_type='text_line'
-                                )
-                                
-                                regions.append(region)
-                                total_lines += 1
-                                
-                                # More detailed logging
-                                if not getattr(self, 'concise_logs', False):
-                                    self._log(f"   Found text region ({confidence:.2f}): {cleaned_line_text[:50]}...")
                             else:
-                                if not getattr(self, 'concise_logs', False):
-                                    self._log(f"   Skipping low confidence text ({confidence:.2f}): {cleaned_line_text[:30]}...")
+                                # Skip if no bbox available
+                                continue
+                        
+                        # Default high confidence (new API doesn't expose confidence scores)
+                        confidence = 0.95
+                        
+                        # Apply confidence threshold filtering
+                        if confidence >= confidence_threshold:
+                            region = TextRegion(
+                                text=cleaned_line_text,
+                                vertices=vertices if len(vertices) >= 4 else [(x_min, y_min), (x_max, y_min), (x_max, y_max), (x_min, y_max)],
+                                bounding_box=(x_min, y_min, x_max - x_min, y_max - y_min),
+                                confidence=confidence,
+                                region_type='text_line'
+                            )
+                            
+                            regions.append(region)
+                            total_lines += 1
+                            
+                            # More detailed logging
+                            if not getattr(self, 'concise_logs', False):
+                                self._log(f"   Found text region ({confidence:.2f}): {cleaned_line_text[:50]}...")
+                        else:
+                            if not getattr(self, 'concise_logs', False):
+                                self._log(f"   Skipping low confidence text ({confidence:.2f}): {cleaned_line_text[:30]}...")
                 
                 # Log summary statistics
                 if total_lines > 0 and not getattr(self, 'concise_logs', False):
@@ -5397,13 +5415,13 @@ class MangaTranslator:
                 )
                 
                 # Aggregate text lines
+                # Use blocks[0] only (comic-translate approach)
                 texts = []
                 if result.read and result.read.blocks:
-                    for block in result.read.blocks:
-                        for line in block.lines:
-                            t = self._sanitize_unicode_characters(self._fix_encoding_issues(line.text or ''))
-                            if t:
-                                texts.append(t)
+                    for line in result.read.blocks[0].lines:
+                        t = self._sanitize_unicode_characters(self._fix_encoding_issues(line.text or ''))
+                        if t:
+                            texts.append(t)
                 
                 text_all = ' '.join(texts).strip()
                 if len(text_all) < min_text_length:
@@ -5462,37 +5480,37 @@ class MangaTranslator:
         regions = []
         confidence_threshold = ocr_settings.get('confidence_threshold', 0.0)
         
+        # Use blocks[0] only (comic-translate approach)
         if result.read and result.read.blocks:
-            for block in result.read.blocks:
-                for line in block.lines:
-                    # Extract bounding polygon
-                    vertices = []
-                    if hasattr(line, 'bounding_polygon') and line.bounding_polygon:
-                        for vertex in line.bounding_polygon:
-                            if hasattr(vertex, 'x') and hasattr(vertex, 'y'):
-                                vertices.append((vertex['x'] if isinstance(vertex, dict) else vertex.x,
-                                               vertex['y'] if isinstance(vertex, dict) else vertex.y))
-                    
-                    if len(vertices) < 2:
-                        continue
-                    
-                    xs = [v[0] for v in vertices]
-                    ys = [v[1] for v in vertices]
-                    x_min, x_max = min(xs), max(xs)
-                    y_min, y_max = min(ys), max(ys)
-                    
-                    # Azure doesn't provide per-line confidence in Read API
-                    confidence = 0.95  # Default high confidence
-                    
-                    if confidence >= confidence_threshold:
-                        region = TextRegion(
-                            text=line.text,
-                            vertices=vertices,
-                            bounding_box=(x_min, y_min, x_max - x_min, y_max - y_min),
-                            confidence=confidence,
-                            region_type='text_line'
-                        )
-                        regions.append(region)
+            for line in result.read.blocks[0].lines:
+                # Extract bounding polygon
+                vertices = []
+                if hasattr(line, 'bounding_polygon') and line.bounding_polygon:
+                    for vertex in line.bounding_polygon:
+                        if hasattr(vertex, 'x') and hasattr(vertex, 'y'):
+                            vertices.append((vertex['x'] if isinstance(vertex, dict) else vertex.x,
+                                           vertex['y'] if isinstance(vertex, dict) else vertex.y))
+                
+                if len(vertices) < 2:
+                    continue
+                
+                xs = [v[0] for v in vertices]
+                ys = [v[1] for v in vertices]
+                x_min, x_max = min(xs), max(xs)
+                y_min, y_max = min(ys), max(ys)
+                
+                # Azure doesn't provide per-line confidence in Read API
+                confidence = 0.95  # Default high confidence
+                
+                if confidence >= confidence_threshold:
+                    region = TextRegion(
+                        text=line.text,
+                        vertices=vertices,
+                        bounding_box=(x_min, y_min, x_max - x_min, y_max - y_min),
+                        confidence=confidence,
+                        region_type='text_line'
+                    )
+                    regions.append(region)
         
         return regions
 
