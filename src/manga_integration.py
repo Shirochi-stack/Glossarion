@@ -8396,6 +8396,274 @@ class MangaTranslationTab:
             print(f"[DEBUG] Error getting system prompt: {str(e)}")
             return ''
     
+    def _update_rectangles_with_recognition(self, recognized_texts: list):
+        """Update rectangles with proper context menu tooltips for OCR'd text"""
+        try:
+            if not hasattr(self, 'image_preview_widget') or not hasattr(self.image_preview_widget, 'viewer'):
+                return
+            
+            rectangles = self.image_preview_widget.viewer.rectangles
+            print(f"[DEBUG] Adding OCR tooltips to {len(rectangles)} rectangles with {len(recognized_texts)} recognition results")
+            
+            # Store recognition data for context menu access
+            self._recognition_data = {}
+            
+            for i, text_data in enumerate(recognized_texts):
+                region_index = text_data.get('region_index', i)
+                
+                # Find the corresponding rectangle (match by index)
+                if region_index < len(rectangles):
+                    rect_item = rectangles[region_index]
+                    recognized_text = text_data['text']
+                    
+                    # Store recognition data for context menu
+                    self._recognition_data[region_index] = {
+                        'text': recognized_text,
+                        'bbox': text_data['bbox']
+                    }
+                    
+                    # Add context menu support to rectangle
+                    self._add_context_menu_to_rectangle(rect_item, region_index)
+                    
+                    print(f"[DEBUG] Added OCR tooltip to rectangle {region_index}: '{recognized_text[:30]}...'")
+                else:
+                    print(f"[DEBUG] Warning: No rectangle found for region index {region_index}")
+            
+            print(f"[DEBUG] OCR tooltip setup complete")
+            
+        except Exception as e:
+            print(f"[DEBUG] Error adding OCR tooltips: {str(e)}")
+            import traceback
+            print(f"[DEBUG] Traceback: {traceback.format_exc()}")
+    
+    def _update_rectangles_with_translations(self, translated_texts: list):
+        """Render translated text directly onto the image preview"""
+        try:
+            if not hasattr(self, 'image_preview_widget') or not hasattr(self.image_preview_widget, 'viewer'):
+                return
+            
+            print(f"[DEBUG] Rendering translated text onto image for {len(translated_texts)} regions")
+            
+            # Get current image path
+            if not hasattr(self.image_preview_widget, 'current_image_path') or not self.image_preview_widget.current_image_path:
+                print(f"[DEBUG] No current image path for rendering")
+                return
+            
+            # Render translated text onto image
+            rendered_image_path = self._render_translations_on_image(translated_texts, self.image_preview_widget.current_image_path)
+            
+            if rendered_image_path and os.path.exists(rendered_image_path):
+                # Update the preview with rendered image
+                print(f"[DEBUG] Loading rendered image: {rendered_image_path}")
+                self.image_preview_widget.load_image(rendered_image_path)
+                
+                # Store translation data for context menu access
+                self._translation_data = {}
+                for i, result in enumerate(translated_texts):
+                    region_index = result['original'].get('region_index', i)
+                    self._translation_data[region_index] = {
+                        'original': result['original']['text'],
+                        'translation': result['translation']
+                    }
+                
+                self._log(f"✅ Rendered {len(translated_texts)} translations onto image preview", "success")
+            else:
+                print(f"[DEBUG] Failed to render translations onto image")
+                self._log(f"❌ Failed to render translations onto image", "error")
+            
+        except Exception as e:
+            print(f"[DEBUG] Error rendering translations: {str(e)}")
+            import traceback
+            print(f"[DEBUG] Traceback: {traceback.format_exc()}")
+            self._log(f"❌ Error rendering translations: {str(e)}", "error")
+    
+    def _add_context_menu_to_rectangle(self, rect_item, region_index: int):
+        """Add context menu to rectangle for showing OCR text on right-click"""
+        try:
+            from PySide6.QtWidgets import QMenu, QMessageBox
+            from PySide6.QtCore import QPoint
+            from PySide6.QtGui import QAction
+            
+            # Store the region index on the rectangle for later retrieval
+            rect_item.region_index = region_index
+            
+            # Override the context menu event
+            def show_context_menu(event):
+                try:
+                    menu = QMenu()
+                    
+                    # Get recognition data
+                    if hasattr(self, '_recognition_data') and region_index in self._recognition_data:
+                        recognition_text = self._recognition_data[region_index]['text']
+                        
+                        # Add action to show OCR text
+                        ocr_action = QAction(f"📝 OCR: {recognition_text[:50]}...", menu)
+                        ocr_action.triggered.connect(lambda: self._show_ocr_popup(recognition_text))
+                        menu.addAction(ocr_action)
+                    
+                    # Get translation data if available
+                    if hasattr(self, '_translation_data') and region_index in self._translation_data:
+                        translation_data = self._translation_data[region_index]
+                        
+                        menu.addSeparator()
+                        
+                        # Add action to show translation
+                        trans_action = QAction(f"🌍 Translation: {translation_data['translation'][:50]}...", menu)
+                        trans_action.triggered.connect(lambda: self._show_translation_popup(translation_data))
+                        menu.addAction(trans_action)
+                    
+                    if not menu.isEmpty():
+                        # Show the context menu at the cursor position
+                        global_pos = self.image_preview_widget.viewer.mapToGlobal(event.pos().toPoint())
+                        menu.exec(global_pos)
+                
+                except Exception as e:
+                    print(f"[DEBUG] Context menu error: {str(e)}")
+            
+            # Replace the rectangle's context menu event
+            rect_item.contextMenuEvent = show_context_menu
+            
+        except Exception as e:
+            print(f"[DEBUG] Error adding context menu: {str(e)}")
+    
+    def _show_ocr_popup(self, ocr_text: str):
+        """Show OCR text in a popup dialog"""
+        try:
+            from PySide6.QtWidgets import QMessageBox
+            
+            msg = QMessageBox(self.image_preview_widget)
+            msg.setWindowTitle("📝 OCR Recognition Result")
+            msg.setText(f"Recognized Text:\n\n{ocr_text}")
+            msg.setIcon(QMessageBox.Icon.Information)
+            msg.exec()
+            
+        except Exception as e:
+            print(f"[DEBUG] Error showing OCR popup: {str(e)}")
+    
+    def _show_translation_popup(self, translation_data: dict):
+        """Show translation in a popup dialog"""
+        try:
+            from PySide6.QtWidgets import QMessageBox
+            
+            original = translation_data['original']
+            translation = translation_data['translation']
+            
+            msg = QMessageBox(self.image_preview_widget)
+            msg.setWindowTitle("🌍 Translation Result")
+            msg.setText(f"Original:\n{original}\n\nTranslation:\n{translation}")
+            msg.setIcon(QMessageBox.Icon.Information)
+            msg.exec()
+            
+        except Exception as e:
+            print(f"[DEBUG] Error showing translation popup: {str(e)}")
+    
+    def _render_translations_on_image(self, translated_texts: list, image_path: str) -> str:
+        """Render translated text onto the image and return path to rendered image"""
+        try:
+            import cv2
+            import numpy as np
+            from PIL import Image, ImageDraw, ImageFont
+            
+            # Load image
+            image = cv2.imread(image_path)
+            if image is None:
+                print(f"[DEBUG] Failed to load image: {image_path}")
+                return None
+            
+            # Convert to PIL for better text rendering
+            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            pil_image = Image.fromarray(image_rgb)
+            draw = ImageDraw.Draw(pil_image)
+            
+            # Try to load a font (fallback to default if not available)
+            try:
+                # Try to use a system font
+                font_size = 24
+                font = ImageFont.truetype("arial.ttf", font_size)
+            except:
+                try:
+                    # Fallback to default font
+                    font = ImageFont.load_default()
+                except:
+                    font = None
+            
+            # Render each translation
+            for result in translated_texts:
+                try:
+                    bbox = result['bbox']
+                    translation = result['translation']
+                    
+                    if len(bbox) >= 4:
+                        x, y, w, h = bbox
+                        
+                        # Create background rectangle for text
+                        padding = 4
+                        bg_x1 = max(0, x - padding)
+                        bg_y1 = max(0, y - padding)
+                        bg_x2 = min(pil_image.width, x + w + padding)
+                        bg_y2 = min(pil_image.height, y + h + padding)
+                        
+                        # Draw white background with slight transparency
+                        bg_overlay = Image.new('RGBA', pil_image.size, (0, 0, 0, 0))
+                        bg_draw = ImageDraw.Draw(bg_overlay)
+                        bg_draw.rectangle([bg_x1, bg_y1, bg_x2, bg_y2], fill=(255, 255, 255, 200))
+                        
+                        # Composite with main image
+                        pil_image = Image.alpha_composite(pil_image.convert('RGBA'), bg_overlay).convert('RGB')
+                        draw = ImageDraw.Draw(pil_image)
+                        
+                        # Word wrap text to fit in the bbox
+                        words = translation.split()
+                        lines = []
+                        current_line = []
+                        
+                        for word in words:
+                            test_line = ' '.join(current_line + [word])
+                            if font:
+                                text_width = draw.textlength(test_line, font=font)
+                            else:
+                                text_width = len(test_line) * 8  # Rough estimate
+                            
+                            if text_width <= w - 8:  # Leave some margin
+                                current_line.append(word)
+                            else:
+                                if current_line:
+                                    lines.append(' '.join(current_line))
+                                current_line = [word]
+                        
+                        if current_line:
+                            lines.append(' '.join(current_line))
+                        
+                        # Draw text lines
+                        line_height = font_size + 4 if font else 16
+                        for i, line in enumerate(lines):
+                            text_y = y + (i * line_height)
+                            if text_y + line_height <= y + h:  # Only draw if it fits
+                                draw.text((x + 4, text_y), line, fill=(0, 0, 0), font=font)
+                
+                except Exception as line_error:
+                    print(f"[DEBUG] Error rendering line: {str(line_error)}")
+                    continue
+            
+            # Save rendered image
+            output_dir = os.path.join(os.path.dirname(image_path), "3_translated")
+            os.makedirs(output_dir, exist_ok=True)
+            output_filename = os.path.basename(image_path)
+            rendered_path = os.path.join(output_dir, output_filename)
+            
+            # Convert back to cv2 format and save
+            rendered_bgr = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+            cv2.imwrite(rendered_path, rendered_bgr)
+            
+            print(f"[DEBUG] Rendered image saved to: {rendered_path}")
+            return rendered_path
+            
+        except Exception as e:
+            print(f"[DEBUG] Error rendering translations on image: {str(e)}")
+            import traceback
+            print(f"[DEBUG] Traceback: {traceback.format_exc()}")
+            return None
+    
     def _restore_translate_button(self):
         """Restore the translate button to its original state"""
         try:
@@ -8460,6 +8728,9 @@ class MangaTranslationTab:
                     text = text_data['text']
                     self._log(f"  Region {i+1} at ({bbox[0]},{bbox[1]}) [{bbox[2]}x{bbox[3]}]: '{text}'", "info")
                 
+                # Update UI with recognition tooltips
+                self._update_rectangles_with_recognition(recognized_texts)
+                
                 self._log(f"📋 Ready for translation! Click 'Translate' to proceed.", "info")
             else:
                 self._log("⚠️ No text was recognized in any regions", "warning")
@@ -8483,6 +8754,9 @@ class MangaTranslationTab:
                     translation = result['translation']
                     bbox = result['bbox']
                     self._log(f"  Region {i+1} at ({bbox[0]},{bbox[1]}): '{original_text}' → '{translation}'", "info")
+                
+                # Update UI with tooltips and visual feedback
+                self._update_rectangles_with_translations(translated_texts)
                 
                 self._log(f"✅ Translation workflow complete!", "success")
             else:
