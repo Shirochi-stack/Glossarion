@@ -7603,7 +7603,7 @@ class MangaTranslationTab:
                 return
             
             viewer = self.image_preview_widget.viewer
-            from PySide6.QtCore import QRectF
+            from PySide6.QtCore import QRectF, Qt
             from PySide6.QtGui import QPen, QBrush, QColor
             from manga_image_preview import MoveableRectItem
             
@@ -8426,6 +8426,10 @@ class MangaTranslationTab:
                 
                 # Run detection synchronously
                 detection_config = self._get_detection_config()
+                # Exclude empty bubble container rectangles in recognize pipeline to avoid doubles
+                if detection_config.get('detect_empty_bubbles', True):
+                    detection_config['detect_empty_bubbles'] = False
+                    self._log("🚫 Recognize pipeline: Excluding empty bubble regions (container boxes)", "info")
                 regions = self._run_detection_sync(image_path, detection_config)
                 
                 if not regions or len(regions) == 0:
@@ -8590,6 +8594,11 @@ class MangaTranslationTab:
                 self._log("🔍 Step 1/3: Detecting text regions...", "info")
                 
                 detection_config = self._get_detection_config()
+                # Exclude empty bubble container rectangles in translate pipeline to avoid doubles
+                if detection_config.get('detect_empty_bubbles', True):
+                    detection_config['detect_empty_bubbles'] = False
+                    self._log("🚫 Translate pipeline: Excluding empty bubble regions (container boxes)", "info")
+                
                 regions = self._run_detection_sync(image_path, detection_config)
                 
                 if not regions or len(regions) == 0:
