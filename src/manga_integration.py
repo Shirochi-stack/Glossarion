@@ -2587,39 +2587,6 @@ class MangaTranslationTab:
         tabs_container_layout.setContentsMargins(0, 0, 0, 0)
         tabs_container_layout.setSpacing(0)
         
-        # Create a horizontal layout for the tab bar area with button
-        tab_bar_container = QWidget()
-        tab_bar_layout = QHBoxLayout(tab_bar_container)
-        tab_bar_layout.setContentsMargins(0, 0, 0, 0)
-        tab_bar_layout.setSpacing(10)
-        
-        # Add stretch to push button to the right
-        tab_bar_layout.addStretch()
-        
-        # Add Advanced Settings button in the corner
-        advanced_settings_btn_corner = QPushButton("⚙️ Advanced")
-        advanced_settings_btn_corner.clicked.connect(self._open_advanced_settings)
-        advanced_settings_btn_corner.setMinimumHeight(28)
-        advanced_settings_btn_corner.setStyleSheet("""
-            QPushButton {
-                background-color: #3b82f6;
-                color: white;
-                padding: 6px 16px;
-                font-weight: bold;
-                font-size: 9pt;
-                border-radius: 4px;
-            }
-            QPushButton:hover {
-                background-color: #4b92ff;
-            }
-            QPushButton:pressed {
-                background-color: #2b72e6;
-            }
-        """)
-        tab_bar_layout.addWidget(advanced_settings_btn_corner, 0, Qt.AlignTop)
-        
-        tabs_container_layout.addWidget(tab_bar_container)
-        
         # Create tab widget for settings
         from PySide6.QtWidgets import QTabWidget, QScrollArea
         self.settings_tabs = QTabWidget()
@@ -2638,6 +2605,7 @@ class MangaTranslationTab:
                 border-top-left-radius: 3px;
                 border-top-right-radius: 3px;
                 margin-right: 2px;
+                font-weight: bold;
             }
             QTabBar::tab:selected {
                 background-color: #5a9fd4;
@@ -2647,6 +2615,30 @@ class MangaTranslationTab:
                 background-color: #3a3a3a;
             }
         """)
+        
+        # Add Advanced Settings button to the tab bar's corner
+        advanced_settings_btn_corner = QPushButton("⚙️ Advanced Settings")
+        advanced_settings_btn_corner.clicked.connect(self._open_advanced_settings)
+        advanced_settings_btn_corner.setMinimumHeight(28)
+        advanced_settings_btn_corner.setStyleSheet("""
+            QPushButton {
+                background-color: #3b82f6;
+                color: white;
+                padding: 8px 16px;
+                margin-top: 2px;
+                margin-bottom: 2px;
+                font-weight: bold;
+                font-size: 9pt;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #4b92ff;
+            }
+            QPushButton:pressed {
+                background-color: #2b72e6;
+            }
+        """)
+        self.settings_tabs.setCornerWidget(advanced_settings_btn_corner, Qt.TopRightCorner)
         
         # Left column (Column 1 - Translation Settings) - for tab content
         left_column = QWidget()
