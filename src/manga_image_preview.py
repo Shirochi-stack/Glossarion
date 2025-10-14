@@ -10,7 +10,7 @@ from typing import List, Dict, Optional
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGraphicsView, 
                                QGraphicsScene, QGraphicsPixmapItem, QToolButton, 
                                QLabel, QSlider, QFrame, QPushButton, QGraphicsRectItem,
-                               QSizePolicy)
+                               QSizePolicy, QListWidget, QListWidgetItem)
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QSize, QThread, QObject, Slot
 from PySide6.QtGui import QPixmap, QImage, QPainter, QColor, QPen, QBrush, QCursor, QIcon
 import numpy as np
@@ -318,6 +318,41 @@ class CompactImageViewer(QGraphicsView):
         self.rectangles.clear()
         self.selected_rect = None
     
+    def draw_detection_boxes(self, regions: list, color: QColor = None):
+        """Draw detection boxes from text regions"""
+        if color is None:
+            color = QColor(0, 255, 0)  # Green for detections
+        
+        # Clear existing rectangles first
+        self.clear_rectangles()
+        
+        # Draw boxes for each region
+        for region in regions:
+            x1, y1, x2, y2 = region.x1, region.y1, region.x2, region.y2
+            rect = QRectF(x1, y1, x2 - x1, y2 - y1)
+            
+            # Create rectangle item
+            rect_item = MoveableRectItem(rect)
+            rect_item.setPen(QPen(color, 2))
+            rect_item.setBrush(QBrush(QColor(color.red(), color.green(), color.blue(), 50)))  # Semi-transparent
+            
+            self._scene.addItem(rect_item)
+            self.rectangles.append(rect_item)
+    
+    def overlay_image(self, image_array):
+        """Overlay a numpy image array (e.g., cleaned or rendered image) on top of current image"""
+        try:
+            import cv2
+            # Convert numpy array (BGR) to QPixmap
+            rgb_image = cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB)
+            height, width, channel = rgb_image.shape
+            bytes_per_line = 3 * width
+            q_image = QImage(rgb_image.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
+            pixmap = QPixmap.fromImage(q_image)
+            self.setPhoto(pixmap)
+        except Exception as e:
+            print(f"Error overlaying image: {e}")
+    
     def delete_selected_rectangle(self):
         """Delete currently selected rectangle"""
         if self.selected_rect:
@@ -374,10 +409,59 @@ class MangaImagePreviewWidget(QWidget):
         title_label.setFont(title_font)
         layout.addWidget(title_label)
         
-        # Image viewer
+        # Create horizontal layout for viewer + thumbnails
+        viewer_container = QWidget()
+        viewer_layout = QHBoxLayout(viewer_container)
+        viewer_layout.setContentsMargins(0, 0, 0, 0)
+        viewer_layout.setSpacing(5)
+        
+        # Image viewer (main)
         self.viewer = CompactImageViewer()
         self.viewer.setMinimumHeight(300)
-        layout.addWidget(self.viewer, stretch=1)
+        viewer_layout.addWidget(self.viewer, stretch=1)
+        
+        # Thumbnail list (right side)
+        from PySide6.QtWidgets import QListWidget, QListWidgetItem, QScrollArea
+        self.thumbnail_list = QListWidget()
+        self.thumbnail_list.setMaximumWidth(150)
+        self.thumbnail_list.setMinimumWidth(120)
+        self.thumbnail_list.setIconSize(QSize(100, 100))
+        self.thumbnail_list.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.thumbnail_list.setViewMode(QListWidget.ViewMode.IconMode)
+        self.thumbnail_list.setMovement(QListWidget.Movement.Static)
+        self.thumbnail_list.setFlow(QListWidget.Flow.TopToBottom)
+        self.thumbnail_list.setWrapping(False)
+        self.thumbnail_list.setSpacing(5)
+        self.thumbnail_list.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
+        self.thumbnail_list.setStyleSheet("""
+            QListWidget {
+                background-color: #1e1e1e;
+                border: 1px solid #3a3a3a;
+                border-radius: 3px;
+            }
+            QListWidget::item {
+                background-color: #2d2d2d;
+                border: 2px solid #3a3a3a;
+                border-radius: 3px;
+                padding: 2px;
+                margin: 2px;
+            }
+            QListWidget::item:selected {
+                background-color: #3a3a3a;
+                border-color: #5a9fd4;
+            }
+            QListWidget::item:hover {
+                border-color: #7bb3e0;
+            }
+        """)
+        self.thumbnail_list.itemClicked.connect(self._on_thumbnail_clicked)
+        self.thumbnail_list.setVisible(False)  # Hidden by default
+        viewer_layout.addWidget(self.thumbnail_list)
+        
+        # Store image paths for thumbnails
+        self.image_paths = []
+        
+        layout.addWidget(viewer_container, stretch=1)
         
         # Connect loading signals to show status
         self.viewer.image_loading.connect(self._on_image_loading_started)
@@ -619,6 +703,100 @@ class MangaImagePreviewWidget(QWidget):
         # Start loading (happens in background)
         self.viewer.load_image(image_path)
         self.current_image_path = image_path
+        
+        # Update thumbnail selection
+        self._update_thumbnail_selection(image_path)
+    
+    def set_image_list(self, image_paths: list):
+        """Set the list of images and populate thumbnails"""
+        self.image_paths = image_paths
+        self._populate_thumbnails()
+        
+        # Hide thumbnail list if there's 0 or 1 images (nothing to switch between)
+        if len(image_paths) <= 1:
+            self.thumbnail_list.setVisible(False)
+            self.thumbnail_list.setMaximumWidth(0)  # Collapse completely
+        else:
+            self.thumbnail_list.setVisible(True)
+            self.thumbnail_list.setMaximumWidth(150)  # Restore width
+    
+    def _populate_thumbnails(self):
+        """Populate thumbnail list with images"""
+        self.thumbnail_list.clear()
+        
+        from PySide6.QtWidgets import QListWidgetItem
+        from PySide6.QtCore import Qt, QSize
+        import threading
+        
+        # Load thumbnails in background to avoid blocking
+        def load_thumb(path, index):
+            try:
+                pixmap = QPixmap(path)
+                if not pixmap.isNull():
+                    # Scale to thumbnail size
+                    thumb = pixmap.scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatio, 
+                                         Qt.TransformationMode.SmoothTransformation)
+                    return (index, path, thumb)
+            except:
+                pass
+            return None
+        
+        # Add items with loading placeholders first
+        for i, path in enumerate(self.image_paths):
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, path)  # Store path
+            item.setText(os.path.basename(path))
+            item.setSizeHint(QSize(110, 110))
+            self.thumbnail_list.addItem(item)
+        
+        # Load thumbnails asynchronously
+        def load_all_thumbs():
+            for i, path in enumerate(self.image_paths):
+                result = load_thumb(path, i)
+                if result:
+                    idx, img_path, thumb = result
+                    # Update item on main thread
+                    try:
+                        from PySide6.QtCore import QMetaObject, Q_ARG
+                        QMetaObject.invokeMethod(self, "_update_thumbnail_item",
+                                                Qt.ConnectionType.QueuedConnection,
+                                                Q_ARG(int, idx),
+                                                Q_ARG(QPixmap, thumb),
+                                                Q_ARG(str, img_path))
+                    except:
+                        pass
+        
+        # Start background loading
+        thread = threading.Thread(target=load_all_thumbs, daemon=True)
+        thread.start()
+    
+    @Slot(int, QPixmap, str)
+    def _update_thumbnail_item(self, index: int, pixmap: QPixmap, path: str):
+        """Update thumbnail item with loaded pixmap (called from background thread)"""
+        try:
+            if index < self.thumbnail_list.count():
+                item = self.thumbnail_list.item(index)
+                icon = QIcon(pixmap)
+                item.setIcon(icon)
+                item.setText("")  # Remove text once icon is loaded
+        except Exception as e:
+            print(f"Error updating thumbnail: {e}")
+    
+    def _update_thumbnail_selection(self, image_path: str):
+        """Update which thumbnail is selected based on current image"""
+        for i in range(self.thumbnail_list.count()):
+            item = self.thumbnail_list.item(i)
+            item_path = item.data(Qt.ItemDataRole.UserRole)
+            if item_path == image_path:
+                self.thumbnail_list.setCurrentItem(item)
+                break
+    
+    def _on_thumbnail_clicked(self, item):
+        """Handle thumbnail click - load the corresponding image"""
+        from PySide6.QtCore import Qt
+        image_path = item.data(Qt.ItemDataRole.UserRole)
+        if image_path and os.path.exists(image_path):
+            self.load_image(image_path)
     
     @Slot(str)
     def _on_image_loading_started(self, image_path: str):

@@ -7199,6 +7199,10 @@ class MangaTranslationTab:
         # Auto-select first image to trigger preview
         if len(self.selected_files) > 0 and self.file_listbox.count() > 0:
             self.file_listbox.setCurrentRow(0)
+        
+        # Update thumbnail preview list
+        if hasattr(self, 'image_preview_widget'):
+            self.image_preview_widget.set_image_list(self.selected_files)
     
     def _add_folder(self):
         """Add all images (and CBZ archives) from a folder"""
@@ -7272,6 +7276,10 @@ class MangaTranslationTab:
                     self._log(f"📦 Added {added} images from CBZ: {filename}", "info")
                 except Exception as e:
                     self._log(f"❌ Failed to read CBZ {filename}: {e}", "error")
+        
+        # Update thumbnail preview list
+        if hasattr(self, 'image_preview_widget'):
+            self.image_preview_widget.set_image_list(self.selected_files)
     
     def _remove_selected(self):
         """Remove selected files from the list"""
@@ -7294,6 +7302,7 @@ class MangaTranslationTab:
         # Clear image preview when list is cleared
         if hasattr(self, 'image_preview_widget'):
             self.image_preview_widget.clear()
+            self.image_preview_widget.set_image_list([])
     
     def _on_file_selection_changed(self):
         """Handle file list selection changes to update image preview"""
@@ -7344,22 +7353,17 @@ class MangaTranslationTab:
             image_path = self.image_preview_widget.current_image_path
             self._log(f"🔍 Detecting text bubbles in: {os.path.basename(image_path)}", "info")
             
-            # Ensure translator is initialized
+            # Initialize translator if needed
             if not hasattr(self, 'translator') or self.translator is None:
-                self._log("⚠️ Translator not initialized. Please start translation first.", "warning")
-                return
+                self._log("🔧 Initializing translator...", "info")
+                self._initialize_translator()
             
-            # Run bubble detection
+            # Run bubble detection and store results
             try:
                 manga_settings = self.main_gui.config.get('manga_settings', {})
                 ocr_settings = manga_settings.get('ocr', {})
                 
-                # Load bubble detector if not already loaded
-                if not hasattr(self.translator, 'bubble_detector') or not self.translator.bubble_detector:
-                    from bubble_detector import BubbleDetector
-                    self.translator.bubble_detector = BubbleDetector()
-                
-                # Run detection
+                # Run detection using the translator's method
                 detections = self.translator._load_bubble_detector(ocr_settings, image_path)
                 
                 if detections:
@@ -7367,8 +7371,29 @@ class MangaTranslationTab:
                                    len(detections.get('text_free', [])))
                     self._log(f"✅ Detected {total_boxes} text regions", "success")
                     
-                    # TODO: Display detected boxes on the image preview
-                    # This would require extending the image preview widget to show detection results
+                    # Store detections for next step (recognize)
+                    self._current_detections = detections
+                    self._current_image_path = image_path
+                    
+                    # Create temporary TextRegion objects for visualization
+                    from manga_translator import TextRegion
+                    viz_regions = []
+                    for box in detections.get('text_bubbles', []):
+                        viz_regions.append(TextRegion(
+                            x1=box[0], y1=box[1], x2=box[2], y2=box[3],
+                            text="", translated_text="", confidence=1.0
+                        ))
+                    for box in detections.get('text_free', []):
+                        viz_regions.append(TextRegion(
+                            x1=box[0], y1=box[1], x2=box[2], y2=box[3],
+                            text="", translated_text="", confidence=1.0
+                        ))
+                    
+                    # Display detected boxes on the image preview
+                    if viz_regions:
+                        from PySide6.QtGui import QColor
+                        self.image_preview_widget.viewer.draw_detection_boxes(viz_regions, QColor(0, 255, 0))  # Green
+                        self._log(f"🖼️ Showing {len(viz_regions)} detection boxes on preview", "debug")
                 else:
                     self._log("⚠️ No text regions detected", "warning")
                     
@@ -7381,7 +7406,7 @@ class MangaTranslationTab:
             self._log(f"❌ Error in detect text handler: {str(e)}", "error")
     
     def _on_recognize_text_clicked(self):
-        """Handle recognize text button click - trigger OCR"""
+        """Handle recognize text button click - trigger OCR and translation"""
         try:
             # Get current image path
             if not hasattr(self, 'image_preview_widget') or not self.image_preview_widget.current_image_path:
@@ -7389,30 +7414,59 @@ class MangaTranslationTab:
                 return
             
             image_path = self.image_preview_widget.current_image_path
-            self._log(f"📝 Recognizing text in: {os.path.basename(image_path)}", "info")
+            self._log(f"📝 Recognizing and translating text in: {os.path.basename(image_path)}", "info")
             
-            # Ensure translator is initialized
+            # Initialize translator if needed
             if not hasattr(self, 'translator') or self.translator is None:
-                self._log("⚠️ Translator not initialized. Please start translation first.", "warning")
-                return
+                self._log("🔧 Initializing translator...", "info")
+                self._initialize_translator()
             
-            # Run OCR
+            # Run OCR to detect and recognize text
             try:
+                self._log("🔍 Step 1: Detecting text regions...", "info")
                 regions = self.translator.detect_text_regions(image_path)
                 
                 if regions:
-                    self._log(f"✅ Recognized text in {len(regions)} regions", "success")
+                    self._log(f"✅ Detected and recognized {len(regions)} text regions", "success")
+                    
+                    # Show detected regions with green boxes
+                    from PySide6.QtGui import QColor
+                    self.image_preview_widget.viewer.draw_detection_boxes(regions, QColor(0, 255, 0))  # Green
+                    self._log(f"🖼️ Showing {len(regions)} detection boxes on preview", "debug")
+                    
                     # Show sample of recognized text
                     for i, region in enumerate(regions[:3]):
                         text_preview = region.text[:50] + "..." if len(region.text) > 50 else region.text
-                        self._log(f"   Region {i+1}: {text_preview}", "info")
+                        self._log(f"   Region {i+1} (original): {text_preview}", "info")
                     if len(regions) > 3:
                         self._log(f"   ... and {len(regions) - 3} more regions", "info")
+                    
+                    # Step 2: Translate the recognized text
+                    self._log(f"\n🌐 Step 2: Translating {len(regions)} regions...", "info")
+                    translated_regions = self.translator.translate_regions(regions, image_path)
+                    
+                    # Show sample of translated text
+                    translated_count = sum(1 for r in translated_regions if r.translated_text)
+                    self._log(f"✅ Translated {translated_count}/{len(regions)} regions", "success")
+                    
+                    # Update boxes to blue after translation
+                    self.image_preview_widget.viewer.draw_detection_boxes(translated_regions, QColor(0, 150, 255))  # Blue
+                    self._log(f"🖼️ Updated boxes to blue (translated)", "debug")
+                    
+                    for i, region in enumerate(translated_regions[:3]):
+                        if region.translated_text:
+                            trans_preview = region.translated_text[:50] + "..." if len(region.translated_text) > 50 else region.translated_text
+                            self._log(f"   Region {i+1} (translated): {trans_preview}", "info")
+                    
+                    # Store regions for next steps (clean, render)
+                    self._current_regions = translated_regions
+                    self._current_image_path = image_path
+                    
                 else:
                     self._log("⚠️ No text recognized", "warning")
                     
             except Exception as e:
-                self._log(f"❌ Text recognition failed: {str(e)}", "error")
+                self._log(f"❌ Text recognition/translation failed: {str(e)}", "error")
                 import traceback
                 self._log(traceback.format_exc(), "debug")
                 
@@ -7420,34 +7474,176 @@ class MangaTranslationTab:
             self._log(f"❌ Error in recognize text handler: {str(e)}", "error")
     
     def _on_segment_text_clicked(self):
-        """Handle segment text button click"""
+        """Handle segment text button click - refine and segment text regions"""
         try:
             # Get current image path
             if not hasattr(self, 'image_preview_widget') or not self.image_preview_widget.current_image_path:
                 self._log("⚠️ No image loaded for segmentation", "warning")
                 return
             
-            self._log("🔨 Text segmentation not yet implemented", "info")
-            self._log("   This feature will segment text regions for better translation", "info")
+            # Check if we have detected regions
+            if not hasattr(self, '_current_regions') or not self._current_regions:
+                self._log("⚠️ No text regions available. Please run 'Recognize' first.", "warning")
+                return
+            
+            image_path = self.image_preview_widget.current_image_path
+            self._log(f"🔨 Segmenting text regions in: {os.path.basename(image_path)}", "info")
+            
+            # Initialize translator if needed
+            if not hasattr(self, 'translator') or self.translator is None:
+                self._log("🔧 Initializing translator...", "info")
+                self._initialize_translator()
+            
+            try:
+                import cv2
+                import numpy as np
+                
+                # Load image
+                image = cv2.imread(image_path)
+                if image is None:
+                    self._log(f"❌ Failed to load image: {image_path}", "error")
+                    return
+                
+                original_count = len(self._current_regions)
+                self._log(f"📊 Starting with {original_count} regions", "info")
+                
+                # Segment regions based on configuration
+                manga_settings = self.main_gui.config.get('manga_settings', {})
+                segmentation_settings = manga_settings.get('segmentation', {})
+                
+                segmented_regions = []
+                
+                for idx, region in enumerate(self._current_regions):
+                    # Extract region from image
+                    x1, y1 = int(region.x1), int(region.y1)
+                    x2, y2 = int(region.x2), int(region.y2)
+                    
+                    # Ensure coordinates are within image bounds
+                    x1, y1 = max(0, x1), max(0, y1)
+                    x2, y2 = min(image.shape[1], x2), min(image.shape[0], y2)
+                    
+                    if x2 <= x1 or y2 <= y1:
+                        continue
+                    
+                    region_img = image[y1:y2, x1:x2]
+                    
+                    # Check if region needs segmentation based on size and text content
+                    region_width = x2 - x1
+                    region_height = y2 - y1
+                    region_area = region_width * region_height
+                    
+                    # Segmentation strategy:
+                    # 1. Very large regions (>500x500) - likely contain multiple text blocks
+                    # 2. Regions with very long text - may benefit from line splitting
+                    # 3. Regions with mixed horizontal/vertical text
+                    
+                    should_segment = False
+                    segment_reason = ""
+                    
+                    # Large region check
+                    if region_width > 500 or region_height > 500:
+                        should_segment = True
+                        segment_reason = "large region"
+                    
+                    # Long text check (more than 100 characters might benefit from splitting)
+                    elif region.text and len(region.text) > 100:
+                        should_segment = True
+                        segment_reason = "long text"
+                    
+                    # Very wide or very tall regions (aspect ratio check)
+                    elif region_width / max(region_height, 1) > 4 or region_height / max(region_width, 1) > 4:
+                        should_segment = True
+                        segment_reason = "unusual aspect ratio"
+                    
+                    if should_segment:
+                        self._log(f"   📐 Segmenting region {idx+1} ({segment_reason}): {region_width}x{region_height}", "info")
+                        
+                        # Simple segmentation strategy: split horizontally or vertically based on aspect ratio
+                        if region_width > region_height:
+                            # Horizontal split - divide into columns
+                            num_segments = min(3, max(2, region_width // 200))  # Max 3 segments
+                            segment_width = region_width // num_segments
+                            
+                            for i in range(num_segments):
+                                seg_x1 = x1 + (i * segment_width)
+                                seg_x2 = x1 + ((i + 1) * segment_width) if i < num_segments - 1 else x2
+                                
+                                # Create new region for segment
+                                from manga_translator import TextRegion
+                                seg_region = TextRegion(
+                                    x1=seg_x1, y1=y1, x2=seg_x2, y2=y2,
+                                    text=region.text,  # Keep original text for now
+                                    translated_text=region.translated_text,
+                                    confidence=region.confidence
+                                )
+                                segmented_regions.append(seg_region)
+                        else:
+                            # Vertical split - divide into rows
+                            num_segments = min(3, max(2, region_height // 200))  # Max 3 segments
+                            segment_height = region_height // num_segments
+                            
+                            for i in range(num_segments):
+                                seg_y1 = y1 + (i * segment_height)
+                                seg_y2 = y1 + ((i + 1) * segment_height) if i < num_segments - 1 else y2
+                                
+                                # Create new region for segment
+                                from manga_translator import TextRegion
+                                seg_region = TextRegion(
+                                    x1=x1, y1=seg_y1, x2=x2, y2=seg_y2,
+                                    text=region.text,  # Keep original text for now
+                                    translated_text=region.translated_text,
+                                    confidence=region.confidence
+                                )
+                                segmented_regions.append(seg_region)
+                    else:
+                        # Keep region as-is
+                        segmented_regions.append(region)
+                
+                # Update regions with segmented version
+                if len(segmented_regions) > original_count:
+                    self._current_regions = segmented_regions
+                    self._log(f"✅ Segmentation complete: {original_count} → {len(segmented_regions)} regions", "success")
+                    self._log(f"   Added {len(segmented_regions) - original_count} new segments", "info")
+                    
+                    # Show segmented regions with yellow boxes
+                    from PySide6.QtGui import QColor
+                    self.image_preview_widget.viewer.draw_detection_boxes(segmented_regions, QColor(255, 255, 0))  # Yellow
+                    self._log(f"🖼️ Showing {len(segmented_regions)} segmented regions (yellow)", "debug")
+                    
+                    # If regions were segmented, suggest re-running OCR
+                    self._log("💡 Tip: You may want to run 'Recognize' again to get accurate text for new segments", "info")
+                else:
+                    self._log("✅ No segmentation needed - all regions are optimal size", "success")
+                    self._log(f"   All {original_count} regions are within acceptable parameters", "info")
+                    
+            except Exception as e:
+                self._log(f"❌ Segmentation failed: {str(e)}", "error")
+                import traceback
+                self._log(traceback.format_exc(), "debug")
                 
         except Exception as e:
             self._log(f"❌ Error in segment text handler: {str(e)}", "error")
     
     def _on_clean_image_clicked(self):
-        """Handle clean image button click - trigger inpainting"""
+        """Handle clean image button click - trigger inpainting to remove original text"""
         try:
             # Get current image path
             if not hasattr(self, 'image_preview_widget') or not self.image_preview_widget.current_image_path:
                 self._log("⚠️ No image loaded for cleaning", "warning")
                 return
             
-            image_path = self.image_preview_widget.current_image_path
-            self._log(f"🧽 Cleaning image: {os.path.basename(image_path)}", "info")
-            
-            # Ensure translator is initialized
-            if not hasattr(self, 'translator') or self.translator is None:
-                self._log("⚠️ Translator not initialized. Please start translation first.", "warning")
+            # Check if we have regions from recognize step
+            if not hasattr(self, '_current_regions') or not self._current_regions:
+                self._log("⚠️ No text regions available. Please run 'Recognize' first.", "warning")
                 return
+            
+            image_path = self.image_preview_widget.current_image_path
+            self._log(f"🧽 Cleaning image (inpainting text regions): {os.path.basename(image_path)}", "info")
+            
+            # Initialize translator if needed
+            if not hasattr(self, 'translator') or self.translator is None:
+                self._log("🔧 Initializing translator...", "info")
+                self._initialize_translator()
             
             # Run inpainting on the image
             try:
@@ -7460,28 +7656,32 @@ class MangaTranslationTab:
                     self._log(f"❌ Failed to load image: {image_path}", "error")
                     return
                 
-                # Create a mask from the brush strokes in the preview widget
-                if hasattr(self.image_preview_widget.viewer, 'brush_strokes') and self.image_preview_widget.viewer.brush_strokes:
-                    # TODO: Convert brush strokes to mask
-                    self._log("🎨 Using manual brush strokes for mask", "info")
-                    mask = np.zeros((image.shape[0], image.shape[1]), dtype=np.uint8)
-                    # Add brush stroke logic here
-                else:
-                    # No manual strokes - use full text region mask
-                    self._log("⚠️ No manual strokes. Run detection first to generate mask.", "warning")
-                    return
+                # Create mask from detected text regions
+                mask = np.zeros((image.shape[0], image.shape[1]), dtype=np.uint8)
+                
+                self._log(f"🎨 Creating mask from {len(self._current_regions)} text regions...", "info")
+                for region in self._current_regions:
+                    # Draw white rectangle on mask for each text region
+                    x1, y1, x2, y2 = int(region.x1), int(region.y1), int(region.x2), int(region.y2)
+                    cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)  # -1 = filled
                 
                 # Run inpainting
+                self._log("🧽 Running inpainting to remove text...", "info")
                 cleaned = self.translator.inpaint_regions(image, mask)
                 
                 if cleaned is not None:
                     # Save cleaned image temporarily and reload in preview
-                    temp_path = image_path.replace('.', '_cleaned.')
-                    cv2.imwrite(temp_path, cleaned)
-                    self._log(f"✅ Image cleaned: {os.path.basename(temp_path)}", "success")
+                    output_dir = os.path.join(os.path.dirname(image_path), "cleaned")
+                    os.makedirs(output_dir, exist_ok=True)
+                    cleaned_path = os.path.join(output_dir, os.path.basename(image_path))
+                    cv2.imwrite(cleaned_path, cleaned)
+                    self._log(f"✅ Image cleaned and saved: {os.path.basename(cleaned_path)}", "success")
+                    
+                    # Store cleaned path for render step
+                    self._cleaned_image_path = cleaned_path
                     
                     # Reload in preview
-                    self.image_preview_widget.load_image(temp_path)
+                    self.image_preview_widget.load_image(cleaned_path)
                 else:
                     self._log("❌ Inpainting failed", "error")
                     
@@ -7494,37 +7694,62 @@ class MangaTranslationTab:
             self._log(f"❌ Error in clean image handler: {str(e)}", "error")
     
     def _on_render_clicked(self):
-        """Handle render button click - render translated text"""
+        """Handle render button click - render translated text onto cleaned image"""
         try:
-            # Get current image path
-            if not hasattr(self, 'image_preview_widget') or not self.image_preview_widget.current_image_path:
+            # Check if we have translated regions
+            if not hasattr(self, '_current_regions') or not self._current_regions:
+                self._log("⚠️ No translated regions available. Please run 'Recognize' first.", "warning")
+                return
+            
+            # Use cleaned image if available, otherwise use current image
+            if hasattr(self, '_cleaned_image_path') and os.path.exists(self._cleaned_image_path):
+                base_image_path = self._cleaned_image_path
+                self._log(f"✨ Rendering translated text on cleaned image: {os.path.basename(base_image_path)}", "info")
+            elif hasattr(self, 'image_preview_widget') and self.image_preview_widget.current_image_path:
+                base_image_path = self.image_preview_widget.current_image_path
+                self._log(f"✨ Rendering translated text on: {os.path.basename(base_image_path)}", "info")
+            else:
                 self._log("⚠️ No image loaded for rendering", "warning")
                 return
             
-            image_path = self.image_preview_widget.current_image_path
-            self._log(f"✨ Rendering translated text on: {os.path.basename(image_path)}", "info")
-            
-            # Ensure translator is initialized
+            # Initialize translator if needed
             if not hasattr(self, 'translator') or self.translator is None:
-                self._log("⚠️ Translator not initialized. Please start translation first.", "warning")
-                return
+                self._log("🔧 Initializing translator...", "info")
+                self._initialize_translator()
             
-            # Run full translation on single image
+            # Render translated text
             try:
-                self._log("🚀 Starting full translation workflow for current image...", "info")
-                output_dir = os.path.join(os.path.dirname(image_path), "translated")
-                os.makedirs(output_dir, exist_ok=True)
+                import cv2
                 
-                # Translate the image
-                output_path = os.path.join(output_dir, os.path.basename(image_path))
-                success = self.translator.translate_image(image_path, output_path)
+                # Load the base image (cleaned or original)
+                image = cv2.imread(base_image_path)
+                if image is None:
+                    self._log(f"❌ Failed to load image: {base_image_path}", "error")
+                    return
                 
-                if success:
-                    self._log(f"✅ Translation complete: {os.path.basename(output_path)}", "success")
-                    # Reload the translated image in preview
+                # Render translated text onto image
+                self._log(f"🖌️ Rendering {len(self._current_regions)} translated text regions...", "info")
+                rendered_image = self.translator.render_text_on_image(image, self._current_regions)
+                
+                if rendered_image is not None:
+                    # Save rendered image
+                    output_dir = os.path.join(os.path.dirname(base_image_path), "translated")
+                    os.makedirs(output_dir, exist_ok=True)
+                    
+                    # Get original filename from the source image path
+                    if hasattr(self, '_current_image_path'):
+                        original_name = os.path.basename(self._current_image_path)
+                    else:
+                        original_name = os.path.basename(base_image_path)
+                    
+                    output_path = os.path.join(output_dir, original_name)
+                    cv2.imwrite(output_path, rendered_image)
+                    self._log(f"✅ Rendering complete: {os.path.basename(output_path)}", "success")
+                    
+                    # Reload the rendered image in preview
                     self.image_preview_widget.load_image(output_path)
                 else:
-                    self._log("❌ Translation failed", "error")
+                    self._log("❌ Rendering failed", "error")
                     
             except Exception as e:
                 self._log(f"❌ Rendering failed: {str(e)}", "error")
@@ -9419,6 +9644,15 @@ class MangaTranslationTab:
                                 if translation_successful:
                                     self.completed_files += 1
                                     self._log(f"✅ Translation completed: {filename}", "success")
+                                    
+                                    # Update image preview to show translated output if this is the current file
+                                    if hasattr(self, 'image_preview_widget') and self.image_preview_widget.current_image_path == filepath:
+                                        try:
+                                            self.image_preview_widget.load_image(result.get('output_path'))
+                                            self._log(f"🖼️ Updated preview to show translated image", "debug")
+                                        except Exception as preview_err:
+                                            self._log(f"⚠️ Failed to update preview: {preview_err}", "debug")
+                                    
                                     # Memory barrier: ensure resources are released before next completion
                                     time.sleep(0.15)  # Slightly longer pause for stability
                                     self._log("💤 Panel completion pausing for resource cleanup", "debug")
@@ -9581,6 +9815,15 @@ class MangaTranslationTab:
                             if output_exists and has_translations:
                                 self.completed_files += 1
                                 self._log(f"✅ Translation completed: {filename}", "success")
+                                
+                                # Update image preview to show translated output if this is the current file
+                                if hasattr(self, 'image_preview_widget') and self.image_preview_widget.current_image_path == filepath:
+                                    try:
+                                        self.image_preview_widget.load_image(result.get('output_path'))
+                                        self._log(f"🖼️ Updated preview to show translated image", "debug")
+                                    except Exception as preview_err:
+                                        self._log(f"⚠️ Failed to update preview: {preview_err}", "debug")
+                                
                                 time.sleep(0.1)  # Brief pause for stability
                                 self._log("💤 Sequential completion pausing briefly for stability", "debug")
                             else:
