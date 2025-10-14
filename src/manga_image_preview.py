@@ -1149,15 +1149,23 @@ class MangaImagePreviewWidget(QWidget):
         # Store state for later use in preview mode
         self.manual_editing_enabled = enabled
         
-        # Persist state to config
-        if self.main_gui and hasattr(self.main_gui, 'config'):
-            self.main_gui.config['manga_manual_editing_enabled'] = enabled
-            # Save config to disk if save method exists
-            if hasattr(self.main_gui, 'save_config'):
-                try:
+        # Persist state to config (same pattern as other checkboxes)
+        try:
+            if self.main_gui and hasattr(self.main_gui, 'config'):
+                self.main_gui.config['manga_manual_editing_enabled'] = enabled
+                print(f"[DEBUG] Set manga_manual_editing_enabled = {enabled}")
+                # Save config to disk
+                if hasattr(self.main_gui, 'save_config'):
                     self.main_gui.save_config(show_message=False)
-                except Exception as e:
-                    print(f"[DEBUG] Failed to save config: {e}")
+                    print(f"[DEBUG] Config saved to disk")
+                else:
+                    print(f"[DEBUG] save_config method not found on main_gui")
+            else:
+                print(f"[DEBUG] main_gui or config not available")
+        except Exception as e:
+            print(f"[DEBUG] Error saving config: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _on_download_images_clicked(self):
         """Handle download images button - open file dialog to save translated images"""
