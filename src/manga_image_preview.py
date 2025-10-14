@@ -9,7 +9,8 @@ import threading
 from typing import List, Dict, Optional
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGraphicsView, 
                                QGraphicsScene, QGraphicsPixmapItem, QToolButton, 
-                               QLabel, QSlider, QFrame, QPushButton, QGraphicsRectItem)
+                               QLabel, QSlider, QFrame, QPushButton, QGraphicsRectItem,
+                               QSizePolicy)
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QSize, QThread, QObject, Slot
 from PySide6.QtGui import QPixmap, QImage, QPainter, QColor, QPen, QBrush, QCursor, QIcon
 import numpy as np
@@ -439,12 +440,11 @@ class MangaImagePreviewWidget(QWidget):
         self.clear_strokes_btn.clicked.connect(self._clear_strokes)
         tools_layout.addWidget(self.clear_strokes_btn)
         
-        # Brush size slider (wider)
+        # Brush size slider (stretches to fill space)
         self.size_slider = QSlider(Qt.Orientation.Horizontal)
         self.size_slider.setMinimum(5)
         self.size_slider.setMaximum(50)
         self.size_slider.setValue(20)
-        self.size_slider.setMinimumWidth(200)
         self.size_slider.setStyleSheet("""
             QSlider::groove:horizontal {
                 height: 6px;
@@ -461,7 +461,7 @@ class MangaImagePreviewWidget(QWidget):
         """)
         self.size_slider.valueChanged.connect(self._update_brush_size)
         self.size_slider.wheelEvent = lambda event: None
-        tools_layout.addWidget(self.size_slider)
+        tools_layout.addWidget(self.size_slider, stretch=1)  # Stretch to fill
         
         self.size_label = QLabel("20")
         self.size_label.setStyleSheet("color: white; min-width: 25px;")
@@ -469,53 +469,40 @@ class MangaImagePreviewWidget(QWidget):
         
         # Box count
         self.box_count_label = QLabel("0")
-        self.box_count_label.setStyleSheet("color: white; font-weight: bold;")
+        self.box_count_label.setStyleSheet("color: white; font-weight: bold; min-width: 20px;")
+        self.box_count_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         tools_layout.addWidget(self.box_count_label)
         self.viewer.rectangle_created.connect(self._update_box_count)
         self.viewer.rectangle_deleted.connect(self._update_box_count)
         
-        tools_layout.addStretch()
         layout.addWidget(tools_frame)
         
-        # Translation workflow buttons (compact)
+        # Translation workflow buttons (compact, single row)
         workflow_frame = self._create_tool_frame("Translation Workflow")
-        workflow_layout = QVBoxLayout(workflow_frame)
+        workflow_layout = QHBoxLayout(workflow_frame)
         workflow_layout.setContentsMargins(3, 3, 3, 3)
-        workflow_layout.setSpacing(3)
-        
-        # Row 1
-        row1 = QHBoxLayout()
-        row1.setSpacing(2)
+        workflow_layout.setSpacing(2)
         
         self.detect_btn = self._create_compact_button("Detect Text")
         self.detect_btn.clicked.connect(self.detect_text_clicked.emit)
-        row1.addWidget(self.detect_btn)
+        workflow_layout.addWidget(self.detect_btn, stretch=1)
         
         self.recognize_btn = self._create_compact_button("Recognize")
         self.recognize_btn.clicked.connect(self.recognize_text_clicked.emit)
-        row1.addWidget(self.recognize_btn)
-        
-        # Translate button removed - use main Start Translation button instead
-        
-        workflow_layout.addLayout(row1)
-        
-        # Row 2
-        row2 = QHBoxLayout()
-        row2.setSpacing(2)
+        workflow_layout.addWidget(self.recognize_btn, stretch=1)
         
         self.segment_btn = self._create_compact_button("Segment")
         self.segment_btn.clicked.connect(self.segment_text_clicked.emit)
-        row2.addWidget(self.segment_btn)
+        workflow_layout.addWidget(self.segment_btn, stretch=1)
         
         self.clean_btn = self._create_compact_button("Clean")
         self.clean_btn.clicked.connect(self.clean_image_clicked.emit)
-        row2.addWidget(self.clean_btn)
+        workflow_layout.addWidget(self.clean_btn, stretch=1)
         
         self.render_btn = self._create_compact_button("Render")
         self.render_btn.clicked.connect(self.render_clicked.emit)
-        row2.addWidget(self.render_btn)
+        workflow_layout.addWidget(self.render_btn, stretch=1)
         
-        workflow_layout.addLayout(row2)
         layout.addWidget(workflow_frame)
         
         # Current file label
@@ -535,10 +522,12 @@ class MangaImagePreviewWidget(QWidget):
                 color: white;
                 border: 1px solid #3a3a3a;
                 border-radius: 3px;
-                padding: 5px;
-                font-size: 12pt;
-                min-width: 30px;
-                min-height: 30px;
+                padding: 3px;
+                font-size: 11pt;
+                min-width: 28px;
+                min-height: 28px;
+                max-width: 32px;
+                max-height: 32px;
             }
             QToolButton:hover {
                 background-color: #3a3a3a;
@@ -554,6 +543,7 @@ class MangaImagePreviewWidget(QWidget):
     def _create_compact_button(self, text: str) -> QPushButton:
         """Create a compact workflow button"""
         btn = QPushButton(text)
+        btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         btn.setStyleSheet("""
             QPushButton {
                 background-color: #2d2d2d;
