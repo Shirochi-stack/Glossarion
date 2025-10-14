@@ -2663,7 +2663,7 @@ class MangaTranslationTab:
         
         # Image preview widget (always visible)
         self.image_preview_widget = MangaImagePreviewWidget()
-        self.image_preview_widget.setMinimumWidth(350)
+        self.image_preview_widget.setMinimumWidth(600)  # Increased from 350 to 600 for better viewing
         self.image_preview_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         
         # Settings frame - GOES TO LEFT COLUMN
@@ -3480,6 +3480,30 @@ class MangaTranslationTab:
 
         # Initialize visibility based on current settings
         self._toggle_inpaint_visibility()
+        
+        # Add decorative icon at the bottom to balance the layout
+        icon_frame = QWidget()
+        icon_layout = QVBoxLayout(icon_frame)
+        icon_layout.setContentsMargins(0, 20, 0, 10)
+        icon_layout.setAlignment(Qt.AlignCenter)
+        
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+        if os.path.exists(icon_path):
+            icon_label = QLabel()
+            icon_pixmap = QPixmap(icon_path)
+            # Scale to a reasonable size
+            scaled_pixmap = icon_pixmap.scaled(120, 120, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            icon_label.setPixmap(scaled_pixmap)
+            icon_label.setAlignment(Qt.AlignCenter)
+            icon_layout.addWidget(icon_label)
+            
+            # Optional: Add a subtle label
+            icon_text = QLabel("Glossarion")
+            icon_text.setStyleSheet("color: #5a9fd4; font-size: 10pt; font-weight: bold;")
+            icon_text.setAlignment(Qt.AlignCenter)
+            icon_layout.addWidget(icon_text)
+        
+        inpaint_group_layout.addWidget(icon_frame)
         
         # Add inpaint_group to render_frame
         render_frame_layout.addWidget(inpaint_group)
