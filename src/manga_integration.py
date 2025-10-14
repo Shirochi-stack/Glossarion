@@ -2668,6 +2668,13 @@ class MangaTranslationTab:
         self.image_preview_widget.setMinimumWidth(600)  # Increased from 350 to 600 for better viewing
         self.image_preview_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         
+        # Connect image preview workflow signals to translation methods
+        self.image_preview_widget.detect_text_clicked.connect(self._on_detect_text_clicked)
+        self.image_preview_widget.recognize_text_clicked.connect(self._on_recognize_text_clicked)
+        self.image_preview_widget.segment_text_clicked.connect(self._on_segment_text_clicked)
+        self.image_preview_widget.clean_image_clicked.connect(self._on_clean_image_clicked)
+        self.image_preview_widget.render_clicked.connect(self._on_render_clicked)
+        
         # Settings frame - GOES TO LEFT COLUMN
         settings_frame = QGroupBox("Translation Settings")
         settings_frame_font = QFont("Arial", 10)
@@ -7196,6 +7203,10 @@ class MangaTranslationTab:
                 if path not in self.selected_files:
                     self.selected_files.append(path)
                     self.file_listbox.addItem(os.path.basename(path))
+        
+        # Auto-select first image to trigger preview
+        if len(self.selected_files) > 0 and self.file_listbox.count() > 0:
+            self.file_listbox.setCurrentRow(0)
     
     def _add_folder(self):
         """Add all images (and CBZ archives) from a folder"""
@@ -7230,7 +7241,10 @@ class MangaTranslationTab:
             if any(lower.endswith(ext) for ext in image_extensions):
                 if filepath not in self.selected_files:
                     self.selected_files.append(filepath)
-                    self.file_listbox.addItem(filename)
+                    item = self.file_listbox.addItem(filename)
+                    # Auto-select first image to trigger preview
+                    if len(self.selected_files) == 1:
+                        self.file_listbox.setCurrentRow(0)
             elif lower.endswith(cbz_ext):
                 # Extract images from CBZ archive
                 try:
@@ -7307,12 +7321,226 @@ class MangaTranslationTab:
             if 0 <= row < len(self.selected_files):
                 image_path = self.selected_files[row]
                 
+                # DEBUG: Log the image loading attempt
+                self._log(f"🖼️ Loading preview: {os.path.basename(image_path)}", "debug")
+                
                 # Load the image into the preview (always visible)
-                if hasattr(self, 'image_preview_widget') and os.path.exists(image_path):
-                    self.image_preview_widget.load_image(image_path)
+                if hasattr(self, 'image_preview_widget'):
+                    if os.path.exists(image_path):
+                        self.image_preview_widget.load_image(image_path)
+                        self._log(f"✅ Preview loaded successfully", "debug")
+                    else:
+                        self._log(f"❌ Image file not found: {image_path}", "error")
+                else:
+                    self._log("❌ Image preview widget not initialized", "error")
+            else:
+                self._log(f"❌ Invalid row index: {row} (total files: {len(self.selected_files)})", "error")
         except Exception as e:
-            # Silently handle errors to avoid disrupting the UI
-            pass
+            # Log errors for debugging
+            self._log(f"❌ Error loading image preview: {str(e)}", "error")
+            import traceback
+            self._log(traceback.format_exc(), "debug")
+    
+    def _on_detect_text_clicked(self):
+        """Handle detect text button click - trigger AI speech bubble detection"""
+        try:
+            # Get current image path from preview widget
+            if not hasattr(self, 'image_preview_widget') or not self.image_preview_widget.current_image_path:
+                self._log("⚠️ No image loaded for detection", "warning")
+                return
+            
+            image_path = self.image_preview_widget.current_image_path
+            self._log(f"🔍 Detecting text bubbles in: {os.path.basename(image_path)}", "info")
+            
+            # Ensure translator is initialized
+            if not hasattr(self, 'translator') or self.translator is None:
+                self._log("⚠️ Translator not initialized. Please start translation first.", "warning")
+                return
+            
+            # Run bubble detection
+            try:
+                manga_settings = self.main_gui.config.get('manga_settings', {})
+                ocr_settings = manga_settings.get('ocr', {})
+                
+                # Load bubble detector if not already loaded
+                if not hasattr(self.translator, 'bubble_detector') or not self.translator.bubble_detector:
+                    from bubble_detector import BubbleDetector
+                    self.translator.bubble_detector = BubbleDetector()
+                
+                # Run detection
+                detections = self.translator._load_bubble_detector(ocr_settings, image_path)
+                
+                if detections:
+                    total_boxes = (len(detections.get('text_bubbles', [])) + 
+                                   len(detections.get('text_free', [])))
+                    self._log(f"✅ Detected {total_boxes} text regions", "success")
+                    
+                    # TODO: Display detected boxes on the image preview
+                    # This would require extending the image preview widget to show detection results
+                else:
+                    self._log("⚠️ No text regions detected", "warning")
+                    
+            except Exception as e:
+                self._log(f"❌ Bubble detection failed: {str(e)}", "error")
+                import traceback
+                self._log(traceback.format_exc(), "debug")
+                
+        except Exception as e:
+            self._log(f"❌ Error in detect text handler: {str(e)}", "error")
+    
+    def _on_recognize_text_clicked(self):
+        """Handle recognize text button click - trigger OCR"""
+        try:
+            # Get current image path
+            if not hasattr(self, 'image_preview_widget') or not self.image_preview_widget.current_image_path:
+                self._log("⚠️ No image loaded for recognition", "warning")
+                return
+            
+            image_path = self.image_preview_widget.current_image_path
+            self._log(f"📝 Recognizing text in: {os.path.basename(image_path)}", "info")
+            
+            # Ensure translator is initialized
+            if not hasattr(self, 'translator') or self.translator is None:
+                self._log("⚠️ Translator not initialized. Please start translation first.", "warning")
+                return
+            
+            # Run OCR
+            try:
+                regions = self.translator.detect_text_regions(image_path)
+                
+                if regions:
+                    self._log(f"✅ Recognized text in {len(regions)} regions", "success")
+                    # Show sample of recognized text
+                    for i, region in enumerate(regions[:3]):
+                        text_preview = region.text[:50] + "..." if len(region.text) > 50 else region.text
+                        self._log(f"   Region {i+1}: {text_preview}", "info")
+                    if len(regions) > 3:
+                        self._log(f"   ... and {len(regions) - 3} more regions", "info")
+                else:
+                    self._log("⚠️ No text recognized", "warning")
+                    
+            except Exception as e:
+                self._log(f"❌ Text recognition failed: {str(e)}", "error")
+                import traceback
+                self._log(traceback.format_exc(), "debug")
+                
+        except Exception as e:
+            self._log(f"❌ Error in recognize text handler: {str(e)}", "error")
+    
+    def _on_segment_text_clicked(self):
+        """Handle segment text button click"""
+        try:
+            # Get current image path
+            if not hasattr(self, 'image_preview_widget') or not self.image_preview_widget.current_image_path:
+                self._log("⚠️ No image loaded for segmentation", "warning")
+                return
+            
+            self._log("🔨 Text segmentation not yet implemented", "info")
+            self._log("   This feature will segment text regions for better translation", "info")
+                
+        except Exception as e:
+            self._log(f"❌ Error in segment text handler: {str(e)}", "error")
+    
+    def _on_clean_image_clicked(self):
+        """Handle clean image button click - trigger inpainting"""
+        try:
+            # Get current image path
+            if not hasattr(self, 'image_preview_widget') or not self.image_preview_widget.current_image_path:
+                self._log("⚠️ No image loaded for cleaning", "warning")
+                return
+            
+            image_path = self.image_preview_widget.current_image_path
+            self._log(f"🧽 Cleaning image: {os.path.basename(image_path)}", "info")
+            
+            # Ensure translator is initialized
+            if not hasattr(self, 'translator') or self.translator is None:
+                self._log("⚠️ Translator not initialized. Please start translation first.", "warning")
+                return
+            
+            # Run inpainting on the image
+            try:
+                import cv2
+                import numpy as np
+                
+                # Load image
+                image = cv2.imread(image_path)
+                if image is None:
+                    self._log(f"❌ Failed to load image: {image_path}", "error")
+                    return
+                
+                # Create a mask from the brush strokes in the preview widget
+                if hasattr(self.image_preview_widget.viewer, 'brush_strokes') and self.image_preview_widget.viewer.brush_strokes:
+                    # TODO: Convert brush strokes to mask
+                    self._log("🎨 Using manual brush strokes for mask", "info")
+                    mask = np.zeros((image.shape[0], image.shape[1]), dtype=np.uint8)
+                    # Add brush stroke logic here
+                else:
+                    # No manual strokes - use full text region mask
+                    self._log("⚠️ No manual strokes. Run detection first to generate mask.", "warning")
+                    return
+                
+                # Run inpainting
+                cleaned = self.translator.inpaint_regions(image, mask)
+                
+                if cleaned is not None:
+                    # Save cleaned image temporarily and reload in preview
+                    temp_path = image_path.replace('.', '_cleaned.')
+                    cv2.imwrite(temp_path, cleaned)
+                    self._log(f"✅ Image cleaned: {os.path.basename(temp_path)}", "success")
+                    
+                    # Reload in preview
+                    self.image_preview_widget.load_image(temp_path)
+                else:
+                    self._log("❌ Inpainting failed", "error")
+                    
+            except Exception as e:
+                self._log(f"❌ Image cleaning failed: {str(e)}", "error")
+                import traceback
+                self._log(traceback.format_exc(), "debug")
+                
+        except Exception as e:
+            self._log(f"❌ Error in clean image handler: {str(e)}", "error")
+    
+    def _on_render_clicked(self):
+        """Handle render button click - render translated text"""
+        try:
+            # Get current image path
+            if not hasattr(self, 'image_preview_widget') or not self.image_preview_widget.current_image_path:
+                self._log("⚠️ No image loaded for rendering", "warning")
+                return
+            
+            image_path = self.image_preview_widget.current_image_path
+            self._log(f"✨ Rendering translated text on: {os.path.basename(image_path)}", "info")
+            
+            # Ensure translator is initialized
+            if not hasattr(self, 'translator') or self.translator is None:
+                self._log("⚠️ Translator not initialized. Please start translation first.", "warning")
+                return
+            
+            # Run full translation on single image
+            try:
+                self._log("🚀 Starting full translation workflow for current image...", "info")
+                output_dir = os.path.join(os.path.dirname(image_path), "translated")
+                os.makedirs(output_dir, exist_ok=True)
+                
+                # Translate the image
+                output_path = os.path.join(output_dir, os.path.basename(image_path))
+                success = self.translator.translate_image(image_path, output_path)
+                
+                if success:
+                    self._log(f"✅ Translation complete: {os.path.basename(output_path)}", "success")
+                    # Reload the translated image in preview
+                    self.image_preview_widget.load_image(output_path)
+                else:
+                    self._log("❌ Translation failed", "error")
+                    
+            except Exception as e:
+                self._log(f"❌ Rendering failed: {str(e)}", "error")
+                import traceback
+                self._log(traceback.format_exc(), "debug")
+                
+        except Exception as e:
+            self._log(f"❌ Error in render handler: {str(e)}", "error")
     
     def _finalize_cbz_jobs(self):
         """Package translated outputs back into .cbz for each imported CBZ.

@@ -634,7 +634,8 @@ class MangaImagePreviewWidget(QWidget):
         self._clear_strokes()
         self._update_box_count()
     
-    def _on_image_loaded_success(self):
+    @Slot(str)
+    def _on_image_loaded_success(self, image_path: str):
         """Handle successful image load"""
         if self.current_image_path:
             self.file_label.setText(f"📄 {os.path.basename(self.current_image_path)}")
