@@ -1052,9 +1052,6 @@ class MetadataBatchTranslatorUI:
             
     def _create_advanced_prompts_tab(self, parent):
         """Create tab for advanced prompt settings"""
-        # Set up icon path for combobox at the start
-        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
-        
         tab_layout = QVBoxLayout(parent)
         tab_layout.setContentsMargins(20, 20, 20, 20)
         
@@ -1178,9 +1175,17 @@ class MetadataBatchTranslatorUI:
         self.output_lang_combo.setCurrentText(self.gui.config.get('output_language', 'English'))
         self.output_lang_combo.setFixedWidth(250)
 
-        # Set up icon path like the working detection algorithm dropdown
-        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
-            
+        # Set up icon path properly for both frozen and non-frozen environments
+        import sys
+        if getattr(sys, 'frozen', False):
+            # In .exe environment
+            icon_path = os.path.join(sys._MEIPASS, 'Halgakos.ico')
+        else:
+            # In Python environment
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+        
+        # Build stylesheet with properly escaped icon path
+        # Use the same pattern as working dropdowns in other_settings.py
         self.output_lang_combo.setStyleSheet("""
             QComboBox {
                 background-color: #1e1e1e;
@@ -1204,7 +1209,7 @@ class MetadataBatchTranslatorUI:
                 background-color: rgba(255, 255, 255, 0.1);
             }
             QComboBox::down-arrow {
-                image: url(Halgakos.ico);
+                image: url(""" + icon_path.replace('\\', '/') + """);
                 width: 16px;
                 height: 16px;
             }
