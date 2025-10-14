@@ -8752,13 +8752,23 @@ class MangaTranslationTab:
             def save_changes():
                 new_text = text_edit.toPlainText()
                 if new_text != ocr_text and region_index is not None:
-                    # Update the stored recognition data
+                    # Update the stored recognition data (for context menu)
                     if hasattr(self, '_recognition_data') and region_index in self._recognition_data:
                         self._recognition_data[region_index]['text'] = new_text
-                        # Also update translation data if it exists
-                        if hasattr(self, '_translation_data') and region_index in self._translation_data:
-                            self._translation_data[region_index]['original'] = new_text
-                        print(f"[DEBUG] Updated OCR text for region {region_index}")
+                    
+                    # Update _recognized_texts (for translation button)
+                    if hasattr(self, '_recognized_texts'):
+                        for text_data in self._recognized_texts:
+                            if text_data.get('region_index') == region_index:
+                                text_data['text'] = new_text
+                                print(f"[DEBUG] Updated _recognized_texts for region {region_index}")
+                                break
+                    
+                    # Also update translation data if it exists
+                    if hasattr(self, '_translation_data') and region_index in self._translation_data:
+                        self._translation_data[region_index]['original'] = new_text
+                    
+                    print(f"[DEBUG] Updated OCR text for region {region_index}: '{new_text[:50]}...'")
                 dialog.accept()
             save_btn.clicked.connect(save_changes)
             button_layout.addWidget(save_btn)
