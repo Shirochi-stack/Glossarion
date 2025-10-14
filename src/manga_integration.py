@@ -7506,15 +7506,15 @@ class MangaTranslationTab:
                     try:
                         x, y, width, height = int(box[0]), int(box[1]), int(box[2]), int(box[3])
                         
-                        # Clamp coordinates to image bounds
-                        x = max(0, min(x, image.shape[1] - 1))
-                        y = max(0, min(y, image.shape[0] - 1))
-                        x2 = max(x + 1, min(x + width, image.shape[1]))
-                        y2 = max(y + 1, min(y + height, image.shape[0]))
+                        # Calculate x2, y2 from width and height, then clamp to image bounds
+                        x1 = max(0, min(x, image.shape[1] - 1))
+                        y1 = max(0, min(y, image.shape[0] - 1))
+                        x2 = max(x1 + 1, min(x + width, image.shape[1]))
+                        y2 = max(y1 + 1, min(y + height, image.shape[0]))
                         
                         # Store region for workflow continuity
                         region_dict = {
-                            'bbox': [x, y, x2 - x, y2 - y],  # (x, y, width, height)
+                            'bbox': [x1, y1, x2 - x1, y2 - y1],  # (x, y, width, height)
                             'coords': [[x, y], [x2, y], [x2, y2], [x, y2]],  # Corner coordinates
                             'confidence': getattr(box, 'confidence', confidence) if hasattr(box, 'confidence') else confidence
                         }
@@ -7961,17 +7961,25 @@ class MangaTranslationTab:
                 if len(box) >= 4:
                     # Validate and convert coordinates
                     try:
-                        x, y, width, height = int(box[0]), int(box[1]), int(box[2]), int(box[3])
+                        # Extract box coordinates (x, y, width, height format)
+                        x, y, width, height = [int(v) for v in box[:4]]
+                        
+                        # Calculate bottom-right coordinates from dimensions
+                        x2 = x + width
+                        y2 = y + height
                         
                         # Clamp coordinates to image bounds
                         x = max(0, min(x, image.shape[1] - 1))
                         y = max(0, min(y, image.shape[0] - 1))
-                        x2 = max(x + 1, min(x + width, image.shape[1]))
-                        y2 = max(y + 1, min(y + height, image.shape[0]))
+                        x2 = max(x + 1, min(x2, image.shape[1]))
+                        y2 = max(y + 1, min(y2, image.shape[0]))
                         
-                        # Store region for workflow continuity
+                        # Recalculate width and height after clamping
+                        width = x2 - x
+                        height = y2 - y
+                        
                         region_dict = {
-                            'bbox': [x, y, x2 - x, y2 - y],  # (x, y, width, height)
+                            'bbox': [x, y, width, height],  # (x, y, width, height)
                             'coords': [[x, y], [x2, y], [x2, y2], [x, y2]],  # Corner coordinates
                             'confidence': getattr(box, 'confidence', confidence) if hasattr(box, 'confidence') else confidence
                         }
@@ -8109,6 +8117,182 @@ class MangaTranslationTab:
             print(f"[INPAINT_SYNC] Traceback: {traceback.format_exc()}")
             return None
     
+    def _run_ocr_on_regions(self, image_path: str, regions: list, ocr_config: dict) -> list:
+        """Run OCR on regions and return recognized texts
+        
+        This is the core OCR logic extracted for reuse by both recognize and translate.
+        Runs OCR on full image and matches results to detected regions.
+        
+        Args:
+            image_path: Path to image
+            regions: List of region dicts to recognize text in
+            ocr_config: OCR configuration dict
+            
+        Returns:
+            list: List of recognized text dicts with 'region_index', 'bbox', 'text', 'confidence'
+        """
+        try:
+            import cv2
+            
+            # Load image
+            image = cv2.imread(image_path)
+            if image is None:
+                print(f"[OCR_REGIONS] Failed to load image: {os.path.basename(image_path)}")
+                return []
+            
+            # Initialize OCR manager if not already done
+            if not hasattr(self, 'ocr_manager') or not self.ocr_manager:
+                from ocr_manager import OCRManager
+                self.ocr_manager = OCRManager(log_callback=self._log)
+            
+            recognized_texts = []
+            
+            print(f"[OCR_REGIONS] Running OCR on full image, then matching to {len(regions)} regions")
+            
+            # STEP 1: Run OCR on FULL IMAGE
+            provider = ocr_config['provider']
+            full_image_ocr_results = []
+            
+            if provider == 'azure':
+                # Use Azure OCR on full image
+                print(f"[OCR_REGIONS] Running Azure OCR on full image")
+                try:
+                    from azure.ai.vision.imageanalysis import ImageAnalysisClient
+                    from azure.core.credentials import AzureKeyCredential
+                    from azure.ai.vision.imageanalysis.models import VisualFeatures
+                    import time
+                    
+                    # Create Azure client
+                    azure_endpoint = ocr_config['azure_endpoint']
+                    azure_key = ocr_config['azure_key']
+                    
+                    vision_client = ImageAnalysisClient(
+                        endpoint=azure_endpoint,
+                        credential=AzureKeyCredential(azure_key)
+                    )
+                    
+                    # Convert full image to bytes
+                    _, encoded = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                    image_bytes = encoded.tobytes()
+                    
+                    # Call Azure OCR on full image with timeout handling
+                    start_time = time.time()
+                    
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        future = executor.submit(
+                            vision_client.analyze,
+                            image_data=image_bytes,
+                            visual_features=[VisualFeatures.READ]
+                        )
+                        
+                        try:
+                            # Wait for result with 30 second timeout
+                            result = future.result(timeout=30.0)
+                            elapsed = time.time() - start_time
+                            print(f"[OCR_REGIONS] Azure OCR completed in {elapsed:.2f}s")
+                        except concurrent.futures.TimeoutError:
+                            print(f"[OCR_REGIONS] Azure OCR timed out after 30 seconds")
+                            self._log(f"❌ Azure OCR timed out after 30 seconds", "error")
+                            return []
+                    
+                    # Extract all text lines from full image OCR
+                    if result.read and result.read.blocks:
+                        for line in result.read.blocks[0].lines:
+                            if hasattr(line, 'bounding_polygon') and line.bounding_polygon:
+                                # Get line bounding box
+                                points = line.bounding_polygon
+                                xs = [p.x for p in points]
+                                ys = [p.y for p in points]
+                                x_min, x_max = int(min(xs)), int(max(xs))
+                                y_min, y_max = int(min(ys)), int(max(ys))
+                                
+                                # Create OCR result
+                                from ocr_manager import OCRResult
+                                ocr_line = OCRResult(
+                                    text=line.text,
+                                    bbox=(x_min, y_min, x_max - x_min, y_max - y_min),
+                                    confidence=0.9,
+                                    vertices=[(int(p.x), int(p.y)) for p in points]
+                                )
+                                full_image_ocr_results.append(ocr_line)
+                    
+                    print(f"[OCR_REGIONS] Azure OCR found {len(full_image_ocr_results)} text lines")
+                    
+                except Exception as e:
+                    print(f"[OCR_REGIONS] Azure OCR error: {str(e)}")
+                    import traceback
+                    print(f"[OCR_REGIONS] Azure OCR traceback: {traceback.format_exc()}")
+                    self._log(f"❌ Azure OCR failed: {str(e)}", "error")
+                    return []
+                    
+            else:
+                # For non-Azure providers, use OCRManager on full image
+                print(f"[OCR_REGIONS] Running {provider} OCR on full image")
+                try:
+                    if not self.ocr_manager.get_provider(provider).is_loaded:
+                        print(f"[OCR_REGIONS] Loading OCR provider: {provider}")
+                        load_success = self.ocr_manager.load_provider(provider, **ocr_config)
+                        print(f"[OCR_REGIONS] Provider load result: {load_success}")
+                    
+                    full_image_ocr_results = self.ocr_manager.detect_text(
+                        image, 
+                        provider,
+                        confidence=0.5
+                    )
+                    print(f"[OCR_REGIONS] {provider} OCR found {len(full_image_ocr_results)} text regions")
+                    
+                except Exception as e:
+                    print(f"[OCR_REGIONS] {provider} OCR error: {str(e)}")
+                    import traceback
+                    print(f"[OCR_REGIONS] {provider} OCR traceback: {traceback.format_exc()}")
+                    return []
+            
+            # STEP 2: Match OCR results to detected regions
+            print(f"[OCR_REGIONS] Matching {len(full_image_ocr_results)} OCR results to {len(regions)} regions")
+            
+            for i, region in enumerate(regions):
+                bbox = region.get('bbox', [])
+                if len(bbox) >= 4:
+                    region_x, region_y, region_w, region_h = bbox
+                    region_center_x = region_x + region_w / 2
+                    region_center_y = region_y + region_h / 2
+                    
+                    # Find OCR results that overlap with this region
+                    matching_ocr = []
+                    for ocr_result in full_image_ocr_results:
+                        ocr_x, ocr_y, ocr_w, ocr_h = ocr_result.bbox
+                        ocr_center_x = ocr_x + ocr_w / 2
+                        ocr_center_y = ocr_y + ocr_h / 2
+                        
+                        # Check if OCR result center is within region bounds
+                        if (region_x <= ocr_center_x <= region_x + region_w and
+                            region_y <= ocr_center_y <= region_y + region_h):
+                            matching_ocr.append(ocr_result)
+                    
+                    # Combine matching OCR texts
+                    region_text = " ".join([ocr.text.strip() for ocr in matching_ocr if ocr.text.strip()])
+                    
+                    print(f"[OCR_REGIONS] Region {i+1}: Found {len(matching_ocr)} matching OCR results")
+                    
+                    if region_text:
+                        recognized_texts.append({
+                            'region_index': i,
+                            'bbox': bbox,
+                            'text': region_text.strip(),
+                            'confidence': region.get('confidence', 1.0)
+                        })
+                        print(f"[OCR_REGIONS] Region {i+1}: '{region_text.strip()}'")
+            
+            print(f"[OCR_REGIONS] Recognized text in {len(recognized_texts)}/{len(regions)} regions")
+            return recognized_texts
+            
+        except Exception as e:
+            import traceback
+            print(f"[OCR_REGIONS] Error: {str(e)}")
+            print(f"[OCR_REGIONS] Traceback: {traceback.format_exc()}")
+            return []
+    
     def _on_recognize_text_clicked(self):
         """Recognize text in current preview rectangles using selected OCR provider"""
         print("[DEBUG] _on_recognize_text_clicked called!")
@@ -8148,21 +8332,31 @@ class MangaTranslationTab:
             print(f"[DEBUG] OCR config: {ocr_config}")
             self._log(f"🤖 Using OCR provider: {ocr_config['provider']}", "info")
             
-            # Check if we have rectangles - if not, run detection first!
+            # Check if we have rectangles - if yes, extract them now; if no, will detect in background
             has_rectangles = (hasattr(self.image_preview_widget, 'viewer') and 
                             self.image_preview_widget.viewer.rectangles and 
                             len(self.image_preview_widget.viewer.rectangles) > 0)
             
-            if not has_rectangles:
-                print("[DEBUG] No rectangles found - need to run detection first")
+            # Extract regions NOW if rectangles exist (don't pass to background thread)
+            regions = None
+            if has_rectangles:
+                print("[DEBUG] Rectangles exist - extracting regions now")
+                regions = self._extract_regions_from_preview()
+                print(f"[DEBUG] Extracted {len(regions)} regions from preview")
+                if not regions or len(regions) == 0:
+                    self._log("⚠️ No valid regions found in preview", "warning")
+                    self._restore_recognize_button()
+                    return
+                self._log(f"📝 Starting text recognition on {len(regions)} existing regions using {ocr_config['provider']}", "info")
+            else:
+                print("[DEBUG] No rectangles found - will run detection in background")
                 self._log("🔍 No text regions found - running automatic detection first...", "info")
-                # Note: Detection will be run in the background thread, regions will be extracted there
             
             # Run OCR in background thread
-            # Pass has_rectangles flag so background thread knows if it needs to detect first
+            # Pass regions (if extracted) or None (will trigger detection in background)
             import threading
             thread = threading.Thread(target=self._run_recognize_background, 
-                                    args=(image_path, has_rectangles, ocr_config),
+                                    args=(image_path, regions, ocr_config),
                                     daemon=True)
             thread.start()
             
@@ -8175,15 +8369,20 @@ class MangaTranslationTab:
             print(f"[DEBUG] Recognize setup error traceback: {traceback_msg}")
             self._restore_recognize_button()
     
-    def _run_recognize_background(self, image_path: str, has_rectangles: bool, ocr_config: dict):
-        """Run text recognition in background thread"""
+    def _run_recognize_background(self, image_path: str, regions: list, ocr_config: dict):
+        """Run text recognition in background thread
+        
+        Args:
+            image_path: Path to image
+            regions: List of region dicts (if provided), or None to trigger detection
+            ocr_config: OCR configuration dict
+        """
         try:
             import cv2
             
             # STEP 0: Check if we need to run detection first
-            regions = None
-            if not has_rectangles:
-                print("[RECOGNIZE] No rectangles - running detection first...")
+            if regions is None:
+                print("[RECOGNIZE] No regions provided - running detection first...")
                 self._log("🔍 Running automatic text detection...", "info")
                 
                 # Run detection synchronously
@@ -8204,196 +8403,17 @@ class MangaTranslationTab:
                     'regions': regions
                 }))
             else:
-                # Extract regions from existing rectangles on main thread via callback
-                # We'll extract them below after loading the image
-                print("[RECOGNIZE] Using existing rectangles")
+                # Using provided regions from existing rectangles
+                print(f"[RECOGNIZE] Using {len(regions)} provided regions from existing rectangles")
             
-            # Load image
-            image = cv2.imread(image_path)
-            if image is None:
-                self._log(f"❌ Failed to load image: {os.path.basename(image_path)}", "error")
+            # Run OCR on regions using the reusable helper method
+            self._log(f"🔍 Running OCR on full image and matching to {len(regions)} regions...", "info")
+            recognized_texts = self._run_ocr_on_regions(image_path, regions, ocr_config)
+            
+            if not recognized_texts or len(recognized_texts) == 0:
+                self._log("⚠️ No text recognized in any regions", "warning")
                 self.update_queue.put(('recognize_button_restore', None))
                 return
-            
-            # If we didn't run detection (had existing rectangles), extract them now
-            if regions is None:
-                # Need to extract from preview on main thread - use a temporary storage
-                import time
-                self._temp_regions_extracted = None
-                self.update_queue.put(('call_method', (self._extract_regions_for_background, ())))
-                # Wait a bit for main thread to process (not ideal but simple)
-                for _ in range(50):  # Wait up to 5 seconds
-                    time.sleep(0.1)
-                    if self._temp_regions_extracted is not None:
-                        regions = self._temp_regions_extracted
-                        self._temp_regions_extracted = None
-                        break
-                
-                if not regions:
-                    self._log("❌ Failed to extract regions from preview", "error")
-                    self.update_queue.put(('recognize_button_restore', None))
-                    return
-            
-            # Initialize OCR manager if not already done
-            if not hasattr(self, 'ocr_manager') or not self.ocr_manager:
-                from ocr_manager import OCRManager
-                self.ocr_manager = OCRManager(log_callback=self._log)
-            
-            recognized_texts = []
-            
-            self._log(f"🔍 Running OCR on FULL IMAGE first, then matching to {len(regions)} regions (like regular pipeline)", "info")
-            
-            # STEP 1: Run OCR on FULL IMAGE (like regular pipeline)
-            provider = ocr_config['provider']
-            full_image_ocr_results = []
-            
-            if provider == 'azure':
-                # Use Azure OCR on full image (like regular pipeline)
-                print(f"[DEBUG] Running Azure OCR on full image (like regular pipeline)")
-                try:
-                    from azure.ai.vision.imageanalysis import ImageAnalysisClient
-                    from azure.core.credentials import AzureKeyCredential
-                    from azure.ai.vision.imageanalysis.models import VisualFeatures
-                    import cv2
-                    import time
-                    
-                    # Create Azure client
-                    azure_endpoint = ocr_config['azure_endpoint']
-                    azure_key = ocr_config['azure_key']
-                    print(f"[DEBUG] Azure endpoint: {azure_endpoint}")
-                    print(f"[DEBUG] Azure key length: {len(azure_key) if azure_key else 0}")
-                    
-                    vision_client = ImageAnalysisClient(
-                        endpoint=azure_endpoint,
-                        credential=AzureKeyCredential(azure_key)
-                    )
-                    print(f"[DEBUG] Azure client created successfully")
-                    
-                    # Convert full image to bytes
-                    print(f"[DEBUG] Encoding image to bytes...")
-                    _, encoded = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                    image_bytes = encoded.tobytes()
-                    print(f"[DEBUG] Image encoded to {len(image_bytes)} bytes")
-                    
-                    # Call Azure OCR on full image with timeout handling
-                    print(f"[DEBUG] Starting Azure OCR API call...")
-                    start_time = time.time()
-                    
-                    # Set up timeout for the Azure call
-                    import concurrent.futures
-                    with concurrent.futures.ThreadPoolExecutor() as executor:
-                        future = executor.submit(
-                            vision_client.analyze,
-                            image_data=image_bytes,
-                            visual_features=[VisualFeatures.READ]
-                        )
-                        
-                        try:
-                            # Wait for result with 30 second timeout
-                            result = future.result(timeout=30.0)
-                            elapsed = time.time() - start_time
-                            print(f"[DEBUG] Azure OCR completed in {elapsed:.2f}s")
-                        except concurrent.futures.TimeoutError:
-                            print(f"[DEBUG] Azure OCR timed out after 30 seconds")
-                            self._log(f"❌ Azure OCR timed out after 30 seconds", "error")
-                            raise Exception("Azure OCR timeout - please check network connection and Azure service")
-                    
-                    # Extract all text lines from full image OCR
-                    if result.read and result.read.blocks:
-                        for line in result.read.blocks[0].lines:
-                            if hasattr(line, 'bounding_polygon') and line.bounding_polygon:
-                                # Get line bounding box
-                                points = line.bounding_polygon
-                                xs = [p.x for p in points]
-                                ys = [p.y for p in points]
-                                x_min, x_max = int(min(xs)), int(max(xs))
-                                y_min, y_max = int(min(ys)), int(max(ys))
-                                
-                                # Create OCR result
-                                from ocr_manager import OCRResult
-                                ocr_line = OCRResult(
-                                    text=line.text,
-                                    bbox=(x_min, y_min, x_max - x_min, y_max - y_min),
-                                    confidence=0.9,
-                                    vertices=[(int(p.x), int(p.y)) for p in points]
-                                )
-                                full_image_ocr_results.append(ocr_line)
-                    
-                    print(f"[DEBUG] Azure OCR found {len(full_image_ocr_results)} text lines in full image")
-                    
-                except Exception as e:
-                    print(f"[DEBUG] Full image Azure OCR error: {str(e)}")
-                    import traceback
-                    print(f"[DEBUG] Full image Azure OCR traceback: {traceback.format_exc()}")
-                    self._log(f"❌ Azure OCR failed: {str(e)}", "error")
-                    # Don't fall back - let user know Azure specifically failed
-                    self.update_queue.put(('recognize_button_restore', None))
-                    self._log(f"⚠️ Azure OCR service failed. Please check your Azure credentials and service availability.", "warning")
-                    return
-                    
-            else:
-                # For non-Azure providers, use OCRManager on full image
-                print(f"[DEBUG] Running {provider} OCR on full image via OCRManager")
-                try:
-                    if not self.ocr_manager.get_provider(provider).is_loaded:
-                        print(f"[DEBUG] Loading OCR provider: {provider}")
-                        load_success = self.ocr_manager.load_provider(provider, **ocr_config)
-                        print(f"[DEBUG] Provider load result: {load_success}")
-                    
-                    full_image_ocr_results = self.ocr_manager.detect_text(
-                        image, 
-                        provider,
-                        confidence=0.5
-                    )
-                    print(f"[DEBUG] {provider} OCR found {len(full_image_ocr_results)} text regions in full image")
-                    
-                except Exception as e:
-                    print(f"[DEBUG] Full image {provider} OCR error: {str(e)}")
-                    import traceback
-                    print(f"[DEBUG] Full image {provider} OCR traceback: {traceback.format_exc()}")
-            
-            # STEP 2: Match OCR results to detected regions
-            print(f"[DEBUG] Matching {len(full_image_ocr_results)} OCR results to {len(regions)} detected regions")
-            self._log(f"🔄 Matching {len(full_image_ocr_results)} OCR results to {len(regions)} regions...", "info")
-            
-            for i, region in enumerate(regions):
-                bbox = region.get('bbox', [])
-                if len(bbox) >= 4:
-                    region_x, region_y, region_w, region_h = bbox
-                    region_center_x = region_x + region_w / 2
-                    region_center_y = region_y + region_h / 2
-                    
-                    # Find OCR results that overlap with this region
-                    matching_ocr = []
-                    for ocr_result in full_image_ocr_results:
-                        ocr_x, ocr_y, ocr_w, ocr_h = ocr_result.bbox
-                        ocr_center_x = ocr_x + ocr_w / 2
-                        ocr_center_y = ocr_y + ocr_h / 2
-                        
-                        # Check if OCR result overlaps with or is contained in region
-                        if (region_x <= ocr_center_x <= region_x + region_w and
-                            region_y <= ocr_center_y <= region_y + region_h):
-                            matching_ocr.append(ocr_result)
-                    
-                    # Combine matching OCR texts
-                    region_text = " ".join([ocr.text.strip() for ocr in matching_ocr if ocr.text.strip()])
-                    
-                    print(f"[DEBUG] Region {i+1} bbox={bbox}: Found {len(matching_ocr)} matching OCR results")
-                    print(f"[DEBUG] Region {i+1} combined text: '{region_text}'")
-                    
-                    if region_text:
-                        recognized_texts.append({
-                            'region_index': i,
-                            'bbox': bbox,
-                            'text': region_text.strip(),
-                            'confidence': region.get('confidence', 1.0)
-                        })
-                        self._log(f"📝 Region {i+1}: '{region_text.strip()}'", "info")
-                    else:
-                        self._log(f"⚠️ Region {i+1}: No matching OCR text found", "warning")
-                else:
-                    print(f"[DEBUG] Region {i+1} has invalid bbox: {bbox}")
-                    self._log(f"⚠️ Region {i+1}: Invalid bbox format: {bbox}", "warning")
             
             # Send results to main thread
             print(f"[DEBUG] Sending {len(recognized_texts)} recognition results to main thread")
@@ -8426,21 +8446,41 @@ class MangaTranslationTab:
             pass
     
     def _on_translate_text_clicked(self):
-        """Translate recognized text using the selected API"""
+        """Translate recognized text using the selected API - runs full pipeline if needed"""
         print("[DEBUG] _on_translate_text_clicked called!")
         self._log("🐛 DEBUG: Translate button clicked", "debug")
         
         try:
-            # Debug: Check recognized texts
-            print(f"[DEBUG] Has _recognized_texts: {hasattr(self, '_recognized_texts')}")
-            if hasattr(self, '_recognized_texts'):
-                print(f"[DEBUG] Number of recognized texts: {len(self._recognized_texts) if self._recognized_texts else 0}")
-            
-            # Check if we have recognized text to translate
-            if not hasattr(self, '_recognized_texts') or not self._recognized_texts:
-                self._log("⚠️ No recognized text to translate. Please run 'Recognize Text' first.", "warning")
-                print("[DEBUG] No recognized texts - returning early")
+            # Check if we have an image loaded
+            if not hasattr(self, 'image_preview_widget') or not self.image_preview_widget.current_image_path:
+                self._log("⚠️ No image loaded for translation", "warning")
                 return
+            
+            # STEP 1: Check if we have rectangles (detection done)
+            has_rectangles = (hasattr(self.image_preview_widget, 'viewer') and 
+                            self.image_preview_widget.viewer.rectangles and 
+                            len(self.image_preview_widget.viewer.rectangles) > 0)
+            
+            if not has_rectangles:
+                # No rectangles - need to run detection first
+                print("[DEBUG] No rectangles found - need to run detection AND recognition")
+                self._log("🔍 No text regions found - running automatic detection and recognition...", "info")
+                # Clear any stale recognized texts
+                if hasattr(self, '_recognized_texts'):
+                    del self._recognized_texts
+            
+            # STEP 2: Check if we have recognized text
+            has_recognized_text = (hasattr(self, '_recognized_texts') and 
+                                  self._recognized_texts and 
+                                  len(self._recognized_texts) > 0)
+            
+            if not has_recognized_text:
+                if has_rectangles:
+                    # Have rectangles but no recognized text - need to run recognition only
+                    print("[DEBUG] Rectangles exist but no recognized text - need to run recognition")
+                    self._log("📝 Text regions found but not recognized - running OCR...", "info")
+                # If no rectangles, we already logged the message above
+                # In both cases, we need to run recognition (which will detect if needed)
             
             # Disable the translate button
             if hasattr(self.image_preview_widget, 'translate_btn'):
@@ -8450,25 +8490,122 @@ class MangaTranslationTab:
             # Add processing overlay effect
             self._add_processing_overlay()
             
-            # Get current image path for visual context if enabled
-            image_path = self.image_preview_widget.current_image_path if hasattr(self, 'image_preview_widget') else None
+            # Get current image path
+            image_path = self.image_preview_widget.current_image_path
             
-            self._log(f"🌍 Starting translation of {len(self._recognized_texts)} text regions", "info")
-            print(f"[DEBUG] Starting background translation thread...")
+            # STEP 3: Prepare regions for recognition if needed
+            regions_for_recognition = None
+            if has_rectangles and not has_recognized_text:
+                # Extract existing rectangles for recognition
+                regions_for_recognition = self._extract_regions_from_preview()
+                print(f"[DEBUG] Extracted {len(regions_for_recognition)} regions for recognition")
+            elif not has_rectangles:
+                # No rectangles - will trigger detection in background
+                regions_for_recognition = None
+                print("[DEBUG] No rectangles - will detect in background")
             
-            # Run translation in background thread
-            import threading
-            thread = threading.Thread(target=self._run_translate_background, 
-                                    args=(self._recognized_texts.copy(), image_path),
-                                    daemon=True)
-            thread.start()
-            print(f"[DEBUG] Background translation thread started")
+            # STEP 4: Start translation workflow
+            if has_recognized_text:
+                # Already have recognized text - proceed directly to translation
+                self._log(f"🌍 Starting translation of {len(self._recognized_texts)} text regions", "info")
+                print(f"[DEBUG] Starting background translation thread...")
+                
+                import threading
+                thread = threading.Thread(target=self._run_translate_background, 
+                                        args=(self._recognized_texts.copy(), image_path),
+                                        daemon=True)
+                thread.start()
+                print(f"[DEBUG] Background translation thread started")
+            else:
+                # Need to run detection/recognition first, then translate
+                print(f"[DEBUG] Starting full pipeline: detect -> recognize -> translate")
+                self._log("🚀 Running full translation pipeline...", "info")
+                
+                import threading
+                thread = threading.Thread(target=self._run_full_translate_pipeline, 
+                                        args=(image_path, regions_for_recognition),
+                                        daemon=True)
+                thread.start()
+                print(f"[DEBUG] Full pipeline thread started")
             
         except Exception as e:
             import traceback
             self._log(f"❌ Translate setup failed: {str(e)}", "error")
             print(f"Translate setup error traceback: {traceback.format_exc()}")
             self._restore_translate_button()
+    
+    def _run_full_translate_pipeline(self, image_path: str, regions: list):
+        """Run full translation pipeline: detect (if needed) -> recognize -> translate
+        
+        Args:
+            image_path: Path to the image
+            regions: List of region dicts (if provided), or None to trigger detection
+        """
+        print(f"[FULL_PIPELINE] Starting full translation pipeline")
+        try:
+            import cv2
+            
+            # STEP 1: Detection (if needed)
+            if regions is None:
+                print("[FULL_PIPELINE] Running detection...")
+                self._log("🔍 Step 1/3: Detecting text regions...", "info")
+                
+                detection_config = self._get_detection_config()
+                regions = self._run_detection_sync(image_path, detection_config)
+                
+                if not regions or len(regions) == 0:
+                    self._log("⚠️ No text regions detected - cannot translate", "warning")
+                    self.update_queue.put(('translate_button_restore', None))
+                    return
+                
+                print(f"[FULL_PIPELINE] Detection found {len(regions)} regions")
+                self._log(f"✅ Detected {len(regions)} text regions", "success")
+                
+                # Send detection results to main thread to draw boxes
+                self.update_queue.put(('detect_results', {
+                    'image_path': image_path,
+                    'regions': regions
+                }))
+            else:
+                print(f"[FULL_PIPELINE] Using {len(regions)} provided regions (skipping detection)")
+            
+            # STEP 2: Recognition
+            print("[FULL_PIPELINE] Running recognition...")
+            self._log("📝 Step 2/3: Recognizing text in regions...", "info")
+            
+            # Get OCR config
+            ocr_config = self._get_ocr_config()
+            
+            # Run OCR using the same robust method as _run_recognize_background
+            # This will run OCR on full image and match to regions
+            recognized_texts = self._run_ocr_on_regions(image_path, regions, ocr_config)
+            
+            if not recognized_texts or len(recognized_texts) == 0:
+                self._log("⚠️ No text recognized - cannot translate", "warning")
+                self.update_queue.put(('translate_button_restore', None))
+                return
+            
+            print(f"[FULL_PIPELINE] Recognition found text in {len(recognized_texts)}/{len(regions)} regions")
+            self._log(f"✅ Recognized text in {len(recognized_texts)} regions", "success")
+            
+            # Store recognized texts for potential manual edits
+            self.update_queue.put(('recognize_results', {
+                'image_path': image_path,
+                'recognized_texts': recognized_texts
+            }))
+            
+            # STEP 3: Translation (reuse existing translation logic)
+            print("[FULL_PIPELINE] Running translation...")
+            self._log("🌍 Step 3/3: Translating text...", "info")
+            
+            # Call the existing translation logic
+            self._run_translate_background(recognized_texts, image_path)
+            
+        except Exception as e:
+            import traceback
+            self._log(f"❌ Full pipeline failed: {str(e)}", "error")
+            print(f"[FULL_PIPELINE] Error traceback: {traceback.format_exc()}")
+            self.update_queue.put(('translate_button_restore', None))
     
     def _run_translate_background(self, recognized_texts: list, image_path: str):
         """Run translation in background thread"""
