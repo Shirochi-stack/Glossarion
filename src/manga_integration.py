@@ -8910,11 +8910,26 @@ class MangaTranslationTab:
             # Determine font size based on settings
             font_size_mode = settings.get('font_size_mode', 'auto')
             font_family = settings.get('font_family', 'Arial')
+            algorithm = settings.get('font_algorithm', 'smart')
             
-            # Calculate available text area
+            # Apply safe area margin (like manga_translator does)
+            # This ensures text doesn't go right to the edges
+            if algorithm == 'conservative':
+                margin_factor = 0.85  # 85% usable
+            elif algorithm == 'aggressive':
+                margin_factor = 0.95  # 95% usable  
+            else:  # smart
+                margin_factor = 0.87  # 87% usable
+            
+            safe_width = int(w * margin_factor)
+            safe_height = int(h * margin_factor)
+            
+            # Calculate available text area within safe bounds
             padding = settings.get('text_padding', 4)
-            available_width = w - (padding * 2)
-            available_height = h - (padding * 2)
+            available_width = safe_width - (padding * 2)
+            available_height = safe_height - (padding * 2)
+            
+            print(f"[DEBUG] Bubble: ({w}x{h}) -> Safe area: ({safe_width}x{safe_height}) -> Available: ({available_width}x{available_height}), margin={margin_factor:.2f}")
             
             if available_width <= 0 or available_height <= 0:
                 return None, 0
