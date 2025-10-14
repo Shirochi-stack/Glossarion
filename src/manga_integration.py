@@ -7864,91 +7864,169 @@ class MangaTranslationTab:
             
             recognized_texts = []
             
-            self._log(f"🔍 Processing {len(regions)} regions with {ocr_config['provider']} OCR", "info")
+            self._log(f"🔍 Running OCR on FULL IMAGE first, then matching to {len(regions)} regions (like regular pipeline)", "info")
             
-            # Process each region
+            # STEP 1: Run OCR on FULL IMAGE (like regular pipeline)
+            provider = ocr_config['provider']
+            full_image_ocr_results = []
+            
+            if provider == 'azure':
+                # Use Azure OCR on full image (like regular pipeline)
+                print(f"[DEBUG] Running Azure OCR on full image (like regular pipeline)")
+                try:
+                    from azure.ai.vision.imageanalysis import ImageAnalysisClient
+                    from azure.core.credentials import AzureKeyCredential
+                    from azure.ai.vision.imageanalysis.models import VisualFeatures
+                    import cv2
+                    import time
+                    
+                    # Create Azure client
+                    azure_endpoint = ocr_config['azure_endpoint']
+                    azure_key = ocr_config['azure_key']
+                    print(f"[DEBUG] Azure endpoint: {azure_endpoint}")
+                    print(f"[DEBUG] Azure key length: {len(azure_key) if azure_key else 0}")
+                    
+                    vision_client = ImageAnalysisClient(
+                        endpoint=azure_endpoint,
+                        credential=AzureKeyCredential(azure_key)
+                    )
+                    print(f"[DEBUG] Azure client created successfully")
+                    
+                    # Convert full image to bytes
+                    print(f"[DEBUG] Encoding image to bytes...")
+                    _, encoded = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                    image_bytes = encoded.tobytes()
+                    print(f"[DEBUG] Image encoded to {len(image_bytes)} bytes")
+                    
+                    # Call Azure OCR on full image with timeout handling
+                    print(f"[DEBUG] Starting Azure OCR API call...")
+                    start_time = time.time()
+                    
+                    # Set up timeout for the Azure call
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        future = executor.submit(
+                            vision_client.analyze,
+                            image_data=image_bytes,
+                            visual_features=[VisualFeatures.READ]
+                        )
+                        
+                        try:
+                            # Wait for result with 30 second timeout
+                            result = future.result(timeout=30.0)
+                            elapsed = time.time() - start_time
+                            print(f"[DEBUG] Azure OCR completed in {elapsed:.2f}s")
+                        except concurrent.futures.TimeoutError:
+                            print(f"[DEBUG] Azure OCR timed out after 30 seconds")
+                            self._log(f"❌ Azure OCR timed out after 30 seconds", "error")
+                            raise Exception("Azure OCR timeout - please check network connection and Azure service")
+                    
+                    # Extract all text lines from full image OCR
+                    if result.read and result.read.blocks:
+                        for line in result.read.blocks[0].lines:
+                            if hasattr(line, 'bounding_polygon') and line.bounding_polygon:
+                                # Get line bounding box
+                                points = line.bounding_polygon
+                                xs = [p.x for p in points]
+                                ys = [p.y for p in points]
+                                x_min, x_max = int(min(xs)), int(max(xs))
+                                y_min, y_max = int(min(ys)), int(max(ys))
+                                
+                                # Create OCR result
+                                from ocr_manager import OCRResult
+                                ocr_line = OCRResult(
+                                    text=line.text,
+                                    bbox=(x_min, y_min, x_max - x_min, y_max - y_min),
+                                    confidence=0.9,
+                                    vertices=[(int(p.x), int(p.y)) for p in points]
+                                )
+                                full_image_ocr_results.append(ocr_line)
+                    
+                    print(f"[DEBUG] Azure OCR found {len(full_image_ocr_results)} text lines in full image")
+                    
+                except Exception as e:
+                    print(f"[DEBUG] Full image Azure OCR error: {str(e)}")
+                    import traceback
+                    print(f"[DEBUG] Full image Azure OCR traceback: {traceback.format_exc()}")
+                    self._log(f"❌ Azure OCR failed: {str(e)}", "error")
+                    # Don't fall back - let user know Azure specifically failed
+                    self.update_queue.put(('recognize_button_restore', None))
+                    self._log(f"⚠️ Azure OCR service failed. Please check your Azure credentials and service availability.", "warning")
+                    return
+                    
+            else:
+                # For non-Azure providers, use OCRManager on full image
+                print(f"[DEBUG] Running {provider} OCR on full image via OCRManager")
+                try:
+                    if not self.ocr_manager.get_provider(provider).is_loaded:
+                        print(f"[DEBUG] Loading OCR provider: {provider}")
+                        load_success = self.ocr_manager.load_provider(provider, **ocr_config)
+                        print(f"[DEBUG] Provider load result: {load_success}")
+                    
+                    full_image_ocr_results = self.ocr_manager.detect_text(
+                        image, 
+                        provider,
+                        confidence=0.5
+                    )
+                    print(f"[DEBUG] {provider} OCR found {len(full_image_ocr_results)} text regions in full image")
+                    
+                except Exception as e:
+                    print(f"[DEBUG] Full image {provider} OCR error: {str(e)}")
+                    import traceback
+                    print(f"[DEBUG] Full image {provider} OCR traceback: {traceback.format_exc()}")
+            
+            # STEP 2: Match OCR results to detected regions
+            print(f"[DEBUG] Matching {len(full_image_ocr_results)} OCR results to {len(regions)} detected regions")
+            self._log(f"🔄 Matching {len(full_image_ocr_results)} OCR results to {len(regions)} regions...", "info")
+            
             for i, region in enumerate(regions):
                 bbox = region.get('bbox', [])
-                print(f"[DEBUG] Processing region {i+1}: bbox={bbox}")
-                self._log(f"🔍 Processing region {i+1}: bbox={bbox}", "debug")
-                
                 if len(bbox) >= 4:
-                    x, y, width, height = bbox
-                    print(f"[DEBUG] Region {i+1} coordinates: x={x}, y={y}, w={width}, h={height}")
+                    region_x, region_y, region_w, region_h = bbox
+                    region_center_x = region_x + region_w / 2
+                    region_center_y = region_y + region_h / 2
                     
-                    # Crop the region from the image
-                    cropped = image[y:y+height, x:x+width]
-                    print(f"[DEBUG] Cropped image shape: {cropped.shape if cropped.size > 0 else 'empty'}")
+                    # Find OCR results that overlap with this region
+                    matching_ocr = []
+                    for ocr_result in full_image_ocr_results:
+                        ocr_x, ocr_y, ocr_w, ocr_h = ocr_result.bbox
+                        ocr_center_x = ocr_x + ocr_w / 2
+                        ocr_center_y = ocr_y + ocr_h / 2
+                        
+                        # Check if OCR result overlaps with or is contained in region
+                        if (region_x <= ocr_center_x <= region_x + region_w and
+                            region_y <= ocr_center_y <= region_y + region_h):
+                            matching_ocr.append(ocr_result)
                     
-                    if cropped.size > 0:
-                        try:
-                            # Save cropped region for debugging (optional)
-                            debug_path = f"/tmp/ocr_debug_region_{i+1}.png"
-                            try:
-                                cv2.imwrite(debug_path, cropped)
-                                print(f"[DEBUG] Saved cropped region to: {debug_path}")
-                            except:
-                                pass
-                            
-                            # Run OCR on the cropped region (same way as regular pipeline)
-                            print(f"[DEBUG] Running OCR on region {i+1} with provider: {ocr_config['provider']}")
-                            
-                            # Match the regular pipeline's OCR call exactly
-                            provider = ocr_config['provider']
-                            confidence_threshold = 0.5  # Default confidence threshold
-                            
-                            # Load the provider if needed (same as regular pipeline)
-                            if not self.ocr_manager.get_provider(provider).is_loaded:
-                                print(f"[DEBUG] Loading OCR provider: {provider}")
-                                load_success = self.ocr_manager.load_provider(provider, **ocr_config)
-                                print(f"[DEBUG] Provider load result: {load_success}")
-                            
-                            # Call OCR exactly like the regular pipeline does
-                            ocr_results = self.ocr_manager.detect_text(
-                                cropped, 
-                                provider,
-                                confidence=confidence_threshold
-                            )
-                            print(f"[DEBUG] OCR results for region {i+1}: {ocr_results} (type: {type(ocr_results)})")
-                            
-                            # Extract text from OCR results (same as regular pipeline)
-                            text = ""
-                            if ocr_results and len(ocr_results) > 0 and ocr_results[0].text.strip():
-                                text = ocr_results[0].text.strip()
-                            print(f"[DEBUG] Extracted text for region {i+1}: '{text}'")
-                            
-                            if text and text.strip():
-                                recognized_texts.append({
-                                    'region_index': i,
-                                    'bbox': bbox,
-                                    'text': text.strip(),
-                                    'confidence': region.get('confidence', 1.0)
-                                })
-                                self._log(f"📝 Region {i+1}: '{text.strip()}'", "info")
-                                print(f"[DEBUG] Added text to results: '{text.strip()}'")
-                            else:
-                                self._log(f"⚠️ Region {i+1}: No text detected (raw result: '{text}')", "warning")
-                                print(f"[DEBUG] No valid text in region {i+1} - raw OCR result: '{text}'")
-                        except Exception as e:
-                            import traceback
-                            error_msg = f"❌ Region {i+1} OCR failed: {str(e)}"
-                            self._log(error_msg, "error")
-                            print(f"[DEBUG] {error_msg}")
-                            print(f"[DEBUG] OCR error traceback: {traceback.format_exc()}")
+                    # Combine matching OCR texts
+                    region_text = " ".join([ocr.text.strip() for ocr in matching_ocr if ocr.text.strip()])
+                    
+                    print(f"[DEBUG] Region {i+1} bbox={bbox}: Found {len(matching_ocr)} matching OCR results")
+                    print(f"[DEBUG] Region {i+1} combined text: '{region_text}'")
+                    
+                    if region_text:
+                        recognized_texts.append({
+                            'region_index': i,
+                            'bbox': bbox,
+                            'text': region_text.strip(),
+                            'confidence': region.get('confidence', 1.0)
+                        })
+                        self._log(f"📝 Region {i+1}: '{region_text.strip()}'", "info")
                     else:
-                        print(f"[DEBUG] Region {i+1} cropped image is empty - skipping")
-                        self._log(f"⚠️ Region {i+1}: Empty cropped region", "warning")
+                        self._log(f"⚠️ Region {i+1}: No matching OCR text found", "warning")
                 else:
                     print(f"[DEBUG] Region {i+1} has invalid bbox: {bbox}")
                     self._log(f"⚠️ Region {i+1}: Invalid bbox format: {bbox}", "warning")
             
             # Send results to main thread
+            print(f"[DEBUG] Sending {len(recognized_texts)} recognition results to main thread")
             self.update_queue.put(('recognize_results', {
                 'image_path': image_path,
                 'recognized_texts': recognized_texts
             }))
             
             self._log(f"✅ Text recognition complete! Found text in {len(recognized_texts)}/{len(regions)} regions", "success")
+            print(f"[DEBUG] Recognition background thread completed successfully")
             
         except Exception as e:
             import traceback
@@ -7993,6 +8071,7 @@ class MangaTranslationTab:
             image_path = self.image_preview_widget.current_image_path if hasattr(self, 'image_preview_widget') else None
             
             self._log(f"🌍 Starting translation of {len(self._recognized_texts)} text regions", "info")
+            print(f"[DEBUG] Starting background translation thread...")
             
             # Run translation in background thread
             import threading
@@ -8000,6 +8079,7 @@ class MangaTranslationTab:
                                     args=(self._recognized_texts.copy(), image_path),
                                     daemon=True)
             thread.start()
+            print(f"[DEBUG] Background translation thread started")
             
         except Exception as e:
             import traceback
@@ -8009,69 +8089,36 @@ class MangaTranslationTab:
     
     def _run_translate_background(self, recognized_texts: list, image_path: str):
         """Run translation in background thread"""
+        print(f"[DEBUG] _run_translate_background started with {len(recognized_texts)} texts")
         try:
-            # Check if visual context is enabled
-            include_page_image = False
+            # Check if full page context translation is enabled
+            full_page_context_enabled = False
             try:
-                include_page_image = bool(self.include_image_var.get()) if hasattr(self, 'include_image_var') else False
+                full_page_context_enabled = bool(self.main_gui.config.get('manga_full_page_context', False))
             except Exception:
                 pass
             
-            translated_texts = []
+            print(f"[DEBUG] Full page context enabled: {full_page_context_enabled}")
             
-            # Process each recognized text
-            for text_data in recognized_texts:
-                text = text_data['text']
-                
-                try:
-                    # Prepare translation request
-                    if include_page_image and image_path and os.path.exists(image_path):
-                        # Include visual context
-                        self._log(f"🖼️ Translating with visual context: '{text[:50]}...'", "info")
-                        
-                        # Create a simple prompt for translation with image
-                        prompt = f"Please translate this text from the manga page: {text}"
-                        
-                        # Use the main GUI's client for translation with image
-                        response = self.main_gui.client.query_with_image(
-                            prompt=prompt,
-                            image_path=image_path
-                        )
-                    else:
-                        # Text-only translation
-                        self._log(f"📝 Translating text: '{text[:50]}...'", "info")
-                        
-                        # Simple translation prompt
-                        prompt = f"Translate this text: {text}"
-                        
-                        # Use the main GUI's client for translation
-                        response = self.main_gui.client.query(prompt)
-                    
-                    # Extract translated text from response
-                    translated_text = response if isinstance(response, str) else str(response)
-                    
-                    translated_texts.append({
-                        'original': text_data,
-                        'translation': translated_text.strip(),
-                        'bbox': text_data['bbox']
-                    })
-                    
-                    self._log(f"✅ Translated: '{text}' → '{translated_text.strip()}'", "success")
-                    
-                except Exception as e:
-                    self._log(f"❌ Translation failed for '{text}': {str(e)}", "error")
-                    translated_texts.append({
-                        'original': text_data,
-                        'translation': f"[Translation Error: {str(e)}]",
-                        'bbox': text_data['bbox']
-                    })
+            if full_page_context_enabled:
+                # Use full page context translation (batch all texts together)
+                print(f"[DEBUG] Using FULL PAGE CONTEXT translation mode")
+                self._log(f"📄 Using full page context translation for {len(recognized_texts)} regions", "info")
+                translated_texts = self._translate_with_full_page_context(recognized_texts, image_path)
+            else:
+                # Use individual translation mode (one by one)
+                print(f"[DEBUG] Using INDIVIDUAL translation mode")
+                self._log(f"📝 Using individual translation for {len(recognized_texts)} regions", "info")
+                translated_texts = self._translate_individually(recognized_texts, image_path)
             
             # Send results to main thread
+            print(f"[DEBUG] Sending {len(translated_texts)} translation results to main thread")
             self.update_queue.put(('translate_results', {
                 'translated_texts': translated_texts
             }))
             
             self._log(f"✅ Translation complete! Translated {len(translated_texts)} text regions", "success")
+            print(f"[DEBUG] Translation background thread completed successfully")
             
         except Exception as e:
             import traceback
@@ -8080,6 +8127,274 @@ class MangaTranslationTab:
         finally:
             # Always restore the button
             self.update_queue.put(('translate_button_restore', None))
+    
+    def _translate_with_full_page_context(self, recognized_texts: list, image_path: str) -> list:
+        """Translate all texts using full page context like the regular pipeline"""
+        try:
+            from manga_translator import TextRegion
+            
+            # Convert recognized texts to TextRegion objects
+            regions = []
+            for i, text_data in enumerate(recognized_texts):
+                bbox = text_data['bbox']
+                # Convert bbox from (x, y, w, h) to vertices for TextRegion
+                x, y, w, h = bbox
+                vertices = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
+                
+                region = TextRegion(
+                    text=text_data['text'],
+                    vertices=vertices,
+                    bounding_box=(x, y, w, h),
+                    confidence=text_data.get('confidence', 1.0),
+                    region_type='text_block'
+                )
+                regions.append(region)
+                print(f"[DEBUG] Created TextRegion {i+1}: '{text_data['text'][:30]}...' at {bbox}")
+            
+            # Get or create MangaTranslator instance
+            if not hasattr(self, '_manga_translator') or self._manga_translator is None:
+                from manga_translator import MangaTranslator
+                from unified_api_client import UnifiedClient
+                
+                # Get OCR config (required by MangaTranslator)
+                ocr_config = self._get_ocr_config()
+                
+                # Create UnifiedClient (required by MangaTranslator)
+                api_key = self.main_gui.api_key_entry.text().strip() if hasattr(self.main_gui, 'api_key_entry') else ''
+                model = self.main_gui.model_var if hasattr(self.main_gui, 'model_var') else 'gpt-4o-mini'
+                
+                if not api_key:
+                    raise ValueError("No API key found in main GUI - cannot create MangaTranslator")
+                
+                unified_client = UnifiedClient(model=model, api_key=api_key)
+                
+                # Create MangaTranslator with all required parameters
+                self._manga_translator = MangaTranslator(
+                    ocr_config=ocr_config,
+                    unified_client=unified_client,
+                    main_gui=self.main_gui,
+                    log_callback=self._log
+                )
+                print(f"[DEBUG] Created MangaTranslator instance for full page context")
+            
+            # Use the MangaTranslator's full page context method
+            print(f"[DEBUG] Calling translate_full_page_context for {len(regions)} regions")
+            self._log(f"🌍 Starting full page context translation...", "info")
+            
+            translations_dict = self._manga_translator.translate_full_page_context(regions, image_path)
+            print(f"[DEBUG] Got translations dict: {list(translations_dict.keys()) if translations_dict else 'None'}")
+            
+            # Convert the results back to the expected format
+            translated_texts = []
+            for i, (region, text_data) in enumerate(zip(regions, recognized_texts)):
+                if hasattr(region, 'translated_text') and region.translated_text:
+                    translation = region.translated_text
+                    print(f"[DEBUG] Region {i+1} translated: '{region.text[:20]}...' -> '{translation[:20]}...'")
+                else:
+                    translation = text_data['text']  # Fallback to original
+                    print(f"[DEBUG] Region {i+1} no translation, using original: '{translation[:20]}...'")
+                
+                translated_texts.append({
+                    'original': text_data,
+                    'translation': translation,
+                    'bbox': text_data['bbox']
+                })
+            
+            self._log(f"✅ Full page context translation complete: {len(translated_texts)} regions", "success")
+            return translated_texts
+            
+        except Exception as e:
+            import traceback
+            self._log(f"❌ Full page context translation failed: {str(e)}", "error")
+            print(f"[DEBUG] Full page context error traceback: {traceback.format_exc()}")
+            # Fallback to original texts
+            return [{
+                'original': text_data,
+                'translation': f"[Full Page Context Error: {str(e)}]",
+                'bbox': text_data['bbox']
+            } for text_data in recognized_texts]
+    
+    def _translate_individually(self, recognized_texts: list, image_path: str) -> list:
+        """Translate each text individually (original behavior)"""
+        try:
+            # Check if visual context is enabled
+            include_page_image = False
+            try:
+                include_page_image = bool(self.include_image_var.get()) if hasattr(self, 'include_image_var') else False
+            except Exception:
+                pass
+            
+            print(f"[DEBUG] Visual context enabled: {include_page_image}")
+            print(f"[DEBUG] Image path: {image_path}")
+            
+            translated_texts = []
+            
+            # Process each recognized text
+            print(f"[DEBUG] Processing {len(recognized_texts)} recognized texts for individual translation")
+            for i, text_data in enumerate(recognized_texts):
+                text = text_data['text']
+                print(f"[DEBUG] Translating text {i+1}/{len(recognized_texts)}: '{text[:30]}...'")
+                
+                try:
+                    # Prepare translation request
+                    if include_page_image and image_path and os.path.exists(image_path):
+                        # Include visual context
+                        print(f"[DEBUG] Using visual context for translation")
+                        self._log(f"🖼️ Translating with visual context: '{text[:50]}...'", "info")
+                        
+                        # Get system prompt from GUI profile (same as regular pipeline)
+                        system_prompt = self._get_system_prompt_from_gui()
+                        
+                        if not system_prompt:
+                            raise ValueError("No system prompt configured in GUI profile - translation cannot proceed")
+                        
+                        # Just send the text to translate - the system prompt has all instructions
+                        prompt = text
+                        
+                        # Create UnifiedClient for visual context translation
+                        print(f"[DEBUG] Creating UnifiedClient for visual translation...")
+                        try:
+                            from unified_api_client import UnifiedClient
+                            # Get API key and model from main GUI
+                            api_key = self.main_gui.api_key_entry.text().strip() if hasattr(self.main_gui, 'api_key_entry') else ''
+                            model = self.main_gui.model_var if hasattr(self.main_gui, 'model_var') else 'gpt-4o-mini'
+                            
+                            if not api_key:
+                                raise ValueError("No API key found in main GUI")
+                            
+                            client = UnifiedClient(model=model, api_key=api_key)
+                            print(f"[DEBUG] Created UnifiedClient for visual context with model: {model}")
+                            
+                            print(f"[DEBUG] Calling client.send_image()...")
+                            messages = []
+                            if system_prompt:
+                                messages.append({"role": "system", "content": system_prompt})
+                            messages.append({"role": "user", "content": prompt})
+                            # Read image file
+                            with open(image_path, 'rb') as img_file:
+                                image_data = img_file.read()
+                            import base64
+                            image_base64 = base64.b64encode(image_data).decode('utf-8')
+                            
+                            response = client.send_image(messages, image_base64, temperature=0.3, max_tokens=4000)
+                            print(f"[DEBUG] Got response: {response[:100] if response else 'None'}...")
+                            
+                        except Exception as client_error:
+                            print(f"[DEBUG] UnifiedClient creation for visual context error: {str(client_error)}")
+                            raise client_error
+                    else:
+                        # Text-only translation
+                        print(f"[DEBUG] Using text-only translation")
+                        self._log(f"📝 Translating text: '{text[:50]}...'", "info")
+                        
+                        # Get system prompt from GUI profile (same as regular pipeline)
+                        system_prompt = self._get_system_prompt_from_gui()
+                        
+                        if not system_prompt:
+                            raise ValueError("No system prompt configured in GUI profile - translation cannot proceed")
+                        
+                        # Just send the text to translate - the system prompt has all instructions
+                        prompt = text
+                        
+                        # Create UnifiedClient for translation (same as main GUI does)
+                        print(f"[DEBUG] Creating UnifiedClient for translation...")
+                        try:
+                            from unified_api_client import UnifiedClient
+                            # Get API key and model from main GUI
+                            api_key = self.main_gui.api_key_entry.text().strip() if hasattr(self.main_gui, 'api_key_entry') else ''
+                            model = self.main_gui.model_var if hasattr(self.main_gui, 'model_var') else 'gpt-4o-mini'
+                            
+                            if not api_key:
+                                raise ValueError("No API key found in main GUI")
+                            
+                            client = UnifiedClient(model=model, api_key=api_key)
+                            print(f"[DEBUG] Created UnifiedClient with model: {model}")
+                            
+                            print(f"[DEBUG] Calling client.send()...")
+                            messages = []
+                            if system_prompt:
+                                messages.append({"role": "system", "content": system_prompt})
+                            messages.append({"role": "user", "content": prompt})
+                            response = client.send(messages, temperature=0.3, max_tokens=4000)
+                            print(f"[DEBUG] Got response: {response[:100] if response else 'None'}...")
+                            
+                        except Exception as client_error:
+                            print(f"[DEBUG] UnifiedClient creation error: {str(client_error)}")
+                            raise client_error
+                    
+                    # Extract translated text from response (UnifiedClient returns tuple or response object)
+                    if hasattr(response, 'content'):
+                        translated_text = response.content
+                    elif isinstance(response, tuple) and len(response) >= 1:
+                        translated_text = response[0]  # (content, finish_reason)
+                    else:
+                        translated_text = str(response)
+                    
+                    print(f"[DEBUG] Processed response: '{translated_text[:50]}...'")
+                    
+                    translated_texts.append({
+                        'original': text_data,
+                        'translation': translated_text.strip(),
+                        'bbox': text_data['bbox']
+                    })
+                    
+                    self._log(f"✅ Translated: '{text}' → '{translated_text.strip()}'", "success")
+                    print(f"[DEBUG] Successfully translated text {i+1}")
+                    
+                except Exception as e:
+                    import traceback
+                    error_msg = f"Translation failed for '{text}': {str(e)}"
+                    self._log(f"❌ {error_msg}", "error")
+                    print(f"[DEBUG] {error_msg}")
+                    print(f"[DEBUG] Translation error traceback: {traceback.format_exc()}")
+                    translated_texts.append({
+                        'original': text_data,
+                        'translation': f"[Translation Error: {str(e)}]",
+                        'bbox': text_data['bbox']
+                    })
+            
+            return translated_texts
+            
+        except Exception as e:
+            import traceback
+            self._log(f"❌ Individual translation failed: {str(e)}", "error")
+            print(f"[DEBUG] Individual translation error traceback: {traceback.format_exc()}")
+            # Fallback to original texts
+            return [{
+                'original': text_data,
+                'translation': f"[Individual Translation Error: {str(e)}]",
+                'bbox': text_data['bbox']
+            } for text_data in recognized_texts]
+    
+    def _get_system_prompt_from_gui(self) -> str:
+        """Get system prompt from GUI profile (same as regular pipeline) - fails if no prompt found"""
+        try:
+            # Get profile name from GUI (support both Tkinter and PySide6)
+            profile_name = 'Default'
+            try:
+                if hasattr(self.main_gui, 'profile_var'):
+                    if hasattr(self.main_gui.profile_var, 'get'):
+                        profile_name = self.main_gui.profile_var.get()
+                    else:
+                        profile_name = self.main_gui.profile_var
+            except Exception:
+                profile_name = 'Default'
+            
+            # Get the prompt from prompt_profiles dictionary - NO FALLBACKS
+            system_prompt = ''
+            if hasattr(self.main_gui, 'prompt_profiles') and profile_name in self.main_gui.prompt_profiles:
+                system_prompt = self.main_gui.prompt_profiles[profile_name]
+                if system_prompt.strip():  # Only accept non-empty prompts
+                    print(f"[DEBUG] Using system prompt from profile: {profile_name}")
+                    return system_prompt.strip()
+            
+            # NO FALLBACKS - fail if no proper prompt found
+            print(f"[DEBUG] No valid system prompt found for profile: {profile_name}")
+            return ''
+            
+        except Exception as e:
+            print(f"[DEBUG] Error getting system prompt: {str(e)}")
+            return ''
     
     def _restore_translate_button(self):
         """Restore the translate button to its original state"""
