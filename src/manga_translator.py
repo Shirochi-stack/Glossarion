@@ -9752,15 +9752,19 @@ class MangaTranslator:
             for region2 in adjusted_regions[i+1:]:
                 if self._regions_overlap(region1, region2):
                     has_overlaps = True
-                    self._log("  ⚠️ Regions still overlap after adjustment", "warning")
+                    # Only log overlap warnings in debug/verbose mode
+                    if not getattr(self, 'concise_logs', False):
+                        self._log("  ⚠️ Regions still overlap after adjustment", "warning")
                     break
             if has_overlaps:
                 break
         
         # Handle transparency settings based on overlaps
         if has_overlaps and self.text_bg_opacity < 255 and self.text_bg_opacity > 0:
-            self._log("  ⚠️ Overlapping regions detected with partial transparency", "warning")
-            self._log("  ℹ️ Rendering with requested transparency level", "info")
+            # Only log overlap warnings in debug/verbose mode
+            if not getattr(self, 'concise_logs', False):
+                self._log("  ⚠️ Overlapping regions detected with partial transparency", "warning")
+                self._log("  ℹ️ Rendering with requested transparency level", "info")
         
         region_count = 0
         
