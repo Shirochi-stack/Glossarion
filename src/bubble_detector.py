@@ -798,6 +798,9 @@ class BubbleDetector:
             use_rtdetr = self.rtdetr_loaded
         
         if use_rtdetr:
+            # Use defaults if not specified
+            confidence = confidence or self.default_confidence
+            
             # Prefer ONNX backend if available, else PyTorch
             if getattr(self, 'rtdetr_onnx_loaded', False):
                 results = self.detect_with_rtdetr_onnx(
@@ -1752,6 +1755,11 @@ class BubbleDetector:
         if not self.rtdetr_onnx_loaded or self.rtdetr_onnx_session is None:
             logger.warning("RT-DETR ONNX not loaded")
             return [] if return_all_bubbles else {'bubbles': [], 'text_bubbles': [], 'text_free': []}
+        
+        # Validate and set default confidence if None or invalid
+        if confidence is None or not isinstance(confidence, (int, float)):
+            confidence = self.default_confidence
+        confidence = float(confidence)
         try:
             # Acquire image
             if image_path is not None:

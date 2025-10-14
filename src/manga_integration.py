@@ -7342,7 +7342,7 @@ class MangaTranslationTab:
             self._log(traceback.format_exc(), "debug")
     
     def _on_detect_text_clicked(self):
-        """Handle detect text button click - run detection AI and save results"""
+        """Simplified detect text button - directly detect bubbles and show green boxes"""
         try:
             # Get current image path
             if not hasattr(self, 'image_preview_widget') or not self.image_preview_widget.current_image_path:
@@ -7350,92 +7350,120 @@ class MangaTranslationTab:
                 return
             
             image_path = self.image_preview_widget.current_image_path
-            self._log(f"🔍 Step 1/5: Detecting text bubbles in {os.path.basename(image_path)}", "info")
+            self._log(f"🔍 Detecting text bubbles in: {os.path.basename(image_path)}", "info")
             
-            # Initialize translator if needed
-            if not hasattr(self, 'translator') or self.translator is None:
-                if not self._initialize_translator():
-                    return
+            # Import required modules
+            import cv2
+            from bubble_detector import BubbleDetector
+            
+            # Create bubble detector
+            detector = BubbleDetector()
+            
+            # Get bubble detection settings from manga config
+            manga_settings = self.main_gui.config.get('manga_settings', {})
+            ocr_settings = manga_settings.get('ocr', {})
+            
+            # Extract settings with defaults matching manga_settings_dialog.py defaults
+            detector_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
+            model_path = ocr_settings.get('bubble_model_path', '')
+            model_url = ocr_settings.get('rtdetr_model_url', 'ogkalu/comic-text-and-bubble-detector')
+            confidence = ocr_settings.get('bubble_confidence', 0.3)
+            
+            # Load the appropriate model based on user settings
+            success = False
+            if detector_type == 'rtdetr_onnx':
+                # Use model_path if available, otherwise use model_url
+                model_source = model_path if (model_path and os.path.exists(model_path)) else model_url
+                success = detector.load_rtdetr_onnx_model(model_source)
+                self._log(f"📥 Loading RT-DETR ONNX model: {os.path.basename(model_source) if model_path else model_source}", "info")
+            elif detector_type == 'rtdetr':
+                success = detector.load_rtdetr_model(model_id=model_url or 'ogkalu/comic-text-and-bubble-detector')
+                self._log(f"📥 Loading RT-DETR model: {model_url}", "info")
+            elif detector_type == 'yolo' and model_path:
+                success = detector.load_model(model_path)
+                self._log(f"📥 Loading YOLO model: {os.path.basename(model_path)}", "info")
+            elif detector_type == 'custom' and model_path:
+                success = detector.load_model(model_path)
+                self._log(f"📥 Loading custom model: {os.path.basename(model_path)}", "info")
+            else:
+                # Default fallback
+                success = detector.load_rtdetr_onnx_model('ogkalu/comic-text-and-bubble-detector')
+                self._log(f"📥 Loading default RT-DETR ONNX model", "info")
+            
+            if not success:
+                self._log("❌ Failed to load bubble detection model", "error")
+                return
+            
+            # Load and validate image
+            image = cv2.imread(image_path)
+            if image is None:
+                self._log(f"❌ Failed to load image: {os.path.basename(image_path)}", "error")
+                return
             
             # Run bubble detection
-            try:
-                import cv2
-                import numpy as np
-                
-                manga_settings = self.main_gui.config.get('manga_settings', {})
-                ocr_settings = manga_settings.get('ocr', {})
-                
-                # Run detection
-                detections = self.translator._load_bubble_detector(ocr_settings, image_path)
-                
-                if detections:
-                    total_boxes = (len(detections.get('text_bubbles', [])) + 
-                                   len(detections.get('text_free', [])))
-                    self._log(f"✅ Detected {total_boxes} text regions", "success")
-                    
-                    # Store detections
-                    self._current_detections = detections
-                    self._current_image_path = image_path
-                    
-                    # Start monitoring for auto-updating preview
-                    self._monitor_translation_output(image_path)
-                    
-                    # Load image and draw boxes
-                    image = cv2.imread(image_path)
-                    if image is not None:
-                        print(f"DEBUG: Image shape: {image.shape}")
+            self._log(f"🤖 Running bubble detection (confidence: {confidence:.2f})", "info")
+            
+            # Use appropriate detection method based on detector type
+            if detector_type in ['rtdetr_onnx', 'rtdetr']:
+                boxes = detector.detect_bubbles(image_path, confidence=confidence, use_rtdetr=True)
+            else:
+                boxes = detector.detect_bubbles(image_path, confidence=confidence)
+            
+            if not boxes:
+                self._log("⚠️ No text regions detected", "warning")
+                return
+            
+            self._log(f"✅ Found {len(boxes)} text regions", "success")
+            
+            # Store regions for use by subsequent workflow steps
+            self._current_regions = []
+            
+            # Draw green detection boxes on image
+            for i, box in enumerate(boxes):
+                if len(box) >= 4:
+                    # Validate and convert coordinates
+                    try:
+                        x, y, width, height = int(box[0]), int(box[1]), int(box[2]), int(box[3])
                         
-                        # Draw boxes on image with validation
-                        boxes_drawn = 0
-                        for box in detections.get('text_bubbles', []) + detections.get('text_free', []):
-                            try:
-                                # Validate box format and coordinates
-                                if len(box) < 4:
-                                    print(f"DEBUG: Invalid box format: {box}")
-                                    continue
-                                    
-                                x1, y1, x2, y2 = float(box[0]), float(box[1]), float(box[2]), float(box[3])
-                                print(f"DEBUG: Box coordinates: ({x1}, {y1}, {x2}, {y2})")
-                                
-                                # Ensure coordinates are integers and within bounds
-                                x1, y1 = max(0, int(x1)), max(0, int(y1))
-                                x2, y2 = min(image.shape[1], int(x2)), min(image.shape[0], int(y2))
-                                
-                                # Validate that box has positive dimensions
-                                if x2 > x1 and y2 > y1:
-                                    cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 3)  # Green boxes, thicker line
-                                    boxes_drawn += 1
-                                    print(f"DEBUG: Drew box {boxes_drawn}: ({x1}, {y1}, {x2}, {y2})")
-                                else:
-                                    print(f"DEBUG: Skipped invalid box dimensions: ({x1}, {y1}, {x2}, {y2})")
-                                    
-                            except Exception as box_err:
-                                print(f"DEBUG: Error drawing box {box}: {box_err}")
-                                continue
+                        # Clamp coordinates to image bounds
+                        x = max(0, min(x, image.shape[1] - 1))
+                        y = max(0, min(y, image.shape[0] - 1))
+                        x2 = max(x + 1, min(x + width, image.shape[1]))
+                        y2 = max(y + 1, min(y + height, image.shape[0]))
                         
-                        print(f"DEBUG: Total boxes drawn: {boxes_drawn}")
+                        # Draw bright green rectangle (3px thick)
+                        cv2.rectangle(image, (x, y), (x2, y2), (0, 255, 0), 3)
                         
-                        # Save to detected folder
-                        output_dir = os.path.join(os.path.dirname(image_path), "1_detected")
-                        os.makedirs(output_dir, exist_ok=True)
-                        output_path = os.path.join(output_dir, os.path.basename(image_path))
-                        cv2.imwrite(output_path, image)
-                        self._log(f"💾 Saved detection boxes to: {output_path}", "info")
+                        # Store region for workflow continuity
+                        region_dict = {
+                            'bbox': [x, y, x2 - x, y2 - y],  # (x, y, width, height)
+                            'coords': [[x, y], [x2, y], [x2, y2], [x, y2]],  # Corner coordinates
+                            'confidence': getattr(box, 'confidence', confidence) if hasattr(box, 'confidence') else confidence
+                        }
+                        self._current_regions.append(region_dict)
                         
-                        # Show in preview
-                        self.image_preview_widget.load_image(output_path)
-                else:
-                    self._log("⚠️ No text regions detected", "warning")
-                    
-            except Exception as e:
-                self._log(f"❌ Bubble detection failed: {str(e)}", "error")
-                import traceback
-                self._log(traceback.format_exc(), "debug")
-                
+                    except (ValueError, IndexError) as e:
+                        self._log(f"⚠️ Skipping invalid box {i}: {e}", "warning")
+                        continue
+            
+            # Save detected image to the workflow directory structure
+            output_dir = os.path.join(os.path.dirname(image_path), "1_detected")
+            os.makedirs(output_dir, exist_ok=True)
+            output_filename = os.path.basename(image_path)
+            output_path = os.path.join(output_dir, output_filename)
+            
+            cv2.imwrite(output_path, image)
+            self._log(f"💾 Saved detection overlay to: 1_detected/{output_filename}", "info")
+            
+            # Load the detected image into preview immediately
+            self.image_preview_widget.load_image(output_path)
+            
+            self._log(f"🎯 Detection complete! Found {len(self._current_regions)} valid regions", "success")
+            
         except Exception as e:
-            self._log(f"❌ Error in detect text handler: {str(e)}", "error")
             import traceback
-            self._log(traceback.format_exc(), "debug")
+            self._log(f"❌ Detection failed: {str(e)}", "error")
+            print(f"Detection error traceback: {traceback.format_exc()}")
     
     
     def _on_segment_text_clicked(self):
