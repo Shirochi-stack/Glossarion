@@ -171,6 +171,59 @@ class MangaSettingsDialog(QDialog):
         # Show dialog
         self.show_dialog()
             
+    def _show_styled_messagebox(self, icon, title, text, buttons=QMessageBox.Ok):
+        """Show a styled message box with proper button styling"""
+        msg_box = QMessageBox(self)
+        msg_box.setIcon(icon)
+        msg_box.setWindowTitle(title)
+        msg_box.setText(text)
+        msg_box.setStandardButtons(buttons)
+        
+        # Style the message box buttons
+        for button in msg_box.buttons():
+            if msg_box.buttonRole(button) == QMessageBox.AcceptRole:
+                # OK, Yes, Save, etc. - use green/blue
+                button.setStyleSheet("""
+                    QPushButton {
+                        background-color: #28a745;
+                        color: white;
+                        font-weight: bold;
+                        border: none;
+                        border-radius: 4px;
+                        padding: 6px 20px;
+                        min-width: 80px;
+                        font-size: 10pt;
+                    }
+                    QPushButton:hover {
+                        background-color: #34c759;
+                    }
+                    QPushButton:pressed {
+                        background-color: #218838;
+                    }
+                """)
+            elif msg_box.buttonRole(button) == QMessageBox.RejectRole:
+                # No, Cancel, etc. - use gray
+                button.setStyleSheet("""
+                    QPushButton {
+                        background-color: #6c757d;
+                        color: white;
+                        font-weight: bold;
+                        border: none;
+                        border-radius: 4px;
+                        padding: 6px 20px;
+                        min-width: 80px;
+                        font-size: 10pt;
+                    }
+                    QPushButton:hover {
+                        background-color: #7d8a96;
+                    }
+                    QPushButton:pressed {
+                        background-color: #5a6268;
+                    }
+                """)
+        
+        return msg_box.exec()
+    
     def _create_styled_checkbox(self, text):
         """Create a checkbox with proper checkmark using text overlay (same as manga_integration.py)"""
         checkbox = QCheckBox(text)
@@ -2330,13 +2383,35 @@ class MangaSettingsDialog(QDialog):
         conf_layout.addWidget(self.confidence_threshold_label)
         conf_layout.addStretch()
         
-        # Add info label below slider
-        conf_info = QLabel("ℹ️ Local OCR providers (RapidOCR, PaddleOCR, EasyOCR, DocTR) don't use this - they rely on RT-DETR confidence only")
+        # Add info label below slider with icon
+        conf_info_widget = QWidget()
+        conf_info_layout = QHBoxLayout(conf_info_widget)
+        conf_info_layout.setContentsMargins(10, 0, 0, 0)
+        conf_info_layout.setSpacing(5)
+        ocr_layout.addWidget(conf_info_widget)
+        
+        # Add icon
+        icon_label = QLabel()
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+        if os.path.exists(icon_path):
+            pixmap = QPixmap(icon_path)
+            # Scale icon to 16x16 to match text size
+            scaled_pixmap = pixmap.scaled(16, 16, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            icon_label.setPixmap(scaled_pixmap)
+        else:
+            # Fallback to emoji if icon not found
+            icon_label.setText("ℹ️")
+        icon_label.setFixedSize(16, 16)
+        conf_info_layout.addWidget(icon_label)
+        
+        # Add text label
+        conf_info = QLabel("Local OCR providers don't use this")
         conf_info_font = QFont('Arial', 9)
         conf_info.setFont(conf_info_font)
-        conf_info.setStyleSheet("color: gray; font-style: italic; padding-left: 10px;")
-        conf_info.setWordWrap(True)
-        ocr_layout.addWidget(conf_info)
+        conf_info.setStyleSheet("color: gray; font-style: italic;")
+        conf_info.setWordWrap(False)
+        conf_info_layout.addWidget(conf_info)
+        conf_info_layout.addStretch()
         
         # Detection mode
         mode_widget = QWidget()
@@ -2880,10 +2955,42 @@ class MangaSettingsDialog(QDialog):
         # Browse and Clear buttons (initially hidden for HuggingFace models)
         self.bubble_browse_btn = QPushButton("Browse")
         self.bubble_browse_btn.clicked.connect(self._browse_bubble_model)
+        self.bubble_browse_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #5a9fd4;
+                color: white;
+                font-weight: bold;
+                border: none;
+                border-radius: 3px;
+                padding: 5px 15px;
+            }
+            QPushButton:hover {
+                background-color: #7bb3e0;
+            }
+            QPushButton:pressed {
+                background-color: #4a8fc4;
+            }
+        """)
         model_layout.addWidget(self.bubble_browse_btn)
 
         self.bubble_clear_btn = QPushButton("Clear")
         self.bubble_clear_btn.clicked.connect(self._clear_bubble_model)
+        self.bubble_clear_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #6c757d;
+                color: white;
+                font-weight: bold;
+                border: none;
+                border-radius: 3px;
+                padding: 5px 15px;
+            }
+            QPushButton:hover {
+                background-color: #7d8a96;
+            }
+            QPushButton:pressed {
+                background-color: #5a6268;
+            }
+        """)
         model_layout.addWidget(self.bubble_clear_btn)
         model_layout.addStretch()
 
@@ -3161,11 +3268,11 @@ class MangaSettingsDialog(QDialog):
                 if bd.load_rtdetr_onnx_model(model_id=model_url):
                     self.rtdetr_status_label.setText("✅ Downloaded")
                     self.rtdetr_status_label.setStyleSheet("color: green;")
-                    QMessageBox.information(self, "Success", f"RTEDR_onnx model downloaded successfully!")
+                    self._show_styled_messagebox(QMessageBox.Information, "Success", "RTEDR_onnx model downloaded successfully!")
                 else:
                     self.rtdetr_status_label.setText("❌ Failed")
                     self.rtdetr_status_label.setStyleSheet("color: red;")
-                    QMessageBox.critical(self, "Error", f"Failed to download RTEDR_onnx model")
+                    self._show_styled_messagebox(QMessageBox.Critical, "Error", "Failed to download RTEDR_onnx model")
             elif 'RT-DETR' in detector:
                 # RT-DETR handling (works fine)
                 from bubble_detector import BubbleDetector
@@ -3174,11 +3281,11 @@ class MangaSettingsDialog(QDialog):
                 if bd.load_rtdetr_model(model_id=model_url):
                     self.rtdetr_status_label.setText("✅ Downloaded")
                     self.rtdetr_status_label.setStyleSheet("color: green;")
-                    QMessageBox.information(self, "Success", f"RT-DETR model downloaded successfully!")
+                    self._show_styled_messagebox(QMessageBox.Information, "Success", "RT-DETR model downloaded successfully!")
                 else:
                     self.rtdetr_status_label.setText("❌ Failed")
                     self.rtdetr_status_label.setStyleSheet("color: red;")
-                    QMessageBox.critical(self, "Error", f"Failed to download RT-DETR model")
+                    self._show_styled_messagebox(QMessageBox.Critical, "Error", "Failed to download RT-DETR model")
             else:
                 # FIX FOR YOLO: Download to a simpler local path
                 from huggingface_hub import hf_hub_download
@@ -3209,16 +3316,16 @@ class MangaSettingsDialog(QDialog):
                 self.bubble_model_entry.setText(local_path)
                 self.rtdetr_status_label.setText("✅ Downloaded")
                 self.rtdetr_status_label.setStyleSheet("color: green;")
-                QMessageBox.information(self, "Success", f"Model downloaded to:\n{local_path}")
+                self._show_styled_messagebox(QMessageBox.Information, "Success", f"Model downloaded to:\n{local_path}")
         
         except ImportError:
             self.rtdetr_status_label.setText("❌ Missing deps")
             self.rtdetr_status_label.setStyleSheet("color: red;")
-            QMessageBox.critical(self, "Error", "Install: pip install huggingface-hub transformers")
+            self._show_styled_messagebox(QMessageBox.Critical, "Error", "Install: pip install huggingface-hub transformers")
         except Exception as e:
             self.rtdetr_status_label.setText("❌ Error")
             self.rtdetr_status_label.setStyleSheet("color: red;")
-            QMessageBox.critical(self, "Error", f"Download failed: {e}")
+            self._show_styled_messagebox(QMessageBox.Critical, "Error", f"Download failed: {e}")
 
     def _check_rtdetr_status(self):
         """Check if model is already loaded"""
@@ -3273,7 +3380,7 @@ class MangaSettingsDialog(QDialog):
                 if bd.load_rtdetr_onnx_model(model_id=model_path):
                     self.rtdetr_status_label.setText("✅ Ready")
                     self.rtdetr_status_label.setStyleSheet("color: green;")
-                    QMessageBox.information(self, "Success", f"RTEDR_onnx model loaded successfully!")
+                    self._show_styled_messagebox(QMessageBox.Information, "Success", "RTEDR_onnx model loaded successfully!")
                 else:
                     self.rtdetr_status_label.setText("❌ Failed")
                     self.rtdetr_status_label.setStyleSheet("color: red;")
@@ -3282,7 +3389,7 @@ class MangaSettingsDialog(QDialog):
                 if bd.load_rtdetr_model(model_id=model_path):
                     self.rtdetr_status_label.setText("✅ Ready")
                     self.rtdetr_status_label.setStyleSheet("color: green;")
-                    QMessageBox.information(self, "Success", f"RT-DETR model loaded successfully!")
+                    self._show_styled_messagebox(QMessageBox.Information, "Success", "RT-DETR model loaded successfully!")
                 else:
                     self.rtdetr_status_label.setText("❌ Failed")
                     self.rtdetr_status_label.setStyleSheet("color: red;")
@@ -3306,15 +3413,15 @@ class MangaSettingsDialog(QDialog):
                         self.bubble_model_entry.setText(local_path)  # Update the field
                     else:
                         # Not downloaded yet
-                        QMessageBox.warning(self, "Download Required", 
-                            f"Model not found locally.\nPlease download it first using the Download button.")
+                        self._show_styled_messagebox(QMessageBox.Warning, "Download Required", 
+                            "Model not found locally.\nPlease download it first using the Download button.")
                         self.rtdetr_status_label.setText("❌ Not downloaded")
                         self.rtdetr_status_label.setStyleSheet("color: orange;")
                         return
                 
                 # Now model_path should be a local file
                 if not os.path.exists(model_path):
-                    QMessageBox.critical(self, "Error", f"Model file not found: {model_path}")
+                    self._show_styled_messagebox(QMessageBox.Critical, "Error", f"Model file not found: {model_path}")
                     self.rtdetr_status_label.setText("❌ File not found")
                     self.rtdetr_status_label.setStyleSheet("color: red;")
                     return
@@ -3323,7 +3430,7 @@ class MangaSettingsDialog(QDialog):
                 if bd.load_model(model_path):
                     self.rtdetr_status_label.setText("✅ Ready")
                     self.rtdetr_status_label.setStyleSheet("color: green;")
-                    QMessageBox.information(self, "Success", f"YOLOv8 model loaded successfully!")
+                    self._show_styled_messagebox(QMessageBox.Information, "Success", "YOLOv8 model loaded successfully!")
                     
                     # Auto-convert to ONNX if enabled
                     if os.environ.get('AUTO_CONVERT_TO_ONNX', 'true').lower() == 'true':
@@ -3338,11 +3445,11 @@ class MangaSettingsDialog(QDialog):
         except ImportError:
             self.rtdetr_status_label.setText("❌ Missing deps")
             self.rtdetr_status_label.setStyleSheet("color: red;")
-            QMessageBox.critical(self, "Error", "Install transformers: pip install transformers")
+            self._show_styled_messagebox(QMessageBox.Critical, "Error", "Install transformers: pip install transformers")
         except Exception as e:
             self.rtdetr_status_label.setText("❌ Error")
             self.rtdetr_status_label.setStyleSheet("color: red;")
-            QMessageBox.critical(self, "Error", f"Failed to load: {e}")
+            self._show_styled_messagebox(QMessageBox.Critical, "Error", f"Failed to load: {e}")
         
     def _toggle_bubble_controls(self):
         """Enable/disable bubble detection controls with fade animation"""
