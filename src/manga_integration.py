@@ -7403,7 +7403,30 @@ class MangaTranslationTab:
             
             # Use appropriate detection method based on detector type
             if detector_type in ['rtdetr_onnx', 'rtdetr']:
-                boxes = detector.detect_bubbles(image_path, confidence=confidence, use_rtdetr=True)
+                # For RT-DETR, get detailed detection results to avoid double boxes
+                if detector_type == 'rtdetr_onnx' and hasattr(detector, 'detect_with_rtdetr_onnx'):
+                    detection_results = detector.detect_with_rtdetr_onnx(image_path, confidence=confidence, return_all_bubbles=False)
+                    # Combine text_bubbles and text_free to get all text regions
+                    text_bubbles = detection_results.get('text_bubbles', [])
+                    text_free = detection_results.get('text_free', [])
+                    boxes = text_bubbles + text_free
+                    if not boxes:
+                        # Fallback to all bubbles if no text regions found
+                        boxes = detection_results.get('bubbles', [])
+                    self._log(f"📋 RT-DETR ONNX: {len(text_bubbles)} text bubbles + {len(text_free)} free text = {len(boxes)} total regions", "info")
+                elif detector_type == 'rtdetr' and hasattr(detector, 'detect_with_rtdetr'):
+                    detection_results = detector.detect_with_rtdetr(image_path, confidence=confidence, return_all_bubbles=False)
+                    # Combine text_bubbles and text_free to get all text regions
+                    text_bubbles = detection_results.get('text_bubbles', [])
+                    text_free = detection_results.get('text_free', [])
+                    boxes = text_bubbles + text_free
+                    if not boxes:
+                        # Fallback to all bubbles if no text regions found
+                        boxes = detection_results.get('bubbles', [])
+                    self._log(f"📋 RT-DETR: {len(text_bubbles)} text bubbles + {len(text_free)} free text = {len(boxes)} total regions", "info")
+                else:
+                    # Fallback to old method
+                    boxes = detector.detect_bubbles(image_path, confidence=confidence, use_rtdetr=True)
             else:
                 boxes = detector.detect_bubbles(image_path, confidence=confidence)
             
@@ -7415,8 +7438,10 @@ class MangaTranslationTab:
             
             # Store regions for use by subsequent workflow steps
             self._current_regions = []
+            # Also store the original source image path for cleaning
+            self._original_image_path = image_path
             
-            # Draw green detection boxes on image
+            # Process detection boxes and store regions (no drawing on image)
             for i, box in enumerate(boxes):
                 if len(box) >= 4:
                     # Validate and convert coordinates
@@ -7428,9 +7453,6 @@ class MangaTranslationTab:
                         y = max(0, min(y, image.shape[0] - 1))
                         x2 = max(x + 1, min(x + width, image.shape[1]))
                         y2 = max(y + 1, min(y + height, image.shape[0]))
-                        
-                        # Draw bright green rectangle (3px thick)
-                        cv2.rectangle(image, (x, y), (x2, y2), (0, 255, 0), 3)
                         
                         # Store region for workflow continuity
                         region_dict = {
@@ -7444,17 +7466,15 @@ class MangaTranslationTab:
                         self._log(f"⚠️ Skipping invalid box {i}: {e}", "warning")
                         continue
             
-            # Save detected image to the workflow directory structure
-            output_dir = os.path.join(os.path.dirname(image_path), "1_detected")
-            os.makedirs(output_dir, exist_ok=True)
-            output_filename = os.path.basename(image_path)
-            output_path = os.path.join(output_dir, output_filename)
+            # Keep the original image in the preview (don't draw boxes on it)
+            # The preview widget will show the green boxes using the region data
             
-            cv2.imwrite(output_path, image)
-            self._log(f"💾 Saved detection overlay to: 1_detected/{output_filename}", "info")
+            # Clear any existing boxes and draw new detection boxes on the preview
+            if hasattr(self.image_preview_widget.viewer, 'clear_rectangles'):
+                self.image_preview_widget.viewer.clear_rectangles()
             
-            # Load the detected image into preview immediately
-            self.image_preview_widget.load_image(output_path)
+            # Draw detection boxes on the viewer using the region data (this will show proper single boxes)
+            self._draw_detection_boxes_on_preview()
             
             self._log(f"🎯 Detection complete! Found {len(self._current_regions)} valid regions", "success")
             
@@ -7463,7 +7483,34 @@ class MangaTranslationTab:
             self._log(f"❌ Detection failed: {str(e)}", "error")
             print(f"Detection error traceback: {traceback.format_exc()}")
     
-    
+    def _draw_detection_boxes_on_preview(self):
+        """Draw detection boxes on the preview widget using region data"""
+        try:
+            if not hasattr(self, '_current_regions') or not self._current_regions:
+                return
+            
+            viewer = self.image_preview_widget.viewer
+            from PySide6.QtCore import QRectF
+            from PySide6.QtGui import QPen, QBrush, QColor
+            from manga_image_preview import MoveableRectItem
+            
+            # Draw boxes for each region
+            for region in self._current_regions:
+                bbox = region.get('bbox', [])
+                if len(bbox) >= 4:
+                    x, y, width, height = bbox
+                    rect = QRectF(x, y, width, height)
+                    
+                    # Create rectangle item with green color
+                    rect_item = MoveableRectItem(rect)
+                    rect_item.setPen(QPen(QColor(0, 255, 0), 2))  # Green border
+                    rect_item.setBrush(QBrush(QColor(0, 255, 0, 50)))  # Semi-transparent green fill
+                    
+                    viewer._scene.addItem(rect_item)
+                    viewer.rectangles.append(rect_item)
+        
+        except Exception as e:
+            self._log(f"⚠️ Error drawing detection boxes: {str(e)}", "warning")
     
     def _on_clean_image_clicked(self):
         """Simplified clean button - run inpainting in background thread"""
@@ -7478,12 +7525,18 @@ class MangaTranslationTab:
                 self._log("⚠️ No text regions detected. Please run 'Detect Text' first.", "warning")
                 return
             
+            # Check if we have the original image path stored from detection
+            if not hasattr(self, '_original_image_path') or not self._original_image_path:
+                self._log("⚠️ No original image found. Please run 'Detect Text' first.", "warning")
+                return
+            
             # Disable the clean button to prevent multiple clicks
             if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'clean_btn'):
                 self.image_preview_widget.clean_btn.setEnabled(False)
                 self.image_preview_widget.clean_btn.setText("Cleaning...")
             
-            image_path = self.image_preview_widget.current_image_path
+            # Use the original image path for cleaning (not the current preview which might have boxes)
+            image_path = self._original_image_path
             regions = self._current_regions.copy()  # Copy for thread safety
             
             self._log(f"🧽 Starting background cleaning: {os.path.basename(image_path)}", "info")
@@ -7512,7 +7565,7 @@ class MangaTranslationTab:
             image = cv2.imread(image_path)
             if image is None:
                 self._log(f"❌ Failed to load image: {os.path.basename(image_path)}", "error")
-                self._restore_clean_button()
+                self.update_queue.put(('clean_button_restore', None))
                 return
             
             # Create mask from detected regions
@@ -7574,15 +7627,15 @@ class MangaTranslationTab:
                         success = inpainter.load_model_with_retry(local_model, resolved_model_path, force_reload=False)
                         if not success:
                             self._log(f"❌ Failed to load model with retry", "error")
-                            self._restore_clean_button()
+                            self.update_queue.put(('clean_button_restore', None))
                             return
                     except Exception as e:
                         self._log(f"❌ Model loading error: {str(e)}", "error")
-                        self._restore_clean_button()
+                        self.update_queue.put(('clean_button_restore', None))
                         return
                 else:
                     self._log(f"❌ No valid model path for {local_model}", "error")
-                    self._restore_clean_button()
+                    self.update_queue.put(('clean_button_restore', None))
                     return
                 
                 # Run inpainting
@@ -7605,9 +7658,8 @@ class MangaTranslationTab:
                 cv2.imwrite(output_path, cleaned_image)
                 self._log(f"💾 Saved cleaned image to: 2_cleaned/{output_filename}", "info")
                 
-                # Load cleaned image into preview on main thread
-                from PySide6.QtCore import QTimer
-                QTimer.singleShot(0, lambda: self._update_preview_after_clean(output_path))
+                # Load cleaned image into preview using thread-safe update queue
+                self.update_queue.put(('clean_preview_update', output_path))
                 
                 self._log(f"✅ Cleaning complete!", "success")
             else:
@@ -7618,9 +7670,8 @@ class MangaTranslationTab:
             self._log(f"❌ Background cleaning failed: {str(e)}", "error")
             print(f"Background clean error traceback: {traceback.format_exc()}")
         finally:
-            # Always restore the button
-            from PySide6.QtCore import QTimer
-            QTimer.singleShot(0, self._restore_clean_button)
+            # Always restore the button using thread-safe update queue
+            self.update_queue.put(('clean_button_restore', None))
     
     def _update_preview_after_clean(self, output_path: str):
         """Update preview on main thread after cleaning is complete"""
@@ -8179,6 +8230,21 @@ class MangaTranslationTab:
                             self.local_model_status_label.setStyleSheet("color: green;")
                         else:
                             self.local_model_status_label.setStyleSheet("color: gray;")
+                
+                elif update[0] == 'clean_preview_update':
+                    _, output_path = update
+                    # Update the image preview with the cleaned image
+                    try:
+                        self._update_preview_after_clean(output_path)
+                    except Exception as e:
+                        self._log(f"❌ Failed to update preview: {str(e)}", "error")
+                
+                elif update[0] == 'clean_button_restore':
+                    # Restore the clean button to its normal state
+                    try:
+                        self._restore_clean_button()
+                    except Exception as e:
+                        self._log(f"❌ Failed to restore clean button: {str(e)}", "error")
                     
         except Exception:
             # Queue is empty or some other exception
