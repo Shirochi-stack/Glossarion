@@ -7340,32 +7340,59 @@ class MangaTranslationTab:
             self._log(traceback.format_exc(), "debug")
     
     def _on_detect_text_clicked(self):
-        """Simplified detect text button - directly detect bubbles and show green boxes"""
+        """Detect text button - run detection in background thread"""
         try:
             # Get current image path
             if not hasattr(self, 'image_preview_widget') or not self.image_preview_widget.current_image_path:
                 self._log("⚠️ No image loaded for detection", "warning")
                 return
             
-            image_path = self.image_preview_widget.current_image_path
-            self._log(f"🔍 Detecting text bubbles in: {os.path.basename(image_path)}", "info")
+            # Disable the detect button to prevent multiple clicks
+            if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'detect_btn'):
+                self.image_preview_widget.detect_btn.setEnabled(False)
+                self.image_preview_widget.detect_btn.setText("Detecting...")
             
-            # Import required modules
+            image_path = self.image_preview_widget.current_image_path
+            
+            # Get detection settings for the background thread
+            manga_settings = self.main_gui.config.get('manga_settings', {})
+            ocr_settings = manga_settings.get('ocr', {})
+            detection_config = {
+                'detector_type': ocr_settings.get('detector_type', 'rtdetr_onnx'),
+                'model_path': ocr_settings.get('bubble_model_path', ''),
+                'model_url': ocr_settings.get('rtdetr_model_url', 'ogkalu/comic-text-and-bubble-detector'),
+                'confidence': ocr_settings.get('bubble_confidence', 0.3)
+            }
+            
+            self._log(f"🔍 Starting background detection: {os.path.basename(image_path)}", "info")
+            
+            # Run detection in background thread
+            import threading
+            thread = threading.Thread(target=self._run_detect_background, 
+                                    args=(image_path, detection_config),
+                                    daemon=True)
+            thread.start()
+            
+        except Exception as e:
+            import traceback
+            self._log(f"❌ Detect setup failed: {str(e)}", "error")
+            print(f"Detect setup error traceback: {traceback.format_exc()}")
+            self._restore_detect_button()
+    
+    def _run_detect_background(self, image_path: str, detection_config: dict):
+        """Run the actual detection process in background thread"""
+        try:
             import cv2
             from bubble_detector import BubbleDetector
             
             # Create bubble detector
             detector = BubbleDetector()
             
-            # Get bubble detection settings from manga config
-            manga_settings = self.main_gui.config.get('manga_settings', {})
-            ocr_settings = manga_settings.get('ocr', {})
-            
-            # Extract settings with defaults matching manga_settings_dialog.py defaults
-            detector_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
-            model_path = ocr_settings.get('bubble_model_path', '')
-            model_url = ocr_settings.get('rtdetr_model_url', 'ogkalu/comic-text-and-bubble-detector')
-            confidence = ocr_settings.get('bubble_confidence', 0.3)
+            # Extract settings from config
+            detector_type = detection_config['detector_type']
+            model_path = detection_config['model_path']
+            model_url = detection_config['model_url']
+            confidence = detection_config['confidence']
             
             # Load the appropriate model based on user settings
             success = False
@@ -7390,12 +7417,14 @@ class MangaTranslationTab:
             
             if not success:
                 self._log("❌ Failed to load bubble detection model", "error")
+                self.update_queue.put(('detect_button_restore', None))
                 return
             
             # Load and validate image
             image = cv2.imread(image_path)
             if image is None:
                 self._log(f"❌ Failed to load image: {os.path.basename(image_path)}", "error")
+                self.update_queue.put(('detect_button_restore', None))
                 return
             
             # Run bubble detection
@@ -7432,16 +7461,13 @@ class MangaTranslationTab:
             
             if not boxes:
                 self._log("⚠️ No text regions detected", "warning")
+                self.update_queue.put(('detect_button_restore', None))
                 return
             
             self._log(f"✅ Found {len(boxes)} text regions", "success")
             
-            # Store regions for use by subsequent workflow steps
-            self._current_regions = []
-            # Also store the original source image path for cleaning
-            self._original_image_path = image_path
-            
-            # Process detection boxes and store regions (no drawing on image)
+            # Process detection boxes and store regions
+            regions = []
             for i, box in enumerate(boxes):
                 if len(box) >= 4:
                     # Validate and convert coordinates
@@ -7460,28 +7486,56 @@ class MangaTranslationTab:
                             'coords': [[x, y], [x2, y], [x2, y2], [x, y2]],  # Corner coordinates
                             'confidence': getattr(box, 'confidence', confidence) if hasattr(box, 'confidence') else confidence
                         }
-                        self._current_regions.append(region_dict)
+                        regions.append(region_dict)
                         
                     except (ValueError, IndexError) as e:
                         self._log(f"⚠️ Skipping invalid box {i}: {e}", "warning")
                         continue
             
-            # Keep the original image in the preview (don't draw boxes on it)
-            # The preview widget will show the green boxes using the region data
+            # Send detection results to main thread using update queue
+            self.update_queue.put(('detect_results', {
+                'image_path': image_path,
+                'regions': regions
+            }))
+            
+            self._log(f"🎯 Detection complete! Found {len(regions)} valid regions", "success")
+            
+        except Exception as e:
+            import traceback
+            self._log(f"❌ Background detection failed: {str(e)}", "error")
+            print(f"Background detect error traceback: {traceback.format_exc()}")
+        finally:
+            # Always restore the button using thread-safe update queue
+            self.update_queue.put(('detect_button_restore', None))
+    
+    def _restore_detect_button(self):
+        """Restore the detect button to its original state"""
+        try:
+            if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'detect_btn'):
+                self.image_preview_widget.detect_btn.setEnabled(True)
+                self.image_preview_widget.detect_btn.setText("Detect Text")
+        except Exception:
+            pass
+    
+    def _process_detect_results(self, results: dict):
+        """Process detection results on main thread and update preview"""
+        try:
+            image_path = results['image_path']
+            regions = results['regions']
+            
+            # Store regions and original image path
+            self._current_regions = regions
+            self._original_image_path = image_path
             
             # Clear any existing boxes and draw new detection boxes on the preview
             if hasattr(self.image_preview_widget.viewer, 'clear_rectangles'):
                 self.image_preview_widget.viewer.clear_rectangles()
             
-            # Draw detection boxes on the viewer using the region data (this will show proper single boxes)
+            # Draw detection boxes on the viewer using the region data
             self._draw_detection_boxes_on_preview()
             
-            self._log(f"🎯 Detection complete! Found {len(self._current_regions)} valid regions", "success")
-            
         except Exception as e:
-            import traceback
-            self._log(f"❌ Detection failed: {str(e)}", "error")
-            print(f"Detection error traceback: {traceback.format_exc()}")
+            self._log(f"❌ Failed to process detection results: {str(e)}", "error")
     
     def _draw_detection_boxes_on_preview(self):
         """Draw detection boxes on the preview widget using region data"""
@@ -8245,6 +8299,21 @@ class MangaTranslationTab:
                         self._restore_clean_button()
                     except Exception as e:
                         self._log(f"❌ Failed to restore clean button: {str(e)}", "error")
+                
+                elif update[0] == 'detect_results':
+                    _, results = update
+                    # Process detection results and update preview
+                    try:
+                        self._process_detect_results(results)
+                    except Exception as e:
+                        self._log(f"❌ Failed to process detection results: {str(e)}", "error")
+                
+                elif update[0] == 'detect_button_restore':
+                    # Restore the detect button to its normal state
+                    try:
+                        self._restore_detect_button()
+                    except Exception as e:
+                        self._log(f"❌ Failed to restore detect button: {str(e)}", "error")
                     
         except Exception:
             # Queue is empty or some other exception
