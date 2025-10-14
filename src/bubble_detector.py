@@ -392,7 +392,24 @@ class BubbleDetector:
             # Determine model type by extension
             ext = Path(model_path).suffix.lower()
             
-            if ext in ['.pt', '.pth']:
+            if ext == '.safetensors':
+                logger.warning("SafeTensors format detected but not directly supported for YOLOv8")
+                logger.info("Please convert to .pt format or use ONNX format for best compatibility")
+                logger.info("Attempting to load with safetensors library...")
+                try:
+                    from safetensors.torch import load_file
+                    import torch
+                    state_dict = load_file(model_path)
+                    logger.info("✅ SafeTensors file loaded, but YOLOv8 requires .pt format")
+                    logger.info("Please use an ONNX model or convert to .pt for full support")
+                    return False
+                except ImportError:
+                    logger.error("safetensors library not installed. Install with: pip install safetensors")
+                    return False
+                except Exception as e:
+                    logger.error(f"Failed to load safetensors file: {e}")
+                    return False
+            elif ext in ['.pt', '.pth']:
                 if not YOLO_AVAILABLE:
                     logger.warning("Ultralytics package not available in this build")
                     logger.info("Bubble detection will be disabled - this is normal for lightweight builds")
@@ -508,7 +525,7 @@ class BubbleDetector:
                     
             else:
                 logger.error(f"Unsupported model format: {ext}")
-                logger.info("Supported formats: .pt/.pth (YOLOv8), .onnx (ONNX), .torchscript (TorchScript)")
+                logger.info("Supported formats: .pt/.pth (YOLOv8), .onnx (ONNX), .torchscript (TorchScript), .safetensors (limited)")
                 return False
             
             # Only set loaded if we actually succeeded

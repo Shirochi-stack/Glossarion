@@ -1912,8 +1912,23 @@ class LocalInpainter:
                     self.model_loaded = False
                     return False
             
+            # Check if it's a safetensors file
+            is_safetensors = model_path.endswith('.safetensors')
+            
+            if is_safetensors:
+                try:
+                    from safetensors.torch import load_file
+                    logger.info("📦 Loading safetensors file...")
+                    checkpoint = load_file(model_path)
+                    self.is_jit_model = False
+                except ImportError:
+                    logger.error("safetensors library not installed. Install with: pip install safetensors")
+                    return False
+                except Exception as load_error:
+                    logger.error(f"Failed to load safetensors file: {load_error}")
+                    return False
             # Check if it's a JIT model (.pt) or checkpoint (.ckpt/.pth)
-            if model_path.endswith('.pt'):
+            elif model_path.endswith('.pt'):
                 try:
                     # Try loading as JIT/TorchScript
                     logger.info("📦 Attempting to load as JIT model...")
