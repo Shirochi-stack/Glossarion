@@ -3578,6 +3578,149 @@ class MangaSettingsDialog(QDialog):
         self.concise_logs_checkbox.toggled.connect(_save_concise)
         debug_layout.addWidget(self.concise_logs_checkbox)
         
+        # Add mutual exclusion logic for debug mode and concise logs
+        def _on_debug_mode_changed(checked):
+            """Handle debug mode checkbox changes"""
+            if checked:
+                # Disable and uncheck concise logs when debug mode is enabled
+                self.concise_logs_checkbox.blockSignals(True)
+                self.concise_logs_checkbox.setChecked(False)
+                self.concise_logs_checkbox.setEnabled(False)
+                # Update styling for disabled state
+                self.concise_logs_checkbox.setStyleSheet("""
+                    QCheckBox {
+                        color: #666666;
+                        spacing: 6px;
+                    }
+                    QCheckBox::indicator {
+                        width: 14px;
+                        height: 14px;
+                        border: 1px solid #3a3a3a;
+                        border-radius: 2px;
+                        background-color: #1a1a1a;
+                    }
+                    QCheckBox::indicator:checked {
+                        background-color: #3a3a3a;
+                        border-color: #3a3a3a;
+                    }
+                """)
+                self.concise_logs_checkbox.blockSignals(False)
+                # Save the unchecked state for concise logs
+                try:
+                    if 'advanced' not in self.settings:
+                        self.settings['advanced'] = {}
+                    self.settings['advanced']['concise_logs'] = False
+                    if hasattr(self, 'config'):
+                        self.config['manga_settings'] = self.settings
+                    if hasattr(self.main_gui, 'save_config'):
+                        self.main_gui.save_config(show_message=False)
+                except Exception:
+                    pass
+            else:
+                # Re-enable concise logs when debug mode is disabled
+                self.concise_logs_checkbox.setEnabled(True)
+                # Restore normal styling
+                self.concise_logs_checkbox.setStyleSheet("""
+                    QCheckBox {
+                        color: white;
+                        spacing: 6px;
+                    }
+                    QCheckBox::indicator {
+                        width: 14px;
+                        height: 14px;
+                        border: 1px solid #5a9fd4;
+                        border-radius: 2px;
+                        background-color: #2d2d2d;
+                    }
+                    QCheckBox::indicator:checked {
+                        background-color: #5a9fd4;
+                        border-color: #5a9fd4;
+                    }
+                    QCheckBox::indicator:hover {
+                        border-color: #7bb3e0;
+                    }
+                """)
+        
+        def _on_concise_logs_changed(checked):
+            """Handle concise logs checkbox changes"""
+            if checked:
+                # Disable and uncheck debug mode when concise logs is enabled
+                self.debug_mode_checkbox.blockSignals(True)
+                self.debug_mode_checkbox.setChecked(False)
+                self.debug_mode_checkbox.setEnabled(False)
+                # Update styling for disabled state
+                self.debug_mode_checkbox.setStyleSheet("""
+                    QCheckBox {
+                        color: #666666;
+                        spacing: 6px;
+                    }
+                    QCheckBox::indicator {
+                        width: 14px;
+                        height: 14px;
+                        border: 1px solid #3a3a3a;
+                        border-radius: 2px;
+                        background-color: #1a1a1a;
+                    }
+                    QCheckBox::indicator:checked {
+                        background-color: #3a3a3a;
+                        border-color: #3a3a3a;
+                    }
+                """)
+                self.debug_mode_checkbox.blockSignals(False)
+                # Save the unchecked state for debug mode
+                try:
+                    if 'advanced' not in self.settings:
+                        self.settings['advanced'] = {}
+                    self.settings['advanced']['debug_mode'] = False
+                    if hasattr(self, 'config'):
+                        self.config['manga_settings'] = self.settings
+                    if hasattr(self.main_gui, 'save_config'):
+                        self.main_gui.save_config(show_message=False)
+                except Exception:
+                    pass
+            else:
+                # Re-enable debug mode when concise logs is disabled
+                self.debug_mode_checkbox.setEnabled(True)
+                # Restore normal styling
+                self.debug_mode_checkbox.setStyleSheet("""
+                    QCheckBox {
+                        color: white;
+                        spacing: 6px;
+                    }
+                    QCheckBox::indicator {
+                        width: 14px;
+                        height: 14px;
+                        border: 1px solid #5a9fd4;
+                        border-radius: 2px;
+                        background-color: #2d2d2d;
+                    }
+                    QCheckBox::indicator:checked {
+                        background-color: #5a9fd4;
+                        border-color: #5a9fd4;
+                    }
+                    QCheckBox::indicator:hover {
+                        border-color: #7bb3e0;
+                    }
+                """)
+        
+        # Connect the mutual exclusion handlers
+        self.debug_mode_checkbox.toggled.connect(_on_debug_mode_changed)
+        self.concise_logs_checkbox.toggled.connect(_on_concise_logs_changed)
+        
+        # Initialize the state based on current values (do this AFTER connecting handlers)
+        # Block signals temporarily to avoid triggering handlers during initialization
+        self.debug_mode_checkbox.blockSignals(True)
+        self.concise_logs_checkbox.blockSignals(True)
+        
+        if self.debug_mode_checkbox.isChecked():
+            _on_debug_mode_changed(True)
+        elif self.concise_logs_checkbox.isChecked():
+            _on_concise_logs_changed(True)
+        
+        # Re-enable signals
+        self.debug_mode_checkbox.blockSignals(False)
+        self.concise_logs_checkbox.blockSignals(False)
+        
         self.save_intermediate_checkbox = self._create_styled_checkbox("Save intermediate images (preprocessed, detection overlays)")
         self.save_intermediate_checkbox.setChecked(self.settings['advanced']['save_intermediate'])
         debug_layout.addWidget(self.save_intermediate_checkbox)
