@@ -4287,19 +4287,26 @@ class MangaSettingsDialog(QDialog):
             
             # Update config
             self.config['manga_settings'] = self.settings
+            
+            # CRITICAL: Directly update main_gui.config to ensure settings propagate immediately
+            if hasattr(self.main_gui, 'config'):
+                self.main_gui.config['manga_settings'] = self.settings
 
             # Mirror only auto max to top-level config for backward compatibility; keep min nested
             try:
                 auto_max = self.settings.get('rendering', {}).get('auto_max_size', None)
                 if auto_max is not None:
                     self.config['manga_max_font_size'] = int(auto_max)
+                    # Also update main_gui.config for immediate effect
+                    if hasattr(self.main_gui, 'config'):
+                        self.main_gui.config['manga_max_font_size'] = int(auto_max)
             except Exception:
                 pass
             
             # Save to file immediately
             if hasattr(self.main_gui, 'save_config'):
                 self.main_gui.save_config()
-                print(f"Auto-saved rendering settings")
+                print(f"✅ Auto-saved rendering settings to main_gui.config")
                 time.sleep(0.1)  # Brief pause for stability
                 print("💤 Auto-save pausing briefly for stability")
             
@@ -4523,10 +4530,28 @@ class MangaSettingsDialog(QDialog):
             # Save to config - CRITICAL: Update both local and main_gui config
             self.config['manga_settings'] = self.settings
             
-            # CRITICAL: Directly update main_gui.config to ensure settings propagate
+            # CRITICAL: Directly update main_gui.config to ensure settings propagate immediately
+            # This is essential because many settings require the updated config to take effect
+            # without requiring a GUI restart
             if hasattr(self.main_gui, 'config'):
                 self.main_gui.config['manga_settings'] = self.settings
-                print(f"✅ Updated main_gui.config with manga_settings (cloud_ocr_confidence={self.settings.get('ocr', {}).get('cloud_ocr_confidence', 'N/A')}, min_text_length={self.settings.get('ocr', {}).get('min_text_length', 'N/A')})")
+                
+                # Log key settings that were updated
+                ocr_settings = self.settings.get('ocr', {})
+                advanced_settings = self.settings.get('advanced', {})
+                preprocessing_settings = self.settings.get('preprocessing', {})
+                
+                print(f"✅ Updated main_gui.config with manga_settings:")
+                print(f"   OCR: confidence={ocr_settings.get('cloud_ocr_confidence', 'N/A')}, "
+                      f"min_text_length={ocr_settings.get('min_text_length', 'N/A')}, "
+                      f"bubble_detection={ocr_settings.get('bubble_detection_enabled', 'N/A')}, "
+                      f"use_rtdetr={ocr_settings.get('use_rtdetr_for_ocr_regions', 'N/A')}, "
+                      f"enable_fallback_ocr={ocr_settings.get('enable_fallback_ocr', 'N/A')}")
+                print(f"   Advanced: debug_mode={advanced_settings.get('debug_mode', 'N/A')}, "
+                      f"parallel_processing={advanced_settings.get('parallel_processing', 'N/A')}, "
+                      f"max_workers={advanced_settings.get('max_workers', 'N/A')}")
+                print(f"   Preprocessing: enabled={preprocessing_settings.get('enabled', 'N/A')}, "
+                      f"tiling={preprocessing_settings.get('inpaint_tiling_enabled', 'N/A')}")
             
             # Save to file - using the correct method name
             try:
