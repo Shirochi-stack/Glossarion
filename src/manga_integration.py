@@ -7366,6 +7366,11 @@ class MangaTranslationTab:
             # Add processing overlay effect
             self._add_processing_overlay()
             
+            # Clear cleaned image path when starting new detection (new workflow)
+            if hasattr(self, '_cleaned_image_path'):
+                self._cleaned_image_path = None
+                print(f"[DETECT] Cleared cleaned image path for new workflow")
+            
             image_path = self.image_preview_widget.current_image_path
             
             # Get detection settings for the background thread
@@ -7776,6 +7781,10 @@ class MangaTranslationTab:
     def _update_preview_after_clean(self, output_path: str):
         """Update preview on main thread after cleaning is complete"""
         try:
+            # Store cleaned image path so Translate button can use it
+            self._cleaned_image_path = output_path
+            print(f"[CLEAN] Stored cleaned image path: {output_path}")
+            
             # Before switching image, alias overlays from original path to cleaned path
             if hasattr(self, '_original_image_path') and self._original_image_path:
                 self._alias_text_overlays_for_image(self._original_image_path, output_path)
@@ -10023,11 +10032,23 @@ class MangaTranslationTab:
                         regions.append(region)
                         print(f"[TRANSLATE] Region {i}: '{result['original']['text'][:30]}...' -> '{result['translation'][:30]}...'")
                 
-                # Render with PIL pipeline (includes inpainting!)
+                # Render with PIL pipeline
                 current_image = self.image_preview_widget.current_image_path
                 if current_image and regions:
-                    print(f"[TRANSLATE] Calling PIL renderer for {len(regions)} regions on {os.path.basename(current_image)}")
-                    self._render_with_manga_translator(current_image, regions)
+                    # Check if we have a cleaned image (from Clean button)
+                    cleaned_image = None
+                    if hasattr(self, '_cleaned_image_path') and self._cleaned_image_path and os.path.exists(self._cleaned_image_path):
+                        cleaned_image = self._cleaned_image_path
+                        print(f"[TRANSLATE] Using cleaned image: {os.path.basename(cleaned_image)}")
+                        self._log(f"🧹 Rendering on cleaned image", "info")
+                    else:
+                        print(f"[TRANSLATE] No cleaned image available, rendering on original")
+                        self._log(f"📝 Rendering on original image (click Clean first to remove original text)", "info")
+                    
+                    # Use cleaned image if available, otherwise current image
+                    render_image = cleaned_image if cleaned_image else current_image
+                    print(f"[TRANSLATE] Calling PIL renderer for {len(regions)} regions on {os.path.basename(render_image)}")
+                    self._render_with_manga_translator(render_image, regions)
                 else:
                     print(f"[TRANSLATE] ERROR: No image path or no regions")
                     self._log("⚠️ Could not render: no image loaded", "warning")
