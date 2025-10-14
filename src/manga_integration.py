@@ -8764,8 +8764,16 @@ class MangaTranslationTab:
                                 print(f"[DEBUG] Updated _recognized_texts for region {region_index}")
                                 break
                     
-                    # Also update translation data if it exists
-                    if hasattr(self, '_translation_data') and region_index in self._translation_data:
+                    # Update translation data if it exists (or create it)
+                    if not hasattr(self, '_translation_data'):
+                        self._translation_data = {}
+                    if region_index not in self._translation_data:
+                        # Initialize entry if it doesn't exist yet
+                        self._translation_data[region_index] = {
+                            'original': new_text,
+                            'translation': ''  # Will be filled when translation happens
+                        }
+                    else:
                         self._translation_data[region_index]['original'] = new_text
                     
                     print(f"[DEBUG] Updated OCR text for region {region_index}: '{new_text[:50]}...'")
@@ -8990,20 +8998,28 @@ class MangaTranslationTab:
             viewer = self.image_preview_widget.viewer
             current_image = self.image_preview_widget.current_image_path
             
-            if not current_image or not hasattr(self, '_text_overlays_by_image'):
+            if not current_image:
+                print(f"[DEBUG] No current image path, cannot update overlay")
                 return
+            
+            # Initialize overlay dictionary if not exists
+            if not hasattr(self, '_text_overlays_by_image'):
+                self._text_overlays_by_image = {}
             
             # If overlays are stored under the original path (pre-clean), alias them to the current path
             if current_image not in self._text_overlays_by_image and hasattr(self, '_original_image_path'):
+                print(f"[DEBUG] Attempting to alias overlays from original to current path")
                 self._alias_text_overlays_for_image(self._original_image_path, current_image)
             
-            if current_image not in self._text_overlays_by_image:
-                return
+            # Force overlay creation even if they don't exist - this ensures edits always apply
+            print(f"[DEBUG] Updating overlay for region {region_index}, current_image: {os.path.basename(current_image)}")
             
             # Regenerate overlays with updated data
-            if hasattr(self, '_translation_data'):
+            if hasattr(self, '_translation_data') and self._translation_data:
                 translated_texts = []
                 rectangles = self.image_preview_widget.viewer.rectangles
+                print(f"[DEBUG] Rebuilding overlays from {len(self._translation_data)} translation entries and {len(rectangles)} rectangles")
+                
                 for idx in sorted(self._translation_data.keys()):
                     if idx < len(rectangles):
                         rect = rectangles[idx].rect()
@@ -9013,9 +9029,15 @@ class MangaTranslationTab:
                             'translation': trans_data['translation'],
                             'bbox': [int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height())]
                         })
+                
                 if translated_texts:
+                    print(f"[DEBUG] Regenerating {len(translated_texts)} text overlays")
                     self._add_text_overlay_to_viewer(translated_texts)
-                    print(f"[DEBUG] Refreshed all text overlays after editing region {region_index}")
+                    print(f"[DEBUG] Successfully refreshed all text overlays after editing region {region_index}")
+                else:
+                    print(f"[DEBUG] No translated texts to regenerate")
+            else:
+                print(f"[DEBUG] No translation data available to regenerate overlays")
             
         except Exception as e:
             print(f"[DEBUG] Error updating text overlay: {str(e)}")
@@ -9104,6 +9126,10 @@ class MangaTranslationTab:
             
             overlay_count = len(self._text_overlays_by_image.get(current_image, []))
             print(f"[DEBUG] Added {overlay_count} text overlay items for image: {os.path.basename(current_image)}")
+            
+            # Force scene update to ensure overlays are visible
+            viewer._scene.update()
+            print(f"[DEBUG] Forced scene update")
             
         except Exception as e:
             print(f"[DEBUG] Error adding text overlays: {str(e)}")
