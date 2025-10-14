@@ -384,8 +384,6 @@ class MangaImagePreviewWidget(QWidget):
     
     # Signals for translation workflow
     detect_text_clicked = Signal()
-    recognize_text_clicked = Signal()
-    get_translations_clicked = Signal()
     segment_text_clicked = Signal()
     clean_image_clicked = Signal()
     render_clicked = Signal()
@@ -568,10 +566,6 @@ class MangaImagePreviewWidget(QWidget):
         self.detect_btn = self._create_compact_button("Detect Text")
         self.detect_btn.clicked.connect(self.detect_text_clicked.emit)
         workflow_layout.addWidget(self.detect_btn, stretch=1)
-        
-        self.recognize_btn = self._create_compact_button("Recognize")
-        self.recognize_btn.clicked.connect(self.recognize_text_clicked.emit)
-        workflow_layout.addWidget(self.recognize_btn, stretch=1)
         
         self.segment_btn = self._create_compact_button("Segment")
         self.segment_btn.clicked.connect(self.segment_text_clicked.emit)
