@@ -2445,44 +2445,7 @@ class MangaTranslationTab:
         # Store reference for updates
         self.status_label = status_label
         
-        # Advanced Settings button at the TOP
-        advanced_button_frame = QWidget()
-        advanced_button_layout = QHBoxLayout(advanced_button_frame)
-        advanced_button_layout.setContentsMargins(0, 5, 0, 10)
-        advanced_button_layout.setSpacing(10)
-
-        advanced_settings_desc = QLabel("Configure OCR, preprocessing, and performance options")
-        desc_font = QFont("Arial", 9)
-        advanced_settings_desc.setFont(desc_font)
-        advanced_settings_desc.setStyleSheet("color: gray;")
-        advanced_button_layout.addWidget(advanced_settings_desc, 0, Qt.AlignVCenter)
-        
-        advanced_button_layout.addStretch()
-        
-        advanced_settings_btn = QPushButton("⚙️ Advanced Settings")
-        advanced_settings_btn.clicked.connect(self._open_advanced_settings)
-        advanced_settings_btn.setMinimumHeight(35)
-        advanced_settings_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3b82f6;
-                color: white;
-                padding: 8px 20px;
-                font-weight: bold;
-                font-size: 10pt;
-                border-radius: 4px;
-            }
-            QPushButton:hover {
-                background-color: #4b92ff;
-            }
-            QPushButton:pressed {
-                background-color: #2b72e6;
-            }
-        """)
-        advanced_button_layout.addWidget(advanced_settings_btn, 0, Qt.AlignVCenter)
-        
-        main_layout.addWidget(advanced_button_frame)
-        
-        # Model Preloading Progress Bar (after advanced settings button, initially hidden)
+        # Model Preloading Progress Bar (initially hidden)
         self.preload_progress_frame = QWidget()
         self.preload_progress_frame.setStyleSheet(
             "background-color: #2d2d2d; "
@@ -2617,6 +2580,45 @@ class MangaTranslationTab:
         columns_layout = QHBoxLayout(columns_container)
         columns_layout.setContentsMargins(0, 0, 0, 0)
         columns_layout.setSpacing(10)
+        
+        # Create a container for tabs + advanced settings button
+        tabs_container = QWidget()
+        tabs_container_layout = QVBoxLayout(tabs_container)
+        tabs_container_layout.setContentsMargins(0, 0, 0, 0)
+        tabs_container_layout.setSpacing(0)
+        
+        # Create a horizontal layout for the tab bar area with button
+        tab_bar_container = QWidget()
+        tab_bar_layout = QHBoxLayout(tab_bar_container)
+        tab_bar_layout.setContentsMargins(0, 0, 0, 0)
+        tab_bar_layout.setSpacing(10)
+        
+        # Add stretch to push button to the right
+        tab_bar_layout.addStretch()
+        
+        # Add Advanced Settings button in the corner
+        advanced_settings_btn_corner = QPushButton("⚙️ Advanced")
+        advanced_settings_btn_corner.clicked.connect(self._open_advanced_settings)
+        advanced_settings_btn_corner.setMinimumHeight(28)
+        advanced_settings_btn_corner.setStyleSheet("""
+            QPushButton {
+                background-color: #3b82f6;
+                color: white;
+                padding: 6px 16px;
+                font-weight: bold;
+                font-size: 9pt;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #4b92ff;
+            }
+            QPushButton:pressed {
+                background-color: #2b72e6;
+            }
+        """)
+        tab_bar_layout.addWidget(advanced_settings_btn_corner, 0, Qt.AlignTop)
+        
+        tabs_container_layout.addWidget(tab_bar_container)
         
         # Create tab widget for settings
         from PySide6.QtWidgets import QTabWidget, QScrollArea
@@ -4237,6 +4239,30 @@ class MangaTranslationTab:
         # Initially disable shadow controls
         self._toggle_shadow_controls()
         
+        # Add decorative icon at the bottom of Font & Text Settings to balance the layout
+        font_icon_frame = QWidget()
+        font_icon_layout = QVBoxLayout(font_icon_frame)
+        font_icon_layout.setContentsMargins(0, 8, 0, 3)
+        font_icon_layout.setAlignment(Qt.AlignCenter)
+        
+        icon_path_font = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+        if os.path.exists(icon_path_font):
+            font_icon_label = QLabel()
+            font_icon_pixmap = QPixmap(icon_path_font)
+            # Scale to a smaller, more subtle size
+            font_scaled_pixmap = font_icon_pixmap.scaled(40, 40, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            font_icon_label.setPixmap(font_scaled_pixmap)
+            font_icon_label.setAlignment(Qt.AlignCenter)
+            font_icon_layout.addWidget(font_icon_label)
+            
+            # Optional: Add a subtle label
+            font_icon_text = QLabel("Glossarion")
+            font_icon_text.setStyleSheet("color: #5a9fd4; font-size: 7pt; font-weight: bold;")
+            font_icon_text.setAlignment(Qt.AlignCenter)
+            font_icon_layout.addWidget(font_icon_text)
+        
+        font_render_frame_layout.addWidget(font_icon_frame)
+        
         # Add font_render_frame to RIGHT COLUMN
         right_column_layout.addWidget(font_render_frame)
         
@@ -4277,7 +4303,7 @@ class MangaTranslationTab:
         self.start_button = QPushButton()
         self.start_button.clicked.connect(self._toggle_translation)
         self.start_button.setEnabled(is_ready)
-        self.start_button.setMinimumHeight(90)  # Minimum height when space is constrained
+        self.start_button.setMinimumHeight(120)  # Increased to prevent icon clipping
         # Set size policy to expand vertically to fill available space
         self.start_button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         
@@ -4376,7 +4402,7 @@ class MangaTranslationTab:
             "QPushButton { "
             "  background-color: #28a745; "
             "  color: white; "
-            "  padding: 22px 30px; "
+            "  padding: 28px 30px; "
             "  font-size: 14pt; "
             "  font-weight: bold; "
             "  border-radius: 8px; "
@@ -4411,11 +4437,14 @@ class MangaTranslationTab:
         self.settings_tabs.addTab(right_column, "🎨 Rendering Settings")
         self.settings_tabs.setMinimumHeight(900)  # Increased height to fit content without scrolling
         
-        # Add settings tabs to main columns layout
-        columns_layout.addWidget(self.settings_tabs, stretch=1)
+        # Add settings tabs to the tabs container (below the advanced button)
+        tabs_container_layout.addWidget(self.settings_tabs)
         
-        # Add image preview widget directly (always visible)
-        columns_layout.addWidget(self.image_preview_widget, stretch=0)
+        # Add tabs container (with advanced button on top) to main columns layout
+        columns_layout.addWidget(tabs_container, stretch=1)
+        
+        # Add image preview widget directly (always visible) with higher stretch priority
+        columns_layout.addWidget(self.image_preview_widget, stretch=2)
         
         # Make the columns container itself have proper size policy
         columns_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
