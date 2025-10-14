@@ -776,6 +776,7 @@ class MangaImagePreviewWidget(QWidget):
             }
         """)
         self.download_btn.wheelEvent = lambda event: None  # Disable scroll wheel
+        self.download_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # Prevent focus on click
         self.download_btn.clicked.connect(self._on_download_images_clicked)
         self.download_btn.setEnabled(False)  # Initially disabled until images are translated
         file_info_layout.addWidget(self.download_btn)
@@ -809,6 +810,9 @@ class MangaImagePreviewWidget(QWidget):
                 border-color: #7bb3e0;
             }
         """)
+        # Prevent focus and scroll issues
+        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn.wheelEvent = lambda event: None
         return btn
     
     def _create_compact_button(self, text: str) -> QPushButton:
@@ -838,6 +842,8 @@ class MangaImagePreviewWidget(QWidget):
         """)
         # Disable scroll wheel focus
         btn.wheelEvent = lambda event: None
+        # Prevent button from taking keyboard/mouse focus (prevents scroll on click)
+        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         return btn
     
     def _create_tool_frame(self, title: str) -> QFrame:
