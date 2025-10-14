@@ -452,6 +452,8 @@ class MangaImagePreviewWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.current_image_path = None
+        self.manual_editing_enabled = True  # Manual editing is enabled by default
+        self.translated_folder_path = None  # Path to translated images folder
         self._build_ui()
     
     def _build_ui(self):
@@ -460,13 +462,50 @@ class MangaImagePreviewWidget(QWidget):
         layout.setContentsMargins(5, 5, 5, 5)
         layout.setSpacing(5)
         
-        # Title
+        # Title with toggle switch
+        title_container = QWidget()
+        title_layout = QHBoxLayout(title_container)
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        title_layout.setSpacing(10)
+        
         title_label = QLabel("📷 Image Preview & Editing")
         title_font = title_label.font()
         title_font.setBold(True)
         title_font.setPointSize(10)
         title_label.setFont(title_font)
-        layout.addWidget(title_label)
+        title_layout.addWidget(title_label)
+        
+        # Manual editing toggle
+        from PySide6.QtWidgets import QCheckBox
+        self.manual_editing_toggle = QCheckBox("Enable Manual Editing")
+        self.manual_editing_toggle.setChecked(True)  # Enabled by default
+        self.manual_editing_toggle.setStyleSheet("""
+            QCheckBox {
+                color: white;
+                font-size: 9pt;
+                spacing: 5px;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border: 2px solid #5a9fd4;
+                border-radius: 4px;
+                background-color: #2d2d2d;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #5a9fd4;
+                border-color: #7bb3e0;
+                image: url(data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><path fill='white' d='M0 11l2-2 5 5L18 3l2 2L7 18z'/></svg>);
+            }
+            QCheckBox::indicator:unchecked:hover {
+                border-color: #7bb3e0;
+            }
+        """)
+        self.manual_editing_toggle.stateChanged.connect(self._on_manual_editing_toggled)
+        title_layout.addWidget(self.manual_editing_toggle)
+        
+        title_layout.addStretch()
+        layout.addWidget(title_container)
         
         # Create horizontal layout for viewer + thumbnails
         viewer_container = QWidget()
@@ -530,17 +569,34 @@ class MangaImagePreviewWidget(QWidget):
         self._show_placeholder_icon()
         
         # Manual Tools - Row 1: Box Drawing & Inpainting
-        tools_frame = self._create_tool_frame("Manual Tools")
-        tools_layout = QHBoxLayout(tools_frame)
+        self.tools_frame = self._create_tool_frame("Manual Tools")
+        tools_layout = QHBoxLayout(self.tools_frame)
         tools_layout.setContentsMargins(3, 3, 3, 3)
         tools_layout.setSpacing(3)
         
+        # ALWAYS VISIBLE: Pan and zoom controls at the start
         self.hand_tool_btn = self._create_tool_button("✅", "Pan")
         self.hand_tool_btn.setCheckable(True)
         self.hand_tool_btn.setChecked(True)  # Default to Pan
         self.hand_tool_btn.clicked.connect(lambda: self._set_tool('pan'))
         tools_layout.addWidget(self.hand_tool_btn)
         
+        self.fit_btn = self._create_tool_button("⊟", "Fit to View")
+        self.fit_btn.clicked.connect(self.viewer.fitInView)
+        tools_layout.addWidget(self.fit_btn)
+        
+        self.zoom_in_btn = self._create_tool_button("🔍+", "Zoom In (Shift+Wheel)")
+        self.zoom_in_btn.clicked.connect(self._zoom_in)
+        tools_layout.addWidget(self.zoom_in_btn)
+        
+        self.zoom_out_btn = self._create_tool_button("🔍-", "Zoom Out (Shift+Wheel)")
+        self.zoom_out_btn.clicked.connect(self._zoom_out)
+        tools_layout.addWidget(self.zoom_out_btn)
+        
+        # Add a stretch spacer after zoom controls
+        tools_layout.addStretch()
+        
+        # MANUAL EDITING TOOLS (hidden when manual editing is off)
         self.box_draw_btn = self._create_tool_button("◭", "Draw Box")
         self.box_draw_btn.setCheckable(True)
         self.box_draw_btn.clicked.connect(lambda: self._set_tool('box_draw'))
@@ -603,24 +659,11 @@ class MangaImagePreviewWidget(QWidget):
         self.viewer.rectangle_created.connect(self._update_box_count)
         self.viewer.rectangle_deleted.connect(self._update_box_count)
         
-        # Add zoom controls to the same row
-        self.fit_btn = self._create_tool_button("⊟", "Fit to View")
-        self.fit_btn.clicked.connect(self.viewer.fitInView)
-        tools_layout.addWidget(self.fit_btn)
-        
-        self.zoom_in_btn = self._create_tool_button("🔍+", "Zoom In (Shift+Wheel)")
-        self.zoom_in_btn.clicked.connect(self._zoom_in)
-        tools_layout.addWidget(self.zoom_in_btn)
-        
-        self.zoom_out_btn = self._create_tool_button("🔍-", "Zoom Out (Shift+Wheel)")
-        self.zoom_out_btn.clicked.connect(self._zoom_out)
-        tools_layout.addWidget(self.zoom_out_btn)
-        
-        layout.addWidget(tools_frame)
+        layout.addWidget(self.tools_frame)
         
         # Translation workflow buttons (compact, single row)
-        workflow_frame = self._create_tool_frame("Translation Workflow")
-        workflow_layout = QHBoxLayout(workflow_frame)
+        self.workflow_frame = self._create_tool_frame("Translation Workflow")
+        workflow_layout = QHBoxLayout(self.workflow_frame)
         workflow_layout.setContentsMargins(3, 3, 3, 3)
         workflow_layout.setSpacing(2)
         
@@ -640,13 +683,51 @@ class MangaImagePreviewWidget(QWidget):
         self.translate_btn.clicked.connect(lambda: self._emit_translate_signal())
         workflow_layout.addWidget(self.translate_btn, stretch=1)
         
-        layout.addWidget(workflow_frame)
+        layout.addWidget(self.workflow_frame)
         
-        # Current file label
+        # Current file label with download button
+        file_info_container = QWidget()
+        file_info_layout = QHBoxLayout(file_info_container)
+        file_info_layout.setContentsMargins(0, 0, 0, 0)
+        file_info_layout.setSpacing(8)
+        
         self.file_label = QLabel("No image loaded")
         self.file_label.setStyleSheet("color: gray; font-size: 8pt;")
         self.file_label.setWordWrap(True)
-        layout.addWidget(self.file_label)
+        file_info_layout.addWidget(self.file_label, stretch=1)
+        
+        # Download Images button
+        self.download_btn = QPushButton("📥 Download Images")
+        self.download_btn.setMinimumHeight(24)
+        self.download_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #28a745;
+                color: white;
+                border: 1px solid #28a745;
+                border-radius: 3px;
+                padding: 4px 10px;
+                font-size: 8pt;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #218838;
+                border-color: #218838;
+            }
+            QPushButton:pressed {
+                background-color: #1e7e34;
+            }
+            QPushButton:disabled {
+                background-color: #1a1a1a;
+                color: #666666;
+                border-color: #2a2a2a;
+            }
+        """)
+        self.download_btn.wheelEvent = lambda event: None  # Disable scroll wheel
+        self.download_btn.clicked.connect(self._on_download_images_clicked)
+        self.download_btn.setEnabled(False)  # Initially disabled until images are translated
+        file_info_layout.addWidget(self.download_btn)
+        
+        layout.addWidget(file_info_container)
     
     def _create_tool_button(self, text: str, tooltip: str = "") -> QToolButton:
         """Create a compact tool button"""
@@ -696,7 +777,14 @@ class MangaImagePreviewWidget(QWidget):
             QPushButton:pressed {
                 background-color: #1a1a1a;
             }
+            QPushButton:disabled {
+                background-color: #1a1a1a;
+                color: #666666;
+                border-color: #2a2a2a;
+            }
         """)
+        # Disable scroll wheel focus
+        btn.wheelEvent = lambda event: None
         return btn
     
     def _create_tool_frame(self, title: str) -> QFrame:
@@ -939,3 +1027,141 @@ class MangaImagePreviewWidget(QWidget):
             except Exception as e:
                 # Silently fail if icon can't be loaded
                 pass
+    
+    def _on_manual_editing_toggled(self, state):
+        """Handle manual editing toggle - show/hide manual tools and workflow buttons"""
+        from PySide6.QtCore import Qt
+        enabled = (state == Qt.CheckState.Checked.value)
+        
+        print(f"[DEBUG] Manual editing toggled: {enabled}")
+        
+        # Show/hide manual editing tools ONLY (not pan/zoom which are always visible)
+        self.box_draw_btn.setVisible(enabled)
+        self.brush_btn.setVisible(enabled)
+        self.eraser_btn.setVisible(enabled)
+        self.delete_btn.setVisible(enabled)
+        self.clear_boxes_btn.setVisible(enabled)
+        self.clear_strokes_btn.setVisible(enabled)
+        self.size_slider.setVisible(enabled)
+        self.size_label.setVisible(enabled)
+        self.box_count_label.setVisible(enabled)
+        
+        # Show/hide entire workflow frame (Translation Workflow row)
+        self.workflow_frame.setVisible(enabled)
+        
+        # Pan and zoom buttons are ALWAYS visible (explicitly ensure they stay visible)
+        self.hand_tool_btn.setVisible(True)
+        self.fit_btn.setVisible(True)
+        self.zoom_in_btn.setVisible(True)
+        self.zoom_out_btn.setVisible(True)
+        
+        # If hiding tools, reset to pan tool
+        if not enabled:
+            self._set_tool('pan')
+        
+        # Store state for later use in preview mode
+        self.manual_editing_enabled = enabled
+    
+    def _on_download_images_clicked(self):
+        """Handle download images button - open file dialog to save translated images"""
+        try:
+            from PySide6.QtWidgets import QFileDialog
+            import shutil
+            
+            # Check if we have a translated folder path stored
+            if not hasattr(self, 'translated_folder_path') or not self.translated_folder_path:
+                print("[DEBUG] No translated folder path available")
+                return
+            
+            if not os.path.exists(self.translated_folder_path):
+                print(f"[DEBUG] Translated folder does not exist: {self.translated_folder_path}")
+                return
+            
+            # Get destination folder from user
+            dest_folder = QFileDialog.getExistingDirectory(
+                self,
+                "Select Destination Folder for Translated Images",
+                os.path.expanduser("~"),
+                QFileDialog.Option.ShowDirsOnly
+            )
+            
+            if not dest_folder:
+                print("[DEBUG] User cancelled folder selection")
+                return
+            
+            # Copy all images from translated folder to destination
+            image_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp')
+            copied_count = 0
+            
+            for filename in os.listdir(self.translated_folder_path):
+                if filename.lower().endswith(image_extensions):
+                    src_path = os.path.join(self.translated_folder_path, filename)
+                    dest_path = os.path.join(dest_folder, filename)
+                    shutil.copy2(src_path, dest_path)
+                    copied_count += 1
+            
+            print(f"[DEBUG] Successfully copied {copied_count} translated images to {dest_folder}")
+            
+            # Show success message (could be enhanced with a QMessageBox)
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(
+                self,
+                "Download Complete",
+                f"Successfully downloaded {copied_count} translated images to:\n{dest_folder}"
+            )
+            
+        except Exception as e:
+            print(f"[DEBUG] Error downloading images: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
+    
+    def set_translated_folder(self, folder_path: str):
+        """Set the translated folder path and enable download button"""
+        self.translated_folder_path = folder_path
+        if folder_path and os.path.exists(folder_path):
+            # Check if folder has images
+            image_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp')
+            has_images = any(
+                f.lower().endswith(image_extensions) 
+                for f in os.listdir(folder_path)
+            )
+            self.download_btn.setEnabled(has_images)
+            print(f"[DEBUG] Translated folder set: {folder_path}, has images: {has_images}")
+            
+            # If manual editing is disabled (preview mode), load translated images
+            if not self.manual_editing_enabled and has_images:
+                self._load_translated_preview(folder_path)
+        else:
+            self.download_btn.setEnabled(False)
+    
+    def _load_translated_preview(self, folder_path: str):
+        """Load translated images from folder into preview mode"""
+        try:
+            print(f"[DEBUG] Loading translated images from: {folder_path}")
+            
+            # Get all translated images
+            image_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp')
+            translated_images = sorted([
+                os.path.join(folder_path, f)
+                for f in os.listdir(folder_path)
+                if f.lower().endswith(image_extensions)
+            ])
+            
+            if not translated_images:
+                print("[DEBUG] No translated images found")
+                return
+            
+            print(f"[DEBUG] Found {len(translated_images)} translated images")
+            
+            # Update thumbnail list with translated images
+            self.set_image_list(translated_images)
+            
+            # Load the first translated image
+            if translated_images:
+                self.load_image(translated_images[0])
+                print(f"[DEBUG] Loaded first translated image: {os.path.basename(translated_images[0])}")
+            
+        except Exception as e:
+            print(f"[DEBUG] Error loading translated preview: {str(e)}")
+            import traceback
+            print(traceback.format_exc())

@@ -9997,6 +9997,16 @@ class MangaTranslationTab:
                         self._restore_translate_button()
                     except Exception as e:
                         self._log(f"❌ Failed to restore translate button: {str(e)}", "error")
+                
+                elif update[0] == 'set_translated_folder':
+                    # Set translated folder for preview mode and download button
+                    _, folder_path = update
+                    try:
+                        if hasattr(self, 'image_preview_widget'):
+                            self.image_preview_widget.set_translated_folder(folder_path)
+                            self._log(f"✅ Preview mode updated with translated images", "success")
+                    except Exception as e:
+                        self._log(f"❌ Failed to set translated folder: {str(e)}", "error")
                     
         except Exception:
             # Queue is empty or some other exception
@@ -11772,6 +11782,26 @@ class MangaTranslationTab:
                     self.total_files,
                     f"Complete! {self.completed_files} successful, {self.failed_files} failed"
                 )
+                
+                # Enable download button and preview mode if translation succeeded
+                if self.completed_files > 0 and hasattr(self, 'image_preview_widget'):
+                    # Determine translated folder path
+                    translated_folder = None
+                    if self.selected_files and len(self.selected_files) > 0:
+                        first_file = self.selected_files[0]
+                        if self.create_subfolder_value:
+                            translated_folder = os.path.join(os.path.dirname(first_file), 'translated')
+                        else:
+                            # For non-subfolder mode, use parent directory
+                            translated_folder = os.path.dirname(first_file)
+                    
+                    # Set translated folder via update queue (main thread) for GUI updates
+                    if translated_folder and os.path.exists(translated_folder):
+                        try:
+                            self.update_queue.put(('set_translated_folder', translated_folder))
+                            self._log(f"💻 Preview mode will be updated with translated images from: {translated_folder}", "info")
+                        except Exception as e:
+                            self._log(f"⚠️ Failed to queue preview mode update: {e}", "warning")
             
         except Exception as e:
             self._log(f"\n❌ Translation error: {str(e)}", "error")
