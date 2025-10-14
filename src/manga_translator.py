@@ -1224,13 +1224,9 @@ class MangaTranslator:
             else:
                 self._initialize_local_inpainter()
             
-        # advanced settings
-        self.debug_mode = self.manga_settings.get('advanced', {}).get('debug_mode', False)
-        self.save_intermediate = self.manga_settings.get('advanced', {}).get('save_intermediate', False)
-        self.parallel_processing = self.manga_settings.get('advanced', {}).get('parallel_processing', True)
-        self.max_workers = self.manga_settings.get('advanced', {}).get('max_workers', 2)
-        # Deep cleanup control: if True, release models after every image (aggressive)
-        self.force_deep_cleanup_each_image = self.manga_settings.get('advanced', {}).get('force_deep_cleanup_each_image', False)
+        # NOTE: All advanced settings are now accessed dynamically via properties
+        # This allows settings changes to take effect immediately without GUI restart
+        # Cached variables have been removed - see properties below in this class
         
         # RAM cap
         adv = self.manga_settings.get('advanced', {})
@@ -1252,8 +1248,7 @@ class MangaTranslator:
             self.ram_baseline_mb = 0
         if self.ram_cap_enabled and self.ram_cap_mb > 0:
             self._init_ram_cap()
-            
-            
+    
     def set_stop_flag(self, stop_flag):
         """Set the stop flag for checking interruptions"""
         self.stop_flag = stop_flag
@@ -3616,8 +3611,8 @@ class MangaTranslator:
                                 # Step 2: Match OCR lines to RT-DETR blocks (comic-translate approach)
                                 self._log(f"🔗 Step 2: Matching {len(full_image_ocr)} OCR lines to {len(all_regions)} RT-DETR blocks")
                                 source_lang = ocr_settings.get('language_hints', ['ja'])[0] if ocr_settings.get('language_hints') else 'ja'
-                                # Enable debug mode based on manga settings
-                                debug_matching = self.debug_mode  # Respect the debug mode toggle
+                                # Enable debug mode based on manga settings  
+                                debug_matching = self.main_gui.config.get('manga_settings', {}).get('advanced', {}).get('debug_mode', False)
                                 matched_blocks = match_ocr_to_rtdetr_blocks(full_image_ocr, all_regions, source_lang, debug=debug_matching)
                                 
                                 # Convert matched blocks to TextRegion format
@@ -4323,7 +4318,7 @@ class MangaTranslator:
                             self._log(f"🔑 Preserved RT-DETR detections for free text classification", "debug")
                             
                             # Check if parallel processing is enabled
-                            if self.parallel_processing and len(all_regions) > 1:
+                            if self.main_gui.config.get('manga_settings', {}).get('advanced', {}).get('parallel_processing', True) and len(all_regions) > 1:
                                 self._log(f"🚀 Using PARALLEL OCR for {len(all_regions)} regions with manga-ocr")
                                 ocr_results = self._parallel_ocr_regions(image, all_regions, 'manga-ocr', confidence_threshold)
                             else:
@@ -4389,7 +4384,7 @@ class MangaTranslator:
                             self._log(f"🔑 Preserved RT-DETR detections for free text classification", "debug")
                             
                             # Check if parallel processing is enabled
-                            if self.parallel_processing and len(all_regions) > 1:
+                            if self.main_gui.config.get('manga_settings', {}).get('advanced', {}).get('parallel_processing', True) and len(all_regions) > 1:
                                 self._log(f"🚀 Using PARALLEL OCR for {len(all_regions)} regions with Qwen2-VL")
                                 ocr_results = self._parallel_ocr_regions(image, all_regions, 'Qwen2-VL', confidence_threshold)
                             else:
@@ -4459,7 +4454,7 @@ class MangaTranslator:
                             
                             # Decide parallelization for custom-api:
                             # Use API batch mode OR local parallel toggle so that API calls can run in parallel
-                            if (getattr(self, 'batch_mode', False) or self.parallel_processing) and len(all_regions) > 1:
+                            if (getattr(self, 'batch_mode', False) or self.main_gui.config.get('manga_settings', {}).get('advanced', {}).get('parallel_processing', True)) and len(all_regions) > 1:
                                 self._log(f"🚀 Using PARALLEL OCR for {len(all_regions)} regions (custom-api; API batch mode honored)")
                                 ocr_results = self._parallel_ocr_regions(image, all_regions, 'custom-api', confidence_threshold)
                             else:
@@ -4549,7 +4544,7 @@ class MangaTranslator:
                             self._log(f"🔑 Preserved RT-DETR detections for free text classification", "debug")
                             
                             # Check if parallel processing is enabled
-                            if self.parallel_processing and len(all_regions) > 1:
+                            if self.main_gui.config.get('manga_settings', {}).get('advanced', {}).get('parallel_processing', True) and len(all_regions) > 1:
                                 self._log(f"🚀 Using PARALLEL OCR for {len(all_regions)} regions with EasyOCR")
                                 ocr_results = self._parallel_ocr_regions(image, all_regions, 'easyocr', confidence_threshold)
                             else:
@@ -4633,7 +4628,7 @@ class MangaTranslator:
                             self._log(f"🔑 Preserved RT-DETR detections for free text classification", "debug")
                             
                             # Check if parallel processing is enabled
-                            if self.parallel_processing and len(all_regions) > 1:
+                            if self.main_gui.config.get('manga_settings', {}).get('advanced', {}).get('parallel_processing', True) and len(all_regions) > 1:
                                 self._log(f"🚀 Using PARALLEL OCR for {len(all_regions)} regions with PaddleOCR")
                                 ocr_results = self._parallel_ocr_regions(image, all_regions, 'paddleocr', confidence_threshold)
                             else:
@@ -4701,7 +4696,7 @@ class MangaTranslator:
                             self._log(f"🔑 Preserved RT-DETR detections for free text classification", "debug")
                             
                             # Check if parallel processing is enabled
-                            if self.parallel_processing and len(all_regions) > 1:
+                            if self.main_gui.config.get('manga_settings', {}).get('advanced', {}).get('parallel_processing', True) and len(all_regions) > 1:
                                 self._log(f"🚀 Using PARALLEL OCR for {len(all_regions)} regions with DocTR")
                                 ocr_results = self._parallel_ocr_regions(image, all_regions, 'doctr', confidence_threshold)
                             else:
@@ -4778,7 +4773,7 @@ class MangaTranslator:
                                     # Step 2: Match OCR lines to RT-DETR blocks (comic-translate approach)
                                     self._log(f"🔗 Step 2: Matching {len(full_image_ocr)} OCR lines to {len(all_regions)} RT-DETR blocks")
                                     source_lang = ocr_settings.get('language_hints', ['ja'])[0] if ocr_settings.get('language_hints') else 'ja'
-                                    matched_blocks = match_ocr_to_rtdetr_blocks(full_image_ocr, all_regions, source_lang, debug=self.debug_mode)
+                                    matched_blocks = match_ocr_to_rtdetr_blocks(full_image_ocr, all_regions, source_lang, debug=self.main_gui.config.get('manga_settings', {}).get('advanced', {}).get('debug_mode', False))
                                     
                                     # Convert matched blocks to OCR results
                                     ocr_results = []
@@ -5019,7 +5014,7 @@ class MangaTranslator:
                                     # Step 2: Match OCR lines to RT-DETR blocks (comic-translate approach)
                                     self._log(f"🔗 Step 2: Matching {len(full_image_ocr)} OCR lines to {len(all_regions)} RT-DETR blocks")
                                     source_lang = ocr_settings.get('language_hints', ['ja'])[0] if ocr_settings.get('language_hints') else 'ja'
-                                    matched_blocks = match_ocr_to_rtdetr_blocks(full_image_ocr, all_regions, source_lang, debug=self.debug_mode)
+                                    matched_blocks = match_ocr_to_rtdetr_blocks(full_image_ocr, all_regions, source_lang, debug=self.main_gui.config.get('manga_settings', {}).get('advanced', {}).get('debug_mode', False))
                                     
                                     # Convert matched blocks to OCR results
                                     ocr_results = []
@@ -7938,7 +7933,7 @@ class MangaTranslator:
         self._log(f"🎭 Creating text mask for {len(regions)} regions", "info")
         
         # Log detailed state of each region (only when verbose debug is enabled)
-        if self.debug_mode:
+        if self.main_gui.config.get('manga_settings', {}).get('advanced', {}).get('debug_mode', False):
             self._log("\n📋 REGION STATES BEFORE MASKING:", "debug")
             for idx, region in enumerate(regions):
                 self._log(f"\nRegion {idx + 1}:", "debug")
