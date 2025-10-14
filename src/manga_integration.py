@@ -7374,14 +7374,7 @@ class MangaTranslationTab:
             image_path = self.image_preview_widget.current_image_path
             
             # Get detection settings for the background thread
-            manga_settings = self.main_gui.config.get('manga_settings', {})
-            ocr_settings = manga_settings.get('ocr', {})
-            detection_config = {
-                'detector_type': ocr_settings.get('detector_type', 'rtdetr_onnx'),
-                'model_path': ocr_settings.get('bubble_model_path', ''),
-                'model_url': ocr_settings.get('rtdetr_model_url', 'ogkalu/comic-text-and-bubble-detector'),
-                'confidence': ocr_settings.get('bubble_confidence', 0.3)
-            }
+            detection_config = self._get_detection_config()
             
             self._log(f"🔍 Starting background detection: {os.path.basename(image_path)}", "info")
             
@@ -7412,6 +7405,12 @@ class MangaTranslationTab:
             model_path = detection_config['model_path']
             model_url = detection_config['model_url']
             confidence = detection_config['confidence']
+            detect_free_text = detection_config.get('detect_free_text', True)
+            detect_empty_bubbles = detection_config.get('detect_empty_bubbles', True)
+            detect_text_bubbles = detection_config.get('detect_text_bubbles', True)
+            
+            # Log detection settings
+            self._log(f"📋 Detection settings: Empty bubbles={'✓' if detect_empty_bubbles else '✗'}, Text bubbles={'✓' if detect_text_bubbles else '✗'}, Free text={'✓' if detect_free_text else '✗'}", "info")
             
             # Load the appropriate model based on user settings
             success = False
@@ -7454,24 +7453,38 @@ class MangaTranslationTab:
                 # For RT-DETR, get detailed detection results to avoid double boxes
                 if detector_type == 'rtdetr_onnx' and hasattr(detector, 'detect_with_rtdetr_onnx'):
                     detection_results = detector.detect_with_rtdetr_onnx(image_path, confidence=confidence, return_all_bubbles=False)
-                    # Combine text_bubbles and text_free to get all text regions
+                    # Combine enabled bubble types based on settings
+                    empty_bubbles = detection_results.get('bubbles', [])
                     text_bubbles = detection_results.get('text_bubbles', [])
                     text_free = detection_results.get('text_free', [])
-                    boxes = text_bubbles + text_free
-                    if not boxes:
-                        # Fallback to all bubbles if no text regions found
-                        boxes = detection_results.get('bubbles', [])
-                    self._log(f"📋 RT-DETR ONNX: {len(text_bubbles)} text bubbles + {len(text_free)} free text = {len(boxes)} total regions", "info")
+                    
+                    boxes = []
+                    if detect_empty_bubbles:
+                        boxes.extend(empty_bubbles)
+                    if detect_text_bubbles:
+                        boxes.extend(text_bubbles)
+                    if detect_free_text:
+                        boxes.extend(text_free)
+                    
+                    self._log(f"📋 RT-DETR ONNX: {len(empty_bubbles)} empty + {len(text_bubbles)} text bubbles + {len(text_free)} free text", "info")
+                    self._log(f"📊 After filtering: {len(boxes)} regions included", "info")
                 elif detector_type == 'rtdetr' and hasattr(detector, 'detect_with_rtdetr'):
                     detection_results = detector.detect_with_rtdetr(image_path, confidence=confidence, return_all_bubbles=False)
-                    # Combine text_bubbles and text_free to get all text regions
+                    # Combine enabled bubble types based on settings
+                    empty_bubbles = detection_results.get('bubbles', [])
                     text_bubbles = detection_results.get('text_bubbles', [])
                     text_free = detection_results.get('text_free', [])
-                    boxes = text_bubbles + text_free
-                    if not boxes:
-                        # Fallback to all bubbles if no text regions found
-                        boxes = detection_results.get('bubbles', [])
-                    self._log(f"📋 RT-DETR: {len(text_bubbles)} text bubbles + {len(text_free)} free text = {len(boxes)} total regions", "info")
+                    
+                    boxes = []
+                    if detect_empty_bubbles:
+                        boxes.extend(empty_bubbles)
+                    if detect_text_bubbles:
+                        boxes.extend(text_bubbles)
+                    if detect_free_text:
+                        boxes.extend(text_free)
+                    
+                    self._log(f"📋 RT-DETR: {len(empty_bubbles)} empty + {len(text_bubbles)} text bubbles + {len(text_free)} free text", "info")
+                    self._log(f"📊 After filtering: {len(boxes)} regions included", "info")
                 else:
                     # Fallback to old method
                     boxes = detector.detect_bubbles(image_path, confidence=confidence, use_rtdetr=True)
@@ -7806,6 +7819,177 @@ class MangaTranslationTab:
         except Exception:
             pass
     
+    def _get_detection_config(self) -> dict:
+        """Get detection configuration from settings"""
+        manga_settings = self.main_gui.config.get('manga_settings', {})
+        ocr_settings = manga_settings.get('ocr', {})
+        detection_config = {
+            'detector_type': ocr_settings.get('detector_type', 'rtdetr_onnx'),
+            'model_path': ocr_settings.get('bubble_model_path', ''),
+            'model_url': ocr_settings.get('rtdetr_model_url', 'ogkalu/comic-text-and-bubble-detector'),
+            'confidence': ocr_settings.get('bubble_confidence', 0.3),
+            'detect_free_text': ocr_settings.get('detect_free_text', True),  # Free text checkbox setting
+            'detect_empty_bubbles': ocr_settings.get('detect_empty_bubbles', True),
+            'detect_text_bubbles': ocr_settings.get('detect_text_bubbles', True)
+        }
+        return detection_config
+    
+    def _extract_regions_for_background(self):
+        """Helper to extract regions from preview and store for background thread"""
+        try:
+            regions = self._extract_regions_from_preview()
+            self._temp_regions_extracted = regions
+            print(f"[EXTRACT] Extracted {len(regions)} regions for background thread")
+        except Exception as e:
+            print(f"[EXTRACT] Error extracting regions: {e}")
+            self._temp_regions_extracted = []
+    
+    def _run_detection_sync(self, image_path: str, detection_config: dict) -> list:
+        """Run detection synchronously (for Recognize button) and return regions
+        
+        Args:
+            image_path: Path to the image
+            detection_config: Detection configuration dict
+            
+        Returns:
+            list: List of region dictionaries, or empty list if detection failed
+        """
+        try:
+            import cv2
+            from bubble_detector import BubbleDetector
+            
+            # Create bubble detector
+            detector = BubbleDetector()
+            
+            # Extract settings from config
+            detector_type = detection_config['detector_type']
+            model_path = detection_config['model_path']
+            model_url = detection_config['model_url']
+            confidence = detection_config['confidence']
+            detect_free_text = detection_config.get('detect_free_text', True)
+            detect_empty_bubbles = detection_config.get('detect_empty_bubbles', True)
+            detect_text_bubbles = detection_config.get('detect_text_bubbles', True)
+            
+            # Load the appropriate model based on user settings
+            success = False
+            if detector_type == 'rtdetr_onnx':
+                # Use model_path if available, otherwise use model_url
+                model_source = model_path if (model_path and os.path.exists(model_path)) else model_url
+                success = detector.load_rtdetr_onnx_model(model_source)
+                print(f"[DETECT_SYNC] Loading RT-DETR ONNX model: {os.path.basename(model_source) if model_path else model_source}")
+            elif detector_type == 'rtdetr':
+                success = detector.load_rtdetr_model(model_id=model_url or 'ogkalu/comic-text-and-bubble-detector')
+                print(f"[DETECT_SYNC] Loading RT-DETR model: {model_url}")
+            elif detector_type == 'yolo' and model_path:
+                success = detector.load_model(model_path)
+                print(f"[DETECT_SYNC] Loading YOLO model: {os.path.basename(model_path)}")
+            elif detector_type == 'custom' and model_path:
+                success = detector.load_model(model_path)
+                print(f"[DETECT_SYNC] Loading custom model: {os.path.basename(model_path)}")
+            else:
+                # Default fallback
+                success = detector.load_rtdetr_onnx_model('ogkalu/comic-text-and-bubble-detector')
+                print(f"[DETECT_SYNC] Loading default RT-DETR ONNX model")
+            
+            if not success:
+                print(f"[DETECT_SYNC] Failed to load bubble detection model")
+                return []
+            
+            # Load and validate image
+            image = cv2.imread(image_path)
+            if image is None:
+                print(f"[DETECT_SYNC] Failed to load image: {os.path.basename(image_path)}")
+                return []
+            
+            # Run bubble detection
+            print(f"[DETECT_SYNC] Running bubble detection (confidence: {confidence:.2f})")
+            
+            # Use appropriate detection method based on detector type
+            if detector_type in ['rtdetr_onnx', 'rtdetr']:
+                # For RT-DETR, get detailed detection results to avoid double boxes
+                if detector_type == 'rtdetr_onnx' and hasattr(detector, 'detect_with_rtdetr_onnx'):
+                    detection_results = detector.detect_with_rtdetr_onnx(image_path, confidence=confidence, return_all_bubbles=False)
+                    # Combine enabled bubble types based on settings
+                    empty_bubbles = detection_results.get('bubbles', [])
+                    text_bubbles = detection_results.get('text_bubbles', [])
+                    text_free = detection_results.get('text_free', [])
+                    
+                    boxes = []
+                    if detect_empty_bubbles:
+                        boxes.extend(empty_bubbles)
+                    if detect_text_bubbles:
+                        boxes.extend(text_bubbles)
+                    if detect_free_text:
+                        boxes.extend(text_free)
+                    
+                    print(f"[DETECT_SYNC] RT-DETR ONNX: {len(empty_bubbles)} empty + {len(text_bubbles)} text bubbles + {len(text_free)} free text")
+                    print(f"[DETECT_SYNC] Filters: empty={detect_empty_bubbles}, text_bubbles={detect_text_bubbles}, free_text={detect_free_text}")
+                    print(f"[DETECT_SYNC] Result: {len(boxes)} regions included after filtering")
+                elif detector_type == 'rtdetr' and hasattr(detector, 'detect_with_rtdetr'):
+                    detection_results = detector.detect_with_rtdetr(image_path, confidence=confidence, return_all_bubbles=False)
+                    # Combine enabled bubble types based on settings
+                    empty_bubbles = detection_results.get('bubbles', [])
+                    text_bubbles = detection_results.get('text_bubbles', [])
+                    text_free = detection_results.get('text_free', [])
+                    
+                    boxes = []
+                    if detect_empty_bubbles:
+                        boxes.extend(empty_bubbles)
+                    if detect_text_bubbles:
+                        boxes.extend(text_bubbles)
+                    if detect_free_text:
+                        boxes.extend(text_free)
+                    
+                    print(f"[DETECT_SYNC] RT-DETR: {len(empty_bubbles)} empty + {len(text_bubbles)} text bubbles + {len(text_free)} free text")
+                    print(f"[DETECT_SYNC] Filters: empty={detect_empty_bubbles}, text_bubbles={detect_text_bubbles}, free_text={detect_free_text}")
+                    print(f"[DETECT_SYNC] Result: {len(boxes)} regions included after filtering")
+                else:
+                    # Fallback to old method
+                    boxes = detector.detect_bubbles(image_path, confidence=confidence, use_rtdetr=True)
+            else:
+                boxes = detector.detect_bubbles(image_path, confidence=confidence)
+            
+            if not boxes:
+                print(f"[DETECT_SYNC] No text regions detected")
+                return []
+            
+            print(f"[DETECT_SYNC] Found {len(boxes)} text regions")
+            
+            # Process detection boxes and store regions
+            regions = []
+            for i, box in enumerate(boxes):
+                if len(box) >= 4:
+                    # Validate and convert coordinates
+                    try:
+                        x, y, width, height = int(box[0]), int(box[1]), int(box[2]), int(box[3])
+                        
+                        # Clamp coordinates to image bounds
+                        x = max(0, min(x, image.shape[1] - 1))
+                        y = max(0, min(y, image.shape[0] - 1))
+                        x2 = max(x + 1, min(x + width, image.shape[1]))
+                        y2 = max(y + 1, min(y + height, image.shape[0]))
+                        
+                        # Store region for workflow continuity
+                        region_dict = {
+                            'bbox': [x, y, x2 - x, y2 - y],  # (x, y, width, height)
+                            'coords': [[x, y], [x2, y], [x2, y2], [x, y2]],  # Corner coordinates
+                            'confidence': getattr(box, 'confidence', confidence) if hasattr(box, 'confidence') else confidence
+                        }
+                        regions.append(region_dict)
+                        
+                    except (ValueError, IndexError) as e:
+                        print(f"[DETECT_SYNC] Skipping invalid box {i}: {e}")
+                        continue
+            
+            print(f"[DETECT_SYNC] Detection complete! Found {len(regions)} valid regions")
+            return regions
+            
+        except Exception as e:
+            import traceback
+            print(f"[DETECT_SYNC] Synchronous detection failed: {str(e)}")
+            print(f"[DETECT_SYNC] Traceback: {traceback.format_exc()}")
+            return []
+    
     def _run_inpainting_sync(self, image_path: str, regions: list) -> str:
         """Run inpainting synchronously (for Translate button) and return cleaned image path
         
@@ -7939,15 +8123,10 @@ class MangaTranslationTab:
                 if hasattr(self.image_preview_widget, 'viewer'):
                     print(f"[DEBUG] Number of rectangles: {len(self.image_preview_widget.viewer.rectangles)}")
             
-            # Check if we have an image and rectangles
+            # Check if we have an image
             if not hasattr(self, 'image_preview_widget') or not self.image_preview_widget.current_image_path:
                 self._log("⚠️ No image loaded for text recognition", "warning")
                 print("[DEBUG] No image loaded - returning early")
-                return
-            
-            if not hasattr(self.image_preview_widget, 'viewer') or not self.image_preview_widget.viewer.rectangles:
-                self._log("⚠️ No text regions to recognize. Please run 'Detect Text' or manually draw boxes first.", "warning")
-                print("[DEBUG] No rectangles found - returning early")
                 return
             
             # Disable the recognize button to prevent multiple clicks
@@ -7969,21 +8148,21 @@ class MangaTranslationTab:
             print(f"[DEBUG] OCR config: {ocr_config}")
             self._log(f"🤖 Using OCR provider: {ocr_config['provider']}", "info")
             
-            # Extract regions from current preview rectangles
-            regions = self._extract_regions_from_preview()
-            print(f"[DEBUG] Extracted {len(regions)} regions from preview")
+            # Check if we have rectangles - if not, run detection first!
+            has_rectangles = (hasattr(self.image_preview_widget, 'viewer') and 
+                            self.image_preview_widget.viewer.rectangles and 
+                            len(self.image_preview_widget.viewer.rectangles) > 0)
             
-            if not regions:
-                self._log("⚠️ No valid regions found in preview", "warning")
-                self._restore_recognize_button()
-                return
-            
-            self._log(f"📝 Starting text recognition on {len(regions)} regions using {ocr_config['provider']}", "info")
+            if not has_rectangles:
+                print("[DEBUG] No rectangles found - need to run detection first")
+                self._log("🔍 No text regions found - running automatic detection first...", "info")
+                # Note: Detection will be run in the background thread, regions will be extracted there
             
             # Run OCR in background thread
+            # Pass has_rectangles flag so background thread knows if it needs to detect first
             import threading
             thread = threading.Thread(target=self._run_recognize_background, 
-                                    args=(image_path, regions, ocr_config),
+                                    args=(image_path, has_rectangles, ocr_config),
                                     daemon=True)
             thread.start()
             
@@ -7996,10 +8175,38 @@ class MangaTranslationTab:
             print(f"[DEBUG] Recognize setup error traceback: {traceback_msg}")
             self._restore_recognize_button()
     
-    def _run_recognize_background(self, image_path: str, regions: list, ocr_config: dict):
+    def _run_recognize_background(self, image_path: str, has_rectangles: bool, ocr_config: dict):
         """Run text recognition in background thread"""
         try:
             import cv2
+            
+            # STEP 0: Check if we need to run detection first
+            regions = None
+            if not has_rectangles:
+                print("[RECOGNIZE] No rectangles - running detection first...")
+                self._log("🔍 Running automatic text detection...", "info")
+                
+                # Run detection synchronously
+                detection_config = self._get_detection_config()
+                regions = self._run_detection_sync(image_path, detection_config)
+                
+                if not regions or len(regions) == 0:
+                    self._log("⚠️ No text regions detected in image", "warning")
+                    self.update_queue.put(('recognize_button_restore', None))
+                    return
+                
+                print(f"[RECOGNIZE] Detection found {len(regions)} regions")
+                self._log(f"✅ Detected {len(regions)} text regions", "success")
+                
+                # Send detection results to main thread to draw boxes
+                self.update_queue.put(('detect_results', {
+                    'image_path': image_path,
+                    'regions': regions
+                }))
+            else:
+                # Extract regions from existing rectangles on main thread via callback
+                # We'll extract them below after loading the image
+                print("[RECOGNIZE] Using existing rectangles")
             
             # Load image
             image = cv2.imread(image_path)
@@ -8007,6 +8214,25 @@ class MangaTranslationTab:
                 self._log(f"❌ Failed to load image: {os.path.basename(image_path)}", "error")
                 self.update_queue.put(('recognize_button_restore', None))
                 return
+            
+            # If we didn't run detection (had existing rectangles), extract them now
+            if regions is None:
+                # Need to extract from preview on main thread - use a temporary storage
+                import time
+                self._temp_regions_extracted = None
+                self.update_queue.put(('call_method', (self._extract_regions_for_background, ())))
+                # Wait a bit for main thread to process (not ideal but simple)
+                for _ in range(50):  # Wait up to 5 seconds
+                    time.sleep(0.1)
+                    if self._temp_regions_extracted is not None:
+                        regions = self._temp_regions_extracted
+                        self._temp_regions_extracted = None
+                        break
+                
+                if not regions:
+                    self._log("❌ Failed to extract regions from preview", "error")
+                    self.update_queue.put(('recognize_button_restore', None))
+                    return
             
             # Initialize OCR manager if not already done
             if not hasattr(self, 'ocr_manager') or not self.ocr_manager:
