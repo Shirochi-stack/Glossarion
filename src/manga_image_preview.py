@@ -475,8 +475,10 @@ class MangaImagePreviewWidget(QWidget):
         title_label.setFont(title_font)
         title_layout.addWidget(title_label)
         
-        # Manual editing toggle
+        # Manual editing toggle with spinning icon
         from PySide6.QtWidgets import QCheckBox
+        from spinning import create_spinning_checkbox_with_icon
+        
         self.manual_editing_toggle = QCheckBox("✓ Enable Manual Editing")  # Checkmark in label
         self.manual_editing_toggle.setChecked(True)  # Enabled by default
         self.manual_editing_toggle.setStyleSheet("""
@@ -511,9 +513,49 @@ class MangaImagePreviewWidget(QWidget):
                 background-color: #7bb3e0;
             }
         """)
+        
+        # Create checkmark overlay (same technique as manga_settings_dialog.py)
+        self.checkmark_overlay = QLabel("✓", self.manual_editing_toggle)
+        self.checkmark_overlay.setStyleSheet("""
+            QLabel {
+                color: white;
+                background: transparent;
+                font-weight: bold;
+                font-size: 14px;
+            }
+        """)
+        self.checkmark_overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.checkmark_overlay.hide()
+        self.checkmark_overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)  # Make checkmark click-through
+        
+        # Position checkmark properly
+        def position_checkmark():
+            self.checkmark_overlay.setGeometry(2, 2, 20, 20)
+        
+        # Show/hide checkmark based on checked state
+        def update_checkmark_visibility():
+            if self.manual_editing_toggle.isChecked():
+                position_checkmark()
+                self.checkmark_overlay.show()
+            else:
+                self.checkmark_overlay.hide()
+        
+        self.manual_editing_toggle.stateChanged.connect(update_checkmark_visibility)
+        # Delay initial positioning to ensure widget is properly rendered
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, lambda: (position_checkmark(), update_checkmark_visibility()))
         self.manual_editing_toggle.stateChanged.connect(self._on_manual_editing_toggled)
         self.manual_editing_toggle.stateChanged.connect(self._update_toggle_label)
         title_layout.addWidget(self.manual_editing_toggle)
+        
+        # Add spinning Halgakos icon next to checkbox
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        self.halgakos_icon = create_spinning_checkbox_with_icon(
+            self.manual_editing_toggle,
+            icon_size=20,
+            base_dir=script_dir
+        )
+        title_layout.addWidget(self.halgakos_icon)
         
         title_layout.addStretch()
         layout.addWidget(title_container)
