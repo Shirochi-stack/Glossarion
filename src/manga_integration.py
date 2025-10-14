@@ -7875,6 +7875,18 @@ class MangaTranslationTab:
         }
         return detection_config
     
+    def _get_inpaint_config(self) -> dict:
+        """Get inpainting configuration from settings"""
+        inpaint_config = {
+            'method': self.inpaint_method_value if hasattr(self, 'inpaint_method_value') else 'none',
+            'model_type': self.local_model_type_value if hasattr(self, 'local_model_type_value') else 'lama',
+            'model_path': self.local_model_path_value if hasattr(self, 'local_model_path_value') else '',
+            'quality': self.inpaint_quality_value if hasattr(self, 'inpaint_quality_value') else 'high',
+            'dilation': self.inpaint_dilation_value if hasattr(self, 'inpaint_dilation_value') else 0,
+            'passes': self.inpaint_passes_value if hasattr(self, 'inpaint_passes_value') else 2
+        }
+        return inpaint_config
+    
     def _extract_regions_for_background(self):
         """Helper to extract regions from preview and store for background thread"""
         try:
@@ -10670,6 +10682,9 @@ class MangaTranslationTab:
                 self.image_preview_widget.translate_all_btn.setEnabled(False)
                 self.image_preview_widget.translate_all_btn.setText(f"Translating... (0/{total_images})")
             
+            # Add blue pulse processing overlay
+            self._add_processing_overlay()
+            
             # Run in background thread
             import threading
             thread = threading.Thread(target=self._run_translate_all_background, 
@@ -10730,6 +10745,15 @@ class MangaTranslationTab:
                     
                     self._log(f"✅ [{idx}/{total}] Detected {len(regions)} regions", "success")
                     
+                    # Send detection results to main thread to draw GREEN boxes
+                    self.update_queue.put(('detect_results', {
+                        'image_path': image_path,
+                        'regions': regions
+                    }))
+                    
+                    # Brief pause so user can see green detection boxes
+                    time.sleep(0.3)
+                    
                     # Step 2: Run OCR
                     recognized_texts = self._run_ocr_on_regions(image_path, regions, ocr_config)
                     if not recognized_texts:
@@ -10738,6 +10762,32 @@ class MangaTranslationTab:
                         continue
                     
                     self._log(f"✅ [{idx}/{total}] Recognized {len(recognized_texts)} text regions", "success")
+                    
+                    # Send recognition results to main thread to draw BLUE boxes
+                    self.update_queue.put(('recognize_results', {
+                        'image_path': image_path,
+                        'recognized_texts': recognized_texts
+                    }))
+                    
+                    # Brief pause so user can see blue recognition boxes
+                    time.sleep(0.3)
+                    
+                    # Step 2.5: Run inpainting/cleaning if enabled (optional visual step)
+                    try:
+                        inpaint_config = self._get_inpaint_config()
+                        if inpaint_config.get('method') != 'none':
+                            self._log(f"🧹 [{idx}/{total}] Cleaning image...", "info")
+                            cleaned_path = self._run_inpainting_sync(image_path, regions, inpaint_config)
+                            if cleaned_path and os.path.exists(cleaned_path):
+                                # Store cleaned image path for rendering
+                                self._cleaned_image_path = cleaned_path
+                                # Load cleaned image in preview
+                                self.update_queue.put(('load_preview_image', cleaned_path))
+                                self._log(f"✅ [{idx}/{total}] Image cleaned", "success")
+                                # Brief pause to show cleaned image
+                                time.sleep(0.3)
+                    except Exception as e:
+                        self._log(f"⚠️ [{idx}/{total}] Cleaning skipped: {str(e)}", "warning")
                     
                     # Step 3: Run translation
                     translated_texts = self._translate_individually(recognized_texts, image_path)
@@ -10748,11 +10798,14 @@ class MangaTranslationTab:
                     
                     self._log(f"✅ [{idx}/{total}] Translated {len(translated_texts)} regions", "success")
                     
-                    # Send results to main thread for rendering
+                    # Send results to main thread for rendering (with cleaned image if available)
                     self.update_queue.put(('translate_results', {
                         'image_path': image_path,
                         'translated_texts': translated_texts
                     }))
+                    
+                    # Longer pause so user can see the final translated result
+                    time.sleep(0.8)
                     
                     translated_count += 1
                     
@@ -10774,6 +10827,8 @@ class MangaTranslationTab:
             self._log(f"❌ Batch translation failed: {str(e)}", "error")
             print(f"[TRANSLATE_ALL] Fatal error: {traceback.format_exc()}")
         finally:
+            # Remove blue pulse overlay
+            self.update_queue.put(('remove_processing_overlay', None))
             # Restore button
             self.update_queue.put(('translate_all_button_restore', None))
     
@@ -11594,6 +11649,13 @@ class MangaTranslationTab:
                         self._restore_translate_all_button()
                     except Exception as e:
                         self._log(f"❌ Failed to restore translate all button: {str(e)}", "error")
+                
+                elif update[0] == 'remove_processing_overlay':
+                    # Remove the blue pulse overlay
+                    try:
+                        self._remove_processing_overlay()
+                    except Exception as e:
+                        print(f"Error removing processing overlay: {str(e)}")
                 
                 elif update[0] == 'set_translated_folder':
                     # Set translated folder for preview mode and download button
