@@ -8740,6 +8740,14 @@ class MangaTranslationTab:
             text_edit = QTextEdit()
             text_edit.setPlainText(ocr_text)
             text_edit.setReadOnly(False)  # Make it editable
+            
+            # Apply user's selected font from manga settings
+            font_name = getattr(self, 'font_style_value', 'Comic Sans MS Bold')
+            if font_name == 'Default':
+                font_name = 'Comic Sans MS Bold'  # Use Comic Sans Bold as default
+            edit_font = QFont(font_name, 11)  # 11pt size for readability in dialog
+            text_edit.setFont(edit_font)
+            
             layout.addWidget(text_edit)
             
             # Button layout
@@ -8863,6 +8871,14 @@ class MangaTranslationTab:
             orig_text.setPlainText(original)
             orig_text.setReadOnly(False)  # Make it editable
             orig_text.setMaximumHeight(100)
+            
+            # Apply user's selected font from manga settings
+            font_name = getattr(self, 'font_style_value', 'Comic Sans MS Bold')
+            if font_name == 'Default':
+                font_name = 'Comic Sans MS Bold'  # Use Comic Sans Bold as default
+            edit_font = QFont(font_name, 11)  # 11pt size for readability in dialog
+            orig_text.setFont(edit_font)
+            
             layout.addWidget(orig_text)
             
             # Separator
@@ -8879,6 +8895,14 @@ class MangaTranslationTab:
             trans_text.setPlainText(translation)
             trans_text.setReadOnly(False)  # Make it editable
             trans_text.setMaximumHeight(100)
+            
+            # Apply user's selected font from manga settings
+            font_name = getattr(self, 'font_style_value', 'Comic Sans MS Bold')
+            if font_name == 'Default':
+                font_name = 'Comic Sans MS Bold'  # Use Comic Sans Bold as default
+            edit_font = QFont(font_name, 11)  # 11pt size for readability in dialog
+            trans_text.setFont(edit_font)
+            
             layout.addWidget(trans_text)
             
             # Button layout
@@ -8991,58 +9015,143 @@ class MangaTranslationTab:
             print(f"[DEBUG] Error aliasing overlays: {str(e)}")
     
     def _update_single_text_overlay(self, region_index: int, new_translation: str):
-        """Update a single text overlay after editing"""
+        """Update overlay after editing by rendering with MangaTranslator (same as regular pipeline)"""
+        print(f"\n{'='*60}")
+        print(f"[DEBUG] _update_single_text_overlay called for region {region_index}")
+        print(f"[DEBUG] new_translation: '{new_translation[:50]}...'")
+        print(f"{'='*60}\n")
+        
         try:
-            from PySide6.QtWidgets import QGraphicsTextItem
-            
-            viewer = self.image_preview_widget.viewer
             current_image = self.image_preview_widget.current_image_path
             
             if not current_image:
-                print(f"[DEBUG] No current image path, cannot update overlay")
+                print(f"[DEBUG] ERROR: No current image path, cannot update overlay")
+                self._log("❌ No image loaded", "error")
                 return
             
-            # Initialize overlay dictionary if not exists
-            if not hasattr(self, '_text_overlays_by_image'):
-                self._text_overlays_by_image = {}
+            print(f"[DEBUG] Current image: {current_image}")
+            print(f"[DEBUG] Manual edit complete for region {region_index}. Rendering with MangaTranslator...")
+            self._log(f"🔄 Rendering edited translation...", "info")
             
-            # If overlays are stored under the original path (pre-clean), alias them to the current path
-            if current_image not in self._text_overlays_by_image and hasattr(self, '_original_image_path'):
-                print(f"[DEBUG] Attempting to alias overlays from original to current path")
-                self._alias_text_overlays_for_image(self._original_image_path, current_image)
-            
-            # Force overlay creation even if they don't exist - this ensures edits always apply
-            print(f"[DEBUG] Updating overlay for region {region_index}, current_image: {os.path.basename(current_image)}")
-            
-            # Regenerate overlays with updated data
+            # Prepare data for rendering
             if hasattr(self, '_translation_data') and self._translation_data:
-                translated_texts = []
-                rectangles = self.image_preview_widget.viewer.rectangles
-                print(f"[DEBUG] Rebuilding overlays from {len(self._translation_data)} translation entries and {len(rectangles)} rectangles")
+                from manga_translator import TextRegion
                 
+                rectangles = self.image_preview_widget.viewer.rectangles
+                print(f"[DEBUG] Found {len(rectangles)} rectangles and {len(self._translation_data)} translations")
+                
+                regions = []
+                
+                # Build TextRegion objects from translation data
                 for idx in sorted(self._translation_data.keys()):
                     if idx < len(rectangles):
                         rect = rectangles[idx].rect()
                         trans_data = self._translation_data[idx]
-                        translated_texts.append({
-                            'original': {'text': trans_data['original'], 'bbox': [int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height())]},
-                            'translation': trans_data['translation'],
-                            'bbox': [int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height())]
-                        })
+                        
+                        x, y, w, h = int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height())
+                        vertices = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
+                        
+                        region = TextRegion(
+                            text=trans_data['original'],
+                            vertices=vertices,
+                            bounding_box=(x, y, w, h),
+                            confidence=1.0,
+                            region_type='text_block'
+                        )
+                        # Set the translation directly
+                        region.translated_text = trans_data['translation']
+                        regions.append(region)
+                        print(f"[DEBUG] Region {idx}: '{trans_data['original'][:30]}...' -> '{trans_data['translation'][:30]}...'")
                 
-                if translated_texts:
-                    print(f"[DEBUG] Regenerating {len(translated_texts)} text overlays")
-                    self._add_text_overlay_to_viewer(translated_texts)
-                    print(f"[DEBUG] Successfully refreshed all text overlays after editing region {region_index}")
+                if regions:
+                    print(f"[DEBUG] ✅ Built {len(regions)} regions, calling PIL renderer...")
+                    self._render_with_manga_translator(current_image, regions)
                 else:
-                    print(f"[DEBUG] No translated texts to regenerate")
+                    print(f"[DEBUG] ❌ No regions to render")
+                    self._log("⚠️ No regions to render", "warning")
             else:
-                print(f"[DEBUG] No translation data available to regenerate overlays")
+                print(f"[DEBUG] ❌ No translation data available")
+                self._log("⚠️ No translation data", "warning")
             
         except Exception as e:
-            print(f"[DEBUG] Error updating text overlay: {str(e)}")
+            print(f"[DEBUG] ❌ ERROR in _update_single_text_overlay: {str(e)}")
+            import traceback
+            traceback_str = traceback.format_exc()
+            print(f"[DEBUG] Traceback:\n{traceback_str}")
+            self._log(f"❌ Rendering failed: {str(e)}", "error")
+    
+    def _render_with_manga_translator(self, image_path: str, regions: list):
+        """Render translations using MangaTranslator's PIL pipeline (same as batch workflow)"""
+        try:
+            from manga_translator import MangaTranslator
+            from unified_api_client import UnifiedClient
+            import tempfile
+            import shutil
+            from PIL import Image
+            import cv2
+            import numpy as np
+            
+            print(f"[DEBUG] Starting PIL rendering for {len(regions)} regions")
+            self._log(f"🎨 Rendering with PIL pipeline...", "info")
+            
+            # Get or create MangaTranslator instance
+            if not hasattr(self, '_manga_translator') or self._manga_translator is None:
+                ocr_config = self._get_ocr_config()
+                api_key = self.main_gui.api_key_entry.text().strip() if hasattr(self.main_gui, 'api_key_entry') else ''
+                model = self.main_gui.model_var if hasattr(self.main_gui, 'model_var') else 'gpt-4o-mini'
+                
+                if not api_key:
+                    raise ValueError("No API key found")
+                
+                unified_client = UnifiedClient(model=model, api_key=api_key)
+                self._manga_translator = MangaTranslator(
+                    ocr_config=ocr_config,
+                    unified_client=unified_client,
+                    main_gui=self.main_gui,
+                    log_callback=self._log
+                )
+                print(f"[DEBUG] Created MangaTranslator instance")
+            
+            # Load original image as numpy array
+            pil_image = Image.open(image_path)
+            # Convert PIL to OpenCV format (BGR)
+            image_rgb = np.array(pil_image.convert('RGB'))
+            image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+            
+            # Call MangaTranslator's render_translated_text method
+            rendered_bgr = self._manga_translator.render_translated_text(image_bgr, regions)
+            
+            # Convert back to PIL and save
+            rendered_rgb = cv2.cvtColor(rendered_bgr, cv2.COLOR_BGR2RGB)
+            rendered_pil = Image.fromarray(rendered_rgb)
+            
+            # Save to temp file
+            temp_dir = tempfile.mkdtemp(prefix="manga_manual_edit_")
+            output_path = os.path.join(temp_dir, os.path.basename(image_path))
+            rendered_pil.save(output_path)
+            
+            print(f"[DEBUG] PIL rendering complete: {output_path}")
+            # Load the rendered image into preview
+            self.image_preview_widget.load_image(output_path, preserve_rectangles=True, preserve_text_overlays=False)
+            self._log(f"✅ Rendered with PIL pipeline", "success")
+            
+            # Clean up temp directory after a delay (give time for image to load)
+            import threading
+            def cleanup_later():
+                import time
+                time.sleep(2)
+                try:
+                    if os.path.exists(temp_dir):
+                        shutil.rmtree(temp_dir)
+                except:
+                    pass
+            threading.Thread(target=cleanup_later, daemon=True).start()
+        
+        except Exception as e:
+            print(f"[DEBUG] Error rendering with MangaTranslator: {str(e)}")
             import traceback
             print(f"[DEBUG] Traceback: {traceback.format_exc()}")
+            self._log(f"❌ Rendering error: {str(e)}", "error")
     
     def _add_text_overlay_to_viewer(self, translated_texts: list):
         """Add translated text as graphics items overlay on the viewer"""
@@ -9154,8 +9263,8 @@ class MangaTranslationTab:
                 'font_size_mode': getattr(self, 'font_size_mode_value', 'auto'),
                 'font_size': getattr(self, 'font_size_value', 0),
                 'font_size_multiplier': getattr(self, 'font_size_multiplier_value', 1.0),
-                'auto_min_size': getattr(self, 'auto_min_size_value', 12),
-'max_font_size': getattr(self, 'max_font_size_value', 96),
+                'auto_min_size': getattr(self, 'auto_min_size_value', 10),
+                'max_font_size': getattr(self, 'max_font_size_value', 48),
                 'font_algorithm': getattr(self, 'font_algorithm_value', 'smart'),
                 'auto_fit_style': getattr(self, 'auto_fit_style_value', 'balanced'),
                 'prefer_larger': getattr(self, 'prefer_larger_value', True),
@@ -9293,8 +9402,23 @@ class MangaTranslationTab:
                 # Note: QGraphicsTextItem doesn't have built-in shadow, would need QGraphicsDropShadowEffect
                 pass
             
-            # Position text with padding
-            text_item.setPos(x + padding, y + padding)
+            # Calculate vertical centering
+            # Get actual text bounding rect to determine height
+            text_bounding = text_item.boundingRect()
+            text_height = text_bounding.height()
+            
+            # Center vertically within the available height
+            vertical_offset = (available_height - text_height) / 2
+            # Ensure text doesn't overflow
+            vertical_offset = max(0, vertical_offset)
+            
+            # Position text centered vertically with padding
+            text_x = x + padding
+            text_y = y + padding + vertical_offset
+            
+            print(f"[DEBUG] Text positioning: bbox=({x},{y},{w},{h}), text_h={text_height:.0f}, offset={vertical_offset:.0f}, final_pos=({text_x},{text_y})")
+            
+            text_item.setPos(text_x, text_y)
             text_item.setZValue(11)  # Above background
             
             return text_item, font_size
@@ -9382,43 +9506,87 @@ class MangaTranslationTab:
             return False
     
     def _wrap_text_for_bubble(self, text: str, max_width: int, font: QFont, settings: dict) -> str:
-        """Wrap text for bubble using manga translation settings"""
+        """Wrap text for bubble using manga translation settings with hyphen_textwrap"""
         try:
             from PySide6.QtGui import QFontMetrics
+            from hyphen_textwrap import wrap as hyphen_wrap
             
             metrics = QFontMetrics(font)
             strict_wrapping = settings.get('strict_wrapping', True)
             max_lines = settings.get('max_lines', 10)
             
-            words = text.split()
-            lines = []
-            current_line = []
+            # Calculate approximate characters per line based on font metrics
+            # Use average character width for estimation
+            avg_char_width = metrics.averageCharWidth()
+            if avg_char_width > 0:
+                chars_per_line = max(1, int((max_width - 8) / avg_char_width))
+            else:
+                chars_per_line = max(1, int(max_width / 10))  # Fallback estimate
             
-            for word in words:
-                test_line = ' '.join(current_line + [word])
-                text_width = metrics.horizontalAdvance(test_line)
+            # Try wrapping with hyphen_textwrap
+            try:
+                wrapped_lines = hyphen_wrap(
+                    text,
+                    width=chars_per_line,
+                    break_on_hyphens=False,
+                    break_long_words=strict_wrapping,
+                    hyphenate_broken_words=strict_wrapping
+                )
                 
-                if text_width <= max_width - 8:  # Leave some margin
-                    current_line.append(word)
-                else:
-                    if current_line:
-                        lines.append(' '.join(current_line))
-                        current_line = [word]
+                # Verify each line fits within max_width
+                validated_lines = []
+                for line in wrapped_lines:
+                    line_width = metrics.horizontalAdvance(line)
+                    if line_width <= max_width - 8:
+                        validated_lines.append(line)
+                    elif strict_wrapping:
+                        # Line is too wide, try narrower wrapping
+                        narrower_chars = max(1, int(chars_per_line * 0.8))
+                        sub_wrapped = hyphen_wrap(
+                            line,
+                            width=narrower_chars,
+                            break_on_hyphens=False,
+                            break_long_words=True,
+                            hyphenate_broken_words=True
+                        )
+                        validated_lines.extend(sub_wrapped)
                     else:
-                        # Single word too long, force break if strict wrapping
-                        if strict_wrapping and len(word) > 3:
-                            # Break word with hyphen
-                            for i in range(len(word) - 1, 0, -1):
-                                test_word = word[:i] + '-'
-                                if metrics.horizontalAdvance(test_word) <= max_width - 8:
-                                    lines.append(test_word)
-                                    current_line = [word[i:]]
-                                    break
-                        else:
+                        validated_lines.append(line)
+                
+                lines = validated_lines
+                
+            except Exception as e:
+                print(f"[DEBUG] hyphen_wrap failed, using fallback: {e}")
+                # Fallback to basic word wrapping
+                words = text.split()
+                lines = []
+                current_line = []
+                
+                for word in words:
+                    test_line = ' '.join(current_line + [word])
+                    text_width = metrics.horizontalAdvance(test_line)
+                    
+                    if text_width <= max_width - 8:
+                        current_line.append(word)
+                    else:
+                        if current_line:
+                            lines.append(' '.join(current_line))
                             current_line = [word]
-            
-            if current_line:
-                lines.append(' '.join(current_line))
+                        else:
+                            # Single word too long
+                            if strict_wrapping and len(word) > 3:
+                                # Break word with hyphen
+                                for i in range(len(word) - 1, 0, -1):
+                                    test_word = word[:i] + '-'
+                                    if metrics.horizontalAdvance(test_word) <= max_width - 8:
+                                        lines.append(test_word)
+                                        current_line = [word[i:]]
+                                        break
+                            else:
+                                current_line = [word]
+                
+                if current_line:
+                    lines.append(' '.join(current_line))
             
             # Limit to max lines
             if len(lines) > max_lines:
@@ -9482,30 +9650,51 @@ class MangaTranslationTab:
             return None
     
     def _wrap_text_to_width(self, text: str, max_width: int, font: QFont) -> str:
-        """Wrap text to fit within the specified width"""
+        """Wrap text to fit within the specified width using hyphen_textwrap"""
         try:
             from PySide6.QtGui import QFontMetrics
+            from hyphen_textwrap import wrap as hyphen_wrap
             
             metrics = QFontMetrics(font)
-            words = text.split()
-            lines = []
-            current_line = []
             
-            for word in words:
-                test_line = ' '.join(current_line + [word])
-                text_width = metrics.horizontalAdvance(test_line)
+            # Calculate approximate characters per line
+            avg_char_width = metrics.averageCharWidth()
+            if avg_char_width > 0:
+                chars_per_line = max(1, int((max_width - 8) / avg_char_width))
+            else:
+                chars_per_line = max(1, int(max_width / 10))
+            
+            # Use hyphen_textwrap for proper hyphenation
+            try:
+                wrapped_lines = hyphen_wrap(
+                    text,
+                    width=chars_per_line,
+                    break_on_hyphens=False,
+                    break_long_words=True,
+                    hyphenate_broken_words=True
+                )
+                return '\n'.join(wrapped_lines)
+            except Exception:
+                # Fallback to basic wrapping
+                words = text.split()
+                lines = []
+                current_line = []
                 
-                if text_width <= max_width - 8:  # Leave some margin
-                    current_line.append(word)
-                else:
-                    if current_line:
-                        lines.append(' '.join(current_line))
-                    current_line = [word]
-            
-            if current_line:
-                lines.append(' '.join(current_line))
-            
-            return '\n'.join(lines)
+                for word in words:
+                    test_line = ' '.join(current_line + [word])
+                    text_width = metrics.horizontalAdvance(test_line)
+                    
+                    if text_width <= max_width - 8:
+                        current_line.append(word)
+                    else:
+                        if current_line:
+                            lines.append(' '.join(current_line))
+                        current_line = [word]
+                
+                if current_line:
+                    lines.append(' '.join(current_line))
+                
+                return '\n'.join(lines)
             
         except Exception as e:
             print(f"[DEBUG] Error wrapping text: {str(e)}")
