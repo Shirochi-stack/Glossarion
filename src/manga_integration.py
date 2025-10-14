@@ -7574,15 +7574,12 @@ class MangaTranslationTab:
                 self._log("⚠️ No image loaded for cleaning", "warning")
                 return
             
-            # Check if we have detected regions
-            if not hasattr(self, '_current_regions') or not self._current_regions:
-                self._log("⚠️ No text regions detected. Please run 'Detect Text' first.", "warning")
+            # Check if we have any rectangles displayed in the preview (either from detection or manually drawn)
+            if not hasattr(self.image_preview_widget, 'viewer') or not self.image_preview_widget.viewer.rectangles:
+                self._log("⚠️ No text regions to clean. Please run 'Detect Text' or manually draw boxes first.", "warning")
                 return
             
-            # Check if we have the original image path stored from detection
-            if not hasattr(self, '_original_image_path') or not self._original_image_path:
-                self._log("⚠️ No original image found. Please run 'Detect Text' first.", "warning")
-                return
+            # No need to check for original image path - we can clean any loaded image with rectangles
             
             # Disable the clean button to prevent multiple clicks
             if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'clean_btn'):
@@ -7590,8 +7587,10 @@ class MangaTranslationTab:
                 self.image_preview_widget.clean_btn.setText("Cleaning...")
             
             # Use the original image path for cleaning (not the current preview which might have boxes)
-            image_path = self._original_image_path
-            regions = self._current_regions.copy()  # Copy for thread safety
+            image_path = self._original_image_path if hasattr(self, '_original_image_path') and self._original_image_path else self.image_preview_widget.current_image_path
+            
+            # Extract regions from currently displayed rectangles in the preview
+            regions = self._extract_regions_from_preview()
             
             self._log(f"🧽 Starting background cleaning: {os.path.basename(image_path)}", "info")
             
@@ -7607,6 +7606,33 @@ class MangaTranslationTab:
             self._log(f"❌ Clean setup failed: {str(e)}", "error")
             print(f"Clean setup error traceback: {traceback.format_exc()}")
             self._restore_clean_button()
+    
+    def _extract_regions_from_preview(self) -> list:
+        """Extract regions from currently displayed rectangles in the preview widget"""
+        regions = []
+        try:
+            if hasattr(self.image_preview_widget, 'viewer') and self.image_preview_widget.viewer.rectangles:
+                for rect_item in self.image_preview_widget.viewer.rectangles:
+                    rect = rect_item.rect()
+                    # Convert QRectF to region dictionary format
+                    region_dict = {
+                        'bbox': [int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height())],  # (x, y, width, height)
+                        'coords': [[int(rect.x()), int(rect.y())], 
+                                  [int(rect.x() + rect.width()), int(rect.y())], 
+                                  [int(rect.x() + rect.width()), int(rect.y() + rect.height())], 
+                                  [int(rect.x()), int(rect.y() + rect.height())]],  # Corner coordinates
+                        'confidence': 1.0  # Manual/detected regions are treated as 100% confidence
+                    }
+                    regions.append(region_dict)
+                self._log(f"🎯 Extracted {len(regions)} regions from preview rectangles", "info")
+            else:
+                self._log("⚠️ No rectangles found in preview widget", "warning")
+        except Exception as e:
+            self._log(f"❌ Error extracting regions from preview: {str(e)}", "error")
+            import traceback
+            print(f"Extract regions error: {traceback.format_exc()}")
+        
+        return regions
     
     def _run_clean_background(self, image_path: str, regions: list):
         """Run the actual cleaning process in background thread"""

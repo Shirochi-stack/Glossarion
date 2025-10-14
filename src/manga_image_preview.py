@@ -272,6 +272,14 @@ class CompactImageViewer(QGraphicsView):
         elif self.current_tool in ['brush', 'eraser'] and event.button() == Qt.MouseButton.LeftButton:
             self.drawing = True
             self.last_pos = self.mapToScene(event.pos())
+        elif self.current_tool == 'pan' and event.button() == Qt.MouseButton.LeftButton:
+            # Check if we clicked on a rectangle to select it
+            item = self.itemAt(event.pos())
+            if isinstance(item, MoveableRectItem):
+                self._select_rectangle(item)
+            else:
+                self._select_rectangle(None)  # Deselect all
+            super().mousePressEvent(event)
         else:
             super().mousePressEvent(event)
     
@@ -285,12 +293,16 @@ class CompactImageViewer(QGraphicsView):
             current_pos = self.mapToScene(event.pos())
             if self.last_pos:
                 # Store stroke for inpainting
-                self.brush_strokes.append({
+                stroke = {
                     'start': (self.last_pos.x(), self.last_pos.y()),
                     'end': (current_pos.x(), current_pos.y()),
                     'size': self.brush_size if self.current_tool == 'brush' else self.eraser_size,
                     'type': self.current_tool
-                })
+                }
+                self.brush_strokes.append(stroke)
+                
+                # Draw stroke visually on the scene
+                self._draw_brush_stroke(stroke)
             self.last_pos = current_pos
         else:
             super().mouseMoveEvent(event)
@@ -311,12 +323,61 @@ class CompactImageViewer(QGraphicsView):
         else:
             super().mouseReleaseEvent(event)
     
+    def _select_rectangle(self, rect_item: Optional[MoveableRectItem]):
+        """Select a rectangle and update visual feedback"""
+        # Deselect previous selection
+        if self.selected_rect:
+            self.selected_rect.setPen(QPen(QColor(0, 255, 0), 2))  # Green for normal
+        
+        # Select new rectangle
+        self.selected_rect = rect_item
+        if self.selected_rect:
+            self.selected_rect.setPen(QPen(QColor(255, 255, 0), 3))  # Yellow for selected, thicker
+            self.rectangle_selected.emit(self.selected_rect.rect())
+    
+    def _draw_brush_stroke(self, stroke: dict):
+        """Draw a brush stroke visually on the scene"""
+        from PySide6.QtWidgets import QGraphicsLineItem
+        
+        start_x, start_y = stroke['start']
+        end_x, end_y = stroke['end']
+        size = stroke['size']
+        stroke_type = stroke['type']
+        
+        # Create line item
+        line = QGraphicsLineItem(start_x, start_y, end_x, end_y)
+        
+        # Style based on tool type
+        if stroke_type == 'brush':
+            # Red brush strokes for areas to inpaint (areas that need cleaning)
+            pen = QPen(QColor(255, 0, 0, 180), size)  # Semi-transparent red
+        else:  # eraser
+            # White eraser strokes (areas to keep clean/erase text)
+            pen = QPen(QColor(255, 255, 255, 200), size)  # Semi-transparent white
+        
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        line.setPen(pen)
+        line.setZValue(2)  # Above rectangles
+        
+        # Add to scene and track it
+        self._scene.addItem(line)
+        
+        # Store reference in stroke for later removal
+        stroke['graphics_item'] = line
+    
     def clear_rectangles(self):
         """Clear all rectangles"""
         for rect in self.rectangles:
             self._scene.removeItem(rect)
         self.rectangles.clear()
         self.selected_rect = None
+    
+    def clear_brush_strokes(self):
+        """Clear all brush strokes from scene and memory"""
+        for stroke in self.brush_strokes:
+            if 'graphics_item' in stroke:
+                self._scene.removeItem(stroke['graphics_item'])
+        self.brush_strokes.clear()
     
     def draw_detection_boxes(self, regions: list, color: QColor = None):
         """Draw detection boxes from text regions"""
@@ -674,12 +735,12 @@ class MangaImagePreviewWidget(QWidget):
     
     def _clear_strokes(self):
         """Clear brush strokes only"""
-        self.viewer.brush_strokes.clear()
+        self.viewer.clear_brush_strokes()
     
     def _clear_all(self):
         """Clear all boxes and strokes"""
         self.viewer.clear_rectangles()
-        self.viewer.brush_strokes.clear()
+        self.viewer.clear_brush_strokes()
         self._update_box_count()
     
     def load_image(self, image_path: str):
