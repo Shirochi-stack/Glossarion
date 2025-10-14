@@ -61,3 +61,8 @@ src/test_azure.py
 
 # Explicitly ignore local PowerShell helper
 src/wait_and_open.ps1
+
+# Ignore test folders and Warp markdown file
+tests/
+junktests/
+warp.md
