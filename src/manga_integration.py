@@ -130,6 +130,100 @@ try:
 except ImportError:
     UnifiedClient = None
 
+
+class ImageStateManager:
+    """
+    Manages per-image state persistence (detection rects, recognition overlays, paths, status).
+    Saves state to JSON with debounced writes to avoid excessive I/O.
+    """
+    def __init__(self, state_file_path: str):
+        self.state_file_path = state_file_path
+        self._states: Dict[str, Dict[str, Any]] = {}  # Keyed by original image path
+        self._dirty = False
+        self._save_timer: Optional[QTimer] = None
+        self._load_state()
+    
+    def _load_state(self):
+        """Load state from JSON file if it exists"""
+        if os.path.exists(self.state_file_path):
+            try:
+                with open(self.state_file_path, 'r', encoding='utf-8') as f:
+                    self._states = json.load(f)
+                print(f"[STATE] Loaded state for {len(self._states)} images from {self.state_file_path}")
+            except Exception as e:
+                print(f"[STATE] Failed to load state: {e}")
+                self._states = {}
+    
+    def _save_state_now(self):
+        """Immediately save state to JSON file"""
+        try:
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(self.state_file_path), exist_ok=True)
+            
+            # Write to temp file first, then rename (atomic on most systems)
+            temp_path = self.state_file_path + '.tmp'
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                json.dump(self._states, f, indent=2)
+            
+            # Atomic rename
+            if os.path.exists(self.state_file_path):
+                os.remove(self.state_file_path)
+            os.rename(temp_path, self.state_file_path)
+            
+            self._dirty = False
+            print(f"[STATE] Saved state for {len(self._states)} images")
+        except Exception as e:
+            print(f"[STATE] Failed to save state: {e}")
+    
+    def _schedule_save(self):
+        """Schedule a debounced save (wait 2 seconds after last change)"""
+        self._dirty = True
+        if self._save_timer is None:
+            # Create timer on first use (requires Qt event loop)
+            try:
+                self._save_timer = QTimer()
+                self._save_timer.setSingleShot(True)
+                self._save_timer.timeout.connect(self._save_state_now)
+            except:
+                # If no Qt app yet, just save immediately
+                self._save_state_now()
+                return
+        
+        # Reset timer to debounce
+        self._save_timer.stop()
+        self._save_timer.start(2000)  # 2 second debounce
+    
+    def get_state(self, image_path: str) -> Dict[str, Any]:
+        """Get state for an image (returns empty dict if not found)"""
+        return self._states.get(image_path, {})
+    
+    def set_state(self, image_path: str, state: Dict[str, Any], save: bool = True):
+        """Set state for an image and optionally schedule save"""
+        self._states[image_path] = state
+        if save:
+            self._schedule_save()
+    
+    def update_state(self, image_path: str, updates: Dict[str, Any], save: bool = True):
+        """Update specific fields in image state"""
+        if image_path not in self._states:
+            self._states[image_path] = {}
+        self._states[image_path].update(updates)
+        if save:
+            self._schedule_save()
+    
+    def clear_state(self, image_path: str, save: bool = True):
+        """Clear state for an image"""
+        if image_path in self._states:
+            del self._states[image_path]
+            if save:
+                self._schedule_save()
+    
+    def flush(self):
+        """Force immediate save if dirty"""
+        if self._dirty:
+            self._save_state_now()
+
+
 # Module-level function for multiprocessing (must be picklable)
 def _preload_models_worker(models_list, progress_queue):
     """Worker function to preload models in separate process (module-level for pickling)"""
@@ -360,6 +454,14 @@ class MangaTranslationTab:
         
         # Queue for thread-safe GUI updates
         self.update_queue = Queue()
+        
+        # Initialize image state manager for persistent overlays/rectangles
+        state_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.glossarion')
+        state_file = os.path.join(state_dir, 'image_state.json')
+        self.image_state_manager = ImageStateManager(state_file)
+        
+        # Track current image path for state persistence on navigation
+        self._current_image_path = None
         
         # Auto-scroll control: delay forcing scroll on new runs
         self._autoscroll_delay_until = 0.0  # epoch seconds
@@ -7317,11 +7419,16 @@ class MangaTranslationTab:
     def _on_file_selection_changed(self):
         """Handle file list selection changes to update image preview"""
         try:
+            # PERSIST CURRENT IMAGE STATE before switching
+            if hasattr(self, '_current_image_path') and self._current_image_path:
+                self._persist_current_image_state()
+            
             selected_items = self.file_listbox.selectedItems()
             
             if not selected_items:
                 if hasattr(self, 'image_preview_widget'):
                     self.image_preview_widget.clear()
+                self._current_image_path = None
                 return
             
             # Get the first selected item
@@ -7332,6 +7439,9 @@ class MangaTranslationTab:
             if 0 <= row < len(self.selected_files):
                 image_path = self.selected_files[row]
                 
+                # Update current image path for state tracking
+                self._current_image_path = image_path
+                
                 # DEBUG: Log the image loading attempt
                 self._log(f"🖼️ Loading preview: {os.path.basename(image_path)}", "debug")
                 
@@ -7340,6 +7450,9 @@ class MangaTranslationTab:
                     if os.path.exists(image_path):
                         self.image_preview_widget.load_image(image_path)
                         self._log(f"✅ Preview loaded successfully", "debug")
+                        
+                        # RESTORE PERSISTED STATE for this image
+                        self._restore_image_state(image_path)
                     else:
                         self._log(f"❌ Image file not found: {image_path}", "error")
                 else:
@@ -7577,6 +7690,141 @@ class MangaTranslationTab:
                 self.image_preview_widget.detect_btn.setText("Detect Text")
         except Exception:
             pass
+    
+    def _persist_current_image_state(self):
+        """Persist the current image's state (rectangles, overlays, paths) before switching"""
+        try:
+            if not hasattr(self, '_current_image_path') or not self._current_image_path:
+                return
+            
+            if not hasattr(self, 'image_state_manager'):
+                return
+            
+            image_path = self._current_image_path
+            
+            # Collect current state
+            state = {}
+            
+            # Store detection rectangles
+            if hasattr(self, '_current_regions') and self._current_regions:
+                state['detection_regions'] = self._current_regions
+                print(f"[STATE] Persisting {len(self._current_regions)} detection regions for {os.path.basename(image_path)}")
+            
+            # Store recognition overlays (if any)
+            if hasattr(self.image_preview_widget.viewer, 'overlay_rects'):
+                state['overlay_rects'] = self.image_preview_widget.viewer.overlay_rects.copy()
+                if state['overlay_rects']:
+                    print(f"[STATE] Persisting {len(state['overlay_rects'])} overlay rects for {os.path.basename(image_path)}")
+            
+            # Store cleaned image path
+            if hasattr(self, '_cleaned_image_path') and self._cleaned_image_path:
+                state['cleaned_image_path'] = self._cleaned_image_path
+                print(f"[STATE] Persisting cleaned image path: {os.path.basename(self._cleaned_image_path)}")
+            
+            # Store rendered image path (if exists)
+            if hasattr(self, '_rendered_images_map') and image_path in self._rendered_images_map:
+                state['rendered_image_path'] = self._rendered_images_map[image_path]
+                print(f"[STATE] Persisting rendered image path: {os.path.basename(self._rendered_images_map[image_path])}")
+            
+            # Store viewer rectangles for visual state
+            if hasattr(self.image_preview_widget, 'viewer') and self.image_preview_widget.viewer.rectangles:
+                # Store rectangle geometry
+                rect_data = []
+                for rect_item in self.image_preview_widget.viewer.rectangles:
+                    rect = rect_item.rect()
+                    rect_data.append({
+                        'x': rect.x(),
+                        'y': rect.y(),
+                        'width': rect.width(),
+                        'height': rect.height()
+                    })
+                state['viewer_rectangles'] = rect_data
+                print(f"[STATE] Persisting {len(rect_data)} viewer rectangles for {os.path.basename(image_path)}")
+            
+            # Save state to manager
+            self.image_state_manager.set_state(image_path, state, save=True)
+            print(f"[STATE] Saved state for {os.path.basename(image_path)}")
+            
+        except Exception as e:
+            print(f"[STATE] Failed to persist state: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _restore_image_state(self, image_path: str):
+        """Restore persisted state for an image (rectangles, overlays, paths)"""
+        try:
+            if not hasattr(self, 'image_state_manager'):
+                return
+            
+            # Get saved state
+            state = self.image_state_manager.get_state(image_path)
+            if not state:
+                print(f"[STATE] No saved state for {os.path.basename(image_path)}")
+                return
+            
+            print(f"[STATE] Restoring state for {os.path.basename(image_path)}")
+            
+            # Restore detection regions
+            if 'detection_regions' in state:
+                self._current_regions = state['detection_regions']
+                print(f"[STATE] Restored {len(self._current_regions)} detection regions")
+                
+                # Redraw detection boxes on preview
+                if hasattr(self.image_preview_widget.viewer, 'clear_rectangles'):
+                    self.image_preview_widget.viewer.clear_rectangles()
+                self._draw_detection_boxes_on_preview()
+            
+            # Restore overlay rectangles
+            if 'overlay_rects' in state and state['overlay_rects']:
+                if hasattr(self.image_preview_widget.viewer, 'overlay_rects'):
+                    self.image_preview_widget.viewer.overlay_rects = state['overlay_rects'].copy()
+                    print(f"[STATE] Restored {len(state['overlay_rects'])} overlay rects")
+            
+            # Restore cleaned image path
+            if 'cleaned_image_path' in state:
+                self._cleaned_image_path = state['cleaned_image_path']
+                print(f"[STATE] Restored cleaned image path: {os.path.basename(self._cleaned_image_path)}")
+            
+            # Restore rendered image path and load it if available
+            if 'rendered_image_path' in state:
+                rendered_path = state['rendered_image_path']
+                if os.path.exists(rendered_path):
+                    # Load the rendered image into preview
+                    self.image_preview_widget.load_image(rendered_path)
+                    print(f"[STATE] Loaded rendered image: {os.path.basename(rendered_path)}")
+                    
+                    # Store mapping
+                    if not hasattr(self, '_rendered_images_map'):
+                        self._rendered_images_map = {}
+                    self._rendered_images_map[image_path] = rendered_path
+            
+            # Restore viewer rectangles (if no detection regions were restored)
+            if 'viewer_rectangles' in state and not ('detection_regions' in state):
+                viewer = self.image_preview_widget.viewer
+                if hasattr(viewer, 'clear_rectangles'):
+                    viewer.clear_rectangles()
+                
+                from PySide6.QtCore import QRectF, Qt
+                from PySide6.QtGui import QPen, QBrush, QColor
+                from manga_image_preview import MoveableRectItem
+                
+                for rect_data in state['viewer_rectangles']:
+                    rect = QRectF(rect_data['x'], rect_data['y'], rect_data['width'], rect_data['height'])
+                    pen = QPen(QColor(0, 255, 0), 1)
+                    pen.setCosmetic(True)
+                    brush = QBrush(QColor(0, 255, 0, 50))
+                    rect_item = MoveableRectItem(rect, pen=pen, brush=brush)
+                    viewer._scene.addItem(rect_item)
+                    viewer.rectangles.append(rect_item)
+                
+                print(f"[STATE] Restored {len(state['viewer_rectangles'])} viewer rectangles")
+            
+            print(f"[STATE] State restoration complete for {os.path.basename(image_path)}")
+            
+        except Exception as e:
+            print(f"[STATE] Failed to restore state: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _process_detect_results(self, results: dict):
         """Process detection results on main thread and update preview"""
@@ -8354,18 +8602,24 @@ class MangaTranslationTab:
                     self._log(f"❌ Google Cloud Vision failed: {str(e)}", "error")
                     return []
             
-            elif provider == 'azure':
-                # Use Azure OCR on full image
-                print(f"[OCR_REGIONS] Running Azure OCR on full image")
+            elif provider in ['azure', 'azure-document-intelligence']:
+                # Use Azure OCR on full image (both legacy and new document intelligence APIs)
+                print(f"[OCR_REGIONS] Running {provider} OCR on full image")
                 try:
                     from azure.ai.vision.imageanalysis import ImageAnalysisClient
                     from azure.core.credentials import AzureKeyCredential
                     from azure.ai.vision.imageanalysis.models import VisualFeatures
                     import time
                     
-                    # Create Azure client
-                    azure_endpoint = ocr_config['azure_endpoint']
-                    azure_key = ocr_config['azure_key']
+                    # Create Azure client - support both azure and azure-document-intelligence
+                    # Both use the same API, just different provider names in config
+                    azure_endpoint = ocr_config.get('azure_endpoint') or ocr_config.get('endpoint', '')
+                    azure_key = ocr_config.get('azure_key') or ocr_config.get('key', '')
+                    
+                    if not azure_endpoint or not azure_key:
+                        print(f"[OCR_REGIONS] Missing Azure credentials: endpoint={bool(azure_endpoint)}, key={bool(azure_key)}")
+                        self._log(f"❌ Azure credentials not configured", "error")
+                        return []
                     
                     vision_client = ImageAnalysisClient(
                         endpoint=azure_endpoint,
@@ -9873,11 +10127,17 @@ class MangaTranslationTab:
                     raise ValueError("No API key found")
                 
                 unified_client = UnifiedClient(model=model, api_key=api_key)
+                
+                # Get manga settings from main_gui config to pass render_parallel toggle
+                manga_settings = self.main_gui.config.get('manga_settings', {})
+                print(f"[RENDER] Passing manga_settings to MangaTranslator (render_parallel={manga_settings.get('advanced', {}).get('render_parallel', True)})")
+                
                 self._manga_translator = MangaTranslator(
                     ocr_config=ocr_config,
                     unified_client=unified_client,
                     main_gui=self.main_gui,
-                    log_callback=self._log
+                    log_callback=self._log,
+                    manga_settings=manga_settings  # Pass settings for parallel rendering toggle
                 )
                 print(f"[RENDER] MangaTranslator instance created")
             else:
@@ -9906,32 +10166,37 @@ class MangaTranslationTab:
             rendered_rgb = cv2.cvtColor(rendered_bgr, cv2.COLOR_BGR2RGB)
             rendered_pil = Image.fromarray(rendered_rgb)
             
-            # Save to temp file
-            temp_dir = tempfile.mkdtemp(prefix="manga_manual_edit_")
-            output_path = os.path.join(temp_dir, os.path.basename(image_path))
+            # Save to permanent 3_translated folder (not temp!)
+            input_dir = os.path.dirname(image_path)
+            output_dir = os.path.join(input_dir, "3_translated")
+            os.makedirs(output_dir, exist_ok=True)
+            output_filename = os.path.basename(image_path)
+            output_path = os.path.join(output_dir, output_filename)
+            
             print(f"[RENDER] Saving to: {output_path}")
             rendered_pil.save(output_path)
             print(f"[RENDER] Saved successfully, file exists: {os.path.exists(output_path)}")
+            
+            # Store rendered image path mapped to ORIGINAL source image (not cleaned)
+            # This allows navigation to work properly
+            if not hasattr(self, '_rendered_images_map'):
+                self._rendered_images_map = {}
+            
+            # If this is a cleaned image (from 2_cleaned folder), map to the original
+            if '2_cleaned' in image_path:
+                # Get original path by going up one folder and using same filename
+                original_path = os.path.join(os.path.dirname(os.path.dirname(image_path)), os.path.basename(image_path))
+                self._rendered_images_map[original_path] = output_path
+                print(f"[RENDER] Mapped cleaned image back to original: {os.path.basename(original_path)} -> {os.path.basename(output_path)}")
+            else:
+                self._rendered_images_map[image_path] = output_path
             
             # Load the rendered image into preview
             print(f"[RENDER] Loading rendered image into preview...")
             self.image_preview_widget.load_image(output_path, preserve_rectangles=True, preserve_text_overlays=False)
             print(f"[RENDER] Image loaded into preview")
             
-            self._log(f"✅ Rendered with PIL pipeline: {os.path.basename(output_path)}", "success")
-            
-            # Clean up temp directory after a delay
-            import threading
-            def cleanup_later():
-                import time
-                time.sleep(5)  # Give more time
-                try:
-                    if os.path.exists(temp_dir):
-                        print(f"[RENDER] Cleaning up temp dir: {temp_dir}")
-                        shutil.rmtree(temp_dir)
-                except Exception as e:
-                    print(f"[RENDER] Cleanup error: {e}")
-            threading.Thread(target=cleanup_later, daemon=True).start()
+            self._log(f"✅ Rendered to: 3_translated/{output_filename}", "success")
             
             print(f"[RENDER] _render_with_manga_translator COMPLETED SUCCESSFULLY\n{'='*80}\n")
         
@@ -10718,8 +10983,12 @@ class MangaTranslationTab:
                         'total': total
                     }))
                     
-                    # Load the image in preview (on main thread)
-                    self.update_queue.put(('load_preview_image', image_path))
+                    # Load the image in preview (on main thread) with overlay preservation
+                    self.update_queue.put(('load_preview_image', {
+                        'path': image_path,
+                        'preserve_rectangles': False,
+                        'preserve_overlays': False
+                    }))
                     
                     # Wait a bit for image to load
                     import time
@@ -10751,6 +11020,12 @@ class MangaTranslationTab:
                         'regions': regions
                     }))
                     
+                    # Save state after detection
+                    self.image_state_manager.update_state(image_path, {
+                        'detection_regions': regions,
+                        'step': 'detected'
+                    })
+                    
                     # Brief pause so user can see green detection boxes
                     time.sleep(0.3)
                     
@@ -10769,25 +11044,60 @@ class MangaTranslationTab:
                         'recognized_texts': recognized_texts
                     }))
                     
+                    # Save state after recognition
+                    self.image_state_manager.update_state(image_path, {
+                        'recognized_texts': recognized_texts,
+                        'step': 'recognized'
+                    })
+                    
                     # Brief pause so user can see blue recognition boxes
                     time.sleep(0.3)
                     
                     # Step 2.5: Run inpainting/cleaning if enabled (optional visual step)
+                    cleaned_path = None
                     try:
                         inpaint_config = self._get_inpaint_config()
-                        if inpaint_config.get('method') != 'none':
+                        inpaint_method = inpaint_config.get('method', 'none')
+                        
+                        # Only run inpainting if method is not 'none' and is 'local' or 'hybrid'
+                        if inpaint_method in ['local', 'hybrid']:
                             self._log(f"🧹 [{idx}/{total}] Cleaning image...", "info")
-                            cleaned_path = self._run_inpainting_sync(image_path, regions, inpaint_config)
+                            cleaned_path = self._run_inpainting_sync(image_path, regions)
+                            
                             if cleaned_path and os.path.exists(cleaned_path):
                                 # Store cleaned image path for rendering
                                 self._cleaned_image_path = cleaned_path
-                                # Load cleaned image in preview
-                                self.update_queue.put(('load_preview_image', cleaned_path))
+                                # Load cleaned image in preview, preserving rectangles
+                                self.update_queue.put(('load_preview_image', {
+                                    'path': cleaned_path,
+                                    'preserve_rectangles': True,
+                                    'preserve_overlays': True
+                                }))
                                 self._log(f"✅ [{idx}/{total}] Image cleaned", "success")
+                                
+                                # Save state after cleaning
+                                self.image_state_manager.update_state(image_path, {
+                                    'cleaned_image_path': cleaned_path,
+                                    'step': 'cleaned'
+                                })
+                                
                                 # Brief pause to show cleaned image
-                                time.sleep(0.3)
+                                time.sleep(0.5)
+                                # Use cleaned image for translation rendering
+                                image_path_for_rendering = cleaned_path
+                            else:
+                                self._log(f"⚠️ [{idx}/{total}] Cleaning failed, using original", "warning")
+                                image_path_for_rendering = image_path
+                        else:
+                            # No cleaning, use original image
+                            image_path_for_rendering = image_path
+                            self._cleaned_image_path = None
                     except Exception as e:
-                        self._log(f"⚠️ [{idx}/{total}] Cleaning skipped: {str(e)}", "warning")
+                        self._log(f"⚠️ [{idx}/{total}] Cleaning error: {str(e)}", "warning")
+                        import traceback
+                        print(f"[TRANSLATE_ALL] Cleaning error: {traceback.format_exc()}")
+                        image_path_for_rendering = image_path
+                        self._cleaned_image_path = None
                     
                     # Step 3: Run translation
                     translated_texts = self._translate_individually(recognized_texts, image_path)
@@ -10798,14 +11108,24 @@ class MangaTranslationTab:
                     
                     self._log(f"✅ [{idx}/{total}] Translated {len(translated_texts)} regions", "success")
                     
-                    # Send results to main thread for rendering (with cleaned image if available)
+                    # Send results to main thread for rendering
+                    # Use cleaned image if available, otherwise original
+                    render_image_path = image_path_for_rendering if 'image_path_for_rendering' in locals() else image_path
                     self.update_queue.put(('translate_results', {
-                        'image_path': image_path,
-                        'translated_texts': translated_texts
+                        'image_path': render_image_path,
+                        'translated_texts': translated_texts,
+                        'original_image_path': image_path  # Keep track of original for mapping
                     }))
                     
-                    # Longer pause so user can see the final translated result
-                    time.sleep(0.8)
+                    # Save state after translation
+                    self.image_state_manager.update_state(image_path, {
+                        'translated_texts': translated_texts,
+                        'step': 'translated'
+                    })
+                    
+                    # Wait for rendering to complete and give user time to see final result
+                    # The _render_with_manga_translator will load the rendered image into preview
+                    time.sleep(1.5)
                     
                     translated_count += 1
                     
@@ -10821,6 +11141,9 @@ class MangaTranslationTab:
             self._log(f"   ✅ Successful: {translated_count}/{total}", "success")
             if failed_count > 0:
                 self._log(f"   ❌ Failed: {failed_count}/{total}", "error")
+            
+            # After all processing, update the thumbnail list to show rendered images
+            self.update_queue.put(('update_preview_to_rendered', None))
             
         except Exception as e:
             import traceback
@@ -10840,6 +11163,42 @@ class MangaTranslationTab:
                 self.image_preview_widget.translate_all_btn.setText("Translate All")
         except Exception:
             pass
+    
+    def _update_preview_to_rendered_images(self):
+        """Update the preview thumbnails to show rendered/translated images"""
+        try:
+            if not hasattr(self, '_rendered_images_map') or not self._rendered_images_map:
+                print("[UPDATE_PREVIEW] No rendered images to show")
+                return
+            
+            # Collect all rendered image paths that exist
+            rendered_paths = []
+            for original_path, rendered_path in self._rendered_images_map.items():
+                if os.path.exists(rendered_path):
+                    rendered_paths.append(rendered_path)
+            
+            if not rendered_paths:
+                print("[UPDATE_PREVIEW] No rendered files found on disk")
+                return
+            
+            print(f"[UPDATE_PREVIEW] Found {len(rendered_paths)} rendered images")
+            self._log(f"🖼️ Updating preview with {len(rendered_paths)} translated images", "success")
+            
+            # Update the thumbnail list with rendered images
+            if hasattr(self, 'image_preview_widget'):
+                self.image_preview_widget.set_image_list(rendered_paths)
+                
+                # Load the first rendered image
+                if rendered_paths:
+                    first_rendered = rendered_paths[0]
+                    self.image_preview_widget.load_image(first_rendered, preserve_rectangles=False, preserve_text_overlays=False)
+                    print(f"[UPDATE_PREVIEW] Loaded first rendered image: {os.path.basename(first_rendered)}")
+                    self._log(f"👁️ Now showing translated images (3_translated folder)", "info")
+            
+        except Exception as e:
+            print(f"[UPDATE_PREVIEW] Error: {str(e)}")
+            import traceback
+            print(f"[UPDATE_PREVIEW] Traceback: {traceback.format_exc()}")
     
     def _get_ocr_config(self) -> dict:
         """Get OCR configuration for the selected provider (same as regular pipeline)"""
@@ -10926,6 +11285,8 @@ class MangaTranslationTab:
         """Process translation results on main thread - USE PIL RENDERING!"""
         try:
             translated_texts = results['translated_texts']
+            image_path = results.get('image_path')  # This might be cleaned image
+            original_image_path = results.get('original_image_path', image_path)  # Original for mapping
             
             # Store translated texts
             self._translated_texts = translated_texts
@@ -10978,24 +11339,17 @@ class MangaTranslationTab:
                         regions.append(region)
                 
                 if regions:
-                    # Decide which image to render on: prefer cleaned if available, else current
-                    current_image = None
-                    try:
-                        current_image = self.image_preview_widget.current_image_path if hasattr(self, 'image_preview_widget') else None
-                    except Exception:
-                        current_image = None
-                    
-                    cleaned_image = None
-                    try:
-                        if hasattr(self, '_cleaned_image_path') and self._cleaned_image_path and os.path.exists(self._cleaned_image_path):
-                            cleaned_image = self._cleaned_image_path
-                    except Exception:
-                        cleaned_image = None
-                    
-                    render_image = cleaned_image if cleaned_image else current_image
-                    if render_image:
-                        if cleaned_image:
-                            print(f"[TRANSLATE] Using cleaned image: {os.path.basename(cleaned_image)}")
+                    # Use the image_path passed in results (already handles cleaned vs original)
+                    render_image = image_path
+                    if render_image and os.path.exists(render_image):
+                        # Check if we're using a cleaned image (from 2_cleaned folder or self._cleaned_image_path)
+                        is_cleaned = ('2_cleaned' in render_image or 
+                                    (hasattr(self, '_cleaned_image_path') and 
+                                     self._cleaned_image_path and 
+                                     render_image == self._cleaned_image_path))
+                        
+                        if is_cleaned:
+                            print(f"[TRANSLATE] Using cleaned image: {os.path.basename(render_image)}")
                             self._log(f"🧹 Rendering on cleaned image", "info")
                         else:
                             print(f"[TRANSLATE] No cleaned image available, rendering on current image")
@@ -11635,11 +11989,39 @@ class MangaTranslationTab:
                 
                 elif update[0] == 'load_preview_image':
                     # Load an image in the preview
-                    _, image_path = update
+                    _, data = update
                     try:
                         if hasattr(self, 'image_preview_widget'):
-                            # Load with preserve_rectangles=False to clear previous boxes
-                            self.image_preview_widget.load_image(image_path, preserve_rectangles=False)
+                            # Handle both string (image_path) and dict (with options)
+                            if isinstance(data, dict):
+                                image_path = data.get('path')
+                                preserve_rectangles = data.get('preserve_rectangles', False)
+                                preserve_overlays = data.get('preserve_overlays', False)
+                            else:
+                                image_path = data
+                                preserve_rectangles = False
+                                preserve_overlays = False
+                            
+                            # Store original path for state restoration
+                            original_image_path = image_path
+                            
+                            # Check if a rendered version exists and use that instead
+                            if hasattr(self, '_rendered_images_map') and image_path in self._rendered_images_map:
+                                rendered_path = self._rendered_images_map[image_path]
+                                if os.path.exists(rendered_path):
+                                    print(f"[LOAD_IMAGE] Using rendered version: {os.path.basename(rendered_path)}")
+                                    image_path = rendered_path
+                            
+                            self.image_preview_widget.load_image(image_path, 
+                                                                preserve_rectangles=preserve_rectangles,
+                                                                preserve_text_overlays=preserve_overlays)
+                            
+                            # Update current image path for state tracking
+                            self._current_image_path = original_image_path
+                            
+                            # Restore persisted state if not preserving (fresh load)
+                            if not preserve_rectangles and not preserve_overlays:
+                                self._restore_image_state(original_image_path)
                     except Exception as e:
                         print(f"Error loading preview image: {str(e)}")
                 
@@ -11656,6 +12038,13 @@ class MangaTranslationTab:
                         self._remove_processing_overlay()
                     except Exception as e:
                         print(f"Error removing processing overlay: {str(e)}")
+                
+                elif update[0] == 'update_preview_to_rendered':
+                    # Update the preview to show all rendered images
+                    try:
+                        self._update_preview_to_rendered_images()
+                    except Exception as e:
+                        self._log(f"❌ Failed to update preview to rendered images: {str(e)}", "error")
                 
                 elif update[0] == 'set_translated_folder':
                     # Set translated folder for preview mode and download button
