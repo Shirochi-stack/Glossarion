@@ -7376,6 +7376,11 @@ class MangaTranslationTab:
             # Get detection settings for the background thread
             detection_config = self._get_detection_config()
             
+            # Manual detection should exclude EMPTY BUBBLES to avoid duplicate container boxes
+            if detection_config.get('detect_empty_bubbles', True):
+                detection_config['detect_empty_bubbles'] = False
+                self._log("🚫 Manual detection: Excluding empty bubble regions (container boxes)", "info")
+            
             self._log(f"🔍 Starting background detection: {os.path.basename(image_path)}", "info")
             
             # Run detection in background thread
@@ -7498,8 +7503,15 @@ class MangaTranslationTab:
             
             self._log(f"✅ Found {len(boxes)} text regions", "success")
             
+            # Debug: Print first few boxes to inspect
+            print(f"[DETECT] First 3 boxes from detector:")
+            for i, box in enumerate(boxes[:3]):
+                print(f"[DETECT]   Box {i}: {box}")
+            
             # Process detection boxes and store regions
             regions = []
+            seen_boxes = set()  # Track boxes to detect duplicates
+            
             for i, box in enumerate(boxes):
                 if len(box) >= 4:
                     # Validate and convert coordinates
@@ -7512,17 +7524,29 @@ class MangaTranslationTab:
                         x2 = max(x1 + 1, min(x + width, image.shape[1]))
                         y2 = max(y1 + 1, min(y + height, image.shape[0]))
                         
+                        # Create box signature for duplicate detection
+                        box_sig = (x1, y1, x2, y2)
+                        
+                        # Skip if we've already seen this exact box
+                        if box_sig in seen_boxes:
+                            print(f"[DETECT] Skipping duplicate box {i}: {box_sig}")
+                            continue
+                        seen_boxes.add(box_sig)
+                        
                         # Store region for workflow continuity
                         region_dict = {
                             'bbox': [x1, y1, x2 - x1, y2 - y1],  # (x, y, width, height)
-                            'coords': [[x, y], [x2, y], [x2, y2], [x, y2]],  # Corner coordinates
+                            'coords': [[x1, y1], [x2, y1], [x2, y2], [x1, y2]],  # Corner coordinates (use clamped values)
                             'confidence': getattr(box, 'confidence', confidence) if hasattr(box, 'confidence') else confidence
                         }
                         regions.append(region_dict)
+                        print(f"[DETECT] Added region {len(regions)-1}: bbox={region_dict['bbox']}")
                         
                     except (ValueError, IndexError) as e:
                         self._log(f"⚠️ Skipping invalid box {i}: {e}", "warning")
                         continue
+            
+            print(f"[DETECT] Total regions after deduplication: {len(regions)}")
             
             # Send detection results to main thread using update queue
             self.update_queue.put(('detect_results', {
@@ -7583,20 +7607,35 @@ class MangaTranslationTab:
             from PySide6.QtGui import QPen, QBrush, QColor
             from manga_image_preview import MoveableRectItem
             
+            print(f"[DRAW_BOXES] Drawing {len(self._current_regions)} regions")
+            print(f"[DRAW_BOXES] Current rectangles count before drawing: {len(viewer.rectangles)}")
+            
             # Draw boxes for each region
-            for region in self._current_regions:
+            for i, region in enumerate(self._current_regions):
                 bbox = region.get('bbox', [])
                 if len(bbox) >= 4:
                     x, y, width, height = bbox
                     rect = QRectF(x, y, width, height)
+                    print(f"[DRAW_BOXES] Drawing rectangle {i}: x={x}, y={y}, w={width}, h={height}")
                     
-                    # Create rectangle item with green color
-                    rect_item = MoveableRectItem(rect)
-                    rect_item.setPen(QPen(QColor(0, 255, 0), 2))  # Green border
-                    rect_item.setBrush(QBrush(QColor(0, 255, 0, 50)))  # Semi-transparent green fill
+                    # Create pen and brush with detection colors
+                    pen = QPen(QColor(0, 255, 0), 1)  # Green border (width 1 to avoid double-line artifact)
+                    pen.setCosmetic(True)  # Pen width stays constant regardless of zoom
+                    pen.setCapStyle(Qt.PenCapStyle.SquareCap)  # Sharp corners
+                    pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)  # Sharp joins
+                    brush = QBrush(QColor(0, 255, 0, 50))  # Semi-transparent green fill
+                    
+                    # Create rectangle item with colors set from the start (avoids double rendering)
+                    rect_item = MoveableRectItem(rect, pen=pen, brush=brush)
+                    
+                    # Explicitly disable antialiasing on this item to prevent blur artifacts
+                    from PySide6.QtWidgets import QGraphicsItem
+                    rect_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemUsesExtendedStyleOption, False)
                     
                     viewer._scene.addItem(rect_item)
                     viewer.rectangles.append(rect_item)
+            
+            print(f"[DRAW_BOXES] Final rectangles count after drawing: {len(viewer.rectangles)}")
         
         except Exception as e:
             self._log(f"⚠️ Error drawing detection boxes: {str(e)}", "warning")

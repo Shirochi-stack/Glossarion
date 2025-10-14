@@ -19,14 +19,27 @@ import numpy as np
 class MoveableRectItem(QGraphicsRectItem):
     """Simple moveable rectangle for text box selection"""
     
-    def __init__(self, rect=None, parent=None):
+    def __init__(self, rect=None, parent=None, pen=None, brush=None):
         super().__init__(rect, parent)
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable, True)
         self.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsSelectable, True)
         self.setAcceptHoverEvents(True)
-        self.setBrush(QBrush(QColor(255, 192, 203, 125)))  # Transparent pink
-        self.setPen(QPen(QColor(255, 0, 0), 2))
+        
+        # Disable caching to prevent double-draw artifacts
+        self.setCacheMode(QGraphicsRectItem.CacheMode.NoCache)
+        
+        # Only set default colors if not provided
+        if brush is not None:
+            self.setBrush(brush)
+        else:
+            self.setBrush(QBrush(QColor(255, 192, 203, 125)))  # Transparent pink (default)
+        
+        if pen is not None:
+            self.setPen(pen)
+        else:
+            self.setPen(QPen(QColor(255, 0, 0), 2))  # Red border (default)
+        
         self.setZValue(1)
         self.selected = False
         
@@ -115,6 +128,8 @@ class CompactImageViewer(QGraphicsView):
         
         # High quality image scaling to preserve image quality
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        # Disable antialiasing for shapes to prevent double-line artifacts on rectangles
+        self.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         
         # State
         self.empty = True
