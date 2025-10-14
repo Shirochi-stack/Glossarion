@@ -109,7 +109,6 @@ app_files = [
     
     # Resources
     ('Halgakos.ico', '.'),
-    ('Halgakos_NoChibi.png', '.'),
 	
 	('enhanced_text_extractor.py', '.'),	
 	

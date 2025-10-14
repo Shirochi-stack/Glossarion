@@ -2651,13 +2651,13 @@ class MangaTranslationTab:
         # Left column (Column 1 - Translation Settings) - for tab content
         left_column = QWidget()
         left_column_layout = QVBoxLayout(left_column)
-        left_column_layout.setContentsMargins(0, 0, 0, 0)
+        left_column_layout.setContentsMargins(0, 15, 0, 0)  # Added 15px top padding
         left_column_layout.setSpacing(6)
         
         # Right column (Column 2 - Rendering Settings) - for tab content
         right_column = QWidget()
         right_column_layout = QVBoxLayout(right_column)
-        right_column_layout.setContentsMargins(0, 0, 0, 0)
+        right_column_layout.setContentsMargins(0, 15, 0, 0)  # Added 15px top padding
         right_column_layout.setSpacing(6)
         
         # Right column (Column 3 - Image Preview & Editing) - Always Visible
@@ -2681,7 +2681,7 @@ class MangaTranslationTab:
         settings_frame_font.setBold(True)
         settings_frame.setFont(settings_frame_font)
         settings_frame_layout = QVBoxLayout(settings_frame)
-        settings_frame_layout.setContentsMargins(10, 10, 10, 8)
+        settings_frame_layout.setContentsMargins(10, 15, 10, 15)  # Increased vertical padding from 10/8 to 15/15
         settings_frame_layout.setSpacing(6)
         
         # API Settings - Hybrid approach
@@ -3526,7 +3526,7 @@ class MangaTranslationTab:
         bg_settings_font.setBold(True)
         self.bg_settings_frame.setFont(bg_settings_font)
         bg_settings_layout = QVBoxLayout(self.bg_settings_frame)
-        bg_settings_layout.setContentsMargins(10, 10, 10, 10)
+        bg_settings_layout.setContentsMargins(10, 15, 10, 15)  # Increased vertical padding from 10 to 15
         bg_settings_layout.setSpacing(8)
         
         # Free text only background opacity toggle (applies BG opacity only to free-text regions)
