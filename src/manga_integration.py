@@ -8437,45 +8437,32 @@ class MangaTranslationTab:
             print(f"[DEBUG] Traceback: {traceback.format_exc()}")
     
     def _update_rectangles_with_translations(self, translated_texts: list):
-        """Render translated text directly onto the image preview"""
+        """Add translated text as overlay layer without modifying original image"""
         try:
             if not hasattr(self, 'image_preview_widget') or not hasattr(self.image_preview_widget, 'viewer'):
                 return
             
-            print(f"[DEBUG] Rendering translated text onto image for {len(translated_texts)} regions")
+            print(f"[DEBUG] Adding translated text overlay for {len(translated_texts)} regions")
             
-            # Get current image path
-            if not hasattr(self.image_preview_widget, 'current_image_path') or not self.image_preview_widget.current_image_path:
-                print(f"[DEBUG] No current image path for rendering")
-                return
+            # Store translation data for context menu access
+            self._translation_data = {}
+            for i, result in enumerate(translated_texts):
+                region_index = result['original'].get('region_index', i)
+                self._translation_data[region_index] = {
+                    'original': result['original']['text'],
+                    'translation': result['translation']
+                }
             
-            # Render translated text onto image
-            rendered_image_path = self._render_translations_on_image(translated_texts, self.image_preview_widget.current_image_path)
+            # Add text overlay to the viewer
+            self._add_text_overlay_to_viewer(translated_texts)
             
-            if rendered_image_path and os.path.exists(rendered_image_path):
-                # Update the preview with rendered image
-                print(f"[DEBUG] Loading rendered image: {rendered_image_path}")
-                self.image_preview_widget.load_image(rendered_image_path)
-                
-                # Store translation data for context menu access
-                self._translation_data = {}
-                for i, result in enumerate(translated_texts):
-                    region_index = result['original'].get('region_index', i)
-                    self._translation_data[region_index] = {
-                        'original': result['original']['text'],
-                        'translation': result['translation']
-                    }
-                
-                self._log(f"✅ Rendered {len(translated_texts)} translations onto image preview", "success")
-            else:
-                print(f"[DEBUG] Failed to render translations onto image")
-                self._log(f"❌ Failed to render translations onto image", "error")
+            self._log(f"✅ Added {len(translated_texts)} translation overlays to image preview", "success")
             
         except Exception as e:
-            print(f"[DEBUG] Error rendering translations: {str(e)}")
+            print(f"[DEBUG] Error adding translation overlays: {str(e)}")
             import traceback
             print(f"[DEBUG] Traceback: {traceback.format_exc()}")
-            self._log(f"❌ Error rendering translations: {str(e)}", "error")
+            self._log(f"❌ Error adding translation overlays: {str(e)}", "error")
     
     def _add_context_menu_to_rectangle(self, rect_item, region_index: int):
         """Add context menu to rectangle for showing OCR text on right-click"""
@@ -8487,41 +8474,97 @@ class MangaTranslationTab:
             # Store the region index on the rectangle for later retrieval
             rect_item.region_index = region_index
             
-            # Override the context menu event
-            def show_context_menu(event):
-                try:
-                    menu = QMenu()
-                    
-                    # Get recognition data
-                    if hasattr(self, '_recognition_data') and region_index in self._recognition_data:
-                        recognition_text = self._recognition_data[region_index]['text']
-                        
-                        # Add action to show OCR text
-                        ocr_action = QAction(f"📝 OCR: {recognition_text[:50]}...", menu)
-                        ocr_action.triggered.connect(lambda: self._show_ocr_popup(recognition_text))
-                        menu.addAction(ocr_action)
-                    
-                    # Get translation data if available
-                    if hasattr(self, '_translation_data') and region_index in self._translation_data:
-                        translation_data = self._translation_data[region_index]
-                        
-                        menu.addSeparator()
-                        
-                        # Add action to show translation
-                        trans_action = QAction(f"🌍 Translation: {translation_data['translation'][:50]}...", menu)
-                        trans_action.triggered.connect(lambda: self._show_translation_popup(translation_data))
-                        menu.addAction(trans_action)
-                    
-                    if not menu.isEmpty():
-                        # Show the context menu at the cursor position
-                        global_pos = self.image_preview_widget.viewer.mapToGlobal(event.pos().toPoint())
-                        menu.exec(global_pos)
-                
-                except Exception as e:
-                    print(f"[DEBUG] Context menu error: {str(e)}")
+            # Override the mouse press event to handle right-clicks
+            original_mouse_press = rect_item.mousePressEvent
             
-            # Replace the rectangle's context menu event
-            rect_item.contextMenuEvent = show_context_menu
+            def handle_mouse_press(event):
+                try:
+                    from PySide6.QtCore import Qt
+                    from PySide6.QtGui import QCursor
+                    
+                    if event.button() == Qt.MouseButton.RightButton:
+                        # Handle right-click for context menu
+                        menu = QMenu()
+                        
+                        # Get recognition data
+                        if hasattr(self, '_recognition_data') and region_index in self._recognition_data:
+                            recognition_text = self._recognition_data[region_index]['text']
+                            
+                            # Add action to show OCR text (with better preview formatting)
+                            if len(recognition_text) > 25:
+                                preview_text = recognition_text[:22] + "..."
+                            else:
+                                preview_text = recognition_text
+                            ocr_action = QAction(f"📝 View OCR: \"{preview_text}\"", menu)
+                            ocr_action.triggered.connect(lambda: self._show_ocr_popup(recognition_text))
+                            menu.addAction(ocr_action)
+                        
+                        # Get translation data if available
+                        if hasattr(self, '_translation_data') and region_index in self._translation_data:
+                            translation_data = self._translation_data[region_index]
+                            
+                            menu.addSeparator()
+                            
+                            # Add action to show translation (with better preview formatting)
+                            translation_text = translation_data['translation']
+                            if len(translation_text) > 25:
+                                preview_trans = translation_text[:22] + "..."
+                            else:
+                                preview_trans = translation_text
+                            trans_action = QAction(f"🌍 View Translation: \"{preview_trans}\"", menu)
+                            trans_action.triggered.connect(lambda: self._show_translation_popup(translation_data))
+                            menu.addAction(trans_action)
+                        
+                        if not menu.isEmpty():
+                            # Set menu properties for better display
+                            menu.setMinimumWidth(250)  # Increase minimum width for better readability
+                            menu.setMaximumWidth(500)  # Allow wider menus for longer text
+                            
+                            # Apply better styling to the menu
+                            menu.setStyleSheet("""
+                                QMenu {
+                                    background-color: #2d2d2d;
+                                    border: 1px solid #5a9fd4;
+                                    color: white;
+                                    padding: 4px;
+                                    border-radius: 4px;
+                                }
+                                QMenu::item {
+                                    background-color: transparent;
+                                    padding: 8px 12px;
+                                    margin: 2px;
+                                    border-radius: 3px;
+                                    font-size: 11pt;
+                                    white-space: nowrap;
+                                }
+                                QMenu::item:selected {
+                                    background-color: #5a9fd4;
+                                    color: white;
+                                }
+                                QMenu::separator {
+                                    height: 1px;
+                                    background-color: #5a9fd4;
+                                    margin: 4px 8px;
+                                }
+                            """)
+                            
+                            # Show the context menu at the actual cursor position
+                            menu.exec(QCursor.pos())
+                        
+                        # Don't propagate the right-click event
+                        event.accept()
+                        return
+                    
+                    # For other mouse buttons, use original behavior
+                    original_mouse_press(event)
+                    
+                except Exception as e:
+                    print(f"[DEBUG] Mouse press error: {str(e)}")
+                    # Fallback to original behavior
+                    original_mouse_press(event)
+            
+            # Replace the rectangle's mouse press event
+            rect_item.mousePressEvent = handle_mouse_press
             
         except Exception as e:
             print(f"[DEBUG] Error adding context menu: {str(e)}")
@@ -8529,13 +8572,74 @@ class MangaTranslationTab:
     def _show_ocr_popup(self, ocr_text: str):
         """Show OCR text in a popup dialog"""
         try:
-            from PySide6.QtWidgets import QMessageBox
+            from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton, QTextEdit, QHBoxLayout
+            from PySide6.QtCore import Qt
+            from PySide6.QtGui import QFont
             
-            msg = QMessageBox(self.image_preview_widget)
-            msg.setWindowTitle("📝 OCR Recognition Result")
-            msg.setText(f"Recognized Text:\n\n{ocr_text}")
-            msg.setIcon(QMessageBox.Icon.Information)
-            msg.exec()
+            dialog = QDialog(self.image_preview_widget)
+            dialog.setWindowTitle("📝 OCR Recognition Result")
+            dialog.resize(400, 250)
+            dialog.setModal(True)
+            
+            # Apply dark theme styling
+            dialog.setStyleSheet("""
+                QDialog {
+                    background-color: #2d2d2d;
+                    color: white;
+                }
+                QTextEdit {
+                    background-color: #1e1e1e;
+                    color: white;
+                    border: 1px solid #5a9fd4;
+                    border-radius: 4px;
+                    padding: 8px;
+                    font-family: 'Segoe UI', Arial, sans-serif;
+                    font-size: 11pt;
+                    selection-background-color: #5a9fd4;
+                }
+                QPushButton {
+                    background-color: #5a9fd4;
+                    color: white;
+                    border: none;
+                    padding: 8px 16px;
+                    border-radius: 4px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #7bb3e0;
+                }
+                QLabel {
+                    color: white;
+                    font-weight: bold;
+                    margin-bottom: 8px;
+                }
+            """)
+            
+            layout = QVBoxLayout(dialog)
+            layout.setContentsMargins(16, 16, 16, 16)
+            layout.setSpacing(12)
+            
+            # Title label
+            title_label = QLabel("Recognized Text:")
+            layout.addWidget(title_label)
+            
+            # Text display
+            text_edit = QTextEdit()
+            text_edit.setPlainText(ocr_text)
+            text_edit.setReadOnly(True)
+            layout.addWidget(text_edit)
+            
+            # Button layout
+            button_layout = QHBoxLayout()
+            button_layout.addStretch()
+            
+            close_btn = QPushButton("Close")
+            close_btn.clicked.connect(dialog.accept)
+            button_layout.addWidget(close_btn)
+            
+            layout.addLayout(button_layout)
+            
+            dialog.exec()
             
         except Exception as e:
             print(f"[DEBUG] Error showing OCR popup: {str(e)}")
@@ -8543,51 +8647,121 @@ class MangaTranslationTab:
     def _show_translation_popup(self, translation_data: dict):
         """Show translation in a popup dialog"""
         try:
-            from PySide6.QtWidgets import QMessageBox
+            from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton, QTextEdit, QHBoxLayout, QFrame
+            from PySide6.QtCore import Qt
+            from PySide6.QtGui import QFont
             
             original = translation_data['original']
             translation = translation_data['translation']
             
-            msg = QMessageBox(self.image_preview_widget)
-            msg.setWindowTitle("🌍 Translation Result")
-            msg.setText(f"Original:\n{original}\n\nTranslation:\n{translation}")
-            msg.setIcon(QMessageBox.Icon.Information)
-            msg.exec()
+            dialog = QDialog(self.image_preview_widget)
+            dialog.setWindowTitle("🌍 Translation Result")
+            dialog.resize(500, 350)
+            dialog.setModal(True)
+            
+            # Apply dark theme styling
+            dialog.setStyleSheet("""
+                QDialog {
+                    background-color: #2d2d2d;
+                    color: white;
+                }
+                QTextEdit {
+                    background-color: #1e1e1e;
+                    color: white;
+                    border: 1px solid #5a9fd4;
+                    border-radius: 4px;
+                    padding: 8px;
+                    font-family: 'Segoe UI', Arial, sans-serif;
+                    font-size: 11pt;
+                    selection-background-color: #5a9fd4;
+                }
+                QPushButton {
+                    background-color: #5a9fd4;
+                    color: white;
+                    border: none;
+                    padding: 8px 16px;
+                    border-radius: 4px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #7bb3e0;
+                }
+                QLabel {
+                    color: white;
+                    font-weight: bold;
+                    margin-bottom: 4px;
+                }
+                QFrame {
+                    border: none;
+                }
+            """)
+            
+            layout = QVBoxLayout(dialog)
+            layout.setContentsMargins(16, 16, 16, 16)
+            layout.setSpacing(12)
+            
+            # Original text section
+            orig_label = QLabel("Original Text:")
+            layout.addWidget(orig_label)
+            
+            orig_text = QTextEdit()
+            orig_text.setPlainText(original)
+            orig_text.setReadOnly(True)
+            orig_text.setMaximumHeight(100)
+            layout.addWidget(orig_text)
+            
+            # Separator
+            separator = QFrame()
+            separator.setFrameShape(QFrame.Shape.HLine)
+            separator.setStyleSheet("color: #5a9fd4;")
+            layout.addWidget(separator)
+            
+            # Translation section
+            trans_label = QLabel("Translation:")
+            layout.addWidget(trans_label)
+            
+            trans_text = QTextEdit()
+            trans_text.setPlainText(translation)
+            trans_text.setReadOnly(True)
+            trans_text.setMaximumHeight(100)
+            layout.addWidget(trans_text)
+            
+            # Button layout
+            button_layout = QHBoxLayout()
+            button_layout.addStretch()
+            
+            close_btn = QPushButton("Close")
+            close_btn.clicked.connect(dialog.accept)
+            button_layout.addWidget(close_btn)
+            
+            layout.addLayout(button_layout)
+            
+            dialog.exec()
             
         except Exception as e:
             print(f"[DEBUG] Error showing translation popup: {str(e)}")
     
-    def _render_translations_on_image(self, translated_texts: list, image_path: str) -> str:
-        """Render translated text onto the image and return path to rendered image"""
+    def _add_text_overlay_to_viewer(self, translated_texts: list):
+        """Add translated text as graphics items overlay on the viewer"""
         try:
-            import cv2
-            import numpy as np
-            from PIL import Image, ImageDraw, ImageFont
+            from PySide6.QtWidgets import QGraphicsTextItem, QGraphicsRectItem
+            from PySide6.QtCore import QRectF
+            from PySide6.QtGui import QColor, QBrush, QPen, QFont
             
-            # Load image
-            image = cv2.imread(image_path)
-            if image is None:
-                print(f"[DEBUG] Failed to load image: {image_path}")
-                return None
+            viewer = self.image_preview_widget.viewer
             
-            # Convert to PIL for better text rendering
-            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            pil_image = Image.fromarray(image_rgb)
-            draw = ImageDraw.Draw(pil_image)
+            # Clear any existing text overlays
+            if hasattr(self, '_text_overlays'):
+                for overlay in self._text_overlays:
+                    viewer._scene.removeItem(overlay)
             
-            # Try to load a font (fallback to default if not available)
-            try:
-                # Try to use a system font
-                font_size = 24
-                font = ImageFont.truetype("arial.ttf", font_size)
-            except:
-                try:
-                    # Fallback to default font
-                    font = ImageFont.load_default()
-                except:
-                    font = None
+            self._text_overlays = []
             
-            # Render each translation
+            # Get manga rendering settings
+            manga_settings = self._get_manga_rendering_settings()
+            
+            print(f"[DEBUG] Using manga rendering settings: {manga_settings}")
+            
             for result in translated_texts:
                 try:
                     bbox = result['bbox']
@@ -8596,73 +8770,413 @@ class MangaTranslationTab:
                     if len(bbox) >= 4:
                         x, y, w, h = bbox
                         
-                        # Create background rectangle for text
-                        padding = 4
-                        bg_x1 = max(0, x - padding)
-                        bg_y1 = max(0, y - padding)
-                        bg_x2 = min(pil_image.width, x + w + padding)
-                        bg_y2 = min(pil_image.height, y + h + padding)
+                        # Create background rectangle if enabled in settings
+                        if manga_settings.get('show_background', True):
+                            bg_rect = self._create_background_shape(
+                                x, y, w, h, manga_settings
+                            )
+                            if bg_rect:
+                                bg_rect.setZValue(10)  # Above image, below text
+                                viewer._scene.addItem(bg_rect)
+                                self._text_overlays.append(bg_rect)
                         
-                        # Draw white background with slight transparency
-                        bg_overlay = Image.new('RGBA', pil_image.size, (0, 0, 0, 0))
-                        bg_draw = ImageDraw.Draw(bg_overlay)
-                        bg_draw.rectangle([bg_x1, bg_y1, bg_x2, bg_y2], fill=(255, 255, 255, 200))
+                        # Apply text formatting
+                        text = translation
+                        if manga_settings.get('force_caps', False):
+                            text = text.upper()
                         
-                        # Composite with main image
-                        pil_image = Image.alpha_composite(pil_image.convert('RGBA'), bg_overlay).convert('RGB')
-                        draw = ImageDraw.Draw(pil_image)
+                        # Create text item with proper manga text rendering
+                        text_item, final_font_size = self._create_manga_text_item(
+                            text, x, y, w, h, manga_settings
+                        )
                         
-                        # Word wrap text to fit in the bbox
-                        words = translation.split()
-                        lines = []
-                        current_line = []
+                        if text_item is None:
+                            print(f"[DEBUG] Failed to create text item for: {text[:30]}...")
+                            continue
                         
-                        for word in words:
-                            test_line = ' '.join(current_line + [word])
-                            if font:
-                                text_width = draw.textlength(test_line, font=font)
-                            else:
-                                text_width = len(test_line) * 8  # Rough estimate
-                            
-                            if text_width <= w - 8:  # Leave some margin
-                                current_line.append(word)
-                            else:
-                                if current_line:
-                                    lines.append(' '.join(current_line))
-                                current_line = [word]
+                        # Position text
+                        text_item.setPos(x + manga_settings.get('text_padding', 4), 
+                                       y + manga_settings.get('text_padding', 4))
+                        text_item.setZValue(11)  # Above background
                         
-                        if current_line:
-                            lines.append(' '.join(current_line))
+                        # Add to scene
+                        viewer._scene.addItem(text_item)
+                        self._text_overlays.append(text_item)
                         
-                        # Draw text lines
-                        line_height = font_size + 4 if font else 16
-                        for i, line in enumerate(lines):
-                            text_y = y + (i * line_height)
-                            if text_y + line_height <= y + h:  # Only draw if it fits
-                                draw.text((x + 4, text_y), line, fill=(0, 0, 0), font=font)
+                        print(f"[DEBUG] Added text overlay at ({x},{y}) with font size {final_font_size}: '{translation[:30]}...'")
                 
-                except Exception as line_error:
-                    print(f"[DEBUG] Error rendering line: {str(line_error)}")
+                except Exception as text_error:
+                    print(f"[DEBUG] Error adding text overlay: {str(text_error)}")
+                    import traceback
+                    print(f"[DEBUG] Text overlay traceback: {traceback.format_exc()}")
                     continue
             
-            # Save rendered image
-            output_dir = os.path.join(os.path.dirname(image_path), "3_translated")
-            os.makedirs(output_dir, exist_ok=True)
-            output_filename = os.path.basename(image_path)
-            rendered_path = os.path.join(output_dir, output_filename)
-            
-            # Convert back to cv2 format and save
-            rendered_bgr = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
-            cv2.imwrite(rendered_path, rendered_bgr)
-            
-            print(f"[DEBUG] Rendered image saved to: {rendered_path}")
-            return rendered_path
+            print(f"[DEBUG] Added {len(self._text_overlays)} text overlay items")
             
         except Exception as e:
-            print(f"[DEBUG] Error rendering translations on image: {str(e)}")
+            print(f"[DEBUG] Error adding text overlays: {str(e)}")
             import traceback
             print(f"[DEBUG] Traceback: {traceback.format_exc()}")
+    
+    def _get_manga_rendering_settings(self) -> dict:
+        """Get manga rendering settings from the GUI's current state"""
+        try:
+            # Get settings directly from GUI components (current user selections)
+            settings = {
+                # Background settings - use actual GUI values
+                'show_background': not getattr(self, 'skip_inpainting_value', False),
+                'bg_color': [255, 255, 255],  # White background for text
+                'bg_opacity': getattr(self, 'bg_opacity_value', 130),
+                'bg_style': getattr(self, 'bg_style_value', 'circle'),
+                'bg_reduction': getattr(self, 'bg_reduction_value', 1.0),
+                'free_text_only_bg': getattr(self, 'free_text_only_bg_opacity_value', True),
+                
+                # Font settings - use GUI current values
+                'font_family': getattr(self, 'font_style_value', 'Arial'),
+                'font_size_mode': getattr(self, 'font_size_mode_value', 'auto'),
+                'font_size': getattr(self, 'font_size_value', 0),
+                'font_size_multiplier': getattr(self, 'font_size_multiplier_value', 1.0),
+                'auto_min_size': getattr(self, 'auto_min_size_value', 12),
+                'max_font_size': getattr(self, 'max_font_size_value', 48),
+                'font_algorithm': getattr(self, 'font_algorithm_value', 'smart'),
+                'auto_fit_style': getattr(self, 'auto_fit_style_value', 'balanced'),
+                'prefer_larger': getattr(self, 'prefer_larger_value', True),
+                'bubble_size_factor': getattr(self, 'bubble_size_factor_value', True),
+                'constrain_to_bubble': getattr(self, 'constrain_to_bubble_value', True),
+                
+                # Text color settings - use GUI current values
+                'text_color': [getattr(self, 'text_color_r_value', 0), 
+                              getattr(self, 'text_color_g_value', 0), 
+                              getattr(self, 'text_color_b_value', 0)],
+                
+                # Text formatting
+                'force_caps': getattr(self, 'force_caps_lock_value', False),
+                'strict_wrapping': getattr(self, 'strict_text_wrapping_value', True),
+                'line_spacing': getattr(self, 'line_spacing_value', 1.3),
+                'max_lines': getattr(self, 'max_lines_value', 10),
+                
+                # Shadow settings
+                'shadow_enabled': getattr(self, 'shadow_enabled_value', False),
+                'shadow_color': [getattr(self, 'shadow_color_r_value', 0),
+                               getattr(self, 'shadow_color_g_value', 0), 
+                               getattr(self, 'shadow_color_b_value', 0)],
+                'shadow_offset_x': getattr(self, 'shadow_offset_x_value', 1),
+                'shadow_offset_y': getattr(self, 'shadow_offset_y_value', 1),
+                'shadow_blur': getattr(self, 'shadow_blur_value', 2),
+                
+                # Layout settings
+                'text_padding': 4
+            }
+            
+            print(f"[DEBUG] Retrieved GUI rendering settings - font_size_mode: {settings['font_size_mode']}, auto_min_size: {settings['auto_min_size']}, max_size: {settings['max_font_size']}, algorithm: {settings['font_algorithm']}")
+            
+            return settings
+            
+        except Exception as e:
+            print(f"[DEBUG] Error getting manga settings: {str(e)}")
+            import traceback
+            print(f"[DEBUG] Traceback: {traceback.format_exc()}")
+            # Return default settings
+            return {
+                'show_background': True,
+                'bg_color': [255, 255, 255],
+                'bg_opacity': 130,
+                'bg_style': 'circle',
+                'bg_reduction': 1.0,
+                'font_family': 'Arial',
+                'font_size_mode': 'auto',
+                'font_size': 0,
+                'auto_min_size': 12,
+                'max_font_size': 48,
+                'font_algorithm': 'smart',
+                'text_color': [0, 0, 0],
+                'force_caps': False,
+                'strict_wrapping': True,
+                'line_spacing': 1.3,
+                'max_lines': 10,
+                'shadow_enabled': False,
+                'constrain_to_bubble': True,
+                'text_padding': 4
+            }
+    
+    def _create_manga_text_item(self, text: str, x: int, y: int, w: int, h: int, settings: dict):
+        """Create a properly sized manga text item using the same algorithm as the main translator"""
+        try:
+            from PySide6.QtWidgets import QGraphicsTextItem
+            from PySide6.QtCore import QRectF
+            from PySide6.QtGui import QFont, QFontMetrics, QColor, QTextDocument
+            import math
+            
+            # Determine font size based on settings
+            font_size_mode = settings.get('font_size_mode', 'auto')
+            font_family = settings.get('font_family', 'Arial')
+            
+            # Calculate available text area
+            padding = settings.get('text_padding', 4)
+            available_width = w - (padding * 2)
+            available_height = h - (padding * 2)
+            
+            if available_width <= 0 or available_height <= 0:
+                return None, 0
+            
+            if font_size_mode == 'fixed':
+                # Use fixed font size
+                font_size = max(8, settings.get('font_size', 12))
+            elif font_size_mode == 'multiplier':
+                # Calculate base size from bubble dimensions
+                base_size = min(available_width, available_height) / 8
+                multiplier = settings.get('font_size_multiplier', 1.0)
+                font_size = int(base_size * multiplier)
+                font_size = max(8, min(font_size, settings.get('max_font_size', 48)))
+            else:
+                # Auto mode - use smart sizing algorithm
+                font_size = self._calculate_auto_font_size(
+                    text, available_width, available_height, settings
+                )
+            
+            # Ensure font size is within bounds
+            min_size = settings.get('auto_min_size', 10)
+            max_size = settings.get('max_font_size', 48)
+            font_size = max(min_size, min(font_size, max_size))
+            
+            # Create font
+            font = QFont(font_family)
+            font.setPointSize(int(font_size))
+            
+            # Create text item
+            text_item = QGraphicsTextItem()
+            
+            # Wrap text to fit width
+            wrapped_text = self._wrap_text_for_bubble(text, available_width, font, settings)
+            text_item.setPlainText(wrapped_text)
+            text_item.setFont(font)
+            
+            # Set text color
+            text_color = QColor(*settings.get('text_color', [0, 0, 0]))
+            text_item.setDefaultTextColor(text_color)
+            
+            # Apply shadow if enabled
+            if settings.get('shadow_enabled', False):
+                # Note: QGraphicsTextItem doesn't have built-in shadow, would need QGraphicsDropShadowEffect
+                pass
+            
+            # Position text with padding
+            text_item.setPos(x + padding, y + padding)
+            text_item.setZValue(11)  # Above background
+            
+            return text_item, font_size
+            
+        except Exception as e:
+            print(f"[DEBUG] Error creating manga text item: {str(e)}")
+            return None, 0
+    
+    def _calculate_auto_font_size(self, text: str, width: int, height: int, settings: dict) -> int:
+        """Calculate optimal font size using manga translation algorithm"""
+        try:
+            from PySide6.QtGui import QFont, QFontMetrics
+            
+            font_family = settings.get('font_family', 'Arial')
+            algorithm = settings.get('font_algorithm', 'smart')
+            min_size = settings.get('auto_min_size', 10)
+            max_size = settings.get('max_font_size', 48)
+            prefer_larger = settings.get('prefer_larger', True)
+            max_lines = settings.get('max_lines', 10)
+            line_spacing = settings.get('line_spacing', 1.3)
+            
+            # Algorithm factors
+            if algorithm == 'conservative':
+                start_size = min_size + 2
+                size_step = 1
+            elif algorithm == 'aggressive':
+                start_size = max(min_size, int(min(width, height) / 6))
+                size_step = 2
+            else:  # smart
+                start_size = max(min_size, int(min(width, height) / 8))
+                size_step = 1
+            
+            # Find optimal font size
+            best_size = min_size
+            
+            for size in range(start_size, max_size + 1, size_step):
+                font = QFont(font_family)
+                font.setPointSize(size)
+                
+                if self._text_fits_in_bounds(text, width, height, font, settings):
+                    best_size = size
+                    if not prefer_larger:
+                        break  # Take first fit if not preferring larger
+                else:
+                    break  # Too big, use previous size
+            
+            return best_size
+            
+        except Exception as e:
+            print(f"[DEBUG] Error calculating auto font size: {str(e)}")
+            return settings.get('auto_min_size', 12)
+    
+    def _text_fits_in_bounds(self, text: str, width: int, height: int, font: QFont, settings: dict) -> bool:
+        """Check if text fits within the given bounds with the specified font"""
+        try:
+            from PySide6.QtGui import QFontMetrics
+            
+            metrics = QFontMetrics(font)
+            line_height = metrics.height() * settings.get('line_spacing', 1.3)
+            max_lines = settings.get('max_lines', 10)
+            
+            # Wrap text and count lines
+            wrapped_text = self._wrap_text_for_bubble(text, width, font, settings)
+            lines = wrapped_text.split('\n')
+            
+            # Check line count
+            if len(lines) > max_lines:
+                return False
+            
+            # Check total height
+            total_height = len(lines) * line_height
+            if total_height > height:
+                return False
+            
+            # Check individual line widths
+            for line in lines:
+                line_width = metrics.horizontalAdvance(line.strip())
+                if line_width > width:
+                    return False
+            
+            return True
+            
+        except Exception as e:
+            print(f"[DEBUG] Error checking text bounds: {str(e)}")
+            return False
+    
+    def _wrap_text_for_bubble(self, text: str, max_width: int, font: QFont, settings: dict) -> str:
+        """Wrap text for bubble using manga translation settings"""
+        try:
+            from PySide6.QtGui import QFontMetrics
+            
+            metrics = QFontMetrics(font)
+            strict_wrapping = settings.get('strict_wrapping', True)
+            max_lines = settings.get('max_lines', 10)
+            
+            words = text.split()
+            lines = []
+            current_line = []
+            
+            for word in words:
+                test_line = ' '.join(current_line + [word])
+                text_width = metrics.horizontalAdvance(test_line)
+                
+                if text_width <= max_width - 8:  # Leave some margin
+                    current_line.append(word)
+                else:
+                    if current_line:
+                        lines.append(' '.join(current_line))
+                        current_line = [word]
+                    else:
+                        # Single word too long, force break if strict wrapping
+                        if strict_wrapping and len(word) > 3:
+                            # Break word with hyphen
+                            for i in range(len(word) - 1, 0, -1):
+                                test_word = word[:i] + '-'
+                                if metrics.horizontalAdvance(test_word) <= max_width - 8:
+                                    lines.append(test_word)
+                                    current_line = [word[i:]]
+                                    break
+                        else:
+                            current_line = [word]
+            
+            if current_line:
+                lines.append(' '.join(current_line))
+            
+            # Limit to max lines
+            if len(lines) > max_lines:
+                lines = lines[:max_lines]
+                if lines:
+                    # Add ellipsis to last line if truncated
+                    last_line = lines[-1]
+                    if len(last_line) > 3:
+                        lines[-1] = last_line[:-3] + '...'
+            
+            return '\n'.join(lines)
+            
+        except Exception as e:
+            print(f"[DEBUG] Error wrapping text: {str(e)}")
+            return text
+    
+    def _create_background_shape(self, x: int, y: int, w: int, h: int, settings: dict):
+        """Create background shape according to GUI settings"""
+        try:
+            from PySide6.QtWidgets import QGraphicsRectItem, QGraphicsEllipseItem
+            from PySide6.QtGui import QColor, QBrush, QPen
+            from PySide6.QtCore import QRectF
+            
+            # Get background settings
+            bg_style = settings.get('bg_style', 'circle')
+            bg_opacity = settings.get('bg_opacity', 130)
+            bg_reduction = settings.get('bg_reduction', 1.0)
+            
+            # Apply size reduction
+            if bg_reduction != 1.0:
+                reduction_factor = (1.0 - bg_reduction) / 2.0
+                x_offset = w * reduction_factor
+                y_offset = h * reduction_factor
+                x += x_offset
+                y += y_offset
+                w *= bg_reduction
+                h *= bg_reduction
+            
+            # Create background color
+            bg_color = QColor(255, 255, 255)  # White background for text readability
+            bg_color.setAlpha(bg_opacity)
+            
+            # Create shape based on style
+            if bg_style == 'circle':
+                # Create ellipse
+                bg_shape = QGraphicsEllipseItem(x, y, w, h)
+            elif bg_style == 'box':
+                # Create rounded rectangle
+                bg_shape = QGraphicsRectItem(x, y, w, h)
+            else:  # wrap - per-line backgrounds (simplified to box for overlay)
+                bg_shape = QGraphicsRectItem(x, y, w, h)
+            
+            # Apply styling
+            bg_shape.setBrush(QBrush(bg_color))
+            bg_shape.setPen(QPen(QColor(0, 0, 0, 0)))  # No border
+            
+            return bg_shape
+            
+        except Exception as e:
+            print(f"[DEBUG] Error creating background shape: {str(e)}")
             return None
+    
+    def _wrap_text_to_width(self, text: str, max_width: int, font: QFont) -> str:
+        """Wrap text to fit within the specified width"""
+        try:
+            from PySide6.QtGui import QFontMetrics
+            
+            metrics = QFontMetrics(font)
+            words = text.split()
+            lines = []
+            current_line = []
+            
+            for word in words:
+                test_line = ' '.join(current_line + [word])
+                text_width = metrics.horizontalAdvance(test_line)
+                
+                if text_width <= max_width - 8:  # Leave some margin
+                    current_line.append(word)
+                else:
+                    if current_line:
+                        lines.append(' '.join(current_line))
+                    current_line = [word]
+            
+            if current_line:
+                lines.append(' '.join(current_line))
+            
+            return '\n'.join(lines)
+            
+        except Exception as e:
+            print(f"[DEBUG] Error wrapping text: {str(e)}")
+            return text
     
     def _restore_translate_button(self):
         """Restore the translate button to its original state"""
