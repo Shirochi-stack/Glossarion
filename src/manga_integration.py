@@ -2655,8 +2655,8 @@ class MangaTranslationTab:
         # Right column (Column 3 - Image Preview & Editing) - Always Visible
         from manga_image_preview import MangaImagePreviewWidget
         
-        # Image preview widget (always visible)
-        self.image_preview_widget = MangaImagePreviewWidget()
+        # Image preview widget (always visible) - pass main_gui for config persistence
+        self.image_preview_widget = MangaImagePreviewWidget(main_gui=self.main_gui)
         self.image_preview_widget.setMinimumWidth(600)  # Increased from 350 to 600 for better viewing
         self.image_preview_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         
@@ -10004,7 +10004,9 @@ class MangaTranslationTab:
                     try:
                         if hasattr(self, 'image_preview_widget'):
                             self.image_preview_widget.set_translated_folder(folder_path)
-                            self._log(f"✅ Preview mode updated with translated images", "success")
+                            # Only log if manual editing is disabled (preview mode active)
+                            if not self.image_preview_widget.manual_editing_enabled:
+                                self._log(f"✅ Preview mode updated with translated images", "success")
                     except Exception as e:
                         self._log(f"❌ Failed to set translated folder: {str(e)}", "error")
                     

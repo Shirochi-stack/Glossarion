@@ -452,10 +452,11 @@ class MangaImagePreviewWidget(QWidget):
     recognize_text_clicked = Signal()
     translate_text_clicked = Signal()
     
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, main_gui=None):
         super().__init__(parent)
         self.current_image_path = None
-        self.manual_editing_enabled = True  # Manual editing is enabled by default
+        self.main_gui = main_gui  # Store reference to main GUI for config persistence
+        self.manual_editing_enabled = False  # Manual editing is disabled by default (preview mode)
         self.translated_folder_path = None  # Path to translated images folder
         self._build_ui()
     
@@ -482,8 +483,16 @@ class MangaImagePreviewWidget(QWidget):
         from PySide6.QtWidgets import QCheckBox
         from spinning import create_spinning_checkbox_with_icon
         
-        self.manual_editing_toggle = QCheckBox("✓ Enable Manual Editing")  # Checkmark in label
-        self.manual_editing_toggle.setChecked(True)  # Enabled by default
+        self.manual_editing_toggle = QCheckBox("Enable Manual Editing")
+        
+        # Load saved state from config or default to disabled (preview mode)
+        if self.main_gui and hasattr(self.main_gui, 'config'):
+            saved_state = self.main_gui.config.get('manga_manual_editing_enabled', False)
+            self.manual_editing_toggle.setChecked(saved_state)
+            self.manual_editing_enabled = saved_state
+        else:
+            self.manual_editing_toggle.setChecked(False)  # Disabled by default
+            self.manual_editing_enabled = False
         self.manual_editing_toggle.setStyleSheet("""
             QCheckBox {
                 color: white;
@@ -1094,13 +1103,13 @@ class MangaImagePreviewWidget(QWidget):
         """Update the toggle label to show visual feedback"""
         from PySide6.QtCore import Qt
         if state == Qt.CheckState.Checked.value:
-            self.manual_editing_toggle.setText("✓ Enable Manual Editing")
+            # Blue text when enabled
             self.manual_editing_toggle.setStyleSheet(self.manual_editing_toggle.styleSheet().replace(
                 "color: white;",
-                "color: #5a9fd4;"  # Blue when enabled
+                "color: #5a9fd4;"
             ))
         else:
-            self.manual_editing_toggle.setText("✗ Enable Manual Editing")  # X symbol when disabled
+            # White text when disabled
             self.manual_editing_toggle.setStyleSheet(self.manual_editing_toggle.styleSheet().replace(
                 "color: #5a9fd4;",
                 "color: white;"
@@ -1139,6 +1148,16 @@ class MangaImagePreviewWidget(QWidget):
         
         # Store state for later use in preview mode
         self.manual_editing_enabled = enabled
+        
+        # Persist state to config
+        if self.main_gui and hasattr(self.main_gui, 'config'):
+            self.main_gui.config['manga_manual_editing_enabled'] = enabled
+            # Save config to disk if save method exists
+            if hasattr(self.main_gui, 'save_config'):
+                try:
+                    self.main_gui.save_config(show_message=False)
+                except Exception as e:
+                    print(f"[DEBUG] Failed to save config: {e}")
     
     def _on_download_images_clicked(self):
         """Handle download images button - open file dialog to save translated images"""
