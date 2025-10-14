@@ -2660,6 +2660,9 @@ class MangaTranslationTab:
         self.image_preview_widget.setMinimumWidth(600)  # Increased from 350 to 600 for better viewing
         self.image_preview_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         
+        # Store reference to manga_integration for clearing overlays
+        self.image_preview_widget.manga_integration = self
+        
         # Connect image preview workflow signals to translation methods
         print("[DEBUG] Connecting workflow signals...")
         self.image_preview_widget.detect_text_clicked.connect(self._on_detect_text_clicked)
@@ -7773,7 +7776,8 @@ class MangaTranslationTab:
     def _update_preview_after_clean(self, output_path: str):
         """Update preview on main thread after cleaning is complete"""
         try:
-            self.image_preview_widget.load_image(output_path)
+            # Load cleaned image while preserving rectangles for OCR workflow
+            self.image_preview_widget.load_image(output_path, preserve_rectangles=True)
         except Exception as e:
             self._log(f"❌ Failed to update preview: {str(e)}", "error")
     
@@ -8513,9 +8517,12 @@ class MangaTranslationTab:
             viewer._scene.addItem(overlay)
             self._processing_overlay = overlay
             
-            # Create pulsing animation
-            class OpacityItem:
-                def __init__(self, item):
+            # Create pulsing animation using QObject wrapper
+            from PySide6.QtCore import QObject, pyqtProperty
+            
+            class OpacityItem(QObject):
+                def __init__(self, item, parent=None):
+                    super().__init__(parent)
                     self._item = item
                     self._opacity = 30
                 
@@ -8526,7 +8533,7 @@ class MangaTranslationTab:
                     self._opacity = value
                     self._item.setBrush(QBrush(QColor(0, 150, 255, int(value))))
                 
-                opacity = property(get_opacity, set_opacity)
+                opacity = pyqtProperty(int, get_opacity, set_opacity)
             
             self._opacity_wrapper = OpacityItem(overlay)
             
@@ -8840,6 +8847,56 @@ class MangaTranslationTab:
         except Exception as e:
             print(f"[DEBUG] Error showing translation popup: {str(e)}")
     
+    def clear_text_overlays_for_image(self, image_path: str = None):
+        """Clear text overlays for a specific image (or all if no path given)"""
+        try:
+            viewer = self.image_preview_widget.viewer
+            
+            # Initialize overlay dictionary if not exists
+            if not hasattr(self, '_text_overlays_by_image'):
+                self._text_overlays_by_image = {}
+            
+            if image_path is None:
+                # Clear all overlays from all images
+                for overlays in self._text_overlays_by_image.values():
+                    for overlay in overlays:
+                        viewer._scene.removeItem(overlay)
+                self._text_overlays_by_image = {}
+                print("[DEBUG] Cleared all text overlays for all images")
+            else:
+                # Clear overlays for specific image
+                if image_path in self._text_overlays_by_image:
+                    for overlay in self._text_overlays_by_image[image_path]:
+                        viewer._scene.removeItem(overlay)
+                    del self._text_overlays_by_image[image_path]
+                    print(f"[DEBUG] Cleared text overlays for image: {os.path.basename(image_path)}")
+        except Exception as e:
+            print(f"[DEBUG] Error clearing text overlays: {str(e)}")
+    
+    def show_text_overlays_for_image(self, image_path: str):
+        """Show text overlays for a specific image (restore from memory)"""
+        try:
+            viewer = self.image_preview_widget.viewer
+            
+            # Initialize overlay dictionary if not exists
+            if not hasattr(self, '_text_overlays_by_image'):
+                self._text_overlays_by_image = {}
+            
+            # First, hide all visible overlays
+            for overlays in self._text_overlays_by_image.values():
+                for overlay in overlays:
+                    overlay.setVisible(False)
+            
+            # Show overlays for the requested image
+            if image_path in self._text_overlays_by_image:
+                for overlay in self._text_overlays_by_image[image_path]:
+                    overlay.setVisible(True)
+                print(f"[DEBUG] Restored {len(self._text_overlays_by_image[image_path])} overlays for image: {os.path.basename(image_path)}")
+            else:
+                print(f"[DEBUG] No overlays found for image: {os.path.basename(image_path)}")
+        except Exception as e:
+            print(f"[DEBUG] Error showing text overlays: {str(e)}")
+    
     def _add_text_overlay_to_viewer(self, translated_texts: list):
         """Add translated text as graphics items overlay on the viewer"""
         try:
@@ -8849,12 +8906,23 @@ class MangaTranslationTab:
             
             viewer = self.image_preview_widget.viewer
             
-            # Clear any existing text overlays
-            if hasattr(self, '_text_overlays'):
-                for overlay in self._text_overlays:
+            # Get current image path
+            current_image = self.image_preview_widget.current_image_path
+            if not current_image:
+                print("[DEBUG] No current image path, cannot add overlays")
+                return
+            
+            # Initialize overlay dictionary if not exists
+            if not hasattr(self, '_text_overlays_by_image'):
+                self._text_overlays_by_image = {}
+            
+            # Clear any existing overlays for this specific image
+            if current_image in self._text_overlays_by_image:
+                for overlay in self._text_overlays_by_image[current_image]:
                     viewer._scene.removeItem(overlay)
             
-            self._text_overlays = []
+            # Create new list for this image's overlays
+            self._text_overlays_by_image[current_image] = []
             
             # Get manga rendering settings
             manga_settings = self._get_manga_rendering_settings()
@@ -8877,7 +8945,7 @@ class MangaTranslationTab:
                             if bg_rect:
                                 bg_rect.setZValue(10)  # Above image, below text
                                 viewer._scene.addItem(bg_rect)
-                                self._text_overlays.append(bg_rect)
+                                self._text_overlays_by_image[current_image].append(bg_rect)
                         
                         # Apply text formatting
                         text = translation
@@ -8900,7 +8968,7 @@ class MangaTranslationTab:
                         
                         # Add to scene
                         viewer._scene.addItem(text_item)
-                        self._text_overlays.append(text_item)
+                        self._text_overlays_by_image[current_image].append(text_item)
                         
                         print(f"[DEBUG] Added text overlay at ({x},{y}) with font size {final_font_size}: '{translation[:30]}...'")
                 
@@ -8910,7 +8978,8 @@ class MangaTranslationTab:
                     print(f"[DEBUG] Text overlay traceback: {traceback.format_exc()}")
                     continue
             
-            print(f"[DEBUG] Added {len(self._text_overlays)} text overlay items")
+            overlay_count = len(self._text_overlays_by_image.get(current_image, []))
+            print(f"[DEBUG] Added {overlay_count} text overlay items for image: {os.path.basename(current_image)}")
             
         except Exception as e:
             print(f"[DEBUG] Error adding text overlays: {str(e)}")

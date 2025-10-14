@@ -95,6 +95,9 @@ class MangaSettingsDialog(QDialog):
                 'rtdetr_model_url': '',
                 'use_rtdetr_for_ocr_regions': True,  # On by default for best accuracy
                 'enable_fallback_ocr': False,  # Disabled by default - fallback OCR for empty RT-DETR blocks
+                # Toggles for RT-DETR behavior customization
+                'skip_rtdetr_merging': False,    # Do not merge overlapping RT-DETR regions (manual mode behavior)
+                'preserve_empty_blocks': False,  # Keep empty RT-DETR blocks even if OCR found no text
                 # Azure settings removed - new API is synchronous, no polling/version settings needed
                 'min_text_length': 0,
                 'exclude_english_text': False,
@@ -2883,6 +2886,25 @@ class MangaSettingsDialog(QDialog):
             "missing text in detected bubbles."
         )
         bubble_layout.addWidget(self.enable_fallback_ocr_checkbox)
+        
+        # Skip RT-DETR region merging (disabled by default)
+        self.skip_rtdetr_merging_checkbox = self._create_styled_checkbox("Skip RT-DETR region merging (preserve all detected regions)")
+        self.skip_rtdetr_merging_checkbox.setChecked(self.settings['ocr'].get('skip_rtdetr_merging', False))
+        self.skip_rtdetr_merging_checkbox.setToolTip(
+            "When enabled, overlapping RT-DETR regions will NOT be merged.\n\n"
+            "Use this to preserve granular free-text regions (e.g., separate SFX parts)\n"
+            "and mimic manual edit mode behavior."
+        )
+        bubble_layout.addWidget(self.skip_rtdetr_merging_checkbox)
+        
+        # Preserve empty RT-DETR blocks (disabled by default)
+        self.preserve_empty_blocks_checkbox = self._create_styled_checkbox("Preserve empty RT-DETR blocks (no OCR text)")
+        self.preserve_empty_blocks_checkbox.setChecked(self.settings['ocr'].get('preserve_empty_blocks', False))
+        self.preserve_empty_blocks_checkbox.setToolTip(
+            "When enabled, regions detected by RT-DETR that have no matched OCR lines\n"
+            "will still be kept. Useful for debugging missed text and SFX."
+        )
+        bubble_layout.addWidget(self.preserve_empty_blocks_checkbox)
 
         # Detector type dropdown
         detector_type_widget = QWidget()
@@ -3135,6 +3157,8 @@ class MangaSettingsDialog(QDialog):
         self.bubble_controls = [
             self.use_rtdetr_for_ocr_checkbox,
             self.enable_fallback_ocr_checkbox,
+            self.skip_rtdetr_merging_checkbox,
+            self.preserve_empty_blocks_checkbox,
             self.detector_type_combo,
             self.bubble_model_entry,
             self.bubble_browse_btn,
@@ -3459,6 +3483,8 @@ class MangaSettingsDialog(QDialog):
             # Fade in and enable controls
             self._fade_widget(self.use_rtdetr_for_ocr_checkbox, fade_in=True)
             self._fade_widget(self.enable_fallback_ocr_checkbox, fade_in=True)
+            self._fade_widget(self.skip_rtdetr_merging_checkbox, fade_in=True)
+            self._fade_widget(self.preserve_empty_blocks_checkbox, fade_in=True)
             self._fade_widget(self.yolo_settings_group, fade_in=True)
             
             # Enable controls after starting fade
@@ -3478,6 +3504,8 @@ class MangaSettingsDialog(QDialog):
             # Fade out and disable controls
             self._fade_widget(self.use_rtdetr_for_ocr_checkbox, fade_in=False)
             self._fade_widget(self.enable_fallback_ocr_checkbox, fade_in=False)
+            self._fade_widget(self.skip_rtdetr_merging_checkbox, fade_in=False)
+            self._fade_widget(self.preserve_empty_blocks_checkbox, fade_in=False)
             self._fade_widget(self.yolo_settings_group, fade_in=False, 
                             on_finished=lambda: self._finish_bubble_disable())
             
@@ -4632,6 +4660,9 @@ class MangaSettingsDialog(QDialog):
             self.settings['ocr']['bubble_detection_enabled'] = self.bubble_detection_enabled_checkbox.isChecked()
             self.settings['ocr']['use_rtdetr_for_ocr_regions'] = self.use_rtdetr_for_ocr_checkbox.isChecked()  # NEW: RT-DETR for OCR guidance
             self.settings['ocr']['enable_fallback_ocr'] = self.enable_fallback_ocr_checkbox.isChecked()  # NEW: Fallback OCR for empty blocks
+            # New toggles
+            self.settings['ocr']['skip_rtdetr_merging'] = self.skip_rtdetr_merging_checkbox.isChecked()
+            self.settings['ocr']['preserve_empty_blocks'] = self.preserve_empty_blocks_checkbox.isChecked()
             self.settings['ocr']['bubble_model_path'] = self.bubble_model_entry.text()
             self.settings['ocr']['bubble_confidence'] = self.bubble_conf_slider.value() / 100.0
             self.settings['ocr']['rtdetr_confidence'] = self.bubble_conf_slider.value() / 100.0

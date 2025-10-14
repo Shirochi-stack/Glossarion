@@ -3056,10 +3056,15 @@ class MangaTranslator:
                         if all_regions:
                             # CRITICAL: Merge overlapping/nested RT-DETR blocks BEFORE OCR processing
                             # This prevents duplicate OCR on the same text (e.g., table of contents with nested boxes)
-                            original_count = len(all_regions)
-                            all_regions_merged = merge_overlapping_boxes(all_regions, containment_threshold=0.3, overlap_threshold=0.5)
-                            if len(all_regions_merged) < original_count:
-                                self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions_merged)} unique blocks (removed {original_count - len(all_regions_merged)} overlaps)")
+                            skip_merging = bool(ocr_settings.get('skip_rtdetr_merging', False))
+                            if skip_merging:
+                                self._log("⛔ Skipping RT-DETR region merging (per settings)")
+                                all_regions_merged = all_regions
+                            else:
+                                original_count = len(all_regions)
+                                all_regions_merged = merge_overlapping_boxes(all_regions, containment_threshold=0.3, overlap_threshold=0.5)
+                                if len(all_regions_merged) < original_count:
+                                    self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions_merged)} unique blocks (removed {original_count - len(all_regions_merged)} overlaps)")
                             
                             # CRITICAL: After merge, reclassify based on RT-DETR detection sets
                             # Don't rely on pre-merge types as merge can combine different types
@@ -3555,10 +3560,14 @@ class MangaTranslator:
                             # RT-DETR often detects both large containing boxes and smaller nested boxes
                             # (e.g., a big table of contents box + individual entry boxes)
                             # Without merging, we get duplicate text rendered for every overlapping block
-                            original_count = len(all_regions)
-                            all_regions = merge_overlapping_boxes(all_regions, containment_threshold=0.3, overlap_threshold=0.5)
-                            if len(all_regions) < original_count:
-                                self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions)} unique blocks (removed {original_count - len(all_regions)} overlaps)")
+                            skip_merging = bool(ocr_settings.get('skip_rtdetr_merging', False))
+                            if skip_merging:
+                                self._log("⛔ Skipping RT-DETR region merging (per settings)")
+                            else:
+                                original_count = len(all_regions)
+                                all_regions = merge_overlapping_boxes(all_regions, containment_threshold=0.3, overlap_threshold=0.5)
+                                if len(all_regions) < original_count:
+                                    self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions)} unique blocks (removed {original_count - len(all_regions)} overlaps)")
                             
                             # Step 1: Run OCR on FULL IMAGE (comic-translate approach)
                             # This is MUCH better for Azure Vision:
@@ -3783,13 +3792,16 @@ class MangaTranslator:
                                     if removed_count > 0:
                                         self._log(f"🧹 Removed {removed_count} genuinely empty blocks (no text after fallback OCR)")
                                 elif empty_blocks_count > 0:
-                                    # Fallback OCR is disabled, just remove empty blocks
-                                    self._log(f"ℹ️ Fallback OCR disabled - removing {empty_blocks_count} empty blocks")
-                                    original_count = len(regions)
-                                    regions = [r for r in regions if r.text.strip()]
-                                    removed_count = original_count - len(regions)
-                                    if removed_count > 0:
-                                        self._log(f"🧹 Removed {removed_count} empty blocks (no text matched)")
+                                    if bool(ocr_settings.get('preserve_empty_blocks', False)):
+                                        self._log(f"ℹ️ Fallback OCR disabled - preserving {empty_blocks_count} empty blocks (per settings)")
+                                    else:
+                                        # Fallback OCR is disabled, just remove empty blocks
+                                        self._log(f"ℹ️ Fallback OCR disabled - removing {empty_blocks_count} empty blocks")
+                                        original_count = len(regions)
+                                        regions = [r for r in regions if r.text.strip()]
+                                        removed_count = original_count - len(regions)
+                                        if removed_count > 0:
+                                            self._log(f"🧹 Removed {removed_count} empty blocks (no text matched)")
                                 
                                 # Clear detections
                                 rtdetr_detections = None
@@ -4748,10 +4760,14 @@ class MangaTranslator:
                                 self._log("⚠️ No RT-DETR text regions found")
                             else:
                                 # CRITICAL: Merge overlapping/nested RT-DETR blocks BEFORE matching with OCR
-                                original_count = len(all_regions)
-                                all_regions = merge_overlapping_boxes(all_regions, containment_threshold=0.3, overlap_threshold=0.5)
-                                if len(all_regions) < original_count:
-                                    self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions)} unique blocks (removed {original_count - len(all_regions)} overlaps)")
+                                skip_merging = bool(ocr_settings.get('skip_rtdetr_merging', False))
+                                if skip_merging:
+                                    self._log("⛔ Skipping RT-DETR region merging (per settings)")
+                                else:
+                                    original_count = len(all_regions)
+                                    all_regions = merge_overlapping_boxes(all_regions, containment_threshold=0.3, overlap_threshold=0.5)
+                                    if len(all_regions) < original_count:
+                                        self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions)} unique blocks (removed {original_count - len(all_regions)} overlaps)")
                                 
                                 # Step 1: Run OCR on FULL IMAGE (comic-translate approach)
                                 # This is MUCH better for Azure Document Intelligence:
@@ -4937,13 +4953,16 @@ class MangaTranslator:
                                         if removed_count > 0:
                                             self._log(f"🧹 Removed {removed_count} empty bubbles after fallback OCR")
                                     elif empty_blocks_count > 0:
-                                        # Fallback OCR is disabled, just remove empty blocks
-                                        self._log(f"ℹ️ Fallback OCR disabled - removing {empty_blocks_count} empty blocks")
-                                        original_count = len(ocr_results)
-                                        ocr_results = [r for r in ocr_results if r.text.strip()]
-                                        removed_count = original_count - len(ocr_results)
-                                        if removed_count > 0:
-                                            self._log(f"🧹 Removed {removed_count} empty blocks (no text matched)")
+                                        if bool(ocr_settings.get('preserve_empty_blocks', False)):
+                                            self._log(f"ℹ️ Fallback OCR disabled - preserving {empty_blocks_count} empty blocks (per settings)")
+                                        else:
+                                            # Fallback OCR is disabled, just remove empty blocks
+                                            self._log(f"ℹ️ Fallback OCR disabled - removing {empty_blocks_count} empty blocks")
+                                            original_count = len(ocr_results)
+                                            ocr_results = [r for r in ocr_results if r.text.strip()]
+                                            removed_count = original_count - len(ocr_results)
+                                            if removed_count > 0:
+                                                self._log(f"🧹 Removed {removed_count} empty blocks (no text matched)")
                                 else:
                                     self._log("⚠️ Azure Document Intelligence found no text lines in full image")
                             
@@ -4997,10 +5016,14 @@ class MangaTranslator:
                                 self._log("⚠️ No RT-DETR text regions found")
                             else:
                                 # CRITICAL: Merge overlapping/nested RT-DETR blocks BEFORE matching with OCR
-                                original_count = len(all_regions)
-                                all_regions = merge_overlapping_boxes(all_regions, containment_threshold=0.3, overlap_threshold=0.5)
-                                if len(all_regions) < original_count:
-                                    self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions)} unique blocks (removed {original_count - len(all_regions)} overlaps)")
+                                skip_merging = bool(ocr_settings.get('skip_rtdetr_merging', False))
+                                if skip_merging:
+                                    self._log("⛔ Skipping RT-DETR region merging (per settings)")
+                                else:
+                                    original_count = len(all_regions)
+                                    all_regions = merge_overlapping_boxes(all_regions, containment_threshold=0.3, overlap_threshold=0.5)
+                                    if len(all_regions) < original_count:
+                                        self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions)} unique blocks (removed {original_count - len(all_regions)} overlaps)")
                                 
                                 # Step 1: Run OCR on FULL IMAGE (comic-translate approach)
                                 self._log(f"📊 Step 1: Running RapidOCR on full image to detect text lines")

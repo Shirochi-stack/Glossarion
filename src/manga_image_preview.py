@@ -466,7 +466,7 @@ class MangaImagePreviewWidget(QWidget):
         layout.setContentsMargins(5, 5, 5, 5)
         layout.setSpacing(5)
         
-        # Title with toggle switch
+        # Title with toggle switch and manual file load button
         title_container = QWidget()
         title_layout = QHBoxLayout(title_container)
         title_layout.setContentsMargins(0, 0, 0, 0)
@@ -794,6 +794,11 @@ class MangaImagePreviewWidget(QWidget):
         file_info_layout.addWidget(self.download_btn)
         
         layout.addWidget(file_info_container)
+        
+        # Apply initial button visibility based on saved manual editing state
+        # (Call the toggle handler to set visibility correctly on startup)
+        initial_state = Qt.CheckState.Checked.value if self.manual_editing_enabled else Qt.CheckState.Unchecked.value
+        self._on_manual_editing_toggled(initial_state)
     
     def _create_tool_button(self, text: str, tooltip: str = "") -> QToolButton:
         """Create a compact tool button"""
@@ -922,8 +927,16 @@ class MangaImagePreviewWidget(QWidget):
         self.viewer.clear_brush_strokes()
         self._update_box_count()
     
-    def load_image(self, image_path: str):
-        """Load an image into the preview (async)"""
+    def load_image(self, image_path: str, preserve_rectangles: bool = False):
+        """Load an image into the preview (async)
+        
+        Args:
+            image_path: Path to the image to load
+            preserve_rectangles: If True, don't clear rectangles when loading (for workflow continuity)
+        """
+        # Store the preserve flag for use in _on_image_loading_started
+        self._preserve_rectangles_on_load = preserve_rectangles
+        
         # Start loading (happens in background)
         self.viewer.load_image(image_path)
         self.current_image_path = image_path
@@ -1041,10 +1054,22 @@ class MangaImagePreviewWidget(QWidget):
         self.file_label.setText(f"⌛ Loading {os.path.basename(image_path)}...")
         self.file_label.setStyleSheet("color: #5a9fd4; font-size: 8pt;")  # Blue while loading
         
-        # Clear previous image data
-        self.viewer.clear_rectangles()
-        self._clear_strokes()
-        self._update_box_count()
+        # Clear previous image data (unless preserve flag is set for workflow continuity)
+        preserve_rectangles = getattr(self, '_preserve_rectangles_on_load', False)
+        if not preserve_rectangles:
+            self.viewer.clear_rectangles()
+            self._clear_strokes()
+            self._update_box_count()
+        else:
+            # Only clear strokes, keep rectangles for workflow continuity (e.g., after cleaning)
+            self._clear_strokes()
+        
+        # Reset the preserve flag after use
+        self._preserve_rectangles_on_load = False
+        
+        # Manage text overlays - hide all overlays when switching images
+        if hasattr(self, 'manga_integration'):
+            self.manga_integration.show_text_overlays_for_image(image_path)
     
     @Slot(str)
     def _on_image_loaded_success(self, image_path: str):
@@ -1145,6 +1170,12 @@ class MangaImagePreviewWidget(QWidget):
         # If hiding tools, reset to pan tool
         if not enabled:
             self._set_tool('pan')
+            # Clear any manually loaded image when disabling manual editing
+            if hasattr(self, '_manual_editing_mode'):
+                self._manual_editing_mode = False
+        else:
+            # Enable manual editing isolation mode
+            self._manual_editing_mode = True
         
         # Store state for later use in preview mode
         self.manual_editing_enabled = enabled
@@ -1166,6 +1197,10 @@ class MangaImagePreviewWidget(QWidget):
             print(f"[DEBUG] Error saving config: {e}")
             import traceback
             traceback.print_exc()
+    
+            print(f"[DEBUG] Error loading manual file: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
     
     def _on_download_images_clicked(self):
         """Handle download images button - open file dialog to save translated images"""
