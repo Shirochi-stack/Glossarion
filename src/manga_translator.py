@@ -534,6 +534,11 @@ class MangaTranslator:
     _inpaint_pool_lock = threading.Lock()
     _inpaint_pool = {}  # (method, model_path) -> {'inpainter': obj|None, 'loaded': bool, 'event': threading.Event()}
     
+    @property
+    def manga_settings(self):
+        """Always return fresh manga settings from main_gui.config"""
+        return self.main_gui.config.get('manga_settings', {})
+    
     # Detector preloading pool for non-singleton bubble detector instances
     _detector_pool_lock = threading.Lock()
     _detector_pool = {}  # (detector_type, model_id_or_path) -> {'spares': list[BubbleDetector]}
@@ -889,7 +894,7 @@ class MangaTranslator:
         self.main_gui = main_gui
         self.log_callback = log_callback
         self.config = main_gui.config
-        self.manga_settings = self.config.get('manga_settings', {})
+        # Note: self.manga_settings is now a property that reads fresh from config
         # Concise logging flag from Advanced settings
         try:
             # Default to False so logs are verbose by default (user must opt-in to concise mode)
@@ -1215,7 +1220,7 @@ class MangaTranslator:
         self._log(f"   Text Rendering: BG {self.text_bg_style}, Opacity {int(self.text_bg_opacity/255*100)}%")
         self._log(f"   Shadow: {'ENABLED' if self.shadow_enabled else 'DISABLED'}\n")
         
-        self.manga_settings = config.get('manga_settings', {})
+        # Note: self.manga_settings is a property that reads fresh from config
 
         # Initialize local inpainter if configured (respects singleton mode)
         if self.manga_settings.get('inpainting', {}).get('method') == 'local':
