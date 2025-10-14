@@ -927,15 +927,17 @@ class MangaImagePreviewWidget(QWidget):
         self.viewer.clear_brush_strokes()
         self._update_box_count()
     
-    def load_image(self, image_path: str, preserve_rectangles: bool = False):
+    def load_image(self, image_path: str, preserve_rectangles: bool = False, preserve_text_overlays: bool = False):
         """Load an image into the preview (async)
         
         Args:
             image_path: Path to the image to load
             preserve_rectangles: If True, don't clear rectangles when loading (for workflow continuity)
+            preserve_text_overlays: If True, keep text overlays visible (for cleaned images)
         """
-        # Store the preserve flag for use in _on_image_loading_started
+        # Store the preserve flags for use in _on_image_loading_started
         self._preserve_rectangles_on_load = preserve_rectangles
+        self._preserve_text_overlays_on_load = preserve_text_overlays
         
         # Start loading (happens in background)
         self.viewer.load_image(image_path)
@@ -1064,12 +1066,16 @@ class MangaImagePreviewWidget(QWidget):
             # Only clear strokes, keep rectangles for workflow continuity (e.g., after cleaning)
             self._clear_strokes()
         
-        # Reset the preserve flag after use
+        # Reset the preserve flags after use
         self._preserve_rectangles_on_load = False
         
-        # Manage text overlays - hide all overlays when switching images
-        if hasattr(self, 'manga_integration'):
+        # Manage text overlays - hide all overlays when switching images (unless preserve flag is set)
+        preserve_text_overlays = getattr(self, '_preserve_text_overlays_on_load', False)
+        if hasattr(self, 'manga_integration') and not preserve_text_overlays:
             self.manga_integration.show_text_overlays_for_image(image_path)
+        
+        # Reset the text overlay preserve flag
+        self._preserve_text_overlays_on_load = False
     
     @Slot(str)
     def _on_image_loaded_success(self, image_path: str):

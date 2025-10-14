@@ -7776,8 +7776,8 @@ class MangaTranslationTab:
     def _update_preview_after_clean(self, output_path: str):
         """Update preview on main thread after cleaning is complete"""
         try:
-            # Load cleaned image while preserving rectangles for OCR workflow
-            self.image_preview_widget.load_image(output_path, preserve_rectangles=True)
+            # Load cleaned image while preserving rectangles and text overlays for workflow continuity
+            self.image_preview_widget.load_image(output_path, preserve_rectangles=True, preserve_text_overlays=True)
         except Exception as e:
             self._log(f"❌ Failed to update preview: {str(e)}", "error")
     
@@ -8601,8 +8601,8 @@ class MangaTranslationTab:
                                 preview_text = recognition_text[:22] + "..."
                             else:
                                 preview_text = recognition_text
-                            ocr_action = QAction(f"📝 View OCR: \"{preview_text}\"", menu)
-                            ocr_action.triggered.connect(lambda: self._show_ocr_popup(recognition_text))
+                            ocr_action = QAction(f"📝 Edit OCR: \"{preview_text}\"", menu)
+                            ocr_action.triggered.connect(lambda idx=region_index: self._show_ocr_popup(recognition_text, idx))
                             menu.addAction(ocr_action)
                         
                         # Get translation data if available
@@ -8617,8 +8617,8 @@ class MangaTranslationTab:
                                 preview_trans = translation_text[:22] + "..."
                             else:
                                 preview_trans = translation_text
-                            trans_action = QAction(f"🌍 View Translation: \"{preview_trans}\"", menu)
-                            trans_action.triggered.connect(lambda: self._show_translation_popup(translation_data))
+                            trans_action = QAction(f"🌍 Edit Translation: \"{preview_trans}\"", menu)
+                            trans_action.triggered.connect(lambda idx=region_index, data=translation_data: self._show_translation_popup(data, idx))
                             menu.addAction(trans_action)
                         
                         if not menu.isEmpty():
@@ -8675,8 +8675,8 @@ class MangaTranslationTab:
         except Exception as e:
             print(f"[DEBUG] Error adding context menu: {str(e)}")
     
-    def _show_ocr_popup(self, ocr_text: str):
-        """Show OCR text in a popup dialog"""
+    def _show_ocr_popup(self, ocr_text: str, region_index: int = None):
+        """Show OCR text in a popup dialog with edit capability"""
         try:
             from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton, QTextEdit, QHBoxLayout
             from PySide6.QtCore import Qt
@@ -8714,6 +8714,12 @@ class MangaTranslationTab:
                 QPushButton:hover {
                     background-color: #7bb3e0;
                 }
+                QPushButton#save_btn {
+                    background-color: #28a745;
+                }
+                QPushButton#save_btn:hover {
+                    background-color: #34ce57;
+                }
                 QLabel {
                     color: white;
                     font-weight: bold;
@@ -8726,21 +8732,39 @@ class MangaTranslationTab:
             layout.setSpacing(12)
             
             # Title label
-            title_label = QLabel("Recognized Text:")
+            title_label = QLabel("Recognized Text (editable):")
             layout.addWidget(title_label)
             
-            # Text display
+            # Text display - EDITABLE
             text_edit = QTextEdit()
             text_edit.setPlainText(ocr_text)
-            text_edit.setReadOnly(True)
+            text_edit.setReadOnly(False)  # Make it editable
             layout.addWidget(text_edit)
             
             # Button layout
             button_layout = QHBoxLayout()
             button_layout.addStretch()
             
+            # Save button
+            save_btn = QPushButton("💾 Save")
+            save_btn.setObjectName("save_btn")
+            def save_changes():
+                new_text = text_edit.toPlainText()
+                if new_text != ocr_text and region_index is not None:
+                    # Update the stored recognition data
+                    if hasattr(self, '_recognition_data') and region_index in self._recognition_data:
+                        self._recognition_data[region_index]['text'] = new_text
+                        # Also update translation data if it exists
+                        if hasattr(self, '_translation_data') and region_index in self._translation_data:
+                            self._translation_data[region_index]['original'] = new_text
+                        print(f"[DEBUG] Updated OCR text for region {region_index}")
+                dialog.accept()
+            save_btn.clicked.connect(save_changes)
+            button_layout.addWidget(save_btn)
+            
+            # Close button
             close_btn = QPushButton("Close")
-            close_btn.clicked.connect(dialog.accept)
+            close_btn.clicked.connect(dialog.reject)
             button_layout.addWidget(close_btn)
             
             layout.addLayout(button_layout)
@@ -8750,8 +8774,8 @@ class MangaTranslationTab:
         except Exception as e:
             print(f"[DEBUG] Error showing OCR popup: {str(e)}")
     
-    def _show_translation_popup(self, translation_data: dict):
-        """Show translation in a popup dialog"""
+    def _show_translation_popup(self, translation_data: dict, region_index: int = None):
+        """Show translation in a popup dialog with edit capability"""
         try:
             from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton, QTextEdit, QHBoxLayout, QFrame
             from PySide6.QtCore import Qt
@@ -8762,7 +8786,7 @@ class MangaTranslationTab:
             
             dialog = QDialog(self.image_preview_widget)
             dialog.setWindowTitle("🌍 Translation Result")
-            dialog.resize(500, 350)
+            dialog.resize(500, 380)
             dialog.setModal(True)
             
             # Apply dark theme styling
@@ -8792,6 +8816,12 @@ class MangaTranslationTab:
                 QPushButton:hover {
                     background-color: #7bb3e0;
                 }
+                QPushButton#save_btn {
+                    background-color: #28a745;
+                }
+                QPushButton#save_btn:hover {
+                    background-color: #34ce57;
+                }
                 QLabel {
                     color: white;
                     font-weight: bold;
@@ -8807,12 +8837,12 @@ class MangaTranslationTab:
             layout.setSpacing(12)
             
             # Original text section
-            orig_label = QLabel("Original Text:")
+            orig_label = QLabel("Original Text (editable):")
             layout.addWidget(orig_label)
             
             orig_text = QTextEdit()
             orig_text.setPlainText(original)
-            orig_text.setReadOnly(True)
+            orig_text.setReadOnly(False)  # Make it editable
             orig_text.setMaximumHeight(100)
             layout.addWidget(orig_text)
             
@@ -8823,12 +8853,12 @@ class MangaTranslationTab:
             layout.addWidget(separator)
             
             # Translation section
-            trans_label = QLabel("Translation:")
+            trans_label = QLabel("Translation (editable):")
             layout.addWidget(trans_label)
             
             trans_text = QTextEdit()
             trans_text.setPlainText(translation)
-            trans_text.setReadOnly(True)
+            trans_text.setReadOnly(False)  # Make it editable
             trans_text.setMaximumHeight(100)
             layout.addWidget(trans_text)
             
@@ -8836,8 +8866,41 @@ class MangaTranslationTab:
             button_layout = QHBoxLayout()
             button_layout.addStretch()
             
+            # Save button
+            save_btn = QPushButton("💾 Save & Update Overlay")
+            save_btn.setObjectName("save_btn")
+            def save_changes():
+                new_original = orig_text.toPlainText()
+                new_translation = trans_text.toPlainText()
+                changed = False
+                
+                if region_index is not None:
+                    # Update the stored data
+                    if new_original != original:
+                        if hasattr(self, '_recognition_data') and region_index in self._recognition_data:
+                            self._recognition_data[region_index]['text'] = new_original
+                        if hasattr(self, '_translation_data') and region_index in self._translation_data:
+                            self._translation_data[region_index]['original'] = new_original
+                        changed = True
+                        print(f"[DEBUG] Updated original text for region {region_index}")
+                    
+                    if new_translation != translation:
+                        if hasattr(self, '_translation_data') and region_index in self._translation_data:
+                            self._translation_data[region_index]['translation'] = new_translation
+                        changed = True
+                        print(f"[DEBUG] Updated translation for region {region_index}")
+                    
+                    # Refresh the text overlay for this region
+                    if changed:
+                        self._update_single_text_overlay(region_index, new_translation)
+                
+                dialog.accept()
+            save_btn.clicked.connect(save_changes)
+            button_layout.addWidget(save_btn)
+            
+            # Close button
             close_btn = QPushButton("Close")
-            close_btn.clicked.connect(dialog.accept)
+            close_btn.clicked.connect(dialog.reject)
             button_layout.addWidget(close_btn)
             
             layout.addLayout(button_layout)
@@ -8896,6 +8959,58 @@ class MangaTranslationTab:
                 print(f"[DEBUG] No overlays found for image: {os.path.basename(image_path)}")
         except Exception as e:
             print(f"[DEBUG] Error showing text overlays: {str(e)}")
+    
+    def _update_single_text_overlay(self, region_index: int, new_translation: str):
+        """Update a single text overlay after editing"""
+        try:
+            from PySide6.QtWidgets import QGraphicsTextItem
+            
+            viewer = self.image_preview_widget.viewer
+            current_image = self.image_preview_widget.current_image_path
+            
+            if not current_image or not hasattr(self, '_text_overlays_by_image'):
+                return
+            
+            if current_image not in self._text_overlays_by_image:
+                return
+            
+            # Find and update the text overlay for this region
+            # Text overlays are stored as pairs (background, text) for each region
+            # We need to find the text item (QGraphicsTextItem) for this region
+            overlays = self._text_overlays_by_image[current_image]
+            
+            for overlay in overlays:
+                if isinstance(overlay, QGraphicsTextItem):
+                    # Check if this is the overlay for our region by checking its position
+                    # This is a simplified approach - in production you'd want to store region indices with overlays
+                    # For now, we'll regenerate all overlays
+                    break
+            
+            # Simpler approach: regenerate all overlays with updated data
+            if hasattr(self, '_translation_data'):
+                # Rebuild translated_texts list with updated data
+                translated_texts = []
+                rectangles = self.image_preview_widget.viewer.rectangles
+                
+                for idx in sorted(self._translation_data.keys()):
+                    if idx < len(rectangles):
+                        rect = rectangles[idx].rect()
+                        trans_data = self._translation_data[idx]
+                        translated_texts.append({
+                            'original': {'text': trans_data['original'], 'bbox': [int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height())]},
+                            'translation': trans_data['translation'],
+                            'bbox': [int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height())]
+                        })
+                
+                # Regenerate overlays
+                if translated_texts:
+                    self._add_text_overlay_to_viewer(translated_texts)
+                    print(f"[DEBUG] Refreshed all text overlays after editing region {region_index}")
+            
+        except Exception as e:
+            print(f"[DEBUG] Error updating text overlay: {str(e)}")
+            import traceback
+            print(f"[DEBUG] Traceback: {traceback.format_exc()}")
     
     def _add_text_overlay_to_viewer(self, translated_texts: list):
         """Add translated text as graphics items overlay on the viewer"""
