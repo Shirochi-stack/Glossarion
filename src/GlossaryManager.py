@@ -517,10 +517,23 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
     
     # Original single-text processing
     if custom_prompt:
-        return _extract_with_custom_prompt(custom_prompt, all_text, language, 
-                                               min_frequency, max_names, max_titles, 
-                                               existing_glossary, output_dir, 
-                                               strip_honorifics, fuzzy_threshold, filter_mode, max_sentences)
+        # Pass cached filtered text if available to avoid re-filtering
+        text_to_process = filtered_text_cache if filtered_text_cache is not None else all_text
+        already_filtered = filtered_text_cache is not None
+        
+        # Set environment flag to indicate text is already filtered
+        if already_filtered:
+            os.environ["_TEXT_ALREADY_FILTERED"] = "1"
+            print(f"📁 Using pre-filtered text cache ({len(text_to_process):,} chars) - skipping redundant filtering")
+        
+        try:
+            return _extract_with_custom_prompt(custom_prompt, text_to_process, language, 
+                                                   min_frequency, max_names, max_titles, 
+                                                   existing_glossary, output_dir, 
+                                                   strip_honorifics, fuzzy_threshold, filter_mode, max_sentences)
+        finally:
+            if already_filtered:
+                os.environ.pop("_TEXT_ALREADY_FILTERED", None)
     else:
         return _extract_with_patterns(all_text, language, min_frequency, 
                                          max_names, max_titles, batch_size, 
@@ -1989,11 +2002,12 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                     print("📑 ❌ Glossary extraction stopped during delay")
                     return {}
                 
-            # Check if text is already filtered (from chunking)
-            already_filtered = os.getenv("_CHUNK_ALREADY_FILTERED", "0") == "1"
+            # Check if text is already filtered (from chunking or cache)
+            already_filtered = (os.getenv("_CHUNK_ALREADY_FILTERED", "0") == "1" or 
+                               os.getenv("_TEXT_ALREADY_FILTERED", "0") == "1")
             
             if already_filtered:
-                print("📑 Text already filtered during chunking, skipping re-filtering")
+                print("📑 Text already filtered, skipping re-filtering")
                 text_sample = all_text  # Use as-is since it's already filtered
                 detected_terms = {}
             else:
