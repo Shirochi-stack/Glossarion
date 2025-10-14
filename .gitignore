@@ -49,6 +49,9 @@ logs/
 
 # Do not commit text files by default (change if needed)
 *.txt
+# But always include requirements files
+!requirements.txt
+!requirements-*.txt
 howtoruntest.txt
 
 # Exclude all JSON by default (change if needed)
