@@ -7776,6 +7776,10 @@ class MangaTranslationTab:
     def _update_preview_after_clean(self, output_path: str):
         """Update preview on main thread after cleaning is complete"""
         try:
+            # Before switching image, alias overlays from original path to cleaned path
+            if hasattr(self, '_original_image_path') and self._original_image_path:
+                self._alias_text_overlays_for_image(self._original_image_path, output_path)
+            
             # Load cleaned image while preserving rectangles and text overlays for workflow continuity
             self.image_preview_widget.load_image(output_path, preserve_rectangles=True, preserve_text_overlays=True)
         except Exception as e:
@@ -8592,33 +8596,30 @@ class MangaTranslationTab:
                         # Handle right-click for context menu
                         menu = QMenu()
                         
-                        # Get recognition data
-                        if hasattr(self, '_recognition_data') and region_index in self._recognition_data:
-                            recognition_text = self._recognition_data[region_index]['text']
-                            
+                        # Get recognition data (fresh lookup for up-to-date text)
+                        # Use rect_item.region_index to get the actual stored index for this specific rectangle
+                        actual_index = rect_item.region_index
+                        if hasattr(self, '_recognition_data') and actual_index in self._recognition_data:
+                            recognition_text = self._recognition_data[actual_index]['text']
                             # Add action to show OCR text (with better preview formatting)
-                            if len(recognition_text) > 25:
-                                preview_text = recognition_text[:22] + "..."
-                            else:
-                                preview_text = recognition_text
+                            preview_text = (recognition_text[:22] + "...") if len(recognition_text) > 25 else recognition_text
                             ocr_action = QAction(f"📝 Edit OCR: \"{preview_text}\"", menu)
-                            ocr_action.triggered.connect(lambda idx=region_index: self._show_ocr_popup(recognition_text, idx))
+                            # Create a proper closure by defining a function that captures the current index
+                            def make_ocr_handler(idx):
+                                return lambda: self._show_ocr_popup(self._recognition_data[idx]['text'], idx)
+                            ocr_action.triggered.connect(make_ocr_handler(actual_index))
                             menu.addAction(ocr_action)
                         
-                        # Get translation data if available
-                        if hasattr(self, '_translation_data') and region_index in self._translation_data:
-                            translation_data = self._translation_data[region_index]
-                            
+                        # Get translation data if available (fresh lookup)
+                        if hasattr(self, '_translation_data') and actual_index in self._translation_data:
                             menu.addSeparator()
-                            
-                            # Add action to show translation (with better preview formatting)
-                            translation_text = translation_data['translation']
-                            if len(translation_text) > 25:
-                                preview_trans = translation_text[:22] + "..."
-                            else:
-                                preview_trans = translation_text
+                            current_trans = self._translation_data[actual_index]['translation']
+                            preview_trans = (current_trans[:22] + "...") if len(current_trans) > 25 else current_trans
                             trans_action = QAction(f"🌍 Edit Translation: \"{preview_trans}\"", menu)
-                            trans_action.triggered.connect(lambda idx=region_index, data=translation_data: self._show_translation_popup(data, idx))
+                            # Create a proper closure by defining a function that captures the current index
+                            def make_trans_handler(idx):
+                                return lambda: self._show_translation_popup(self._translation_data[idx], idx)
+                            trans_action.triggered.connect(make_trans_handler(actual_index))
                             menu.addAction(trans_action)
                         
                         if not menu.isEmpty():
@@ -8960,6 +8961,17 @@ class MangaTranslationTab:
         except Exception as e:
             print(f"[DEBUG] Error showing text overlays: {str(e)}")
     
+    def _alias_text_overlays_for_image(self, from_path: str, to_path: str):
+        """Alias the overlays list from one image path to another (e.g., original -> cleaned)"""
+        try:
+            if not hasattr(self, '_text_overlays_by_image'):
+                self._text_overlays_by_image = {}
+            if from_path in self._text_overlays_by_image:
+                self._text_overlays_by_image[to_path] = self._text_overlays_by_image[from_path]
+                print(f"[DEBUG] Aliased overlays from {os.path.basename(from_path)} to {os.path.basename(to_path)}")
+        except Exception as e:
+            print(f"[DEBUG] Error aliasing overlays: {str(e)}")
+    
     def _update_single_text_overlay(self, region_index: int, new_translation: str):
         """Update a single text overlay after editing"""
         try:
@@ -8971,27 +8983,17 @@ class MangaTranslationTab:
             if not current_image or not hasattr(self, '_text_overlays_by_image'):
                 return
             
+            # If overlays are stored under the original path (pre-clean), alias them to the current path
+            if current_image not in self._text_overlays_by_image and hasattr(self, '_original_image_path'):
+                self._alias_text_overlays_for_image(self._original_image_path, current_image)
+            
             if current_image not in self._text_overlays_by_image:
                 return
             
-            # Find and update the text overlay for this region
-            # Text overlays are stored as pairs (background, text) for each region
-            # We need to find the text item (QGraphicsTextItem) for this region
-            overlays = self._text_overlays_by_image[current_image]
-            
-            for overlay in overlays:
-                if isinstance(overlay, QGraphicsTextItem):
-                    # Check if this is the overlay for our region by checking its position
-                    # This is a simplified approach - in production you'd want to store region indices with overlays
-                    # For now, we'll regenerate all overlays
-                    break
-            
-            # Simpler approach: regenerate all overlays with updated data
+            # Regenerate overlays with updated data
             if hasattr(self, '_translation_data'):
-                # Rebuild translated_texts list with updated data
                 translated_texts = []
                 rectangles = self.image_preview_widget.viewer.rectangles
-                
                 for idx in sorted(self._translation_data.keys()):
                     if idx < len(rectangles):
                         rect = rectangles[idx].rect()
@@ -9001,8 +9003,6 @@ class MangaTranslationTab:
                             'translation': trans_data['translation'],
                             'bbox': [int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height())]
                         })
-                
-                # Regenerate overlays
                 if translated_texts:
                     self._add_text_overlay_to_viewer(translated_texts)
                     print(f"[DEBUG] Refreshed all text overlays after editing region {region_index}")
@@ -9076,9 +9076,8 @@ class MangaTranslationTab:
                             print(f"[DEBUG] Failed to create text item for: {text[:30]}...")
                             continue
                         
-                        # Position text
-                        text_item.setPos(x + manga_settings.get('text_padding', 4), 
-                                       y + manga_settings.get('text_padding', 4))
+                        # Position and layering
+                        # Note: _create_manga_text_item already positions with padding; avoid double-insetting here
                         text_item.setZValue(11)  # Above background
                         
                         # Add to scene
@@ -9120,7 +9119,7 @@ class MangaTranslationTab:
                 'font_size': getattr(self, 'font_size_value', 0),
                 'font_size_multiplier': getattr(self, 'font_size_multiplier_value', 1.0),
                 'auto_min_size': getattr(self, 'auto_min_size_value', 12),
-                'max_font_size': getattr(self, 'max_font_size_value', 48),
+'max_font_size': getattr(self, 'max_font_size_value', 96),
                 'font_algorithm': getattr(self, 'font_algorithm_value', 'smart'),
                 'auto_fit_style': getattr(self, 'auto_fit_style_value', 'balanced'),
                 'prefer_larger': getattr(self, 'prefer_larger_value', True),
@@ -9170,7 +9169,7 @@ class MangaTranslationTab:
                 'font_size_mode': 'auto',
                 'font_size': 0,
                 'auto_min_size': 12,
-                'max_font_size': 48,
+'max_font_size': 96,
                 'font_algorithm': 'smart',
                 'text_color': [0, 0, 0],
                 'force_caps': False,
@@ -9198,11 +9197,11 @@ class MangaTranslationTab:
             # Apply safe area margin (like manga_translator does)
             # This ensures text doesn't go right to the edges
             if algorithm == 'conservative':
-                margin_factor = 0.85  # 85% usable
+                margin_factor = 0.88  # slightly less conservative
             elif algorithm == 'aggressive':
-                margin_factor = 0.95  # 95% usable  
+                margin_factor = 0.97  # allow tighter fit
             else:  # smart
-                margin_factor = 0.87  # 87% usable
+                margin_factor = 0.93  # was 0.87; fill more of the bubble
             
             safe_width = int(w * margin_factor)
             safe_height = int(h * margin_factor)
