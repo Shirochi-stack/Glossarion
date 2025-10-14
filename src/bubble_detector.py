@@ -942,14 +942,20 @@ class BubbleDetector:
                         self._log(f"Failed to move model to CPU: {e}", "warning")
                 
                 # Move all tensor inputs to match model exactly
-                with torch.cuda.device(target_device):  # Ensure correct CUDA context
+                if target_device.type == 'cuda':
+                    # Use CUDA context manager only for CUDA devices
+                    with torch.cuda.device(target_device):  # Ensure correct CUDA context
+                        for k, v in inputs.items():
+                            if isinstance(v, torch.Tensor):
+                                inputs[k] = v.to(device=target_device, dtype=model_dtype, non_blocking=True)
+                        
+                        # Force sync if using CUDA
+                        torch.cuda.synchronize(target_device)
+                else:
+                    # CPU device - no CUDA context needed
                     for k, v in inputs.items():
                         if isinstance(v, torch.Tensor):
                             inputs[k] = v.to(device=target_device, dtype=model_dtype, non_blocking=True)
-                    
-                    # Force sync if using CUDA
-                    if target_device.type == 'cuda':
-                        torch.cuda.synchronize(target_device)
             
             # Run inference with AMP only for half/bfloat16 models
             with torch.no_grad():

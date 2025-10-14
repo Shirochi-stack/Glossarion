@@ -226,23 +226,53 @@ def classify_rtdetr_region_and_set_inpaint(region, bbox, rtdetr_detections, ocr_
         region.should_inpaint = bool(detect_free)
         
         if log_func:
-            if detect_free:
-                log_func(f"📝 Classified RT-DETR block as FREE TEXT (ENABLED): {norm_bbox}", "info")
-            else:
-                log_func(f"📝 Classified RT-DETR block as FREE TEXT (DISABLED by toggle) — will NOT inpaint: {norm_bbox}", "info")
+            # Only log classification details when debug mode is enabled
+            try:
+                # Check if we have access to the main_gui to get debug mode setting
+                debug_mode = False
+                if main_gui and hasattr(main_gui, 'config'):
+                    debug_mode = main_gui.config.get('manga_settings', {}).get('advanced', {}).get('debug_mode', False)
+                
+                if debug_mode:
+                    if detect_free:
+                        log_func(f"📝 Classified RT-DETR block as FREE TEXT (ENABLED): {norm_bbox}", "debug")
+                    else:
+                        log_func(f"📝 Classified RT-DETR block as FREE TEXT (DISABLED by toggle) — will NOT inpaint: {norm_bbox}", "debug")
+            except Exception:
+                pass
     elif norm_bbox in text_bubble_set or norm_bbox in empty_bubble_set:
         region.region_type = 'text_bubble'
         region.bubble_type = 'text_bubble'
         region.should_inpaint = True
         if log_func:
-            log_func(f"💬 Classified RT-DETR block as TEXT BUBBLE: {norm_bbox}", "info")
+            # Only log classification details when debug mode is enabled
+            try:
+                # Check if we have access to the main_gui to get debug mode setting
+                debug_mode = False
+                if main_gui and hasattr(main_gui, 'config'):
+                    debug_mode = main_gui.config.get('manga_settings', {}).get('advanced', {}).get('debug_mode', False)
+                
+                if debug_mode:
+                    log_func(f"💬 Classified RT-DETR block as TEXT BUBBLE: {norm_bbox}", "debug")
+            except Exception:
+                pass
     else:
         # Fallback - default to text_bubble with inpainting
         region.region_type = 'text_block'
         region.bubble_type = 'text_bubble'
         region.should_inpaint = True
         if log_func:
-            log_func(f"⚠️ RT-DETR block not found in class sets, defaulting to text_bubble: {norm_bbox}", "warning")
+            # Only log classification details when debug mode is enabled
+            try:
+                # Check if we have access to the main_gui to get debug mode setting
+                debug_mode = False
+                if main_gui and hasattr(main_gui, 'config'):
+                    debug_mode = main_gui.config.get('manga_settings', {}).get('advanced', {}).get('debug_mode', False)
+                
+                if debug_mode:
+                    log_func(f"⚠️ RT-DETR block not found in class sets, defaulting to text_bubble: {norm_bbox}", "debug")
+            except Exception:
+                pass
 
 
 def merge_overlapping_boxes(
@@ -3586,8 +3616,8 @@ class MangaTranslator:
                                 # Step 2: Match OCR lines to RT-DETR blocks (comic-translate approach)
                                 self._log(f"🔗 Step 2: Matching {len(full_image_ocr)} OCR lines to {len(all_regions)} RT-DETR blocks")
                                 source_lang = ocr_settings.get('language_hints', ['ja'])[0] if ocr_settings.get('language_hints') else 'ja'
-                                # Enable debug mode to see why matching fails
-                                debug_matching = True  # Set to False to disable detailed matching logs
+                                # Enable debug mode based on manga settings
+                                debug_matching = self.debug_mode  # Respect the debug mode toggle
                                 matched_blocks = match_ocr_to_rtdetr_blocks(full_image_ocr, all_regions, source_lang, debug=debug_matching)
                                 
                                 # Convert matched blocks to TextRegion format
@@ -4738,7 +4768,7 @@ class MangaTranslator:
                                     # Step 2: Match OCR lines to RT-DETR blocks (comic-translate approach)
                                     self._log(f"🔗 Step 2: Matching {len(full_image_ocr)} OCR lines to {len(all_regions)} RT-DETR blocks")
                                     source_lang = ocr_settings.get('language_hints', ['ja'])[0] if ocr_settings.get('language_hints') else 'ja'
-                                    matched_blocks = match_ocr_to_rtdetr_blocks(full_image_ocr, all_regions, source_lang)
+                                    matched_blocks = match_ocr_to_rtdetr_blocks(full_image_ocr, all_regions, source_lang, debug=self.debug_mode)
                                     
                                     # Convert matched blocks to OCR results
                                     ocr_results = []
@@ -4969,7 +4999,7 @@ class MangaTranslator:
                                     # Step 2: Match OCR lines to RT-DETR blocks (comic-translate approach)
                                     self._log(f"🔗 Step 2: Matching {len(full_image_ocr)} OCR lines to {len(all_regions)} RT-DETR blocks")
                                     source_lang = ocr_settings.get('language_hints', ['ja'])[0] if ocr_settings.get('language_hints') else 'ja'
-                                    matched_blocks = match_ocr_to_rtdetr_blocks(full_image_ocr, all_regions, source_lang)
+                                    matched_blocks = match_ocr_to_rtdetr_blocks(full_image_ocr, all_regions, source_lang, debug=self.debug_mode)
                                     
                                     # Convert matched blocks to OCR results
                                     ocr_results = []
@@ -7887,18 +7917,19 @@ class MangaTranslator:
         
         self._log(f"🎭 Creating text mask for {len(regions)} regions", "info")
         
-        # Log detailed state of each region
-        self._log("\n📋 REGION STATES BEFORE MASKING:", "info")
-        for idx, region in enumerate(regions):
-            self._log(f"\nRegion {idx + 1}:", "info")
-            self._log(f"   • Text preview: '{region.text[:30]}...'", "info")
-            self._log(f"   • Region type: {getattr(region, 'region_type', 'unset')}", "info")
-            self._log(f"   • Bubble type: {getattr(region, 'bubble_type', 'unset')}", "info")
-            self._log(f"   • Should inpaint: {getattr(region, 'should_inpaint', 'unset')}", "info")
-            self._log(f"   • Has vertices: {bool(getattr(region, 'vertices', None))}", "info")
-            self._log(f"   • Has bubble_bounds: {hasattr(region, 'bubble_bounds')}", "info")
-            if hasattr(region, 'bubble_bounds'):
-                self._log(f"   • Bubble bounds: {region.bubble_bounds}", "info")
+        # Log detailed state of each region (only when verbose debug is enabled)
+        if self.debug_mode:
+            self._log("\n📋 REGION STATES BEFORE MASKING:", "debug")
+            for idx, region in enumerate(regions):
+                self._log(f"\nRegion {idx + 1}:", "debug")
+                self._log(f"   • Text preview: '{region.text[:30]}...'", "debug")
+                self._log(f"   • Region type: {getattr(region, 'region_type', 'unset')}", "debug")
+                self._log(f"   • Bubble type: {getattr(region, 'bubble_type', 'unset')}", "debug")
+                self._log(f"   • Should inpaint: {getattr(region, 'should_inpaint', 'unset')}", "debug")
+                self._log(f"   • Has vertices: {bool(getattr(region, 'vertices', None))}", "debug")
+                self._log(f"   • Has bubble_bounds: {hasattr(region, 'bubble_bounds')}", "debug")
+                if hasattr(region, 'bubble_bounds'):
+                    self._log(f"   • Bubble bounds: {region.bubble_bounds}", "debug")
 
         # Get manga settings
         manga_settings = self.main_gui.config.get('manga_settings', {})
@@ -8755,6 +8786,9 @@ class MangaTranslator:
                 # Check if we already have a loaded instance in the shared pool
                 # This avoids unnecessary tracking and reloading
                 inp_shared = self._get_or_init_shared_local_inpainter(local_method, model_path, force_reload=False)
+                
+                # Initialize need_reload flag
+                need_reload = False
                 
                 # Only track changes AFTER getting the shared instance
                 # This prevents spurious reloads on first initialization

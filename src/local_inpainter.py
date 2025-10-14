@@ -2365,15 +2365,19 @@ class LocalInpainter:
             return False
 
     def _log_inpaint_diag(self, path: str, result: np.ndarray, mask: np.ndarray):
+        # Only log diagnostic info when verbose debug is enabled
+        if not getattr(self, 'verbose_debug', False):
+            return
+            
         try:
             h, w = result.shape[:2]
             if len(result.shape) == 3:
                 stats = (float(result.min()), float(result.max()), float(result.mean()))
             else:
                 stats = (float(result.min()), float(result.max()), float(result.mean()))
-            logger.info(f"[Diag] Path={path} onnx_quant={self.onnx_quantize_applied} torch_quant={self.torch_quantize_applied} size={w}x{h} stats(min,max,mean)={stats}")
+            logger.debug(f"[Diag] Path={path} onnx_quant={self.onnx_quantize_applied} torch_quant={self.torch_quantize_applied} size={w}x{h} stats(min,max,mean)={stats}")
             if self._is_white_paste(result, mask):
-                logger.warning(f"[Diag] White-paste detected (mask>0 mostly white)")
+                logger.debug(f"[Diag] White-paste detected (mask>0 mostly white)")
         except Exception as e:
             logger.debug(f"Diag log failed: {e}")
 
