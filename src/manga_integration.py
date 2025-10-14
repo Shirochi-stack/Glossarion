@@ -10607,8 +10607,34 @@ class MangaTranslationTab:
                         regions.append(region)
                 
                 if regions:
-                    print(f"[TRANSLATE] ✅ Built {len(regions)} regions, calling PIL renderer...")
-                    self._render_with_manga_translator(image_path, regions)
+                    # Decide which image to render on: prefer cleaned if available, else current
+                    current_image = None
+                    try:
+                        current_image = self.image_preview_widget.current_image_path if hasattr(self, 'image_preview_widget') else None
+                    except Exception:
+                        current_image = None
+                    
+                    cleaned_image = None
+                    try:
+                        if hasattr(self, '_cleaned_image_path') and self._cleaned_image_path and os.path.exists(self._cleaned_image_path):
+                            cleaned_image = self._cleaned_image_path
+                    except Exception:
+                        cleaned_image = None
+                    
+                    render_image = cleaned_image if cleaned_image else current_image
+                    if render_image:
+                        if cleaned_image:
+                            print(f"[TRANSLATE] Using cleaned image: {os.path.basename(cleaned_image)}")
+                            self._log(f"🧹 Rendering on cleaned image", "info")
+                        else:
+                            print(f"[TRANSLATE] No cleaned image available, rendering on current image")
+                            self._log(f"📝 Rendering on original image (click Clean first to remove original text)", "info")
+                        
+                        print(f"[TRANSLATE] ✅ Built {len(regions)} regions, calling PIL renderer...")
+                        self._render_with_manga_translator(render_image, regions)
+                    else:
+                        print(f"[TRANSLATE] ERROR: No image path available for rendering")
+                        self._log("⚠️ Could not render: no image loaded", "warning")
                 else:
                     print(f"[TRANSLATE] ❌ No regions to render")
                     self._log("⚠️ No regions to render", "warning")
