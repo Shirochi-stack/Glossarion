@@ -8188,11 +8188,159 @@ class MangaTranslationTab:
             
             print(f"[OCR_REGIONS] Running OCR on full image, then matching to {len(regions)} regions")
             
-            # STEP 1: Run OCR on FULL IMAGE
+            # STEP 1: Run OCR on regions
             provider = ocr_config['provider']
             full_image_ocr_results = []
             
-            if provider == 'azure':
+            # SPECIAL HANDLING: custom-api processes CROPPED regions due to API call indexing
+            if provider == 'custom-api':
+                print(f"[OCR_REGIONS] Running custom-api OCR on cropped regions (required for API indexing)")
+                try:
+                    # Ensure OCR prompt is set in environment from GUI
+                    if hasattr(self, 'ocr_prompt') and self.ocr_prompt:
+                        os.environ['OCR_SYSTEM_PROMPT'] = self.ocr_prompt
+                        print(f"[OCR_REGIONS] Set OCR_SYSTEM_PROMPT from GUI config")
+                    
+                    # Load custom-api provider if needed - MUST PASS API KEY!
+                    if not self.ocr_manager.get_provider(provider).is_loaded:
+                        print(f"[OCR_REGIONS] Loading OCR provider: {provider}")
+                        
+                        # Build load_kwargs with API key and model (same as manga_translator.py)
+                        load_kwargs = {}
+                        if hasattr(self, 'main_gui'):
+                            # Get API key from GUI
+                            if hasattr(self.main_gui, 'api_key_entry'):
+                                try:
+                                    if hasattr(self.main_gui.api_key_entry, 'text'):
+                                        api_key = self.main_gui.api_key_entry.text()
+                                    elif hasattr(self.main_gui.api_key_entry, 'get'):
+                                        api_key = self.main_gui.api_key_entry.get()
+                                    else:
+                                        api_key = ''
+                                    if api_key:
+                                        load_kwargs['api_key'] = api_key
+                                        print(f"[OCR_REGIONS] Got API key from GUI")
+                                except Exception:
+                                    pass
+                            # Get model from GUI
+                            if hasattr(self.main_gui, 'model_var'):
+                                try:
+                                    if hasattr(self.main_gui.model_var, 'get'):
+                                        model = self.main_gui.model_var.get()
+                                    else:
+                                        model = self.main_gui.model_var
+                                    if model:
+                                        load_kwargs['model'] = model
+                                        print(f"[OCR_REGIONS] Using model: {model}")
+                                except Exception:
+                                    pass
+                        
+                        load_success = self.ocr_manager.load_provider(provider, **load_kwargs)
+                        print(f"[OCR_REGIONS] Provider load result: {load_success}")
+                        if not load_success:
+                            self._log(f"❌ Failed to load {provider}", "error")
+                            return []
+                    
+                    # Process each region individually (cropped)
+                    for i, region in enumerate(regions):
+                        bbox = region.get('bbox', [])
+                        if len(bbox) >= 4:
+                            region_x, region_y, region_w, region_h = bbox
+                            
+                            # Crop the region from the full image
+                            cropped_region = image[region_y:region_y+region_h, region_x:region_x+region_w]
+                            
+                            # Run OCR on cropped region
+                            ocr_results = self.ocr_manager.detect_text(
+                                cropped_region,
+                                provider,
+                                confidence=0.5
+                            )
+                            
+                            # Combine all text from this region
+                            if ocr_results:
+                                region_text = " ".join([ocr.text.strip() for ocr in ocr_results if ocr.text.strip()])
+                                if region_text:
+                                    recognized_texts.append({
+                                        'region_index': i,
+                                        'bbox': bbox,
+                                        'text': region_text.strip(),
+                                        'confidence': region.get('confidence', 1.0)
+                                    })
+                                    print(f"[OCR_REGIONS] Region {i+1}: '{region_text.strip()}'")
+                    
+                    print(f"[OCR_REGIONS] custom-api recognized text in {len(recognized_texts)}/{len(regions)} regions")
+                    return recognized_texts
+                    
+                except Exception as e:
+                    print(f"[OCR_REGIONS] custom-api OCR error: {str(e)}")
+                    import traceback
+                    print(f"[OCR_REGIONS] custom-api traceback: {traceback.format_exc()}")
+                    self._log(f"❌ custom-api OCR failed: {str(e)}", "error")
+                    return []
+            
+            elif provider == 'google':
+                # Use Google Cloud Vision OCR on full image
+                print(f"[OCR_REGIONS] Running Google Cloud Vision OCR on full image")
+                try:
+                    from google.cloud import vision
+                    import io
+                    
+                    # Get credentials path
+                    google_creds = ocr_config.get('google_credentials_path', '')
+                    if not google_creds or not os.path.exists(google_creds):
+                        self._log("❌ Google Cloud Vision credentials not found", "error")
+                        print(f"[OCR_REGIONS] Google credentials not found: {google_creds}")
+                        return []
+                    
+                    # Set credentials environment variable
+                    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = google_creds
+                    
+                    # Create client
+                    client = vision.ImageAnnotatorClient()
+                    
+                    # Convert full image to bytes
+                    _, encoded = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                    image_bytes = encoded.tobytes()
+                    
+                    # Call Google Cloud Vision API
+                    vision_image = vision.Image(content=image_bytes)
+                    response = client.text_detection(image=vision_image)
+                    
+                    if response.error.message:
+                        raise Exception(f"Google API error: {response.error.message}")
+                    
+                    # Extract text annotations
+                    texts = response.text_annotations
+                    
+                    if texts:
+                        # Skip first annotation (full text) and process individual words
+                        for text in texts[1:]:
+                            vertices = [(vertex.x, vertex.y) for vertex in text.bounding_poly.vertices]
+                            xs = [v[0] for v in vertices]
+                            ys = [v[1] for v in vertices]
+                            x_min, x_max = min(xs), max(xs)
+                            y_min, y_max = min(ys), max(ys)
+                            
+                            from ocr_manager import OCRResult
+                            ocr_line = OCRResult(
+                                text=text.description,
+                                bbox=(x_min, y_min, x_max - x_min, y_max - y_min),
+                                confidence=0.9,
+                                vertices=vertices
+                            )
+                            full_image_ocr_results.append(ocr_line)
+                    
+                    print(f"[OCR_REGIONS] Google OCR found {len(full_image_ocr_results)} text regions")
+                    
+                except Exception as e:
+                    print(f"[OCR_REGIONS] Google OCR error: {str(e)}")
+                    import traceback
+                    print(f"[OCR_REGIONS] Google OCR traceback: {traceback.format_exc()}")
+                    self._log(f"❌ Google Cloud Vision failed: {str(e)}", "error")
+                    return []
+            
+            elif provider == 'azure':
                 # Use Azure OCR on full image
                 print(f"[OCR_REGIONS] Running Azure OCR on full image")
                 try:
@@ -8266,13 +8414,24 @@ class MangaTranslationTab:
                     return []
                     
             else:
-                # For non-Azure providers, use OCRManager on full image
+                # For non-Azure/custom-api providers, use OCRManager on full image
                 print(f"[OCR_REGIONS] Running {provider} OCR on full image")
                 try:
-                    if not self.ocr_manager.get_provider(provider).is_loaded:
+                    # Check if provider exists in OCRManager
+                    provider_obj = self.ocr_manager.get_provider(provider)
+                    if provider_obj is None:
+                        self._log(f"❌ OCR provider '{provider}' not available in OCRManager", "error")
+                        print(f"[OCR_REGIONS] Provider '{provider}' not found in OCRManager")
+                        return []
+                    
+                    # Load provider if not already loaded
+                    if not provider_obj.is_loaded:
                         print(f"[OCR_REGIONS] Loading OCR provider: {provider}")
                         load_success = self.ocr_manager.load_provider(provider, **ocr_config)
                         print(f"[OCR_REGIONS] Provider load result: {load_success}")
+                        if not load_success:
+                            self._log(f"❌ Failed to load {provider}", "error")
+                            return []
                     
                     full_image_ocr_results = self.ocr_manager.detect_text(
                         image, 
@@ -8285,6 +8444,7 @@ class MangaTranslationTab:
                     print(f"[OCR_REGIONS] {provider} OCR error: {str(e)}")
                     import traceback
                     print(f"[OCR_REGIONS] {provider} OCR traceback: {traceback.format_exc()}")
+                    self._log(f"❌ {provider} OCR failed: {str(e)}", "error")
                     return []
             
             # STEP 2: Match OCR results to detected regions
@@ -9102,7 +9262,7 @@ class MangaTranslationTab:
             self._processing_overlay = overlay
             
             # Create pulsing animation using QObject wrapper
-            from PySide6.QtCore import QObject, pyqtProperty
+            from PySide6.QtCore import QObject
             
             class OpacityItem(QObject):
                 def __init__(self, item, parent=None):
@@ -9117,7 +9277,7 @@ class MangaTranslationTab:
                     self._opacity = value
                     self._item.setBrush(QBrush(QColor(0, 150, 255, int(value))))
                 
-                opacity = pyqtProperty(int, get_opacity, set_opacity)
+                opacity = Property(int, get_opacity, set_opacity)
             
             self._opacity_wrapper = OpacityItem(overlay)
             
@@ -10519,6 +10679,22 @@ class MangaTranslationTab:
                 print(f"[DEBUG] API key available for custom-api OCR")
             else:
                 print(f"[DEBUG] WARNING: No API key available for custom-api OCR")
+            # Also ensure OCR prompt is set in environment
+            if hasattr(self, 'ocr_prompt') and self.ocr_prompt:
+                os.environ['OCR_SYSTEM_PROMPT'] = self.ocr_prompt
+                print(f"[DEBUG] Set OCR_SYSTEM_PROMPT for custom-api")
+        elif config['provider'] == 'azure-document-intelligence':
+            # Azure Document Intelligence uses same credentials as regular Azure
+            azure_key = self.main_gui.config.get('azure_vision_key', '')
+            azure_endpoint = self.main_gui.config.get('azure_vision_endpoint', '')
+            print(f"[DEBUG] Azure Document Intelligence key exists: {bool(azure_key)}")
+            print(f"[DEBUG] Azure Document Intelligence endpoint: {azure_endpoint}")
+            if azure_key and azure_endpoint:
+                config['azure_key'] = azure_key
+                config['azure_endpoint'] = azure_endpoint
+                print(f"[DEBUG] Azure Document Intelligence credentials added to config")
+            else:
+                print(f"[DEBUG] Azure Document Intelligence credentials not complete")
         else:
             print(f"[DEBUG] Using local OCR provider: {config['provider']}")
         
@@ -11672,6 +11848,36 @@ class MangaTranslationTab:
                 
             elif ocr_config['provider'] == 'azure':
                 # Support both PySide6 QLineEdit (.text()) and Tkinter Entry (.get())
+                if hasattr(self.azure_key_entry, 'text'):
+                    azure_key = self.azure_key_entry.text().strip()
+                elif hasattr(self.azure_key_entry, 'get'):
+                    azure_key = self.azure_key_entry.get().strip()
+                else:
+                    azure_key = ''
+                if hasattr(self.azure_endpoint_entry, 'text'):
+                    azure_endpoint = self.azure_endpoint_entry.text().strip()
+                elif hasattr(self.azure_endpoint_entry, 'get'):
+                    azure_endpoint = self.azure_endpoint_entry.get().strip()
+                else:
+                    azure_endpoint = ''
+                
+                if not azure_key or not azure_endpoint:
+                    self._log("❌ Azure credentials not configured.", "error")
+                    self._stop_startup_heartbeat()
+                    self._reset_ui_state()
+                    return
+                
+                # Save Azure settings
+                self.main_gui.config['azure_vision_key'] = azure_key
+                self.main_gui.config['azure_vision_endpoint'] = azure_endpoint
+                if hasattr(self.main_gui, 'save_config'):
+                    self.main_gui.save_config(show_message=False)
+                
+                ocr_config['azure_key'] = azure_key
+                ocr_config['azure_endpoint'] = azure_endpoint
+            
+            elif ocr_config['provider'] == 'azure-document-intelligence':
+                # Azure Document Intelligence uses same credentials as azure
                 if hasattr(self.azure_key_entry, 'text'):
                     azure_key = self.azure_key_entry.text().strip()
                 elif hasattr(self.azure_key_entry, 'get'):
