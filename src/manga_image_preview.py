@@ -384,9 +384,7 @@ class MangaImagePreviewWidget(QWidget):
     
     # Signals for translation workflow
     detect_text_clicked = Signal()
-    segment_text_clicked = Signal()
     clean_image_clicked = Signal()
-    render_clicked = Signal()
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -567,17 +565,9 @@ class MangaImagePreviewWidget(QWidget):
         self.detect_btn.clicked.connect(self.detect_text_clicked.emit)
         workflow_layout.addWidget(self.detect_btn, stretch=1)
         
-        self.segment_btn = self._create_compact_button("Segment")
-        self.segment_btn.clicked.connect(self.segment_text_clicked.emit)
-        workflow_layout.addWidget(self.segment_btn, stretch=1)
-        
         self.clean_btn = self._create_compact_button("Clean")
         self.clean_btn.clicked.connect(self.clean_image_clicked.emit)
         workflow_layout.addWidget(self.clean_btn, stretch=1)
-        
-        self.render_btn = self._create_compact_button("Render")
-        self.render_btn.clicked.connect(self.render_clicked.emit)
-        workflow_layout.addWidget(self.render_btn, stretch=1)
         
         layout.addWidget(workflow_frame)
         

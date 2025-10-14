@@ -2662,9 +2662,7 @@ class MangaTranslationTab:
         
         # Connect image preview workflow signals to translation methods
         self.image_preview_widget.detect_text_clicked.connect(self._on_detect_text_clicked)
-        self.image_preview_widget.segment_text_clicked.connect(self._on_segment_text_clicked)
         self.image_preview_widget.clean_image_clicked.connect(self._on_clean_image_clicked)
-        self.image_preview_widget.render_clicked.connect(self._on_render_clicked)
         
         # Settings frame - GOES TO LEFT COLUMN
         settings_frame = QGroupBox("Translation Settings")
@@ -7466,321 +7464,180 @@ class MangaTranslationTab:
             print(f"Detection error traceback: {traceback.format_exc()}")
     
     
-    def _on_segment_text_clicked(self):
-        """Handle segment text button click - refine and segment text regions"""
-        try:
-            # Get current image path
-            if not hasattr(self, 'image_preview_widget') or not self.image_preview_widget.current_image_path:
-                self._log("⚠️ No image loaded for segmentation", "warning")
-                return
-            
-            # Check if we have detected regions
-            if not hasattr(self, '_current_regions') or not self._current_regions:
-                self._log("⚠️ No text regions available. Please run translation first.", "warning")
-                return
-            
-            image_path = self.image_preview_widget.current_image_path
-            self._log(f"🔨 Segmenting text regions in: {os.path.basename(image_path)}", "info")
-            
-            # Initialize translator if needed
-            if not hasattr(self, 'translator') or self.translator is None:
-                self._log("🔧 Initializing translator...", "info")
-                result = self._initialize_translator()
-                if not result:
-                    return
-            
-            try:
-                import cv2
-                import numpy as np
-                
-                # Load image
-                image = cv2.imread(image_path)
-                if image is None:
-                    self._log(f"❌ Failed to load image: {image_path}", "error")
-                    return
-                
-                original_count = len(self._current_regions)
-                self._log(f"📊 Starting with {original_count} regions", "info")
-                
-                # Segment regions based on configuration
-                manga_settings = self.main_gui.config.get('manga_settings', {})
-                segmentation_settings = manga_settings.get('segmentation', {})
-                
-                segmented_regions = []
-                
-                for idx, region in enumerate(self._current_regions):
-                    # Extract region from image
-                    x1, y1 = int(region.x1), int(region.y1)
-                    x2, y2 = int(region.x2), int(region.y2)
-                    
-                    # Ensure coordinates are within image bounds
-                    x1, y1 = max(0, x1), max(0, y1)
-                    x2, y2 = min(image.shape[1], x2), min(image.shape[0], y2)
-                    
-                    if x2 <= x1 or y2 <= y1:
-                        continue
-                    
-                    region_img = image[y1:y2, x1:x2]
-                    
-                    # Check if region needs segmentation based on size and text content
-                    region_width = x2 - x1
-                    region_height = y2 - y1
-                    region_area = region_width * region_height
-                    
-                    # Segmentation strategy:
-                    # 1. Very large regions (>500x500) - likely contain multiple text blocks
-                    # 2. Regions with very long text - may benefit from line splitting
-                    # 3. Regions with mixed horizontal/vertical text
-                    
-                    should_segment = False
-                    segment_reason = ""
-                    
-                    # Large region check
-                    if region_width > 500 or region_height > 500:
-                        should_segment = True
-                        segment_reason = "large region"
-                    
-                    # Long text check (more than 100 characters might benefit from splitting)
-                    elif region.text and len(region.text) > 100:
-                        should_segment = True
-                        segment_reason = "long text"
-                    
-                    # Very wide or very tall regions (aspect ratio check)
-                    elif region_width / max(region_height, 1) > 4 or region_height / max(region_width, 1) > 4:
-                        should_segment = True
-                        segment_reason = "unusual aspect ratio"
-                    
-                    if should_segment:
-                        self._log(f"   📐 Segmenting region {idx+1} ({segment_reason}): {region_width}x{region_height}", "info")
-                        
-                        # Simple segmentation strategy: split horizontally or vertically based on aspect ratio
-                        if region_width > region_height:
-                            # Horizontal split - divide into columns
-                            num_segments = min(3, max(2, region_width // 200))  # Max 3 segments
-                            segment_width = region_width // num_segments
-                            
-                            for i in range(num_segments):
-                                seg_x1 = x1 + (i * segment_width)
-                                seg_x2 = x1 + ((i + 1) * segment_width) if i < num_segments - 1 else x2
-                                
-                                # Create new region for segment
-                                from manga_translator import TextRegion
-                                seg_region = TextRegion(
-                                    x1=seg_x1, y1=y1, x2=seg_x2, y2=y2,
-                                    text=region.text,  # Keep original text for now
-                                    translated_text=region.translated_text,
-                                    confidence=region.confidence
-                                )
-                                segmented_regions.append(seg_region)
-                        else:
-                            # Vertical split - divide into rows
-                            num_segments = min(3, max(2, region_height // 200))  # Max 3 segments
-                            segment_height = region_height // num_segments
-                            
-                            for i in range(num_segments):
-                                seg_y1 = y1 + (i * segment_height)
-                                seg_y2 = y1 + ((i + 1) * segment_height) if i < num_segments - 1 else y2
-                                
-                                # Create new region for segment
-                                from manga_translator import TextRegion
-                                seg_region = TextRegion(
-                                    x1=x1, y1=seg_y1, x2=x2, y2=seg_y2,
-                                    text=region.text,  # Keep original text for now
-                                    translated_text=region.translated_text,
-                                    confidence=region.confidence
-                                )
-                                segmented_regions.append(seg_region)
-                    else:
-                        # Keep region as-is
-                        segmented_regions.append(region)
-                
-                # Update regions with segmented version
-                if len(segmented_regions) > original_count:
-                    self._current_regions = segmented_regions
-                    self._log(f"✅ Segmentation complete: {original_count} → {len(segmented_regions)} regions", "success")
-                    self._log(f"   Added {len(segmented_regions) - original_count} new segments", "info")
-                    
-                    # Draw segmented regions with yellow boxes on the image
-                    result_image = image.copy()
-                    for region in segmented_regions:
-                        x1, y1, x2, y2 = int(region.x1), int(region.y1), int(region.x2), int(region.y2)
-                        cv2.rectangle(result_image, (x1, y1), (x2, y2), (0, 255, 255), 2)  # Yellow in BGR
-                    
-                    # Save to segmented folder
-                    output_dir = os.path.join(os.path.dirname(image_path), "3_segmented")
-                    os.makedirs(output_dir, exist_ok=True)
-                    output_path = os.path.join(output_dir, os.path.basename(image_path))
-                    cv2.imwrite(output_path, result_image)
-                    self._log(f"💾 Saved segmented results to: {output_path}", "info")
-                    
-                    # Show in preview
-                    self.image_preview_widget.load_image(output_path)
-                    self._log(f"🖼️ Showing {len(segmented_regions)} segmented regions (yellow boxes)", "debug")
-                    
-                    # If regions were segmented, suggest re-running OCR
-                    self._log("💡 Tip: You may want to run 'Recognize' again to get accurate text for new segments", "info")
-                else:
-                    self._log("✅ No segmentation needed - all regions are optimal size", "success")
-                    self._log(f"   All {original_count} regions are within acceptable parameters", "info")
-                    
-                    # Still save image with current regions for consistency
-                    result_image = image.copy()
-                    for region in segmented_regions:
-                        x1, y1, x2, y2 = int(region.x1), int(region.y1), int(region.x2), int(region.y2)
-                        cv2.rectangle(result_image, (x1, y1), (x2, y2), (0, 255, 0), 2)  # Green in BGR
-                    
-                    # Save to segmented folder
-                    output_dir = os.path.join(os.path.dirname(image_path), "3_segmented")
-                    os.makedirs(output_dir, exist_ok=True)
-                    output_path = os.path.join(output_dir, os.path.basename(image_path))
-                    cv2.imwrite(output_path, result_image)
-                    self._log(f"💾 Saved to: {output_path}", "info")
-                    
-                    # Show in preview
-                    self.image_preview_widget.load_image(output_path)
-                    
-            except Exception as e:
-                self._log(f"❌ Segmentation failed: {str(e)}", "error")
-                import traceback
-                self._log(traceback.format_exc(), "debug")
-                
-        except Exception as e:
-            self._log(f"❌ Error in segment text handler: {str(e)}", "error")
     
     def _on_clean_image_clicked(self):
-        """Handle clean image button click - trigger inpainting to remove original text"""
+        """Simplified clean button - run inpainting in background thread"""
         try:
             # Get current image path
             if not hasattr(self, 'image_preview_widget') or not self.image_preview_widget.current_image_path:
                 self._log("⚠️ No image loaded for cleaning", "warning")
                 return
             
-            # Check if we have regions from recognize step
+            # Check if we have detected regions
             if not hasattr(self, '_current_regions') or not self._current_regions:
-                self._log("⚠️ No text regions available. Please run 'Recognize' first.", "warning")
+                self._log("⚠️ No text regions detected. Please run 'Detect Text' first.", "warning")
                 return
+            
+            # Disable the clean button to prevent multiple clicks
+            if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'clean_btn'):
+                self.image_preview_widget.clean_btn.setEnabled(False)
+                self.image_preview_widget.clean_btn.setText("Cleaning...")
             
             image_path = self.image_preview_widget.current_image_path
-            self._log(f"🧽 Cleaning image (inpainting text regions): {os.path.basename(image_path)}", "info")
+            regions = self._current_regions.copy()  # Copy for thread safety
             
-            # Initialize translator if needed
-            if not hasattr(self, 'translator') or self.translator is None:
-                self._log("🔧 Initializing translator...", "info")
-                self._initialize_translator()
+            self._log(f"🧽 Starting background cleaning: {os.path.basename(image_path)}", "info")
             
-            # Run inpainting on the image
-            try:
-                import cv2
-                import numpy as np
-                
-                # Load image
-                image = cv2.imread(image_path)
-                if image is None:
-                    self._log(f"❌ Failed to load image: {image_path}", "error")
-                    return
-                
-                # Create mask from detected text regions
-                mask = np.zeros((image.shape[0], image.shape[1]), dtype=np.uint8)
-                
-                self._log(f"🎨 Creating mask from {len(self._current_regions)} text regions...", "info")
-                for region in self._current_regions:
-                    # Draw white rectangle on mask for each text region
+            # Run inpainting in background thread
+            import threading
+            thread = threading.Thread(target=self._run_clean_background, 
+                                    args=(image_path, regions),
+                                    daemon=True)
+            thread.start()
+            
+        except Exception as e:
+            import traceback
+            self._log(f"❌ Clean setup failed: {str(e)}", "error")
+            print(f"Clean setup error traceback: {traceback.format_exc()}")
+            self._restore_clean_button()
+    
+    def _run_clean_background(self, image_path: str, regions: list):
+        """Run the actual cleaning process in background thread"""
+        try:
+            import cv2
+            import numpy as np
+            from local_inpainter import LocalInpainter
+            
+            # Load image
+            image = cv2.imread(image_path)
+            if image is None:
+                self._log(f"❌ Failed to load image: {os.path.basename(image_path)}", "error")
+                self._restore_clean_button()
+                return
+            
+            # Create mask from detected regions
+            mask = np.zeros((image.shape[0], image.shape[1]), dtype=np.uint8)
+            
+            self._log(f"🎨 Creating mask from {len(regions)} regions", "info")
+            for region in regions:
+                # Handle both dictionary format (from detect) and object format (from translator)
+                if isinstance(region, dict):
+                    # Dictionary format from detect button
+                    bbox = region.get('bbox', [])
+                    if len(bbox) >= 4:
+                        x, y, width, height = bbox
+                        x1, y1, x2, y2 = x, y, x + width, y + height
+                    else:
+                        continue
+                else:
+                    # Object format from translator
                     x1, y1, x2, y2 = int(region.x1), int(region.y1), int(region.x2), int(region.y2)
-                    cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)  # -1 = filled
+                
+                # Ensure coordinates are within image bounds
+                x1 = max(0, min(x1, image.shape[1] - 1))
+                y1 = max(0, min(y1, image.shape[0] - 1))
+                x2 = max(x1 + 1, min(x2, image.shape[1]))
+                y2 = max(y1 + 1, min(y2, image.shape[0]))
+                
+                # Draw filled rectangle on mask
+                cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
+            
+            # Get inpainting settings from manga integration config
+            inpaint_method = self.main_gui.config.get('manga_inpaint_method', 'local')
+            local_model = self.main_gui.config.get('manga_local_inpaint_model', 'anime_onnx')
+            
+            if inpaint_method == 'local':
+                # Use local inpainter with the same method as manga_translator
+                self._log(f"🖼️ Using local inpainter: {local_model}", "info")
+                
+                # Create local inpainter
+                inpainter = LocalInpainter()
+                
+                # Get model path from config (same way as manga_translator)
+                model_path = self.main_gui.config.get(f'manga_{local_model}_model_path', '')
+                
+                # Ensure we have a model path (download if needed)
+                resolved_model_path = model_path
+                if not resolved_model_path or not os.path.exists(resolved_model_path):
+                    try:
+                        self._log(f"📥 Downloading {local_model} model...", "info")
+                        resolved_model_path = inpainter.download_jit_model(local_model)
+                    except Exception as e:
+                        self._log(f"⚠️ Model download failed: {e}", "warning")
+                        resolved_model_path = None
+                
+                # Load the model using the same method as manga_translator
+                if resolved_model_path and os.path.exists(resolved_model_path):
+                    try:
+                        self._log(f"📥 Loading {local_model} model from: {os.path.basename(resolved_model_path)}", "info")
+                        # Use load_model_with_retry like manga_translator does
+                        success = inpainter.load_model_with_retry(local_model, resolved_model_path, force_reload=False)
+                        if not success:
+                            self._log(f"❌ Failed to load model with retry", "error")
+                            self._restore_clean_button()
+                            return
+                    except Exception as e:
+                        self._log(f"❌ Model loading error: {str(e)}", "error")
+                        self._restore_clean_button()
+                        return
+                else:
+                    self._log(f"❌ No valid model path for {local_model}", "error")
+                    self._restore_clean_button()
+                    return
                 
                 # Run inpainting
-                self._log("🧽 Running inpainting to remove text...", "info")
-                cleaned = self.translator.inpaint_regions(image, mask)
+                self._log("🧽 Running local inpainting...", "info")
+                cleaned_image = inpainter.inpaint(image, mask)
                 
-                if cleaned is not None:
-                    # Save cleaned image temporarily and reload in preview
-                    output_dir = os.path.join(os.path.dirname(image_path), "cleaned")
-                    os.makedirs(output_dir, exist_ok=True)
-                    cleaned_path = os.path.join(output_dir, os.path.basename(image_path))
-                    cv2.imwrite(cleaned_path, cleaned)
-                    self._log(f"✅ Image cleaned and saved: {os.path.basename(cleaned_path)}", "success")
-                    
-                    # Store cleaned path for render step
-                    self._cleaned_image_path = cleaned_path
-                    
-                    # Reload in preview
-                    self.image_preview_widget.load_image(cleaned_path)
-                else:
-                    self._log("❌ Inpainting failed", "error")
-                    
-            except Exception as e:
-                self._log(f"❌ Image cleaning failed: {str(e)}", "error")
-                import traceback
-                self._log(traceback.format_exc(), "debug")
-                
-        except Exception as e:
-            self._log(f"❌ Error in clean image handler: {str(e)}", "error")
-    
-    def _on_render_clicked(self):
-        """Handle render button click - overlay translated text on cleaned image"""
-        try:
-            # Check if we have translated regions
-            if not hasattr(self, '_current_regions') or not self._current_regions:
-                self._log("⚠️ No translated regions available. Please run 'Recognize' first.", "warning")
-                return
-            
-            # Use cleaned image if available, otherwise use current image
-            if hasattr(self, '_cleaned_image_path') and os.path.exists(self._cleaned_image_path):
-                base_image_path = self._cleaned_image_path
-                self._log(f"✨ Rendering translated text on cleaned image: {os.path.basename(base_image_path)}", "info")
-            elif hasattr(self, 'image_preview_widget') and self.image_preview_widget.current_image_path:
-                base_image_path = self.image_preview_widget.current_image_path
-                self._log(f"✨ Rendering translated text on: {os.path.basename(base_image_path)}", "info")
             else:
-                self._log("⚠️ No image loaded for rendering", "warning")
-                return
+                # For cloud/hybrid methods, would need more complex setup
+                # For now, fallback to basic OpenCV inpainting
+                self._log("🧽 Using OpenCV inpainting (fallback)", "info")
+                cleaned_image = cv2.inpaint(image, mask, 3, cv2.INPAINT_TELEA)
             
-            # Initialize translator if needed
-            if not hasattr(self, 'translator') or self.translator is None:
-                self._log("🔧 Initializing translator...", "info")
-                self._initialize_translator()
-            
-            # Render translated text
-            try:
-                import cv2
+            if cleaned_image is not None:
+                # Save cleaned image
+                output_dir = os.path.join(os.path.dirname(image_path), "2_cleaned")
+                os.makedirs(output_dir, exist_ok=True)
+                output_filename = os.path.basename(image_path)
+                output_path = os.path.join(output_dir, output_filename)
                 
-                # Load the base image (cleaned or original)
-                image = cv2.imread(base_image_path)
-                if image is None:
-                    self._log(f"❌ Failed to load image: {base_image_path}", "error")
-                    return
+                cv2.imwrite(output_path, cleaned_image)
+                self._log(f"💾 Saved cleaned image to: 2_cleaned/{output_filename}", "info")
                 
-                # Render translated text onto image
-                self._log(f"🖌️ Rendering {len(self._current_regions)} translated text regions...", "info")
-                rendered_image = self.translator.render_text_on_image(image, self._current_regions)
+                # Load cleaned image into preview on main thread
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(0, lambda: self._update_preview_after_clean(output_path))
                 
-                if rendered_image is not None:
-                    # Save rendered image
-                    output_dir = os.path.join(os.path.dirname(base_image_path), "translated")
-                    os.makedirs(output_dir, exist_ok=True)
-                    
-                    # Get original filename from the source image path
-                    if hasattr(self, '_current_image_path'):
-                        original_name = os.path.basename(self._current_image_path)
-                    else:
-                        original_name = os.path.basename(base_image_path)
-                    
-                    output_path = os.path.join(output_dir, original_name)
-                    cv2.imwrite(output_path, rendered_image)
-                    self._log(f"✅ Rendering complete: {os.path.basename(output_path)}", "success")
-                    
-                    # Reload the rendered image in preview
-                    self.image_preview_widget.load_image(output_path)
-                else:
-                    self._log("❌ Rendering failed", "error")
-                    
-            except Exception as e:
-                self._log(f"❌ Rendering failed: {str(e)}", "error")
-                import traceback
-                self._log(traceback.format_exc(), "debug")
+                self._log(f"✅ Cleaning complete!", "success")
+            else:
+                self._log("❌ Inpainting failed", "error")
                 
         except Exception as e:
-            self._log(f"❌ Error in render handler: {str(e)}", "error")
+            import traceback
+            self._log(f"❌ Background cleaning failed: {str(e)}", "error")
+            print(f"Background clean error traceback: {traceback.format_exc()}")
+        finally:
+            # Always restore the button
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(0, self._restore_clean_button)
+    
+    def _update_preview_after_clean(self, output_path: str):
+        """Update preview on main thread after cleaning is complete"""
+        try:
+            self.image_preview_widget.load_image(output_path)
+        except Exception as e:
+            self._log(f"❌ Failed to update preview: {str(e)}", "error")
+    
+    def _restore_clean_button(self):
+        """Restore the clean button to its original state"""
+        try:
+            if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'clean_btn'):
+                self.image_preview_widget.clean_btn.setEnabled(True)
+                self.image_preview_widget.clean_btn.setText("Clean")
+        except Exception:
+            pass
+    
     
     def _finalize_cbz_jobs(self):
         """Package translated outputs back into .cbz for each imported CBZ.
