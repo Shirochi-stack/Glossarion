@@ -113,6 +113,9 @@ class CompactImageViewer(QGraphicsView):
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)  # Default to pan mode
         
+        # High quality image scaling to preserve image quality
+        self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        
         # State
         self.empty = True
         self.zoom_level = 0
@@ -202,7 +205,7 @@ class CompactImageViewer(QGraphicsView):
         self._loader_worker = None
     
     def setPhoto(self, pixmap: QPixmap = None):
-        """Set the photo to display"""
+        """Set the photo to display with high quality rendering"""
         if pixmap and not pixmap.isNull():
             self.empty = False
             self.photo.setPixmap(pixmap)
