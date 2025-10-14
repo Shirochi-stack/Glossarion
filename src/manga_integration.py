@@ -1091,6 +1091,7 @@ class MangaTranslationTab:
             button_layout.addWidget(proceed_btn)
             
             cancel_btn = QPushButton("Cancel")
+            cancel_btn.setMinimumWidth(100)  # Ensure enough width for text
             cancel_btn.setStyleSheet("QPushButton { background-color: #9E9E9E; color: white; padding: 8px 20px; }")
             cancel_btn.clicked.connect(selection_dialog.reject)
             button_layout.addWidget(cancel_btn)
@@ -1572,6 +1573,7 @@ class MangaTranslationTab:
         button_layout.addWidget(download_btn)
         
         cancel_btn = QPushButton("Close")
+        cancel_btn.setMinimumWidth(100)  # Ensure enough width for text
         cancel_btn.setStyleSheet("""
             QPushButton { 
                 background-color: #666666; 
@@ -1992,6 +1994,7 @@ class MangaTranslationTab:
             button_layout.addWidget(load_btn)
             
             cancel_btn = QPushButton("Cancel")
+            cancel_btn.setMinimumWidth(100)  # Ensure enough width for text
             cancel_btn.setStyleSheet("QPushButton { background-color: #9E9E9E; color: white; padding: 8px 20px; }")
             cancel_btn.clicked.connect(selection_dialog.reject)
             button_layout.addWidget(cancel_btn)
@@ -5327,6 +5330,7 @@ class MangaTranslationTab:
         button_layout.addWidget(reset_btn)
         
         cancel_btn = QPushButton("Cancel")
+        cancel_btn.setMinimumWidth(100)  # Ensure enough width for text
         cancel_btn.clicked.connect(dialog.reject)
         button_layout.addWidget(cancel_btn)
         
@@ -6962,6 +6966,7 @@ class MangaTranslationTab:
         btn_layout.addStretch()
         
         cancel_btn = QPushButton("Cancel")
+        cancel_btn.setMinimumWidth(100)  # Ensure enough width for text
         cancel_btn.clicked.connect(api_dialog.reject)
         btn_layout.addWidget(cancel_btn)
         
