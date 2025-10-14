@@ -400,76 +400,51 @@ class MangaImagePreviewWidget(QWidget):
         zoom_layout.addStretch()
         layout.addWidget(zoom_frame)
         
-        # Box Drawing tools
-        box_frame = self._create_tool_frame("Box Drawing")
-        box_layout = QHBoxLayout(box_frame)
-        box_layout.setContentsMargins(3, 3, 3, 3)
-        box_layout.setSpacing(3)
+        # Manual Tools - Row 1: Box Drawing & Inpainting
+        tools_frame = self._create_tool_frame("Manual Tools")
+        tools_layout = QHBoxLayout(tools_frame)
+        tools_layout.setContentsMargins(3, 3, 3, 3)
+        tools_layout.setSpacing(3)
         
         self.hand_tool_btn = self._create_tool_button("✋", "Pan")
         self.hand_tool_btn.setCheckable(True)
         self.hand_tool_btn.clicked.connect(lambda: self._set_tool('pan'))
-        box_layout.addWidget(self.hand_tool_btn)
+        tools_layout.addWidget(self.hand_tool_btn)
         
-        self.box_draw_btn = self._create_tool_button("▭", "Draw Box")
+        self.box_draw_btn = self._create_tool_button("◭", "Draw Box")
         self.box_draw_btn.setCheckable(True)
         self.box_draw_btn.setChecked(True)
         self.box_draw_btn.clicked.connect(lambda: self._set_tool('box_draw'))
-        box_layout.addWidget(self.box_draw_btn)
-        
-        self.delete_btn = self._create_tool_button("🗑", "Delete Selected")
-        self.delete_btn.clicked.connect(self.viewer.delete_selected_rectangle)
-        box_layout.addWidget(self.delete_btn)
-        
-        self.clear_boxes_btn = self._create_tool_button("🧹", "Clear All Boxes")
-        self.clear_boxes_btn.clicked.connect(self.viewer.clear_rectangles)
-        box_layout.addWidget(self.clear_boxes_btn)
-        
-        # Box count
-        self.box_count_label = QLabel("0")
-        self.box_count_label.setStyleSheet("color: white; font-weight: bold;")
-        box_layout.addWidget(self.box_count_label)
-        self.viewer.rectangle_created.connect(self._update_box_count)
-        self.viewer.rectangle_deleted.connect(self._update_box_count)
-        
-        box_layout.addStretch()
-        layout.addWidget(box_frame)
-        
-        # Inpainting tools
-        inpaint_frame = self._create_tool_frame("Inpainting")
-        inpaint_layout = QVBoxLayout(inpaint_frame)
-        inpaint_layout.setContentsMargins(3, 3, 3, 3)
-        inpaint_layout.setSpacing(3)
-        
-        # Tool buttons
-        tool_row = QHBoxLayout()
-        tool_row.setSpacing(3)
+        tools_layout.addWidget(self.box_draw_btn)
         
         self.brush_btn = self._create_tool_button("🖌", "Brush")
         self.brush_btn.setCheckable(True)
         self.brush_btn.clicked.connect(lambda: self._set_tool('brush'))
-        tool_row.addWidget(self.brush_btn)
+        tools_layout.addWidget(self.brush_btn)
         
-        self.eraser_btn = self._create_tool_button("🧽", "Eraser")
+        self.eraser_btn = self._create_tool_button("✏️", "Eraser")
         self.eraser_btn.setCheckable(True)
         self.eraser_btn.clicked.connect(lambda: self._set_tool('eraser'))
-        tool_row.addWidget(self.eraser_btn)
+        tools_layout.addWidget(self.eraser_btn)
         
-        self.clear_strokes_btn = self._create_tool_button("🧹", "Clear Strokes")
+        self.delete_btn = self._create_tool_button("🗑", "Delete Selected")
+        self.delete_btn.clicked.connect(self.viewer.delete_selected_rectangle)
+        tools_layout.addWidget(self.delete_btn)
+        
+        self.clear_boxes_btn = self._create_tool_button("🧹", "Clear Boxes")
+        self.clear_boxes_btn.clicked.connect(self.viewer.clear_rectangles)
+        tools_layout.addWidget(self.clear_boxes_btn)
+        
+        self.clear_strokes_btn = self._create_tool_button("❌", "Clear Strokes")
         self.clear_strokes_btn.clicked.connect(self._clear_strokes)
-        tool_row.addWidget(self.clear_strokes_btn)
+        tools_layout.addWidget(self.clear_strokes_btn)
         
-        tool_row.addStretch()
-        inpaint_layout.addLayout(tool_row)
-        
-        # Brush size slider
-        slider_row = QHBoxLayout()
-        slider_row.setSpacing(5)
-        
+        # Brush size slider (wider)
         self.size_slider = QSlider(Qt.Orientation.Horizontal)
         self.size_slider.setMinimum(5)
         self.size_slider.setMaximum(50)
         self.size_slider.setValue(20)
+        self.size_slider.setMinimumWidth(200)
         self.size_slider.setStyleSheet("""
             QSlider::groove:horizontal {
                 height: 6px;
@@ -485,16 +460,22 @@ class MangaImagePreviewWidget(QWidget):
             }
         """)
         self.size_slider.valueChanged.connect(self._update_brush_size)
-        # Disable mouse wheel to prevent accidental scrolling
         self.size_slider.wheelEvent = lambda event: None
-        slider_row.addWidget(self.size_slider)
+        tools_layout.addWidget(self.size_slider)
         
         self.size_label = QLabel("20")
         self.size_label.setStyleSheet("color: white; min-width: 25px;")
-        slider_row.addWidget(self.size_label)
+        tools_layout.addWidget(self.size_label)
         
-        inpaint_layout.addLayout(slider_row)
-        layout.addWidget(inpaint_frame)
+        # Box count
+        self.box_count_label = QLabel("0")
+        self.box_count_label.setStyleSheet("color: white; font-weight: bold;")
+        tools_layout.addWidget(self.box_count_label)
+        self.viewer.rectangle_created.connect(self._update_box_count)
+        self.viewer.rectangle_deleted.connect(self._update_box_count)
+        
+        tools_layout.addStretch()
+        layout.addWidget(tools_frame)
         
         # Translation workflow buttons (compact)
         workflow_frame = self._create_tool_frame("Translation Workflow")
@@ -636,8 +617,14 @@ class MangaImagePreviewWidget(QWidget):
         self.viewer.eraser_size = value
     
     def _clear_strokes(self):
-        """Clear brush strokes"""
+        """Clear brush strokes only"""
         self.viewer.brush_strokes.clear()
+    
+    def _clear_all(self):
+        """Clear all boxes and strokes"""
+        self.viewer.clear_rectangles()
+        self.viewer.brush_strokes.clear()
+        self._update_box_count()
     
     def load_image(self, image_path: str):
         """Load an image into the preview (async)"""
@@ -649,7 +636,7 @@ class MangaImagePreviewWidget(QWidget):
     def _on_image_loading_started(self, image_path: str):
         """Handle image loading started"""
         # Show loading status immediately
-        self.file_label.setText(f"⏳ Loading {os.path.basename(image_path)}...")
+        self.file_label.setText(f"⌛ Loading {os.path.basename(image_path)}...")
         self.file_label.setStyleSheet("color: #5a9fd4; font-size: 8pt;")  # Blue while loading
         
         # Clear previous image data
