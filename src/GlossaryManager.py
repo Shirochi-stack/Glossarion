@@ -1662,20 +1662,42 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 
                 print(f"📁 Submitting {len(all_args)} batches to process pool...")
                 
-                # Use map_async for better progress tracking
-                result_async = pool.map_async(_process_sentence_batch_for_extraction, all_args)
+                # Use map_async with chunksize for better distribution
+                # chunksize=1 means each worker gets one batch at a time
+                result_async = pool.map_async(_process_sentence_batch_for_extraction, all_args, chunksize=1)
                 
-                # Poll for completion with progress updates
+                # Poll for completion with progress estimates
                 completed_batches = 0
                 batch_start_time = time.time()
+                last_estimate_time = batch_start_time
+                
+                print(f"📁 Processing batches with {extraction_workers} parallel workers...")
                 
                 while not result_async.ready():
-                    time.sleep(0.5)  # Check every 0.5 seconds
-                    # Can't get exact progress with map_async, estimate based on time
-                    # This will be updated when we get actual results
+                    time.sleep(2)  # Check every 2 seconds
+                    elapsed = time.time() - batch_start_time
+                    
+                    # Show periodic updates even without exact progress
+                    if elapsed - (last_estimate_time - batch_start_time) >= 5:  # Every 5 seconds
+                        # Estimate progress based on time and worker count
+                        # With 16 workers and ~0.3s per batch, we process ~53 batches/sec total
+                        # So elapsed * workers / 0.3 gives rough estimate
+                        batches_per_second = extraction_workers / 0.3  # Rough estimate: 53 for 16 workers
+                        estimated_completed = min(int(elapsed * batches_per_second), len(all_args))
+                        
+                        # Cap estimate at 95% until actually complete (avoid showing 100% while still working)
+                        estimated_progress = min(95, (estimated_completed / len(all_args)) * 100)
+                        estimated_sentences = min(estimated_completed * optimal_batch_size, total_sentences)
+                        
+                        if estimated_progress < 95:  # Only show if not at cap
+                            print(f"📁 Processing... ~{estimated_progress:.0f}% estimated (~{estimated_sentences:,} sentences) | {elapsed:.0f}s elapsed")
+                        else:
+                            print(f"📁 Processing... finalizing last batches | {elapsed:.0f}s elapsed")
+                        last_estimate_time = time.time()
                 
                 # Get all results
-                print(f"📁 Collecting results from process pool...")
+                total_elapsed = time.time() - batch_start_time
+                print(f"📁 All batches completed in {total_elapsed:.1f}s! Collecting results...")
                 all_results = result_async.get()
                 
                 # Process all results
