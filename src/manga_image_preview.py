@@ -477,31 +477,42 @@ class MangaImagePreviewWidget(QWidget):
         
         # Manual editing toggle
         from PySide6.QtWidgets import QCheckBox
-        self.manual_editing_toggle = QCheckBox("Enable Manual Editing")
+        self.manual_editing_toggle = QCheckBox("✓ Enable Manual Editing")  # Checkmark in label
         self.manual_editing_toggle.setChecked(True)  # Enabled by default
         self.manual_editing_toggle.setStyleSheet("""
             QCheckBox {
                 color: white;
                 font-size: 9pt;
-                spacing: 5px;
+                font-weight: bold;
+                spacing: 8px;
             }
             QCheckBox::indicator {
-                width: 18px;
-                height: 18px;
+                width: 20px;
+                height: 20px;
                 border: 2px solid #5a9fd4;
-                border-radius: 4px;
+                border-radius: 3px;
                 background-color: #2d2d2d;
             }
             QCheckBox::indicator:checked {
                 background-color: #5a9fd4;
                 border-color: #7bb3e0;
-                image: url(data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'><path fill='white' d='M0 11l2-2 5 5L18 3l2 2L7 18z'/></svg>);
+            }
+            QCheckBox::indicator:unchecked {
+                background-color: #1a1a1a;
+                border-color: #5a5a5a;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #7bb3e0;
             }
             QCheckBox::indicator:unchecked:hover {
-                border-color: #7bb3e0;
+                background-color: #2d2d2d;
+            }
+            QCheckBox::indicator:checked:hover {
+                background-color: #7bb3e0;
             }
         """)
         self.manual_editing_toggle.stateChanged.connect(self._on_manual_editing_toggled)
+        self.manual_editing_toggle.stateChanged.connect(self._update_toggle_label)
         title_layout.addWidget(self.manual_editing_toggle)
         
         title_layout.addStretch()
@@ -1027,6 +1038,22 @@ class MangaImagePreviewWidget(QWidget):
             except Exception as e:
                 # Silently fail if icon can't be loaded
                 pass
+    
+    def _update_toggle_label(self, state):
+        """Update the toggle label to show visual feedback"""
+        from PySide6.QtCore import Qt
+        if state == Qt.CheckState.Checked.value:
+            self.manual_editing_toggle.setText("✓ Enable Manual Editing")
+            self.manual_editing_toggle.setStyleSheet(self.manual_editing_toggle.styleSheet().replace(
+                "color: white;",
+                "color: #5a9fd4;"  # Blue when enabled
+            ))
+        else:
+            self.manual_editing_toggle.setText("✗ Enable Manual Editing")  # X symbol when disabled
+            self.manual_editing_toggle.setStyleSheet(self.manual_editing_toggle.styleSheet().replace(
+                "color: #5a9fd4;",
+                "color: white;"
+            ))
     
     def _on_manual_editing_toggled(self, state):
         """Handle manual editing toggle - show/hide manual tools and workflow buttons"""
