@@ -2445,7 +2445,44 @@ class MangaTranslationTab:
         # Store reference for updates
         self.status_label = status_label
         
-        # Model Preloading Progress Bar (right after title, initially hidden)
+        # Advanced Settings button at the TOP
+        advanced_button_frame = QWidget()
+        advanced_button_layout = QHBoxLayout(advanced_button_frame)
+        advanced_button_layout.setContentsMargins(0, 5, 0, 10)
+        advanced_button_layout.setSpacing(10)
+
+        advanced_settings_desc = QLabel("Configure OCR, preprocessing, and performance options")
+        desc_font = QFont("Arial", 9)
+        advanced_settings_desc.setFont(desc_font)
+        advanced_settings_desc.setStyleSheet("color: gray;")
+        advanced_button_layout.addWidget(advanced_settings_desc, 0, Qt.AlignVCenter)
+        
+        advanced_button_layout.addStretch()
+        
+        advanced_settings_btn = QPushButton("⚙️ Advanced Settings")
+        advanced_settings_btn.clicked.connect(self._open_advanced_settings)
+        advanced_settings_btn.setMinimumHeight(35)
+        advanced_settings_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3b82f6;
+                color: white;
+                padding: 8px 20px;
+                font-weight: bold;
+                font-size: 10pt;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #4b92ff;
+            }
+            QPushButton:pressed {
+                background-color: #2b72e6;
+            }
+        """)
+        advanced_button_layout.addWidget(advanced_settings_btn, 0, Qt.AlignVCenter)
+        
+        main_layout.addWidget(advanced_button_frame)
+        
+        # Model Preloading Progress Bar (after advanced settings button, initially hidden)
         self.preload_progress_frame = QWidget()
         self.preload_progress_frame.setStyleSheet(
             "background-color: #2d2d2d; "
@@ -2572,23 +2609,62 @@ class MangaTranslationTab:
         
         main_layout.addWidget(file_frame)
         
-        # Create 2-column layout for settings
+        # Connect file list selection to image preview
+        self.file_listbox.itemSelectionChanged.connect(self._on_file_selection_changed)
+        
+        # Create layout for settings (always tabs) + image preview
         columns_container = QWidget()
         columns_layout = QHBoxLayout(columns_container)
         columns_layout.setContentsMargins(0, 0, 0, 0)
         columns_layout.setSpacing(10)
         
-        # Left column (Column 1)
+        # Create tab widget for settings
+        from PySide6.QtWidgets import QTabWidget, QScrollArea
+        self.settings_tabs = QTabWidget()
+        self.settings_tabs.setTabPosition(QTabWidget.TabPosition.North)
+        self.settings_tabs.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid #3a3a3a;
+                border-radius: 3px;
+            }
+            QTabBar::tab {
+                background-color: #2d2d2d;
+                color: white;
+                padding: 8px 16px;
+                border: 1px solid #3a3a3a;
+                border-bottom: none;
+                border-top-left-radius: 3px;
+                border-top-right-radius: 3px;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                background-color: #5a9fd4;
+                border-color: #7bb3e0;
+            }
+            QTabBar::tab:hover:!selected {
+                background-color: #3a3a3a;
+            }
+        """)
+        
+        # Left column (Column 1 - Translation Settings) - for tab content
         left_column = QWidget()
         left_column_layout = QVBoxLayout(left_column)
         left_column_layout.setContentsMargins(0, 0, 0, 0)
         left_column_layout.setSpacing(6)
         
-        # Right column (Column 2)
+        # Right column (Column 2 - Rendering Settings) - for tab content
         right_column = QWidget()
         right_column_layout = QVBoxLayout(right_column)
         right_column_layout.setContentsMargins(0, 0, 0, 0)
         right_column_layout.setSpacing(6)
+        
+        # Right column (Column 3 - Image Preview & Editing) - Always Visible
+        from manga_image_preview import MangaImagePreviewWidget
+        
+        # Image preview widget (always visible)
+        self.image_preview_widget = MangaImagePreviewWidget()
+        self.image_preview_widget.setMinimumWidth(350)
+        self.image_preview_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         
         # Settings frame - GOES TO LEFT COLUMN
         settings_frame = QGroupBox("Translation Settings")
@@ -3410,43 +3486,6 @@ class MangaTranslationTab:
         
         # Add render_frame (inpainting only) to LEFT COLUMN
         left_column_layout.addWidget(render_frame)
-        
-        # Advanced Settings button at the TOP OF RIGHT COLUMN
-        advanced_button_frame = QWidget()
-        advanced_button_layout = QHBoxLayout(advanced_button_frame)
-        advanced_button_layout.setContentsMargins(0, 0, 0, 5)
-        advanced_button_layout.setSpacing(10)
-
-        advanced_settings_desc = QLabel("Configure OCR, preprocessing, and performance options")
-        desc_font = QFont("Arial", 9)
-        advanced_settings_desc.setFont(desc_font)
-        advanced_settings_desc.setStyleSheet("color: gray;")
-        advanced_button_layout.addWidget(advanced_settings_desc, 0, Qt.AlignVCenter)
-        
-        advanced_button_layout.addStretch()
-        
-        advanced_settings_btn = QPushButton("⚙️ Advanced Settings")
-        advanced_settings_btn.clicked.connect(self._open_advanced_settings)
-        advanced_settings_btn.setMinimumHeight(35)
-        advanced_settings_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3b82f6;
-                color: white;
-                padding: 8px 20px;
-                font-weight: bold;
-                font-size: 10pt;
-                border-radius: 4px;
-            }
-            QPushButton:hover {
-                background-color: #4b92ff;
-            }
-            QPushButton:pressed {
-                background-color: #2b72e6;
-            }
-        """)
-        advanced_button_layout.addWidget(advanced_settings_btn, 0, Qt.AlignVCenter)
-        
-        right_column_layout.addWidget(advanced_button_frame)
         
         # Background Settings - MOVED TO RIGHT COLUMN
         self.bg_settings_frame = QGroupBox("Background Settings")
@@ -4338,23 +4377,21 @@ class MangaTranslationTab:
             tooltip_text = "Cannot start: " + ", ".join(reasons)
             self.start_button.setToolTip(tooltip_text)
         
-        # Add control buttons to LEFT COLUMN - with stretch so it expands to fill space
-        left_column_layout.addWidget(control_frame, stretch=1)
+        # Don't add control_frame to left_column - will be added to progress section instead
         
         # Add stretch to right column to balance
         right_column_layout.addStretch()
         
-        # Set size policies to make columns expand and shrink properly
-        left_column.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
-        right_column.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        # Add tabs with increased minimum height
+        self.settings_tabs.addTab(left_column, "⚙️ Translation Settings")
+        self.settings_tabs.addTab(right_column, "🎨 Rendering Settings")
+        self.settings_tabs.setMinimumHeight(900)  # Increased height to fit content without scrolling
         
-        # Set minimum widths for columns to allow shrinking
-        left_column.setMinimumWidth(300)
-        right_column.setMinimumWidth(300)
+        # Add settings tabs to main columns layout
+        columns_layout.addWidget(self.settings_tabs, stretch=1)
         
-        # Add columns to container with equal stretch factors
-        columns_layout.addWidget(left_column, stretch=1)
-        columns_layout.addWidget(right_column, stretch=1)
+        # Add image preview widget directly (always visible)
+        columns_layout.addWidget(self.image_preview_widget, stretch=0)
         
         # Make the columns container itself have proper size policy
         columns_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -4370,6 +4407,9 @@ class MangaTranslationTab:
         progress_frame_layout = QVBoxLayout(progress_frame)
         progress_frame_layout.setContentsMargins(10, 10, 10, 8)
         progress_frame_layout.setSpacing(6)
+        
+        # Add start button at the top of progress section
+        progress_frame_layout.addWidget(control_frame)
         
         # Overall progress
         self.progress_label = QLabel("Ready to start")
@@ -7192,6 +7232,34 @@ class MangaTranslationTab:
         """Clear all files from the list"""
         self.file_listbox.clear()
         self.selected_files.clear()
+        # Clear image preview when list is cleared
+        if hasattr(self, 'image_preview_widget'):
+            self.image_preview_widget.clear()
+    
+    def _on_file_selection_changed(self):
+        """Handle file list selection changes to update image preview"""
+        try:
+            selected_items = self.file_listbox.selectedItems()
+            
+            if not selected_items:
+                if hasattr(self, 'image_preview_widget'):
+                    self.image_preview_widget.clear()
+                return
+            
+            # Get the first selected item
+            first_item = selected_items[0]
+            row = self.file_listbox.row(first_item)
+            
+            # Get the corresponding file path
+            if 0 <= row < len(self.selected_files):
+                image_path = self.selected_files[row]
+                
+                # Load the image into the preview (always visible)
+                if hasattr(self, 'image_preview_widget') and os.path.exists(image_path):
+                    self.image_preview_widget.load_image(image_path)
+        except Exception as e:
+            # Silently handle errors to avoid disrupting the UI
+            pass
     
     def _finalize_cbz_jobs(self):
         """Package translated outputs back into .cbz for each imported CBZ.
