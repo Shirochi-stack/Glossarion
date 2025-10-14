@@ -10566,14 +10566,16 @@ class MangaTranslationTab:
                     original_text = result['original']['text']
                     translation = result['translation']
                     bbox = result['bbox']
-                    self._log(f"  Region {i+1} at ({bbox[0]},{bbox[1]}): '{original_text}' → '{translation}'", "info")
+                    region_index = result['original'].get('region_index', i)
+                    self._log(f"  Region {region_index+1} at ({bbox[0]},{bbox[1]}): '{original_text}' → '{translation}'", "info")
                 
-                # Store translation data for potential manual edits
+                # Store translation data keyed by region_index for accurate mapping to rectangles
                 self._translation_data = {}
                 rectangles = self.image_preview_widget.viewer.rectangles
                 for i, result in enumerate(translated_texts):
-                    if i < len(rectangles):
-                        self._translation_data[i] = {
+                    region_index = result['original'].get('region_index', i)
+                    if region_index < len(rectangles):
+                        self._translation_data[region_index] = {
                             'original': result['original']['text'],
                             'translation': result['translation']
                         }
@@ -10582,13 +10584,14 @@ class MangaTranslationTab:
                 print(f"\n[TRANSLATE] Using PIL rendering for {len(translated_texts)} translations")
                 self._log(f"🎨 Rendering translations with PIL pipeline...", "info")
                 
-                # Build TextRegion objects
+                # Build TextRegion objects using region_index mapping
                 from manga_translator import TextRegion
                 regions = []
                 
                 for i, result in enumerate(translated_texts):
-                    if i < len(rectangles):
-                        rect = rectangles[i].rect()
+                    region_index = result['original'].get('region_index', i)
+                    if region_index < len(rectangles):
+                        rect = rectangles[region_index].rect()
                         x, y, w, h = int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height())
                         vertices = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
                         
@@ -10599,30 +10602,16 @@ class MangaTranslationTab:
                             confidence=1.0,
                             region_type='text_block'
                         )
+                        # Set the translation directly
                         region.translated_text = result['translation']
                         regions.append(region)
-                        print(f"[TRANSLATE] Region {i}: '{result['original']['text'][:30]}...' -> '{result['translation'][:30]}...'")
                 
-                # Render with PIL pipeline
-                current_image = self.image_preview_widget.current_image_path
-                if current_image and regions:
-                    # Check if we have a cleaned image (from Clean button)
-                    cleaned_image = None
-                    if hasattr(self, '_cleaned_image_path') and self._cleaned_image_path and os.path.exists(self._cleaned_image_path):
-                        cleaned_image = self._cleaned_image_path
-                        print(f"[TRANSLATE] Using cleaned image: {os.path.basename(cleaned_image)}")
-                        self._log(f"🧹 Rendering on cleaned image", "info")
-                    else:
-                        print(f"[TRANSLATE] No cleaned image available, rendering on original")
-                        self._log(f"📝 Rendering on original image (click Clean first to remove original text)", "info")
-                    
-                    # Use cleaned image if available, otherwise current image
-                    render_image = cleaned_image if cleaned_image else current_image
-                    print(f"[TRANSLATE] Calling PIL renderer for {len(regions)} regions on {os.path.basename(render_image)}")
-                    self._render_with_manga_translator(render_image, regions)
+                if regions:
+                    print(f"[TRANSLATE] ✅ Built {len(regions)} regions, calling PIL renderer...")
+                    self._render_with_manga_translator(image_path, regions)
                 else:
-                    print(f"[TRANSLATE] ERROR: No image path or no regions")
-                    self._log("⚠️ Could not render: no image loaded", "warning")
+                    print(f"[TRANSLATE] ❌ No regions to render")
+                    self._log("⚠️ No regions to render", "warning")
                 
                 self._log(f"✅ Translation workflow complete!", "success")
             else:
