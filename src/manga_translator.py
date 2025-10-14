@@ -3666,7 +3666,7 @@ class MangaTranslator:
                                 self._log(f"✅ Matched text to {len(regions)} RT-DETR blocks (comic-translate style)")
                                 empty_blocks_count = sum(1 for r in regions if not r.text.strip())
                                 if empty_blocks_count > 0:
-                                    self._log(f"⚠️ {empty_blocks_count} blocks have NO matched OCR text — will try fallback OCR")
+                                    self._log(f"⚠️ {empty_blocks_count} blocks have NO matched OCR text")
                                 for i, region in enumerate(regions, 1):
                                     line_count = len(matched_blocks[i-1]['lines']) if i <= len(matched_blocks) else 0
                                     self._log(f"   Block {i}: {line_count} lines → '{region.text[:50]}...'")
@@ -3674,7 +3674,9 @@ class MangaTranslator:
                                 # FALLBACK OCR FOR EMPTY BLOCKS
                                 # If some RT-DETR blocks got NO OCR matches (empty text), re-run Azure OCR on cropped regions
                                 # This catches small text that full-image OCR missed
-                                if empty_blocks_count > 0:
+                                # IMPORTANT: Disabled by default to reduce API costs - enable via settings
+                                enable_fallback_ocr = ocr_settings.get('enable_fallback_ocr', False)
+                                if empty_blocks_count > 0 and enable_fallback_ocr:
                                     self._log(f"🔍 Step 3: Running fallback OCR for {empty_blocks_count} empty blocks")
                                     
                                     # Load the original image for cropping
@@ -3772,14 +3774,22 @@ class MangaTranslator:
                                             except Exception as e:
                                                 self._log(f"   ❌ Block {idx+1}: Fallback OCR failed: {str(e)}", "warning")
                                                 continue
-                                
-                                # FINAL CLEANUP: Remove any blocks that are STILL empty after fallback OCR
-                                # These are genuinely empty bubbles with no text
-                                original_count = len(regions)
-                                regions = [r for r in regions if r.text.strip()]
-                                removed_count = original_count - len(regions)
-                                if removed_count > 0:
-                                    self._log(f"🧹 Removed {removed_count} genuinely empty blocks (no text after fallback OCR)")
+                                    
+                                    # FINAL CLEANUP: Remove any blocks that are STILL empty after fallback OCR
+                                    # These are genuinely empty bubbles with no text
+                                    original_count = len(regions)
+                                    regions = [r for r in regions if r.text.strip()]
+                                    removed_count = original_count - len(regions)
+                                    if removed_count > 0:
+                                        self._log(f"🧹 Removed {removed_count} genuinely empty blocks (no text after fallback OCR)")
+                                elif empty_blocks_count > 0:
+                                    # Fallback OCR is disabled, just remove empty blocks
+                                    self._log(f"ℹ️ Fallback OCR disabled - removing {empty_blocks_count} empty blocks")
+                                    original_count = len(regions)
+                                    regions = [r for r in regions if r.text.strip()]
+                                    removed_count = original_count - len(regions)
+                                    if removed_count > 0:
+                                        self._log(f"🧹 Removed {removed_count} empty blocks (no text matched)")
                                 
                                 # Clear detections
                                 rtdetr_detections = None
@@ -4804,7 +4814,7 @@ class MangaTranslator:
                                     self._log(f"✅ Matched text to {len(ocr_results)} RT-DETR blocks (comic-translate style)")
                                     empty_blocks_count = sum(1 for r in ocr_results if not r.text.strip())
                                     if empty_blocks_count > 0:
-                                        self._log(f"⚠️ {empty_blocks_count} blocks have NO matched OCR text — will try fallback OCR")
+                                        self._log(f"⚠️ {empty_blocks_count} blocks have NO matched OCR text")
                                     for i, result in enumerate(ocr_results, 1):
                                         line_count = len(matched_blocks[i-1]['lines']) if i <= len(matched_blocks) else 0
                                         self._log(f"   Block {i}: {line_count} lines → '{result.text[:50]}...'")
@@ -4812,7 +4822,9 @@ class MangaTranslator:
                                     # FALLBACK OCR FOR EMPTY BLOCKS
                                     # If some RT-DETR blocks got NO OCR matches (empty text), re-run Azure Document Intelligence on cropped regions
                                     # This catches small text that full-image OCR missed
-                                    if empty_blocks_count > 0:
+                                    # IMPORTANT: Disabled by default to reduce API costs - enable via settings
+                                    enable_fallback_ocr = ocr_settings.get('enable_fallback_ocr', False)
+                                    if empty_blocks_count > 0 and enable_fallback_ocr:
                                         self._log(f"🔍 Step 3: Running fallback OCR for {empty_blocks_count} empty blocks")
                                         
                                         # Load the original image for cropping
@@ -4917,13 +4929,21 @@ class MangaTranslator:
                                                         continue
                                             else:
                                                 self._log("⚠️ Azure Document Intelligence client not available for fallback OCR", "warning")
-                                    
-                                    # FINAL CLEANUP: Remove any blocks that are STILL empty after fallback OCR
-                                    original_count = len(ocr_results)
-                                    ocr_results = [r for r in ocr_results if r.text.strip()]
-                                    removed_count = original_count - len(ocr_results)
-                                    if removed_count > 0:
-                                        self._log(f"🧹 Removed {removed_count} empty bubbles after fallback OCR")
+                                        
+                                        # FINAL CLEANUP: Remove any blocks that are STILL empty after fallback OCR
+                                        original_count = len(ocr_results)
+                                        ocr_results = [r for r in ocr_results if r.text.strip()]
+                                        removed_count = original_count - len(ocr_results)
+                                        if removed_count > 0:
+                                            self._log(f"🧹 Removed {removed_count} empty bubbles after fallback OCR")
+                                    elif empty_blocks_count > 0:
+                                        # Fallback OCR is disabled, just remove empty blocks
+                                        self._log(f"ℹ️ Fallback OCR disabled - removing {empty_blocks_count} empty blocks")
+                                        original_count = len(ocr_results)
+                                        ocr_results = [r for r in ocr_results if r.text.strip()]
+                                        removed_count = original_count - len(ocr_results)
+                                        if removed_count > 0:
+                                            self._log(f"🧹 Removed {removed_count} empty blocks (no text matched)")
                                 else:
                                     self._log("⚠️ Azure Document Intelligence found no text lines in full image")
                             

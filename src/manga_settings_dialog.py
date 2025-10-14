@@ -94,6 +94,7 @@ class MangaSettingsDialog(QDialog):
                 'detect_free_text': True,
                 'rtdetr_model_url': '',
                 'use_rtdetr_for_ocr_regions': True,  # On by default for best accuracy
+                'enable_fallback_ocr': False,  # Disabled by default - fallback OCR for empty RT-DETR blocks
                 # Azure settings removed - new API is synchronous, no polling/version settings needed
                 'min_text_length': 0,
                 'exclude_english_text': False,
@@ -2789,6 +2790,24 @@ class MangaSettingsDialog(QDialog):
             "Note: Requires bubble detection to be enabled and uses the selected detector above."
         )
         bubble_layout.addWidget(self.use_rtdetr_for_ocr_checkbox)
+        
+        # Enable fallback OCR for empty RT-DETR blocks (Azure/Azure Document Intelligence only)
+        self.enable_fallback_ocr_checkbox = self._create_styled_checkbox("Enable fallback OCR for empty blocks (Azure only)")
+        self.enable_fallback_ocr_checkbox.setChecked(self.settings['ocr'].get('enable_fallback_ocr', False))  # Default: False (disabled)
+        self.enable_fallback_ocr_checkbox.setToolTip(
+            "When enabled, if RT-DETR detects text bubbles but Azure OCR finds no text,\n"
+            "the system will re-run OCR on those specific regions with padding and upscaling.\n\n"
+            "⚠️ WARNING: This adds extra API calls and may increase costs.\n\n"
+            "🎯 Only applies to: Azure Computer Vision, Azure Document Intelligence\n"
+            "   (when using RT-DETR guidance)\n\n"
+            "Use cases:\n"
+            "• Small or faint text that full-image OCR misses\n"
+            "• Text at unusual angles or perspectives\n"
+            "• Low-quality scans where upscaling helps\n\n"
+            "Note: Disabled by default to reduce API costs. Enable only if experiencing\n"
+            "missing text in detected bubbles."
+        )
+        bubble_layout.addWidget(self.enable_fallback_ocr_checkbox)
 
         # Detector type dropdown
         detector_type_widget = QWidget()
@@ -3008,6 +3027,7 @@ class MangaSettingsDialog(QDialog):
         # Store controls for enable/disable
         self.bubble_controls = [
             self.use_rtdetr_for_ocr_checkbox,
+            self.enable_fallback_ocr_checkbox,
             self.detector_type_combo,
             self.bubble_model_entry,
             self.bubble_browse_btn,
@@ -3331,6 +3351,7 @@ class MangaSettingsDialog(QDialog):
         if enabled:
             # Fade in and enable controls
             self._fade_widget(self.use_rtdetr_for_ocr_checkbox, fade_in=True)
+            self._fade_widget(self.enable_fallback_ocr_checkbox, fade_in=True)
             self._fade_widget(self.yolo_settings_group, fade_in=True)
             
             # Enable controls after starting fade
@@ -3349,6 +3370,7 @@ class MangaSettingsDialog(QDialog):
         else:
             # Fade out and disable controls
             self._fade_widget(self.use_rtdetr_for_ocr_checkbox, fade_in=False)
+            self._fade_widget(self.enable_fallback_ocr_checkbox, fade_in=False)
             self._fade_widget(self.yolo_settings_group, fade_in=False, 
                             on_finished=lambda: self._finish_bubble_disable())
             
@@ -4352,6 +4374,7 @@ class MangaSettingsDialog(QDialog):
             # Bubble detection settings
             self.settings['ocr']['bubble_detection_enabled'] = self.bubble_detection_enabled_checkbox.isChecked()
             self.settings['ocr']['use_rtdetr_for_ocr_regions'] = self.use_rtdetr_for_ocr_checkbox.isChecked()  # NEW: RT-DETR for OCR guidance
+            self.settings['ocr']['enable_fallback_ocr'] = self.enable_fallback_ocr_checkbox.isChecked()  # NEW: Fallback OCR for empty blocks
             self.settings['ocr']['bubble_model_path'] = self.bubble_model_entry.text()
             self.settings['ocr']['bubble_confidence'] = self.bubble_conf_slider.value() / 100.0
             self.settings['ocr']['rtdetr_confidence'] = self.bubble_conf_slider.value() / 100.0
