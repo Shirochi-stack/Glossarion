@@ -2673,6 +2673,8 @@ class MangaTranslationTab:
         print("[DEBUG] Connected recognize_text_clicked")
         self.image_preview_widget.translate_text_clicked.connect(self._on_translate_text_clicked)
         print("[DEBUG] Connected translate_text_clicked")
+        self.image_preview_widget.translate_all_clicked.connect(self._on_translate_all_clicked)
+        print("[DEBUG] Connected translate_all_clicked")
         print("[DEBUG] All workflow signals connected successfully!")
         
         # Settings frame - GOES TO LEFT COLUMN
@@ -9739,7 +9741,8 @@ class MangaTranslationTab:
                     overlay.setVisible(True)
                 print(f"[DEBUG] Restored {len(self._text_overlays_by_image[image_path])} overlays for image: {os.path.basename(image_path)}")
             else:
-                print(f"[DEBUG] No overlays found for image: {os.path.basename(image_path)}")
+                #print(f"[DEBUG] No overlays found for image: {os.path.basename(image_path)}")
+                pass
         except Exception as e:
             print(f"[DEBUG] Error showing text overlays: {str(e)}")
     
@@ -10646,6 +10649,143 @@ class MangaTranslationTab:
         except Exception:
             pass
     
+    def _on_translate_all_clicked(self):
+        """Translate all images in the preview list"""
+        print("[DEBUG] _on_translate_all_clicked called!")
+        self._log("🚀 Starting batch translation of all images", "info")
+        
+        try:
+            # Check if we have images in the preview
+            if not hasattr(self.image_preview_widget, 'image_paths') or not self.image_preview_widget.image_paths:
+                self._log("⚠️ No images loaded in preview", "warning")
+                return
+            
+            image_paths = self.image_preview_widget.image_paths
+            total_images = len(image_paths)
+            
+            self._log(f"📋 Found {total_images} images to translate", "info")
+            
+            # Disable translate all button during processing
+            if hasattr(self.image_preview_widget, 'translate_all_btn'):
+                self.image_preview_widget.translate_all_btn.setEnabled(False)
+                self.image_preview_widget.translate_all_btn.setText(f"Translating... (0/{total_images})")
+            
+            # Run in background thread
+            import threading
+            thread = threading.Thread(target=self._run_translate_all_background, 
+                                    args=(image_paths,),
+                                    daemon=True)
+            thread.start()
+            
+        except Exception as e:
+            import traceback
+            self._log(f"❌ Translate all setup failed: {str(e)}", "error")
+            print(f"Translate all error traceback: {traceback.format_exc()}")
+            self._restore_translate_all_button()
+    
+    def _run_translate_all_background(self, image_paths: list):
+        """Run translation for all images in background"""
+        try:
+            total = len(image_paths)
+            translated_count = 0
+            failed_count = 0
+            
+            self._log(f"🌍 Starting batch translation: {total} images", "info")
+            
+            for idx, image_path in enumerate(image_paths, 1):
+                try:
+                    # Update progress
+                    self._log(f"📄 [{idx}/{total}] Processing: {os.path.basename(image_path)}", "info")
+                    
+                    # Update button text on main thread
+                    self.update_queue.put(('translate_all_progress', {
+                        'current': idx,
+                        'total': total
+                    }))
+                    
+                    # Load the image in preview (on main thread)
+                    self.update_queue.put(('load_preview_image', image_path))
+                    
+                    # Wait a bit for image to load
+                    import time
+                    time.sleep(0.5)
+                    
+                    # Run the full translate pipeline for this image
+                    # This includes detect -> recognize -> translate
+                    regions_for_recognition = None  # Will trigger auto-detection
+                    
+                    # Get OCR config
+                    ocr_config = self._get_ocr_config()
+                    
+                    # Step 1: Run detection
+                    detection_config = self._get_detection_config()
+                    if detection_config.get('detect_empty_bubbles', True):
+                        detection_config['detect_empty_bubbles'] = False
+                    
+                    regions = self._run_detection_sync(image_path, detection_config)
+                    if not regions:
+                        self._log(f"⚠️ [{idx}/{total}] No text regions detected", "warning")
+                        failed_count += 1
+                        continue
+                    
+                    self._log(f"✅ [{idx}/{total}] Detected {len(regions)} regions", "success")
+                    
+                    # Step 2: Run OCR
+                    recognized_texts = self._run_ocr_on_regions(image_path, regions, ocr_config)
+                    if not recognized_texts:
+                        self._log(f"⚠️ [{idx}/{total}] No text recognized", "warning")
+                        failed_count += 1
+                        continue
+                    
+                    self._log(f"✅ [{idx}/{total}] Recognized {len(recognized_texts)} text regions", "success")
+                    
+                    # Step 3: Run translation
+                    translated_texts = self._translate_individually(recognized_texts, image_path)
+                    if not translated_texts:
+                        self._log(f"⚠️ [{idx}/{total}] Translation failed", "warning")
+                        failed_count += 1
+                        continue
+                    
+                    self._log(f"✅ [{idx}/{total}] Translated {len(translated_texts)} regions", "success")
+                    
+                    # Send results to main thread for rendering
+                    self.update_queue.put(('translate_results', {
+                        'image_path': image_path,
+                        'translated_texts': translated_texts
+                    }))
+                    
+                    translated_count += 1
+                    
+                except Exception as e:
+                    import traceback
+                    self._log(f"❌ [{idx}/{total}] Error: {str(e)}", "error")
+                    print(f"[TRANSLATE_ALL] Error on image {idx}: {traceback.format_exc()}")
+                    failed_count += 1
+                    continue
+            
+            # Final summary
+            self._log(f"\n🎉 Batch translation complete!", "success")
+            self._log(f"   ✅ Successful: {translated_count}/{total}", "success")
+            if failed_count > 0:
+                self._log(f"   ❌ Failed: {failed_count}/{total}", "error")
+            
+        except Exception as e:
+            import traceback
+            self._log(f"❌ Batch translation failed: {str(e)}", "error")
+            print(f"[TRANSLATE_ALL] Fatal error: {traceback.format_exc()}")
+        finally:
+            # Restore button
+            self.update_queue.put(('translate_all_button_restore', None))
+    
+    def _restore_translate_all_button(self):
+        """Restore the translate all button to its original state"""
+        try:
+            if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'translate_all_btn'):
+                self.image_preview_widget.translate_all_btn.setEnabled(True)
+                self.image_preview_widget.translate_all_btn.setText("Translate All")
+        except Exception:
+            pass
+    
     def _get_ocr_config(self) -> dict:
         """Get OCR configuration for the selected provider (same as regular pipeline)"""
         print(f"[DEBUG] Building OCR config for provider: {self.ocr_provider_value}")
@@ -11426,6 +11566,34 @@ class MangaTranslationTab:
                         self._restore_translate_button()
                     except Exception as e:
                         self._log(f"❌ Failed to restore translate button: {str(e)}", "error")
+                
+                elif update[0] == 'translate_all_progress':
+                    # Update translate all button progress
+                    _, progress_data = update
+                    try:
+                        current = progress_data['current']
+                        total = progress_data['total']
+                        if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'translate_all_btn'):
+                            self.image_preview_widget.translate_all_btn.setText(f"Translating... ({current}/{total})")
+                    except Exception as e:
+                        print(f"Error updating translate all progress: {str(e)}")
+                
+                elif update[0] == 'load_preview_image':
+                    # Load an image in the preview
+                    _, image_path = update
+                    try:
+                        if hasattr(self, 'image_preview_widget'):
+                            # Load with preserve_rectangles=False to clear previous boxes
+                            self.image_preview_widget.load_image(image_path, preserve_rectangles=False)
+                    except Exception as e:
+                        print(f"Error loading preview image: {str(e)}")
+                
+                elif update[0] == 'translate_all_button_restore':
+                    # Restore the translate all button to its normal state
+                    try:
+                        self._restore_translate_all_button()
+                    except Exception as e:
+                        self._log(f"❌ Failed to restore translate all button: {str(e)}", "error")
                 
                 elif update[0] == 'set_translated_folder':
                     # Set translated folder for preview mode and download button

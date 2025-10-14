@@ -466,6 +466,7 @@ class MangaImagePreviewWidget(QWidget):
     clean_image_clicked = Signal()
     recognize_text_clicked = Signal()
     translate_text_clicked = Signal()
+    translate_all_clicked = Signal()
     
     def __init__(self, parent=None, main_gui=None):
         super().__init__(parent)
@@ -763,6 +764,11 @@ class MangaImagePreviewWidget(QWidget):
         self.translate_btn.clicked.connect(lambda: self._emit_translate_signal())
         workflow_layout.addWidget(self.translate_btn, stretch=1)
         
+        self.translate_all_btn = self._create_compact_button("Translate All")
+        self.translate_all_btn.clicked.connect(lambda: self._emit_translate_all_signal())
+        self.translate_all_btn.setToolTip("Translate all images in preview")
+        workflow_layout.addWidget(self.translate_all_btn, stretch=1)
+        
         layout.addWidget(self.workflow_frame)
         
         # Current file label with download button
@@ -972,6 +978,12 @@ class MangaImagePreviewWidget(QWidget):
         print("[DEBUG] Translate button clicked - emitting signal")
         self.translate_text_clicked.emit()
         print("[DEBUG] Translate signal emitted")
+    
+    def _emit_translate_all_signal(self):
+        """Emit translate all signal with debugging"""
+        print("[DEBUG] Translate All button clicked - emitting signal")
+        self.translate_all_clicked.emit()
+        print("[DEBUG] Translate All signal emitted")
     
     def set_image_list(self, image_paths: list):
         """Set the list of images and populate thumbnails"""
