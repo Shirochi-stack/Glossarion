@@ -7360,6 +7360,9 @@ class MangaTranslationTab:
                 self.image_preview_widget.detect_btn.setEnabled(False)
                 self.image_preview_widget.detect_btn.setText("Detecting...")
             
+            # Add processing overlay effect
+            self._add_processing_overlay()
+            
             image_path = self.image_preview_widget.current_image_path
             
             # Get detection settings for the background thread
@@ -7519,6 +7522,9 @@ class MangaTranslationTab:
     def _restore_detect_button(self):
         """Restore the detect button to its original state"""
         try:
+            # Remove processing overlay effect
+            self._remove_processing_overlay()
+            
             if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'detect_btn'):
                 self.image_preview_widget.detect_btn.setEnabled(True)
                 self.image_preview_widget.detect_btn.setText("Detect Text")
@@ -7593,6 +7599,9 @@ class MangaTranslationTab:
             if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'clean_btn'):
                 self.image_preview_widget.clean_btn.setEnabled(False)
                 self.image_preview_widget.clean_btn.setText("Cleaning...")
+            
+            # Add processing overlay effect
+            self._add_processing_overlay()
             
             # Use the original image path for cleaning (not the current preview which might have boxes)
             image_path = self._original_image_path if hasattr(self, '_original_image_path') and self._original_image_path else self.image_preview_widget.current_image_path
@@ -7771,6 +7780,9 @@ class MangaTranslationTab:
     def _restore_clean_button(self):
         """Restore the clean button to its original state"""
         try:
+            # Remove processing overlay effect
+            self._remove_processing_overlay()
+            
             if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'clean_btn'):
                 self.image_preview_widget.clean_btn.setEnabled(True)
                 self.image_preview_widget.clean_btn.setText("Clean")
@@ -7810,6 +7822,9 @@ class MangaTranslationTab:
                 self.image_preview_widget.recognize_btn.setText("Recognizing...")
             else:
                 print("[DEBUG] No recognize_btn found!")
+            
+            # Add processing overlay effect
+            self._add_processing_overlay()
             
             image_path = self.image_preview_widget.current_image_path
             
@@ -8039,6 +8054,9 @@ class MangaTranslationTab:
     def _restore_recognize_button(self):
         """Restore the recognize button to its original state"""
         try:
+            # Remove processing overlay effect
+            self._remove_processing_overlay()
+            
             if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'recognize_btn'):
                 self.image_preview_widget.recognize_btn.setEnabled(True)
                 self.image_preview_widget.recognize_btn.setText("Recognize Text")
@@ -8066,6 +8084,9 @@ class MangaTranslationTab:
             if hasattr(self.image_preview_widget, 'translate_btn'):
                 self.image_preview_widget.translate_btn.setEnabled(False)
                 self.image_preview_widget.translate_btn.setText("Translating...")
+            
+            # Add processing overlay effect
+            self._add_processing_overlay()
             
             # Get current image path for visual context if enabled
             image_path = self.image_preview_widget.current_image_path if hasattr(self, 'image_preview_widget') else None
@@ -8422,6 +8443,11 @@ class MangaTranslationTab:
                         'bbox': text_data['bbox']
                     }
                     
+                    # Change rectangle color to BLUE when text is recognized
+                    from PySide6.QtGui import QPen, QBrush, QColor
+                    rect_item.setPen(QPen(QColor(0, 150, 255), 2))  # Blue border
+                    rect_item.setBrush(QBrush(QColor(0, 150, 255, 50)))  # Semi-transparent blue fill
+                    
                     # Add context menu support to rectangle
                     self._add_context_menu_to_rectangle(rect_item, region_index)
                     
@@ -8463,6 +8489,79 @@ class MangaTranslationTab:
             import traceback
             print(f"[DEBUG] Traceback: {traceback.format_exc()}")
             self._log(f"❌ Error adding translation overlays: {str(e)}", "error")
+    
+    def _add_processing_overlay(self):
+        """Add a pulsing overlay effect to indicate processing"""
+        try:
+            if not hasattr(self, 'image_preview_widget') or not hasattr(self.image_preview_widget, 'viewer'):
+                return
+            
+            from PySide6.QtWidgets import QGraphicsRectItem
+            from PySide6.QtCore import QRectF, QPropertyAnimation, QEasingCurve, Qt
+            from PySide6.QtGui import QBrush, QColor
+            
+            viewer = self.image_preview_widget.viewer
+            
+            # Create overlay rectangle covering entire scene
+            scene_rect = viewer._scene.sceneRect()
+            overlay = QGraphicsRectItem(scene_rect)
+            overlay.setBrush(QBrush(QColor(0, 150, 255, 30)))  # Blue semi-transparent
+            overlay.setPen(Qt.NoPen)
+            overlay.setZValue(1000)  # On top of everything
+            
+            # Add to scene
+            viewer._scene.addItem(overlay)
+            self._processing_overlay = overlay
+            
+            # Create pulsing animation
+            class OpacityItem:
+                def __init__(self, item):
+                    self._item = item
+                    self._opacity = 30
+                
+                def get_opacity(self):
+                    return self._opacity
+                
+                def set_opacity(self, value):
+                    self._opacity = value
+                    self._item.setBrush(QBrush(QColor(0, 150, 255, int(value))))
+                
+                opacity = property(get_opacity, set_opacity)
+            
+            self._opacity_wrapper = OpacityItem(overlay)
+            
+            self._pulse_animation = QPropertyAnimation(self._opacity_wrapper, b"opacity")
+            self._pulse_animation.setDuration(1500)  # 1.5 seconds
+            self._pulse_animation.setStartValue(15)
+            self._pulse_animation.setEndValue(50)
+            self._pulse_animation.setEasingCurve(QEasingCurve.InOutQuad)
+            self._pulse_animation.setLoopCount(-1)  # Infinite loop
+            self._pulse_animation.start()
+            
+            print(f"[DEBUG] Added processing overlay with pulsing animation")
+            
+        except Exception as e:
+            print(f"[DEBUG] Error adding processing overlay: {str(e)}")
+    
+    def _remove_processing_overlay(self):
+        """Remove the processing overlay effect"""
+        try:
+            if hasattr(self, '_pulse_animation'):
+                self._pulse_animation.stop()
+                del self._pulse_animation
+            
+            if hasattr(self, '_processing_overlay'):
+                if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'viewer'):
+                    self.image_preview_widget.viewer._scene.removeItem(self._processing_overlay)
+                del self._processing_overlay
+            
+            if hasattr(self, '_opacity_wrapper'):
+                del self._opacity_wrapper
+            
+            print(f"[DEBUG] Removed processing overlay")
+            
+        except Exception as e:
+            print(f"[DEBUG] Error removing processing overlay: {str(e)}")
     
     def _add_context_menu_to_rectangle(self, rect_item, region_index: int):
         """Add context menu to rectangle for showing OCR text on right-click"""
@@ -9196,6 +9295,9 @@ class MangaTranslationTab:
     def _restore_translate_button(self):
         """Restore the translate button to its original state"""
         try:
+            # Remove processing overlay effect
+            self._remove_processing_overlay()
+            
             if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'translate_btn'):
                 self.image_preview_widget.translate_btn.setEnabled(True)
                 self.image_preview_widget.translate_btn.setText("Translate")
