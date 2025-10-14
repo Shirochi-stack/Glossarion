@@ -9081,7 +9081,13 @@ class MangaTranslationTab:
             self._log(f"❌ Rendering failed: {str(e)}", "error")
     
     def _render_with_manga_translator(self, image_path: str, regions: list):
-        """Render translations using MangaTranslator's PIL pipeline (same as batch workflow)"""
+        """Render translations using MangaTranslator's PIL pipeline"""
+        print(f"\n{'='*80}")
+        print(f"[RENDER] _render_with_manga_translator CALLED")
+        print(f"[RENDER] image_path: {image_path}")
+        print(f"[RENDER] regions count: {len(regions)}")
+        print(f"{'='*80}\n")
+        
         try:
             from manga_translator import MangaTranslator
             from unified_api_client import UnifiedClient
@@ -9091,16 +9097,24 @@ class MangaTranslationTab:
             import cv2
             import numpy as np
             
-            print(f"[DEBUG] Starting PIL rendering for {len(regions)} regions")
+            print(f"[RENDER] Imports successful")
             self._log(f"🎨 Rendering with PIL pipeline...", "info")
+            
+            # Check if image exists
+            if not os.path.exists(image_path):
+                raise FileNotFoundError(f"Image not found: {image_path}")
+            
+            print(f"[RENDER] Image exists: {os.path.exists(image_path)}")
             
             # Get or create MangaTranslator instance
             if not hasattr(self, '_manga_translator') or self._manga_translator is None:
+                print(f"[RENDER] Creating new MangaTranslator instance...")
                 ocr_config = self._get_ocr_config()
                 api_key = self.main_gui.api_key_entry.text().strip() if hasattr(self.main_gui, 'api_key_entry') else ''
                 model = self.main_gui.model_var if hasattr(self.main_gui, 'model_var') else 'gpt-4o-mini'
                 
                 if not api_key:
+                    print(f"[RENDER] ERROR: No API key found!")
                     raise ValueError("No API key found")
                 
                 unified_client = UnifiedClient(model=model, api_key=api_key)
@@ -9110,16 +9124,28 @@ class MangaTranslationTab:
                     main_gui=self.main_gui,
                     log_callback=self._log
                 )
-                print(f"[DEBUG] Created MangaTranslator instance")
+                print(f"[RENDER] MangaTranslator instance created")
+            else:
+                print(f"[RENDER] Using existing MangaTranslator instance")
             
             # Load original image as numpy array
+            print(f"[RENDER] Loading image...")
             pil_image = Image.open(image_path)
+            print(f"[RENDER] Image size: {pil_image.size}")
+            
             # Convert PIL to OpenCV format (BGR)
             image_rgb = np.array(pil_image.convert('RGB'))
             image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+            print(f"[RENDER] Converted to BGR, shape: {image_bgr.shape}")
+            
+            # Print region details
+            for i, region in enumerate(regions):
+                print(f"[RENDER] Region {i}: text='{region.text[:30] if region.text else 'None'}...', translated='{region.translated_text[:30] if region.translated_text else 'None'}...'")
             
             # Call MangaTranslator's render_translated_text method
+            print(f"[RENDER] Calling render_translated_text...")
             rendered_bgr = self._manga_translator.render_translated_text(image_bgr, regions)
+            print(f"[RENDER] Rendering complete, output shape: {rendered_bgr.shape}")
             
             # Convert back to PIL and save
             rendered_rgb = cv2.cvtColor(rendered_bgr, cv2.COLOR_BGR2RGB)
@@ -9128,29 +9154,40 @@ class MangaTranslationTab:
             # Save to temp file
             temp_dir = tempfile.mkdtemp(prefix="manga_manual_edit_")
             output_path = os.path.join(temp_dir, os.path.basename(image_path))
+            print(f"[RENDER] Saving to: {output_path}")
             rendered_pil.save(output_path)
+            print(f"[RENDER] Saved successfully, file exists: {os.path.exists(output_path)}")
             
-            print(f"[DEBUG] PIL rendering complete: {output_path}")
             # Load the rendered image into preview
+            print(f"[RENDER] Loading rendered image into preview...")
             self.image_preview_widget.load_image(output_path, preserve_rectangles=True, preserve_text_overlays=False)
-            self._log(f"✅ Rendered with PIL pipeline", "success")
+            print(f"[RENDER] Image loaded into preview")
             
-            # Clean up temp directory after a delay (give time for image to load)
+            self._log(f"✅ Rendered with PIL pipeline: {os.path.basename(output_path)}", "success")
+            
+            # Clean up temp directory after a delay
             import threading
             def cleanup_later():
                 import time
-                time.sleep(2)
+                time.sleep(5)  # Give more time
                 try:
                     if os.path.exists(temp_dir):
+                        print(f"[RENDER] Cleaning up temp dir: {temp_dir}")
                         shutil.rmtree(temp_dir)
-                except:
-                    pass
+                except Exception as e:
+                    print(f"[RENDER] Cleanup error: {e}")
             threading.Thread(target=cleanup_later, daemon=True).start()
+            
+            print(f"[RENDER] _render_with_manga_translator COMPLETED SUCCESSFULLY\n{'='*80}\n")
         
         except Exception as e:
-            print(f"[DEBUG] Error rendering with MangaTranslator: {str(e)}")
+            print(f"\n{'='*80}")
+            print(f"[RENDER] ERROR in _render_with_manga_translator")
+            print(f"[RENDER] Error: {str(e)}")
             import traceback
-            print(f"[DEBUG] Traceback: {traceback.format_exc()}")
+            traceback_str = traceback.format_exc()
+            print(f"[RENDER] Traceback:\n{traceback_str}")
+            print(f"{'='*80}\n")
             self._log(f"❌ Rendering error: {str(e)}", "error")
     
     def _add_text_overlay_to_viewer(self, translated_texts: list):
@@ -9428,47 +9465,204 @@ class MangaTranslationTab:
             return None, 0
     
     def _calculate_auto_font_size(self, text: str, width: int, height: int, settings: dict) -> int:
-        """Calculate optimal font size using manga translation algorithm"""
+        """Calculate optimal font size using TOP-DOWN with ITERATIVE WRAPPING like PIL"""
         try:
             from PySide6.QtGui import QFont, QFontMetrics
+            from hyphen_textwrap import wrap as hyphen_wrap
             
             font_family = settings.get('font_family', 'Arial')
-            algorithm = settings.get('font_algorithm', 'smart')
             min_size = settings.get('auto_min_size', 10)
             max_size = settings.get('max_font_size', 48)
-            prefer_larger = settings.get('prefer_larger', True)
-            max_lines = settings.get('max_lines', 10)
             line_spacing = settings.get('line_spacing', 1.3)
             
-            # Algorithm factors
-            if algorithm == 'conservative':
-                start_size = min_size + 2
-                size_step = 1
-            elif algorithm == 'aggressive':
-                start_size = max(min_size, int(min(width, height) / 6))
-                size_step = 2
-            else:  # smart
-                start_size = max(min_size, int(min(width, height) / 8))
-                size_step = 1
+            # Detect if this is a tall rectangle (needs vertical optimization)
+            is_tall = height > width * 1.2
+            aspect = height / max(width, 1)
             
-            # Find optimal font size
-            best_size = min_size
+            print(f"[DEBUG] Auto-sizing: target=({width}x{height}), aspect={aspect:.2f}, is_tall={is_tall}, range={min_size}-{max_size}")
             
-            for size in range(start_size, max_size + 1, size_step):
+            # TOP-DOWN: Start with max size and shrink
+            current_size = float(max_size)
+            step = 0.75
+            
+            while current_size >= min_size:
                 font = QFont(font_family)
-                font.setPointSize(size)
+                font.setPointSize(int(current_size))
+                metrics = QFontMetrics(font)
                 
-                if self._text_fits_in_bounds(text, width, height, font, settings):
-                    best_size = size
-                    if not prefer_larger:
-                        break  # Take first fit if not preferring larger
+                # Calculate how many lines can fit at this font size
+                line_height = metrics.height() * line_spacing
+                max_possible_lines = int(height / line_height) if line_height > 0 else 1
+                
+                # Calculate character range based on text length and desired lines
+                avg_char_width = metrics.averageCharWidth()
+                if avg_char_width > 0:
+                    max_chars_by_width = int(width / avg_char_width)
+                    # For tall rectangles, target more lines by using fewer chars per line
+                    target_chars = max(5, int(len(text) / max(1, max_possible_lines * 0.7)))
                 else:
-                    break  # Too big, use previous size
+                    max_chars_by_width = int(width / 10)
+                    target_chars = max(5, int(len(text) / max(1, max_possible_lines * 0.7)))
+                
+                # Determine column range based on rectangle shape
+                if is_tall:
+                    # TALL RECTANGLE: ULTRA AGGRESSIVE - even 1 char per line if needed!
+                    # Calculate minimum chars needed to fit text in available lines
+                    chars_per_line_for_fit = max(1, int(len(text) / max(max_possible_lines, 1)))
+                    min_cols = max(1, chars_per_line_for_fit)  # Start from 1 char if needed!
+                    max_cols = max_chars_by_width
+                    # Try EVERY width from ultra-narrow to wide
+                    col_range = list(range(1, min(10, max_cols), 1))  # Try 1-10 chars ONE BY ONE
+                    col_range += list(range(10, min(20, max_cols), 2))  # Then 10-20
+                    col_range += list(range(20, max_cols + 1, 3))  # Then wider
+                    print(f"[DEBUG] Tall mode (ULTRA AGGRESSIVE): trying 1->{max_cols} chars (need {max_possible_lines} lines, text={len(text)} chars)")
+                else:
+                    # WIDE RECTANGLE: Start wide (fewer lines) and go narrower
+                    min_cols = max(5, max_chars_by_width // 4)
+                    max_cols = max_chars_by_width
+                    col_range = range(max_cols, min_cols - 1, -2)  # Wide to narrow
+                    print(f"[DEBUG] Wide mode: trying {max_cols}->{min_cols} chars")
+                
+                # Try different column widths
+                found_fit = False
+                best_fit_score = -1
+                best_columns = None
+                
+                for columns in col_range:
+                    try:
+                        # Use hyphen_wrap to break text
+                        wrapped_lines = hyphen_wrap(
+                            text,
+                            width=columns,
+                            break_on_hyphens=False,
+                            break_long_words=True,
+                            hyphenate_broken_words=True
+                        )
+                        
+                        if not wrapped_lines:
+                            continue
+                        
+                        # Calculate dimensions
+                        max_line_width = max([metrics.horizontalAdvance(line) for line in wrapped_lines])
+                        total_height = len(wrapped_lines) * line_height
+                        
+                        # Check if it fits
+                        fits = max_line_width <= width and total_height <= height
+                        
+                        if fits:
+                            # Calculate fit score (higher = better utilization)
+                            width_usage = max_line_width / width
+                            height_usage = total_height / height
+                            # For tall rectangles, prioritize height usage
+                            if is_tall:
+                                fit_score = height_usage * 2 + width_usage
+                            else:
+                                fit_score = width_usage * 2 + height_usage
+                            
+                            if fit_score > best_fit_score:
+                                best_fit_score = fit_score
+                                best_columns = columns
+                                found_fit = True
+                    
+                    except Exception:
+                        continue
+                
+                if found_fit:
+                    # This size works!
+                    print(f"[DEBUG] Found fit: size={int(current_size)}, columns={best_columns}, score={best_fit_score:.2f}")
+                    return int(current_size)
+                
+                # Doesn't fit at this size, shrink
+                current_size -= step
             
+            # Hit minimum size - do brute force optimization (HEIGHT-AWARE)
+            print(f"[DEBUG] Hit minimum size, doing brute-force optimization (height-aware)...")
+            best_size = min_size
+            best_cost = float('inf')
+            
+            for test_size in range(max(8, min_size - 2), min_size + 3):
+                font = QFont(font_family)
+                font.setPointSize(test_size)
+                metrics = QFontMetrics(font)
+                
+                # Calculate possible lines and target columns
+                line_height = metrics.height() * line_spacing
+                max_possible_lines = int(height / line_height) if line_height > 0 else 1
+                
+                avg_char_width = metrics.averageCharWidth()
+                if avg_char_width > 0:
+                    max_chars_by_width = int(width / avg_char_width)
+                    target_chars = max(5, int(len(text) / max(1, max_possible_lines * 0.7)))
+                else:
+                    max_chars_by_width = int(width / 10)
+                    target_chars = max(5, int(len(text) / max(1, max_possible_lines * 0.7)))
+                
+                # Height-aware column range (ULTRA AGGRESSIVE FOR TALL)
+                if is_tall:
+                    # For tall rectangles at minimum size, try ULTRA narrow - even 1 char!
+                    min_cols = 1  # FORCE FIT - try literally 1 char per line
+                    max_cols = max_chars_by_width
+                    # Try EVERY column width from 1 char upward
+                    col_range = list(range(1, min(12, max_cols), 1))  # Try 1-12 chars ONE BY ONE
+                    col_range += list(range(12, min(20, max_cols), 2))  # Then 12-20
+                    col_range += list(range(20, max_cols + 1, 3))  # Then wider
+                    print(f"[DEBUG] Brute-force ULTRA tall: trying 1->{max_cols} chars (text_len={len(text)}, max_lines={max_possible_lines})")
+                else:
+                    min_cols = max(5, max_chars_by_width // 4)
+                    max_cols = max_chars_by_width
+                    col_range = range(max_cols, min_cols - 1, -3)  # Wide to narrow
+                
+                # Try different column widths
+                for columns in col_range:
+                    try:
+                        wrapped_lines = hyphen_wrap(
+                            text,
+                            width=columns,
+                            break_on_hyphens=False,
+                            break_long_words=True,
+                            hyphenate_broken_words=True
+                        )
+                        
+                        if not wrapped_lines:
+                            continue
+                        
+                        max_line_width = max([metrics.horizontalAdvance(line) for line in wrapped_lines])
+                        total_height = len(wrapped_lines) * line_height
+                        
+                        # Cost function: minimize overflow, prefer larger fonts, prioritize height usage
+                        width_overflow = max(0, max_line_width - width)
+                        height_overflow = max(0, total_height - height)
+                        
+                        if is_tall:
+                            # For tall rectangles, heavily penalize not using height
+                            height_usage = total_height / height if height > 0 else 0
+                            cost = width_overflow**2 + height_overflow**2 - (test_size * 20) - (height_usage * 100)
+                        else:
+                            cost = width_overflow**2 + height_overflow**2 - (test_size * 20)
+                        
+                        if cost < best_cost:
+                            best_cost = cost
+                            best_size = test_size
+                            if width_overflow == 0 and height_overflow == 0:
+                                # Perfect fit
+                                print(f"[DEBUG] Perfect fit at size={test_size}, columns={columns}, lines={len(wrapped_lines)}")
+                                return best_size
+                    
+                    except Exception:
+                        continue
+            
+            # Emergency fallback: if we still haven't found anything, just use minimum size
+            if best_size == min_size and best_cost == float('inf'):
+                print(f"[DEBUG] EMERGENCY: No perfect fit found, using min_size={min_size} anyway")
+                best_size = min_size
+            
+            print(f"[DEBUG] Final optimized size: {best_size}")
             return best_size
             
         except Exception as e:
-            print(f"[DEBUG] Error calculating auto font size: {str(e)}")
+            print(f"[DEBUG] Error in auto-sizing: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
             return settings.get('auto_min_size', 12)
     
     def _text_fits_in_bounds(self, text: str, width: int, height: int, font: QFont, settings: dict) -> bool:
@@ -9778,7 +9972,7 @@ class MangaTranslationTab:
             self._log(f"❌ Failed to process recognition results: {str(e)}", "error")
     
     def _process_translate_results(self, results: dict):
-        """Process translation results on main thread"""
+        """Process translation results on main thread - USE PIL RENDERING!"""
         try:
             translated_texts = results['translated_texts']
             
@@ -9794,14 +9988,58 @@ class MangaTranslationTab:
                     bbox = result['bbox']
                     self._log(f"  Region {i+1} at ({bbox[0]},{bbox[1]}): '{original_text}' → '{translation}'", "info")
                 
-                # Update UI with tooltips and visual feedback
-                self._update_rectangles_with_translations(translated_texts)
+                # Store translation data for potential manual edits
+                self._translation_data = {}
+                rectangles = self.image_preview_widget.viewer.rectangles
+                for i, result in enumerate(translated_texts):
+                    if i < len(rectangles):
+                        self._translation_data[i] = {
+                            'original': result['original']['text'],
+                            'translation': result['translation']
+                        }
+                
+                # USE PIL RENDERING (same as manual edit) instead of Qt overlays!
+                print(f"\n[TRANSLATE] Using PIL rendering for {len(translated_texts)} translations")
+                self._log(f"🎨 Rendering translations with PIL pipeline...", "info")
+                
+                # Build TextRegion objects
+                from manga_translator import TextRegion
+                regions = []
+                
+                for i, result in enumerate(translated_texts):
+                    if i < len(rectangles):
+                        rect = rectangles[i].rect()
+                        x, y, w, h = int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height())
+                        vertices = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
+                        
+                        region = TextRegion(
+                            text=result['original']['text'],
+                            vertices=vertices,
+                            bounding_box=(x, y, w, h),
+                            confidence=1.0,
+                            region_type='text_block'
+                        )
+                        region.translated_text = result['translation']
+                        regions.append(region)
+                        print(f"[TRANSLATE] Region {i}: '{result['original']['text'][:30]}...' -> '{result['translation'][:30]}...'")
+                
+                # Render with PIL pipeline (includes inpainting!)
+                current_image = self.image_preview_widget.current_image_path
+                if current_image and regions:
+                    print(f"[TRANSLATE] Calling PIL renderer for {len(regions)} regions on {os.path.basename(current_image)}")
+                    self._render_with_manga_translator(current_image, regions)
+                else:
+                    print(f"[TRANSLATE] ERROR: No image path or no regions")
+                    self._log("⚠️ Could not render: no image loaded", "warning")
                 
                 self._log(f"✅ Translation workflow complete!", "success")
             else:
                 self._log("⚠️ No translations were generated", "warning")
         
         except Exception as e:
+            print(f"[TRANSLATE] ERROR in _process_translate_results: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
             self._log(f"❌ Failed to process translation results: {str(e)}", "error")
     
     
