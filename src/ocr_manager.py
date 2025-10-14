@@ -1892,8 +1892,140 @@ class RapidOCRProvider(OCRProvider):
             
         except Exception as e:
             self._log(f"Error in RapidOCR detection: {str(e)}", "error")
+        return results
+
+
+class AzureComputerVisionProvider(OCRProvider):
+    """Azure Computer Vision OCR provider (the original Azure OCR service)"""
+    
+    def __init__(self, log_callback=None):
+        super().__init__(log_callback)
+        self.client = None
+        self.endpoint = None
+        self.key = None
+        
+    def check_installation(self) -> bool:
+        """Check if Azure Computer Vision SDK is installed"""
+        try:
+            from azure.ai.vision.imageanalysis import ImageAnalysisClient
+            from azure.core.credentials import AzureKeyCredential
+            self.is_installed = True
+            return True
+        except ImportError:
+            return False
+    
+    def install(self, progress_callback=None) -> bool:
+        """Provide installation instructions"""
+        if progress_callback:
+            progress_callback("Azure Computer Vision requires manual installation")
+        self._log("Run: pip install azure-ai-vision-imageanalysis", "info")
+        return False
+    
+    def load_model(self, **kwargs) -> bool:
+        """Initialize Azure Computer Vision client"""
+        try:
+            if not self.is_installed and not self.check_installation():
+                self._log("❌ Azure Computer Vision SDK not installed", "error")
+                self._log("   Install with: pip install azure-ai-vision-imageanalysis", "info")
+                return False
+            
+            from azure.ai.vision.imageanalysis import ImageAnalysisClient
+            from azure.core.credentials import AzureKeyCredential
+            
+            # Get credentials from kwargs (passed from manga integration)
+            self.endpoint = kwargs.get('azure_endpoint')
+            self.key = kwargs.get('azure_key')
+            
+            print(f"[DEBUG] Azure Computer Vision endpoint: {self.endpoint}")
+            print(f"[DEBUG] Azure Computer Vision key exists: {bool(self.key)}")
+            
+            if not self.endpoint or not self.key:
+                self._log("❌ Azure Computer Vision credentials not configured", "error")
+                self._log("   Please configure Azure Key and Endpoint in the GUI", "info")
+                return False
+            
+            # Create client
+            self.client = ImageAnalysisClient(
+                endpoint=self.endpoint,
+                credential=AzureKeyCredential(self.key)
+            )
+            
+            self.is_loaded = True
+            self._log("✅ Azure Computer Vision client initialized")
+            return True
+            
+        except Exception as e:
+            self._log(f"❌ Failed to initialize Azure Computer Vision: {str(e)}", "error")
+            import traceback
+            self._log(traceback.format_exc(), "debug")
+            return False
+    
+    def detect_text(self, image: np.ndarray, **kwargs) -> List[OCRResult]:
+        """Detect text using Azure Computer Vision"""
+        results = []
+        
+        try:
+            if not self.is_loaded:
+                if not self.load_model(**kwargs):
+                    return results
+            
+            from azure.ai.vision.imageanalysis import VisualFeatures
+            import cv2
+            from io import BytesIO
+            
+            # Convert numpy array to bytes
+            _, encoded = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            image_bytes = encoded.tobytes()
+            
+            print(f"[DEBUG] Azure Computer Vision: Processing image of size {image.shape}")
+            
+            # Call Azure Computer Vision API
+            analysis_result = self.client.analyze(
+                image_data=image_bytes,
+                visual_features=[VisualFeatures.READ]
+            )
+            
+            # Extract text from result
+            if analysis_result.read:
+                for block in analysis_result.read.blocks:
+                    for line in block.lines:
+                        text = line.text.strip()
+                        if not text:
+                            continue
+                        
+                        # Get bounding polygon points
+                        if line.bounding_polygon:
+                            vertices = [(int(point.x), int(point.y)) for point in line.bounding_polygon]
+                            
+                            # Calculate bounding box
+                            xs = [v[0] for v in vertices]
+                            ys = [v[1] for v in vertices]
+                            x_min, x_max = min(xs), max(xs)
+                            y_min, y_max = min(ys), max(ys)
+                            
+                            results.append(OCRResult(
+                                text=text,
+                                bbox=(x_min, y_min, x_max - x_min, y_max - y_min),
+                                confidence=0.9,  # Azure doesn't provide confidence scores in this API
+                                vertices=vertices
+                            ))
+                            
+                            print(f"[DEBUG] Azure Computer Vision: Found text '{text}' at ({x_min},{y_min})")
+            
+            print(f"[DEBUG] Azure Computer Vision: Detected {len(results)} text regions")
+            
+            if results:
+                self._log(f"✅ Detected {len(results)} text regions")
+            else:
+                self._log("⚠️ No text detected", "warning")
+            
+        except Exception as e:
+            self._log(f"❌ Error in Azure Computer Vision detection: {str(e)}", "error")
+            import traceback
+            self._log(traceback.format_exc(), "debug")
         
         return results
+
 
 class AzureDocumentIntelligenceProvider(OCRProvider):
     """Azure Document Intelligence OCR provider (successor to Azure AI Vision)
@@ -1941,6 +2073,8 @@ class AzureDocumentIntelligenceProvider(OCRProvider):
             
             # Get credentials from multiple sources (kwargs, environment, or fall back to azure_vision_* config)
             # Priority: explicit kwargs > specific env vars > azure_vision config (GUI uses this)
+            print(f"[DEBUG] Azure Document Intelligence kwargs: {kwargs}")
+            
             self.endpoint = (
                 kwargs.get('endpoint') or 
                 kwargs.get('azure_endpoint') or
@@ -1954,6 +2088,9 @@ class AzureDocumentIntelligenceProvider(OCRProvider):
                 os.environ.get('AZURE_DOCUMENT_INTELLIGENCE_KEY') or
                 os.environ.get('AZURE_KEY')
             )
+            
+            print(f"[DEBUG] Azure endpoint: {self.endpoint}")
+            print(f"[DEBUG] Azure key exists: {bool(self.key)}")
             
             if not self.endpoint or not self.key:
                 self._log("❌ Azure Document Intelligence credentials not configured", "error")
@@ -2110,6 +2247,7 @@ class OCRManager:
             'doctr': DocTROCRProvider(log_callback),
             'rapidocr': RapidOCRProvider(log_callback),
             'Qwen2-VL': Qwen2VL(log_callback),
+            'azure': AzureComputerVisionProvider(log_callback),
             'azure-document-intelligence': AzureDocumentIntelligenceProvider(log_callback)
         }
         self.current_provider = None
@@ -2191,8 +2329,11 @@ class OCRManager:
         
         provider = self.providers.get(provider_name)
         if not provider:
+            print(f"[DEBUG] Provider '{provider_name}' not found")
+            print(f"[DEBUG] Available providers: {list(self.providers.keys())}")
             return []
         
+        print(f"[DEBUG] Using provider: {provider_name}")
         return provider.detect_text(image, **kwargs)
     
     def set_stop_flag(self, stop_flag):

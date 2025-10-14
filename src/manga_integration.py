@@ -2661,8 +2661,16 @@ class MangaTranslationTab:
         self.image_preview_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         
         # Connect image preview workflow signals to translation methods
+        print("[DEBUG] Connecting workflow signals...")
         self.image_preview_widget.detect_text_clicked.connect(self._on_detect_text_clicked)
+        print("[DEBUG] Connected detect_text_clicked")
         self.image_preview_widget.clean_image_clicked.connect(self._on_clean_image_clicked)
+        print("[DEBUG] Connected clean_image_clicked")
+        self.image_preview_widget.recognize_text_clicked.connect(self._on_recognize_text_clicked)
+        print("[DEBUG] Connected recognize_text_clicked")
+        self.image_preview_widget.translate_text_clicked.connect(self._on_translate_text_clicked)
+        print("[DEBUG] Connected translate_text_clicked")
+        print("[DEBUG] All workflow signals connected successfully!")
         
         # Settings frame - GOES TO LEFT COLUMN
         settings_frame = QGroupBox("Translation Settings")
@@ -7769,6 +7777,405 @@ class MangaTranslationTab:
         except Exception:
             pass
     
+    def _on_recognize_text_clicked(self):
+        """Recognize text in current preview rectangles using selected OCR provider"""
+        print("[DEBUG] _on_recognize_text_clicked called!")
+        self._log("🐛 DEBUG: Recognize text button clicked", "debug")
+        
+        try:
+            # Debug: Check widget existence
+            print(f"[DEBUG] Has image_preview_widget: {hasattr(self, 'image_preview_widget')}")
+            if hasattr(self, 'image_preview_widget'):
+                print(f"[DEBUG] Current image path: {self.image_preview_widget.current_image_path}")
+                print(f"[DEBUG] Has viewer: {hasattr(self.image_preview_widget, 'viewer')}")
+                if hasattr(self.image_preview_widget, 'viewer'):
+                    print(f"[DEBUG] Number of rectangles: {len(self.image_preview_widget.viewer.rectangles)}")
+            
+            # Check if we have an image and rectangles
+            if not hasattr(self, 'image_preview_widget') or not self.image_preview_widget.current_image_path:
+                self._log("⚠️ No image loaded for text recognition", "warning")
+                print("[DEBUG] No image loaded - returning early")
+                return
+            
+            if not hasattr(self.image_preview_widget, 'viewer') or not self.image_preview_widget.viewer.rectangles:
+                self._log("⚠️ No text regions to recognize. Please run 'Detect Text' or manually draw boxes first.", "warning")
+                print("[DEBUG] No rectangles found - returning early")
+                return
+            
+            # Disable the recognize button to prevent multiple clicks
+            print(f"[DEBUG] Has recognize_btn: {hasattr(self.image_preview_widget, 'recognize_btn')}")
+            if hasattr(self.image_preview_widget, 'recognize_btn'):
+                print(f"[DEBUG] Disabling recognize button")
+                self.image_preview_widget.recognize_btn.setEnabled(False)
+                self.image_preview_widget.recognize_btn.setText("Recognizing...")
+            else:
+                print("[DEBUG] No recognize_btn found!")
+            
+            image_path = self.image_preview_widget.current_image_path
+            
+            # Get OCR settings
+            ocr_config = self._get_ocr_config()
+            print(f"[DEBUG] OCR config: {ocr_config}")
+            self._log(f"🤖 Using OCR provider: {ocr_config['provider']}", "info")
+            
+            # Extract regions from current preview rectangles
+            regions = self._extract_regions_from_preview()
+            print(f"[DEBUG] Extracted {len(regions)} regions from preview")
+            
+            if not regions:
+                self._log("⚠️ No valid regions found in preview", "warning")
+                self._restore_recognize_button()
+                return
+            
+            self._log(f"📝 Starting text recognition on {len(regions)} regions using {ocr_config['provider']}", "info")
+            
+            # Run OCR in background thread
+            import threading
+            thread = threading.Thread(target=self._run_recognize_background, 
+                                    args=(image_path, regions, ocr_config),
+                                    daemon=True)
+            thread.start()
+            
+        except Exception as e:
+            import traceback
+            error_msg = f"❌ Recognize setup failed: {str(e)}"
+            traceback_msg = traceback.format_exc()
+            self._log(error_msg, "error")
+            print(f"[DEBUG] {error_msg}")
+            print(f"[DEBUG] Recognize setup error traceback: {traceback_msg}")
+            self._restore_recognize_button()
+    
+    def _run_recognize_background(self, image_path: str, regions: list, ocr_config: dict):
+        """Run text recognition in background thread"""
+        try:
+            import cv2
+            
+            # Load image
+            image = cv2.imread(image_path)
+            if image is None:
+                self._log(f"❌ Failed to load image: {os.path.basename(image_path)}", "error")
+                self.update_queue.put(('recognize_button_restore', None))
+                return
+            
+            # Initialize OCR manager if not already done
+            if not hasattr(self, 'ocr_manager') or not self.ocr_manager:
+                from ocr_manager import OCRManager
+                self.ocr_manager = OCRManager(log_callback=self._log)
+            
+            recognized_texts = []
+            
+            self._log(f"🔍 Processing {len(regions)} regions with {ocr_config['provider']} OCR", "info")
+            
+            # Process each region
+            for i, region in enumerate(regions):
+                bbox = region.get('bbox', [])
+                print(f"[DEBUG] Processing region {i+1}: bbox={bbox}")
+                self._log(f"🔍 Processing region {i+1}: bbox={bbox}", "debug")
+                
+                if len(bbox) >= 4:
+                    x, y, width, height = bbox
+                    print(f"[DEBUG] Region {i+1} coordinates: x={x}, y={y}, w={width}, h={height}")
+                    
+                    # Crop the region from the image
+                    cropped = image[y:y+height, x:x+width]
+                    print(f"[DEBUG] Cropped image shape: {cropped.shape if cropped.size > 0 else 'empty'}")
+                    
+                    if cropped.size > 0:
+                        try:
+                            # Save cropped region for debugging (optional)
+                            debug_path = f"/tmp/ocr_debug_region_{i+1}.png"
+                            try:
+                                cv2.imwrite(debug_path, cropped)
+                                print(f"[DEBUG] Saved cropped region to: {debug_path}")
+                            except:
+                                pass
+                            
+                            # Run OCR on the cropped region (same way as regular pipeline)
+                            print(f"[DEBUG] Running OCR on region {i+1} with provider: {ocr_config['provider']}")
+                            
+                            # Match the regular pipeline's OCR call exactly
+                            provider = ocr_config['provider']
+                            confidence_threshold = 0.5  # Default confidence threshold
+                            
+                            # Load the provider if needed (same as regular pipeline)
+                            if not self.ocr_manager.get_provider(provider).is_loaded:
+                                print(f"[DEBUG] Loading OCR provider: {provider}")
+                                load_success = self.ocr_manager.load_provider(provider, **ocr_config)
+                                print(f"[DEBUG] Provider load result: {load_success}")
+                            
+                            # Call OCR exactly like the regular pipeline does
+                            ocr_results = self.ocr_manager.detect_text(
+                                cropped, 
+                                provider,
+                                confidence=confidence_threshold
+                            )
+                            print(f"[DEBUG] OCR results for region {i+1}: {ocr_results} (type: {type(ocr_results)})")
+                            
+                            # Extract text from OCR results (same as regular pipeline)
+                            text = ""
+                            if ocr_results and len(ocr_results) > 0 and ocr_results[0].text.strip():
+                                text = ocr_results[0].text.strip()
+                            print(f"[DEBUG] Extracted text for region {i+1}: '{text}'")
+                            
+                            if text and text.strip():
+                                recognized_texts.append({
+                                    'region_index': i,
+                                    'bbox': bbox,
+                                    'text': text.strip(),
+                                    'confidence': region.get('confidence', 1.0)
+                                })
+                                self._log(f"📝 Region {i+1}: '{text.strip()}'", "info")
+                                print(f"[DEBUG] Added text to results: '{text.strip()}'")
+                            else:
+                                self._log(f"⚠️ Region {i+1}: No text detected (raw result: '{text}')", "warning")
+                                print(f"[DEBUG] No valid text in region {i+1} - raw OCR result: '{text}'")
+                        except Exception as e:
+                            import traceback
+                            error_msg = f"❌ Region {i+1} OCR failed: {str(e)}"
+                            self._log(error_msg, "error")
+                            print(f"[DEBUG] {error_msg}")
+                            print(f"[DEBUG] OCR error traceback: {traceback.format_exc()}")
+                    else:
+                        print(f"[DEBUG] Region {i+1} cropped image is empty - skipping")
+                        self._log(f"⚠️ Region {i+1}: Empty cropped region", "warning")
+                else:
+                    print(f"[DEBUG] Region {i+1} has invalid bbox: {bbox}")
+                    self._log(f"⚠️ Region {i+1}: Invalid bbox format: {bbox}", "warning")
+            
+            # Send results to main thread
+            self.update_queue.put(('recognize_results', {
+                'image_path': image_path,
+                'recognized_texts': recognized_texts
+            }))
+            
+            self._log(f"✅ Text recognition complete! Found text in {len(recognized_texts)}/{len(regions)} regions", "success")
+            
+        except Exception as e:
+            import traceback
+            self._log(f"❌ Background recognition failed: {str(e)}", "error")
+            print(f"Background recognize error traceback: {traceback.format_exc()}")
+        finally:
+            # Always restore the button
+            self.update_queue.put(('recognize_button_restore', None))
+    
+    def _restore_recognize_button(self):
+        """Restore the recognize button to its original state"""
+        try:
+            if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'recognize_btn'):
+                self.image_preview_widget.recognize_btn.setEnabled(True)
+                self.image_preview_widget.recognize_btn.setText("Recognize Text")
+        except Exception:
+            pass
+    
+    def _on_translate_text_clicked(self):
+        """Translate recognized text using the selected API"""
+        print("[DEBUG] _on_translate_text_clicked called!")
+        self._log("🐛 DEBUG: Translate button clicked", "debug")
+        
+        try:
+            # Debug: Check recognized texts
+            print(f"[DEBUG] Has _recognized_texts: {hasattr(self, '_recognized_texts')}")
+            if hasattr(self, '_recognized_texts'):
+                print(f"[DEBUG] Number of recognized texts: {len(self._recognized_texts) if self._recognized_texts else 0}")
+            
+            # Check if we have recognized text to translate
+            if not hasattr(self, '_recognized_texts') or not self._recognized_texts:
+                self._log("⚠️ No recognized text to translate. Please run 'Recognize Text' first.", "warning")
+                print("[DEBUG] No recognized texts - returning early")
+                return
+            
+            # Disable the translate button
+            if hasattr(self.image_preview_widget, 'translate_btn'):
+                self.image_preview_widget.translate_btn.setEnabled(False)
+                self.image_preview_widget.translate_btn.setText("Translating...")
+            
+            # Get current image path for visual context if enabled
+            image_path = self.image_preview_widget.current_image_path if hasattr(self, 'image_preview_widget') else None
+            
+            self._log(f"🌍 Starting translation of {len(self._recognized_texts)} text regions", "info")
+            
+            # Run translation in background thread
+            import threading
+            thread = threading.Thread(target=self._run_translate_background, 
+                                    args=(self._recognized_texts.copy(), image_path),
+                                    daemon=True)
+            thread.start()
+            
+        except Exception as e:
+            import traceback
+            self._log(f"❌ Translate setup failed: {str(e)}", "error")
+            print(f"Translate setup error traceback: {traceback.format_exc()}")
+            self._restore_translate_button()
+    
+    def _run_translate_background(self, recognized_texts: list, image_path: str):
+        """Run translation in background thread"""
+        try:
+            # Check if visual context is enabled
+            include_page_image = False
+            try:
+                include_page_image = bool(self.include_image_var.get()) if hasattr(self, 'include_image_var') else False
+            except Exception:
+                pass
+            
+            translated_texts = []
+            
+            # Process each recognized text
+            for text_data in recognized_texts:
+                text = text_data['text']
+                
+                try:
+                    # Prepare translation request
+                    if include_page_image and image_path and os.path.exists(image_path):
+                        # Include visual context
+                        self._log(f"🖼️ Translating with visual context: '{text[:50]}...'", "info")
+                        
+                        # Create a simple prompt for translation with image
+                        prompt = f"Please translate this text from the manga page: {text}"
+                        
+                        # Use the main GUI's client for translation with image
+                        response = self.main_gui.client.query_with_image(
+                            prompt=prompt,
+                            image_path=image_path
+                        )
+                    else:
+                        # Text-only translation
+                        self._log(f"📝 Translating text: '{text[:50]}...'", "info")
+                        
+                        # Simple translation prompt
+                        prompt = f"Translate this text: {text}"
+                        
+                        # Use the main GUI's client for translation
+                        response = self.main_gui.client.query(prompt)
+                    
+                    # Extract translated text from response
+                    translated_text = response if isinstance(response, str) else str(response)
+                    
+                    translated_texts.append({
+                        'original': text_data,
+                        'translation': translated_text.strip(),
+                        'bbox': text_data['bbox']
+                    })
+                    
+                    self._log(f"✅ Translated: '{text}' → '{translated_text.strip()}'", "success")
+                    
+                except Exception as e:
+                    self._log(f"❌ Translation failed for '{text}': {str(e)}", "error")
+                    translated_texts.append({
+                        'original': text_data,
+                        'translation': f"[Translation Error: {str(e)}]",
+                        'bbox': text_data['bbox']
+                    })
+            
+            # Send results to main thread
+            self.update_queue.put(('translate_results', {
+                'translated_texts': translated_texts
+            }))
+            
+            self._log(f"✅ Translation complete! Translated {len(translated_texts)} text regions", "success")
+            
+        except Exception as e:
+            import traceback
+            self._log(f"❌ Background translation failed: {str(e)}", "error")
+            print(f"Background translate error traceback: {traceback.format_exc()}")
+        finally:
+            # Always restore the button
+            self.update_queue.put(('translate_button_restore', None))
+    
+    def _restore_translate_button(self):
+        """Restore the translate button to its original state"""
+        try:
+            if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'translate_btn'):
+                self.image_preview_widget.translate_btn.setEnabled(True)
+                self.image_preview_widget.translate_btn.setText("Translate")
+        except Exception:
+            pass
+    
+    def _get_ocr_config(self) -> dict:
+        """Get OCR configuration for the selected provider (same as regular pipeline)"""
+        print(f"[DEBUG] Building OCR config for provider: {self.ocr_provider_value}")
+        config = {'provider': self.ocr_provider_value}
+        
+        if config['provider'] == 'google':
+            google_creds = self.main_gui.config.get('google_vision_credentials', '') or \
+                          self.main_gui.config.get('google_cloud_credentials', '')
+            print(f"[DEBUG] Google credentials path: {google_creds}")
+            if google_creds and os.path.exists(google_creds):
+                config['google_credentials_path'] = google_creds
+                print(f"[DEBUG] Google credentials found and added to config")
+            else:
+                print(f"[DEBUG] Google credentials not found or missing")
+        elif config['provider'] == 'azure':
+            azure_key = self.main_gui.config.get('azure_vision_key', '')
+            azure_endpoint = self.main_gui.config.get('azure_vision_endpoint', '')
+            print(f"[DEBUG] Azure key exists: {bool(azure_key)}")
+            print(f"[DEBUG] Azure endpoint: {azure_endpoint}")
+            if azure_key and azure_endpoint:
+                config['azure_key'] = azure_key
+                config['azure_endpoint'] = azure_endpoint
+                print(f"[DEBUG] Azure credentials added to config")
+            else:
+                print(f"[DEBUG] Azure credentials not complete")
+        elif config['provider'] == 'custom-api':
+            print(f"[DEBUG] Using custom-api provider (requires API key)")
+            # For custom-api provider, we need to ensure the API key is available
+            api_key = os.environ.get('API_KEY', '') or os.environ.get('OPENAI_API_KEY', '')
+            if api_key:
+                print(f"[DEBUG] API key available for custom-api OCR")
+            else:
+                print(f"[DEBUG] WARNING: No API key available for custom-api OCR")
+        else:
+            print(f"[DEBUG] Using local OCR provider: {config['provider']}")
+        
+        print(f"[DEBUG] Final OCR config: {config}")
+        return config
+    
+    def _process_recognize_results(self, results: dict):
+        """Process recognition results on main thread"""
+        try:
+            recognized_texts = results['recognized_texts']
+            
+            # Store recognized texts for translation
+            self._recognized_texts = recognized_texts
+            
+            # Log summary of recognized texts
+            if recognized_texts:
+                self._log(f"🎉 Recognition Results ({len(recognized_texts)} regions with text):", "success")
+                for i, text_data in enumerate(recognized_texts):
+                    bbox = text_data['bbox']
+                    text = text_data['text']
+                    self._log(f"  Region {i+1} at ({bbox[0]},{bbox[1]}) [{bbox[2]}x{bbox[3]}]: '{text}'", "info")
+                
+                self._log(f"📋 Ready for translation! Click 'Translate' to proceed.", "info")
+            else:
+                self._log("⚠️ No text was recognized in any regions", "warning")
+        
+        except Exception as e:
+            self._log(f"❌ Failed to process recognition results: {str(e)}", "error")
+    
+    def _process_translate_results(self, results: dict):
+        """Process translation results on main thread"""
+        try:
+            translated_texts = results['translated_texts']
+            
+            # Store translated texts
+            self._translated_texts = translated_texts
+            
+            # Log summary of translations
+            if translated_texts:
+                self._log(f"🎉 Translation Results ({len(translated_texts)} regions translated):", "success")
+                for i, result in enumerate(translated_texts):
+                    original_text = result['original']['text']
+                    translation = result['translation']
+                    bbox = result['bbox']
+                    self._log(f"  Region {i+1} at ({bbox[0]},{bbox[1]}): '{original_text}' → '{translation}'", "info")
+                
+                self._log(f"✅ Translation workflow complete!", "success")
+            else:
+                self._log("⚠️ No translations were generated", "warning")
+        
+        except Exception as e:
+            self._log(f"❌ Failed to process translation results: {str(e)}", "error")
+    
     
     def _finalize_cbz_jobs(self):
         """Package translated outputs back into .cbz for each imported CBZ.
@@ -8340,6 +8747,36 @@ class MangaTranslationTab:
                         self._restore_detect_button()
                     except Exception as e:
                         self._log(f"❌ Failed to restore detect button: {str(e)}", "error")
+                
+                elif update[0] == 'recognize_results':
+                    _, results = update
+                    # Process recognition results
+                    try:
+                        self._process_recognize_results(results)
+                    except Exception as e:
+                        self._log(f"❌ Failed to process recognition results: {str(e)}", "error")
+                
+                elif update[0] == 'recognize_button_restore':
+                    # Restore the recognize button to its normal state
+                    try:
+                        self._restore_recognize_button()
+                    except Exception as e:
+                        self._log(f"❌ Failed to restore recognize button: {str(e)}", "error")
+                
+                elif update[0] == 'translate_results':
+                    _, results = update
+                    # Process translation results
+                    try:
+                        self._process_translate_results(results)
+                    except Exception as e:
+                        self._log(f"❌ Failed to process translation results: {str(e)}", "error")
+                
+                elif update[0] == 'translate_button_restore':
+                    # Restore the translate button to its normal state
+                    try:
+                        self._restore_translate_button()
+                    except Exception as e:
+                        self._log(f"❌ Failed to restore translate button: {str(e)}", "error")
                     
         except Exception:
             # Queue is empty or some other exception

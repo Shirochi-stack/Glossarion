@@ -446,6 +446,8 @@ class MangaImagePreviewWidget(QWidget):
     # Signals for translation workflow
     detect_text_clicked = Signal()
     clean_image_clicked = Signal()
+    recognize_text_clicked = Signal()
+    translate_text_clicked = Signal()
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -630,6 +632,14 @@ class MangaImagePreviewWidget(QWidget):
         self.clean_btn.clicked.connect(self.clean_image_clicked.emit)
         workflow_layout.addWidget(self.clean_btn, stretch=1)
         
+        self.recognize_btn = self._create_compact_button("Recognize Text")
+        self.recognize_btn.clicked.connect(lambda: self._emit_recognize_signal())
+        workflow_layout.addWidget(self.recognize_btn, stretch=1)
+        
+        self.translate_btn = self._create_compact_button("Translate")
+        self.translate_btn.clicked.connect(lambda: self._emit_translate_signal())
+        workflow_layout.addWidget(self.translate_btn, stretch=1)
+        
         layout.addWidget(workflow_frame)
         
         # Current file label
@@ -707,6 +717,7 @@ class MangaImagePreviewWidget(QWidget):
     
     def _set_tool(self, tool: str):
         """Set active tool and update button states"""
+        print(f"[DEBUG] Setting tool to: {tool}")
         self.viewer.set_tool(tool)
         
         # Update button states
@@ -714,6 +725,15 @@ class MangaImagePreviewWidget(QWidget):
         self.box_draw_btn.setChecked(tool == 'box_draw')
         self.brush_btn.setChecked(tool == 'brush')
         self.eraser_btn.setChecked(tool == 'eraser')
+        
+        # Show user feedback
+        tool_names = {
+            'pan': 'Pan/Select Tool',
+            'box_draw': 'Box Drawing Tool', 
+            'brush': 'Brush Tool (Red strokes)',
+            'eraser': 'Eraser Tool (White strokes)'
+        }
+        print(f"[DEBUG] Active tool: {tool_names.get(tool, tool)}")
     
     def _zoom_in(self):
         """Zoom in"""
@@ -751,6 +771,18 @@ class MangaImagePreviewWidget(QWidget):
         
         # Update thumbnail selection
         self._update_thumbnail_selection(image_path)
+    
+    def _emit_recognize_signal(self):
+        """Emit recognize text signal with debugging"""
+        print("[DEBUG] Recognize button clicked - emitting signal")
+        self.recognize_text_clicked.emit()
+        print("[DEBUG] Recognize signal emitted")
+    
+    def _emit_translate_signal(self):
+        """Emit translate text signal with debugging"""
+        print("[DEBUG] Translate button clicked - emitting signal")
+        self.translate_text_clicked.emit()
+        print("[DEBUG] Translate signal emitted")
     
     def set_image_list(self, image_paths: list):
         """Set the list of images and populate thumbnails"""
