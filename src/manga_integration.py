@@ -7806,6 +7806,125 @@ class MangaTranslationTab:
         except Exception:
             pass
     
+    def _run_inpainting_sync(self, image_path: str, regions: list) -> str:
+        """Run inpainting synchronously (for Translate button) and return cleaned image path
+        
+        Args:
+            image_path: Path to the original image
+            regions: List of region dictionaries with 'bbox' keys
+            
+        Returns:
+            str: Path to cleaned image, or None if inpainting failed
+        """
+        try:
+            import cv2
+            import numpy as np
+            from local_inpainter import LocalInpainter
+            
+            # Load image
+            image = cv2.imread(image_path)
+            if image is None:
+                print(f"[INPAINT_SYNC] Failed to load image: {os.path.basename(image_path)}")
+                return None
+            
+            # Create mask from detected regions
+            mask = np.zeros((image.shape[0], image.shape[1]), dtype=np.uint8)
+            
+            print(f"[INPAINT_SYNC] Creating mask from {len(regions)} regions")
+            for region in regions:
+                # Handle both dictionary format (from detect) and object format (from translator)
+                if isinstance(region, dict):
+                    # Dictionary format from detect button
+                    bbox = region.get('bbox', [])
+                    if len(bbox) >= 4:
+                        x, y, width, height = bbox
+                        x1, y1, x2, y2 = x, y, x + width, y + height
+                    else:
+                        continue
+                else:
+                    # Object format from translator
+                    x1, y1, x2, y2 = int(region.x1), int(region.y1), int(region.x2), int(region.y2)
+                
+                # Ensure coordinates are within image bounds
+                x1 = max(0, min(x1, image.shape[1] - 1))
+                y1 = max(0, min(y1, image.shape[0] - 1))
+                x2 = max(x1 + 1, min(x2, image.shape[1]))
+                y2 = max(y1 + 1, min(y2, image.shape[0]))
+                
+                # Draw filled rectangle on mask
+                cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
+            
+            # Get inpainting settings from manga integration config
+            inpaint_method = self.main_gui.config.get('manga_inpaint_method', 'local')
+            local_model = self.main_gui.config.get('manga_local_inpaint_model', 'anime_onnx')
+            
+            if inpaint_method == 'local':
+                # Use local inpainter with the same method as manga_translator
+                print(f"[INPAINT_SYNC] Using local inpainter: {local_model}")
+                
+                # Create local inpainter
+                inpainter = LocalInpainter()
+                
+                # Get model path from config (same way as manga_translator)
+                model_path = self.main_gui.config.get(f'manga_{local_model}_model_path', '')
+                
+                # Ensure we have a model path (download if needed)
+                resolved_model_path = model_path
+                if not resolved_model_path or not os.path.exists(resolved_model_path):
+                    try:
+                        print(f"[INPAINT_SYNC] Downloading {local_model} model...")
+                        resolved_model_path = inpainter.download_jit_model(local_model)
+                    except Exception as e:
+                        print(f"[INPAINT_SYNC] Model download failed: {e}")
+                        resolved_model_path = None
+                
+                # Load the model using the same method as manga_translator
+                if resolved_model_path and os.path.exists(resolved_model_path):
+                    try:
+                        print(f"[INPAINT_SYNC] Loading {local_model} model from: {os.path.basename(resolved_model_path)}")
+                        # Use load_model_with_retry like manga_translator does
+                        success = inpainter.load_model_with_retry(local_model, resolved_model_path, force_reload=False)
+                        if not success:
+                            print(f"[INPAINT_SYNC] Failed to load model with retry")
+                            return None
+                    except Exception as e:
+                        print(f"[INPAINT_SYNC] Model loading error: {str(e)}")
+                        return None
+                else:
+                    print(f"[INPAINT_SYNC] No valid model path for {local_model}")
+                    return None
+                
+                # Run inpainting
+                print(f"[INPAINT_SYNC] Running local inpainting...")
+                cleaned_image = inpainter.inpaint(image, mask)
+                
+            else:
+                # For cloud/hybrid methods, would need more complex setup
+                # For now, fallback to basic OpenCV inpainting
+                print(f"[INPAINT_SYNC] Using OpenCV inpainting (fallback)")
+                cleaned_image = cv2.inpaint(image, mask, 3, cv2.INPAINT_TELEA)
+            
+            if cleaned_image is not None:
+                # Save cleaned image
+                output_dir = os.path.join(os.path.dirname(image_path), "2_cleaned")
+                os.makedirs(output_dir, exist_ok=True)
+                output_filename = os.path.basename(image_path)
+                output_path = os.path.join(output_dir, output_filename)
+                
+                cv2.imwrite(output_path, cleaned_image)
+                print(f"[INPAINT_SYNC] Saved cleaned image to: {output_path}")
+                
+                return output_path
+            else:
+                print(f"[INPAINT_SYNC] Inpainting returned None")
+                return None
+                
+        except Exception as e:
+            import traceback
+            print(f"[INPAINT_SYNC] Synchronous inpainting failed: {str(e)}")
+            print(f"[INPAINT_SYNC] Traceback: {traceback.format_exc()}")
+            return None
+    
     def _on_recognize_text_clicked(self):
         """Recognize text in current preview rectangles using selected OCR provider"""
         print("[DEBUG] _on_recognize_text_clicked called!")
@@ -8129,6 +8248,47 @@ class MangaTranslationTab:
         """Run translation in background thread"""
         print(f"[DEBUG] _run_translate_background started with {len(recognized_texts)} texts")
         try:
+            # STEP 1: Check if we need to run inpainting first
+            cleaned_image_path = None
+            if hasattr(self, '_cleaned_image_path') and self._cleaned_image_path and os.path.exists(self._cleaned_image_path):
+                cleaned_image_path = self._cleaned_image_path
+                print(f"[TRANSLATE] Cleaned image already available: {os.path.basename(cleaned_image_path)}")
+                self._log(f"✅ Using existing cleaned image", "info")
+            else:
+                # No cleaned image - run inpainting automatically!
+                print(f"[TRANSLATE] No cleaned image found - running inpainting automatically...")
+                self._log(f"🧽 Running automatic inpainting before translation...", "info")
+                
+                # Extract regions from recognized texts
+                regions = []
+                for text_data in recognized_texts:
+                    bbox = text_data['bbox']
+                    region_dict = {
+                        'bbox': bbox,
+                        'coords': [[bbox[0], bbox[1]], 
+                                  [bbox[0] + bbox[2], bbox[1]], 
+                                  [bbox[0] + bbox[2], bbox[1] + bbox[3]], 
+                                  [bbox[0], bbox[1] + bbox[3]]],
+                        'confidence': text_data.get('confidence', 1.0)
+                    }
+                    regions.append(region_dict)
+                
+                # Run inpainting using same logic as Clean button
+                cleaned_image_path = self._run_inpainting_sync(image_path, regions)
+                
+                if cleaned_image_path and os.path.exists(cleaned_image_path):
+                    print(f"[TRANSLATE] Inpainting successful: {os.path.basename(cleaned_image_path)}")
+                    self._log(f"✅ Inpainting complete!", "success")
+                    # Store it for future use
+                    self._cleaned_image_path = cleaned_image_path
+                    # Update preview with cleaned image on main thread
+                    self.update_queue.put(('clean_preview_update', cleaned_image_path))
+                else:
+                    print(f"[TRANSLATE] Inpainting failed or returned no path")
+                    self._log(f"⚠️ Inpainting failed, using original image", "warning")
+                    cleaned_image_path = None
+            
+            # STEP 2: Run translation
             # Check if full page context translation is enabled
             full_page_context_enabled = False
             try:
