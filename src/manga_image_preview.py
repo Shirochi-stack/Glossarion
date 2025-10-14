@@ -247,8 +247,9 @@ class CompactImageViewer(QGraphicsView):
             self.setCursor(Qt.CursorShape.ArrowCursor)
     
     def wheelEvent(self, event):
-        """Handle zoom with mouse wheel"""
-        if self.hasPhoto():
+        """Handle zoom with mouse wheel (requires Shift key)"""
+        # Only zoom if Shift key is held, otherwise allow normal scrolling
+        if self.hasPhoto() and event.modifiers() == Qt.KeyboardModifier.ShiftModifier:
             factor = 1.15
             if event.angleDelta().y() > 0:
                 self.scale(factor, factor)
@@ -256,6 +257,9 @@ class CompactImageViewer(QGraphicsView):
             else:
                 self.scale(1 / factor, 1 / factor)
                 self.zoom_level -= 1
+        else:
+            # Pass event to parent for normal scrolling
+            super().wheelEvent(event)
     
     def mousePressEvent(self, event):
         """Handle mouse press for drawing boxes or inpainting"""
@@ -379,27 +383,8 @@ class MangaImagePreviewWidget(QWidget):
         self.viewer.image_loading.connect(self._on_image_loading_started)
         self.viewer.image_loaded.connect(self._on_image_loaded_success)
         
-        # Zoom controls
-        zoom_frame = QFrame()
-        zoom_frame.setFrameShape(QFrame.Shape.StyledPanel)
-        zoom_layout = QHBoxLayout(zoom_frame)
-        zoom_layout.setContentsMargins(3, 3, 3, 3)
-        zoom_layout.setSpacing(5)
-        
-        self.fit_btn = self._create_tool_button("⊡", "Fit to View")
-        self.fit_btn.clicked.connect(self.viewer.fitInView)
-        zoom_layout.addWidget(self.fit_btn)
-        
-        self.zoom_in_btn = self._create_tool_button("🔍+", "Zoom In")
-        self.zoom_in_btn.clicked.connect(self._zoom_in)
-        zoom_layout.addWidget(self.zoom_in_btn)
-        
-        self.zoom_out_btn = self._create_tool_button("🔍-", "Zoom Out")
-        self.zoom_out_btn.clicked.connect(self._zoom_out)
-        zoom_layout.addWidget(self.zoom_out_btn)
-        
-        zoom_layout.addStretch()
-        layout.addWidget(zoom_frame)
+        # Display placeholder icon when no image is loaded
+        self._show_placeholder_icon()
         
         # Manual Tools - Row 1: Box Drawing & Inpainting
         tools_frame = self._create_tool_frame("Manual Tools")
@@ -474,6 +459,19 @@ class MangaImagePreviewWidget(QWidget):
         tools_layout.addWidget(self.box_count_label)
         self.viewer.rectangle_created.connect(self._update_box_count)
         self.viewer.rectangle_deleted.connect(self._update_box_count)
+        
+        # Add zoom controls to the same row
+        self.fit_btn = self._create_tool_button("⊟", "Fit to View")
+        self.fit_btn.clicked.connect(self.viewer.fitInView)
+        tools_layout.addWidget(self.fit_btn)
+        
+        self.zoom_in_btn = self._create_tool_button("🔍+", "Zoom In (Shift+Wheel)")
+        self.zoom_in_btn.clicked.connect(self._zoom_in)
+        tools_layout.addWidget(self.zoom_in_btn)
+        
+        self.zoom_out_btn = self._create_tool_button("🔍-", "Zoom Out (Shift+Wheel)")
+        self.zoom_out_btn.clicked.connect(self._zoom_out)
+        tools_layout.addWidget(self.zoom_out_btn)
         
         layout.addWidget(tools_frame)
         
@@ -647,3 +645,36 @@ class MangaImagePreviewWidget(QWidget):
         self.current_image_path = None
         self.file_label.setText("No image loaded")
         self._update_box_count()
+        # Show placeholder icon when cleared
+        self._show_placeholder_icon()
+    
+    def _show_placeholder_icon(self):
+        """Display Halgakos.png as placeholder when no image is loaded"""
+        # Try PNG first (high resolution), fallback to ICO
+        png_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.png')
+        ico_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+        
+        icon_path = png_path if os.path.exists(png_path) else ico_path
+        
+        if os.path.exists(icon_path) and not self.viewer.hasPhoto():
+            try:
+                from PySide6.QtGui import QPainter
+                
+                # Load the high-resolution PNG at full size (no scaling)
+                placeholder_pixmap = QPixmap(icon_path)
+                
+                if not placeholder_pixmap.isNull():
+                    # Create a semi-transparent version without any scaling
+                    transparent_pixmap = QPixmap(placeholder_pixmap.size())
+                    transparent_pixmap.fill(Qt.GlobalColor.transparent)
+                    
+                    painter = QPainter(transparent_pixmap)
+                    painter.setOpacity(0.15)  # 15% opacity for subtle watermark
+                    painter.drawPixmap(0, 0, placeholder_pixmap)
+                    painter.end()
+                    
+                    # Set the full-size transparent image
+                    self.viewer.setPhoto(transparent_pixmap)
+            except Exception as e:
+                # Silently fail if icon can't be loaded
+                pass
