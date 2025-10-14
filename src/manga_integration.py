@@ -3414,21 +3414,37 @@ class MangaTranslationTab:
         # Advanced Settings button at the TOP OF RIGHT COLUMN
         advanced_button_frame = QWidget()
         advanced_button_layout = QHBoxLayout(advanced_button_frame)
-        advanced_button_layout.setContentsMargins(0, 0, 0, 10)
+        advanced_button_layout.setContentsMargins(0, 0, 0, 5)
         advanced_button_layout.setSpacing(10)
 
         advanced_settings_desc = QLabel("Configure OCR, preprocessing, and performance options")
         desc_font = QFont("Arial", 9)
         advanced_settings_desc.setFont(desc_font)
         advanced_settings_desc.setStyleSheet("color: gray;")
-        advanced_button_layout.addWidget(advanced_settings_desc)
+        advanced_button_layout.addWidget(advanced_settings_desc, 0, Qt.AlignVCenter)
         
         advanced_button_layout.addStretch()
         
         advanced_settings_btn = QPushButton("⚙️ Advanced Settings")
         advanced_settings_btn.clicked.connect(self._open_advanced_settings)
-        advanced_settings_btn.setStyleSheet("QPushButton { background-color: #17a2b8; color: white; padding: 5px 15px; }")
-        advanced_button_layout.addWidget(advanced_settings_btn)
+        advanced_settings_btn.setMinimumHeight(35)
+        advanced_settings_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3b82f6;
+                color: white;
+                padding: 8px 20px;
+                font-weight: bold;
+                font-size: 10pt;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #4b92ff;
+            }
+            QPushButton:pressed {
+                background-color: #2b72e6;
+            }
+        """)
+        advanced_button_layout.addWidget(advanced_settings_btn, 0, Qt.AlignVCenter)
         
         right_column_layout.addWidget(advanced_button_frame)
         
