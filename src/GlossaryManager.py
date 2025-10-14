@@ -1530,18 +1530,32 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         # Calculate based on total sentences
         total_sentences = len(sentences)
         
+        # CRITICAL: Batch size must balance two factors:
+        # 1. Small batches = more parallelism but higher overhead
+        # 2. Large batches = less overhead but limits parallelism
+        # 
+        # For Windows ProcessPoolExecutor, overhead is HIGH, so we prefer LARGE batches
+        # Target: Each worker should get 3-10 batches (not 100+ tiny batches)
+        
+        # Calculate batch size based on workers to minimize overhead
+        target_batches_per_worker = 5  # Sweet spot: enough work distribution, minimal overhead
+        ideal_batch_size = max(500, total_sentences // (extraction_workers * target_batches_per_worker))
+        
+        # Apply sensible limits
         if total_sentences < 1000:
-            # Small dataset: 50-100 sentences per batch
-            optimal_batch_size = 100
+            optimal_batch_size = 100  # Small dataset: normal batching
         elif total_sentences < 10000:
-            # Medium dataset: 200 sentences per batch
-            optimal_batch_size = 200
+            optimal_batch_size = min(500, ideal_batch_size)
         elif total_sentences < 50000:
-            # Large dataset: 300 sentences per batch
-            optimal_batch_size = 300
+            optimal_batch_size = min(2000, ideal_batch_size)
+        elif total_sentences < 200000:
+            optimal_batch_size = min(5000, ideal_batch_size)
         else:
-            # Very large dataset: 400 sentences per batch max
-            optimal_batch_size = 400
+            # For 754K sentences with 12 workers: 
+            # target_batches = 12 * 5 = 60 batches
+            # batch_size = 754K / 60 = ~12,500 sentences/batch
+            # This is MUCH better than 1887 batches of 400!
+            optimal_batch_size = min(20000, ideal_batch_size)
         
         # Ensure we have enough batches for all workers
         min_batches = extraction_workers * 3  # At least 3 batches per worker
@@ -1565,95 +1579,170 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         in_subprocess = multiprocessing.current_process().name != 'MainProcess'
         
         # Use ProcessPoolExecutor for better parallelism on larger datasets
-        use_process_pool = (not in_subprocess and len(sentences) > 5000)
+        # On Windows, we CAN use ProcessPoolExecutor in subprocess with spawn context
+        use_process_pool = len(sentences) > 5000  # Remove subprocess check!
         
         if use_process_pool:
-            print(f"📁 Using ProcessPoolExecutor for maximum performance (true parallelism)")
-            executor_class = ProcessPoolExecutor
+            # Check if we're in a daemonic process (can't spawn children)
+            is_daemon = multiprocessing.current_process().daemon if hasattr(multiprocessing.current_process(), 'daemon') else False
             
-            # Capture CURRENT environment variable values from parent process
-            current_env_vars = {
-                'GLOSSARY_MAX_SENTENCES': os.getenv('GLOSSARY_MAX_SENTENCES', '200'),
-                'GLOSSARY_MIN_FREQUENCY': os.getenv('GLOSSARY_MIN_FREQUENCY', '2'),
-                'GLOSSARY_MAX_NAMES': os.getenv('GLOSSARY_MAX_NAMES', '50'),
-                'GLOSSARY_MAX_TITLES': os.getenv('GLOSSARY_MAX_TITLES', '30'),
-                'GLOSSARY_BATCH_SIZE': os.getenv('GLOSSARY_BATCH_SIZE', '50'),
-                'GLOSSARY_STRIP_HONORIFICS': os.getenv('GLOSSARY_STRIP_HONORIFICS', '1'),
-                'GLOSSARY_FUZZY_THRESHOLD': os.getenv('GLOSSARY_FUZZY_THRESHOLD', '0.90'),
-            }
-            print(f"📁 Passing env vars to child processes: GLOSSARY_MAX_SENTENCES={current_env_vars['GLOSSARY_MAX_SENTENCES']}")
-            
-            # Create initializer that sets these values in child processes
-            def init_worker(env_vars_dict):
-                """Initialize worker process with environment variables from parent"""
-                import os
-                for k, v in env_vars_dict.items():
-                    os.environ[k] = str(v)
-            
-            executor_kwargs = {
-                'max_workers': extraction_workers, 
-                'initializer': init_worker,
-                'initargs': (current_env_vars,)
-            }
+            if in_subprocess and is_daemon:
+                # Daemonic processes can't spawn children - fall back to ThreadPoolExecutor
+                print(f"⚠️  Running in daemonic subprocess - cannot use ProcessPoolExecutor")
+                print(f"📁 Falling back to ThreadPoolExecutor (limited parallelism due to GIL)")
+                use_process_pool = False
+                executor_class = ThreadPoolExecutor
+                executor_kwargs = {'max_workers': extraction_workers}
+                use_mp_pool = False
+            else:
+                # We can use ProcessPoolExecutor
+                if in_subprocess:
+                    print(f"📁 Using ProcessPoolExecutor in non-daemonic subprocess")
+                    print(f"📁 This enables TRUE parallelism even from within a subprocess!")
+                else:
+                    print(f"📁 Using ProcessPoolExecutor for maximum performance (true parallelism)")
+                
+                mp_context = multiprocessing.get_context('spawn')
+                executor_class = mp_context.Pool
+                
+                # Capture CURRENT environment variable values from parent process
+                current_env_vars = {
+                    'GLOSSARY_MAX_SENTENCES': os.getenv('GLOSSARY_MAX_SENTENCES', '200'),
+                    'GLOSSARY_MIN_FREQUENCY': os.getenv('GLOSSARY_MIN_FREQUENCY', '2'),
+                    'GLOSSARY_MAX_NAMES': os.getenv('GLOSSARY_MAX_NAMES', '50'),
+                    'GLOSSARY_MAX_TITLES': os.getenv('GLOSSARY_MAX_TITLES', '30'),
+                    'GLOSSARY_BATCH_SIZE': os.getenv('GLOSSARY_BATCH_SIZE', '50'),
+                    'GLOSSARY_STRIP_HONORIFICS': os.getenv('GLOSSARY_STRIP_HONORIFICS', '1'),
+                    'GLOSSARY_FUZZY_THRESHOLD': os.getenv('GLOSSARY_FUZZY_THRESHOLD', '0.90'),
+                }
+                print(f"📁 Passing env vars to child processes: GLOSSARY_MAX_SENTENCES={current_env_vars['GLOSSARY_MAX_SENTENCES']}")
+                
+                # For multiprocessing.Pool, we use different kwargs
+                # Use module-level init function (can't use local function due to pickling)
+                executor_kwargs = {
+                    'processes': extraction_workers,
+                    'initializer': _init_worker_with_env,
+                    'initargs': (current_env_vars,)
+                }
+                use_mp_pool = True  # Flag to use different API
         else:
-            print(f"📁 Using ThreadPoolExecutor for sentence processing")
+            print(f"📁 Using ThreadPoolExecutor for sentence processing (dataset < 5000 sentences)")
             executor_class = ThreadPoolExecutor
             executor_kwargs = {'max_workers': extraction_workers}
+            use_mp_pool = False
         
-        with executor_class(**executor_kwargs) as executor:
-            futures = []
-            
-            # Prepare data for ProcessPoolExecutor if needed
-            if use_process_pool:
-                # Serialize exclusion check data for process pool
+        # Handle multiprocessing.Pool vs concurrent.futures differently
+        if use_process_pool and use_mp_pool:
+            # Use multiprocessing.Pool API (map_async)
+            with executor_class(**executor_kwargs) as pool:
+                # Prepare data for process pool
                 exclude_check_data = (
                     list(honorifics_to_exclude),
-                    [p.pattern for p in title_patterns],  # Convert regex to strings
+                    [p.pattern for p in title_patterns],
                     PM.COMMON_WORDS,
                     PM.CHINESE_NUMS
                 )
-            
-            for idx, batch in enumerate(batches):
+                
+                # Prepare all arguments
+                all_args = [(batch, idx, combined_pattern, exclude_check_data) 
+                           for idx, batch in enumerate(batches)]
+                
+                print(f"📁 Submitting {len(all_args)} batches to process pool...")
+                
+                # Use map_async for better progress tracking
+                result_async = pool.map_async(_process_sentence_batch_for_extraction, all_args)
+                
+                # Poll for completion with progress updates
+                completed_batches = 0
+                batch_start_time = time.time()
+                
+                while not result_async.ready():
+                    time.sleep(0.5)  # Check every 0.5 seconds
+                    # Can't get exact progress with map_async, estimate based on time
+                    # This will be updated when we get actual results
+                
+                # Get all results
+                print(f"📁 Collecting results from process pool...")
+                all_results = result_async.get()
+                
+                # Process all results
+                for local_word_freq, local_important, local_seen, batch_idx in all_results:
+                    # Merge results
+                    word_freq.update(local_word_freq)
+                    for sentence in local_important:
+                        sentence_key = ' '.join(sorted(re.findall(combined_pattern, sentence)))
+                        if sentence_key not in seen_contexts:
+                            important_sentences.append(sentence)
+                            seen_contexts.add(sentence_key)
+                    
+                    processed_count += len(batches[batch_idx])
+                    completed_batches += 1
+                    
+                    # Show progress
+                    progress_interval = 1 if len(batches) <= 20 else (5 if len(batches) <= 100 else 10)
+                    if completed_batches % progress_interval == 0 or completed_batches == len(batches):
+                        progress = (processed_count / total_sentences) * 100
+                        elapsed = time.time() - batch_start_time
+                        rate = (processed_count / elapsed) if elapsed > 0 else 0
+                        print(f"📑 Progress: {processed_count:,}/{total_sentences:,} sentences ({progress:.1f}%) | Batch {completed_batches}/{len(batches)} | {rate:.0f} sent/sec")
+        else:
+            # Use concurrent.futures API (ThreadPoolExecutor or ProcessPoolExecutor)
+            with executor_class(**executor_kwargs) as executor:
+                futures = []
+                
+                # Prepare data for ProcessPoolExecutor if needed
                 if use_process_pool:
-                    # Use module-level function for ProcessPoolExecutor
-                    future = executor.submit(_process_sentence_batch_for_extraction, 
-                                           (batch, idx, combined_pattern, exclude_check_data))
-                else:
-                    # Use local function for ThreadPoolExecutor
-                    future = executor.submit(process_sentence_batch, batch, idx)
+                    # Serialize exclusion check data for process pool
+                    exclude_check_data = (
+                        list(honorifics_to_exclude),
+                        [p.pattern for p in title_patterns],
+                        PM.COMMON_WORDS,
+                        PM.CHINESE_NUMS
+                    )
                 
-                futures.append(future)
-                # Yield to GUI when submitting futures
-                if idx % 10 == 0:
+                for idx, batch in enumerate(batches):
+                    if use_process_pool:
+                        # Use module-level function for ProcessPoolExecutor
+                        future = executor.submit(_process_sentence_batch_for_extraction, 
+                                               (batch, idx, combined_pattern, exclude_check_data))
+                    else:
+                        # Use local function for ThreadPoolExecutor
+                        future = executor.submit(process_sentence_batch, batch, idx)
+                    
+                    futures.append(future)
+                    # Yield to GUI when submitting futures
+                    if idx % 10 == 0:
+                        time.sleep(0.001)
+                
+                # Collect results with progress
+                completed_batches = 0
+                batch_start_time = time.time()
+                for future in as_completed(futures):
+                    # Get result without timeout - as_completed already handles waiting
+                    local_word_freq, local_important, local_seen, batch_idx = future.result()
+                    
+                    # Merge results
+                    word_freq.update(local_word_freq)
+                    for sentence in local_important:
+                        sentence_key = ' '.join(sorted(re.findall(combined_pattern, sentence)))
+                        if sentence_key not in seen_contexts:
+                            important_sentences.append(sentence)
+                            seen_contexts.add(sentence_key)
+                    
+                    processed_count += len(batches[batch_idx])
+                    completed_batches += 1
+                    
+                    # Show progress more frequently for better user feedback
+                    progress_interval = 1 if len(batches) <= 20 else (5 if len(batches) <= 100 else 10)
+                    
+                    if completed_batches % progress_interval == 0 or completed_batches == len(batches):
+                        progress = (processed_count / total_sentences) * 100
+                        elapsed = time.time() - batch_start_time
+                        rate = (processed_count / elapsed) if elapsed > 0 else 0
+                        print(f"📑 Progress: {processed_count:,}/{total_sentences:,} sentences ({progress:.1f}%) | Batch {completed_batches}/{len(batches)} | {rate:.0f} sent/sec")
+                    
+                    # Yield to GUI after each batch completes
                     time.sleep(0.001)
-            
-            # Collect results with progress
-            completed_batches = 0
-            batch_start_time = time.time()
-            for future in as_completed(futures):
-                # Get result without timeout - as_completed already handles waiting
-                local_word_freq, local_important, local_seen, batch_idx = future.result()
-                
-                # Merge results
-                word_freq.update(local_word_freq)
-                for sentence in local_important:
-                    sentence_key = ' '.join(sorted(re.findall(combined_pattern, sentence)))
-                    if sentence_key not in seen_contexts:
-                        important_sentences.append(sentence)
-                        seen_contexts.add(sentence_key)
-                
-                processed_count += len(batches[batch_idx])
-                completed_batches += 1
-                
-                # Show progress every 10 batches or at key milestones
-                if completed_batches % 10 == 0 or completed_batches == len(batches):
-                    progress = (processed_count / total_sentences) * 100
-                    elapsed = time.time() - batch_start_time
-                    rate = (processed_count / elapsed) if elapsed > 0 else 0
-                    print(f"📑 Progress: {processed_count:,}/{total_sentences:,} sentences ({progress:.1f}%) | Batch {completed_batches}/{len(batches)} | {rate:.0f} sent/sec")
-                
-                # Yield to GUI after each batch completes
-                time.sleep(0.001)
     else:
         # Sequential processing with progress
         for idx, sentence in enumerate(sentences):
@@ -1754,30 +1843,46 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             
             print(f"📑 Using parallel filtering with {extraction_workers} workers...")
             
-            # Optimize batch size
-            check_batch_size = 500  # Larger batches since we're doing simpler checks
+            # Optimize batch size for ProcessPoolExecutor (reduce overhead)
+            # Use larger batches since this is a simpler operation than term extraction
+            check_batch_size = max(1000, len(filtered_sentences) // (extraction_workers * 5))
             check_batches = [filtered_sentences[i:i + check_batch_size] 
                            for i in range(0, len(filtered_sentences), check_batch_size)]
             
             print(f"📑 Processing {len(check_batches)} batches of ~{check_batch_size} sentences")
             
-            # Simple function to check if sentence contains any top term
-            def check_batch_simple(batch):
-                result = []
-                for sentence in batch:
-                    # Simple substring check - much faster than regex
-                    for term in term_set:
-                        if term in sentence:
-                            result.append(sentence)
-                            break
-                return result
+            # Use ProcessPoolExecutor for true parallelism (if not already in subprocess)
+            use_process_pool_filtering = (not in_subprocess and len(check_batches) > 3)
             
-            new_filtered = []
-            with ThreadPoolExecutor(max_workers=extraction_workers) as executor:
-                futures = [executor.submit(check_batch_simple, batch) for batch in check_batches]
+            if use_process_pool_filtering:
+                print(f"📑 Using ProcessPoolExecutor for true parallel filtering")
+                new_filtered = []
+                with ProcessPoolExecutor(max_workers=extraction_workers) as executor:
+                    # Use the module-level function _check_sentence_batch_for_terms
+                    futures = [executor.submit(_check_sentence_batch_for_terms, (batch, term_set)) 
+                              for batch in check_batches]
+                    
+                    for future in as_completed(futures):
+                        new_filtered.extend(future.result())
+            else:
+                print(f"📑 Using ThreadPoolExecutor for filtering (small dataset or in subprocess)")
+                # Simple function to check if sentence contains any top term
+                def check_batch_simple(batch):
+                    result = []
+                    for sentence in batch:
+                        # Simple substring check - much faster than regex
+                        for term in term_set:
+                            if term in sentence:
+                                result.append(sentence)
+                                break
+                    return result
                 
-                for future in as_completed(futures):
-                    new_filtered.extend(future.result())
+                new_filtered = []
+                with ThreadPoolExecutor(max_workers=extraction_workers) as executor:
+                    futures = [executor.submit(check_batch_simple, batch) for batch in check_batches]
+                    
+                    for future in as_completed(futures):
+                        new_filtered.extend(future.result())
             
             filtered_sentences = new_filtered
             print(f"📑 Filtered to {len(filtered_sentences):,} sentences containing top terms")
@@ -3433,3 +3538,88 @@ def _parse_translation_response(response, original_terms):
             continue
     
     return translations
+    
+    
+def _init_worker_with_env(env_vars_dict):
+    """Initialize worker process with environment variables from parent.
+    
+    MUST be at module level for pickling by multiprocessing.Pool.
+    """
+    import os
+    for k, v in env_vars_dict.items():
+        os.environ[k] = str(v)
+
+def _check_sentence_batch_for_terms(args):
+    """Check a batch of sentences for term matches - used by ProcessPoolExecutor"""
+    batch_sentences, terms = args
+    filtered = []
+    
+    # Use pre-compiled term list for fast checking
+    for sentence in batch_sentences:
+        # Quick check using any() - stops at first match
+        if any(term in sentence for term in terms):
+            filtered.append(sentence)
+    
+    return filtered
+
+def _process_sentence_batch_for_extraction(args):
+    """Process sentences to extract terms - used by ProcessPoolExecutor"""
+    batch_sentences, batch_idx, combined_pattern, exclude_check_data = args
+    from collections import Counter
+    import re
+    
+    local_word_freq = Counter()
+    local_important = []
+    local_seen = set()
+    
+    # Rebuild the exclusion check function from data
+    honorifics_to_exclude, title_patterns_str, common_words, chinese_nums = exclude_check_data
+    title_patterns = [re.compile(p) for p in title_patterns_str]
+    
+    def should_exclude_term(term):
+        term_lower = term.lower()
+        
+        # Check if it's a common word
+        if term in common_words or term_lower in common_words:
+            return True
+        
+        # Check if it contains honorifics
+        for honorific in honorifics_to_exclude:
+            if honorific in term or (honorific.startswith('-') and term.endswith(honorific[1:])):
+                return True
+        
+        # Check if it matches title patterns
+        for pattern in title_patterns:
+            if pattern.search(term):
+                return True
+        
+        # Check if it's a number
+        if term in chinese_nums or term.isdigit():
+            return True
+        
+        return False
+    
+    for sentence in batch_sentences:
+        sentence = sentence.strip()
+        if len(sentence) < 10 or len(sentence) > 500:
+            continue
+            
+        # Find all potential terms in this sentence
+        matches = re.findall(combined_pattern, sentence)
+        
+        if matches:
+            # Filter out excluded terms
+            filtered_matches = []
+            for match in matches:
+                if not should_exclude_term(match):
+                    local_word_freq[match] += 1
+                    filtered_matches.append(match)
+            
+            # Keep sentences with valid potential terms
+            if filtered_matches:
+                sentence_key = ' '.join(sorted(filtered_matches))
+                if sentence_key not in local_seen:
+                    local_important.append(sentence)
+                    local_seen.add(sentence_key)
+    
+    return local_word_freq, local_important, local_seen, batch_idx
