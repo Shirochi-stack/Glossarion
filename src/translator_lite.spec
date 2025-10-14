@@ -109,6 +109,7 @@ app_files = [
     
     # Resources
     ('Halgakos.ico', '.'),
+    ('Halgakos_NoChibi.png', '.'),
 	
 	('enhanced_text_extractor.py', '.'),	
 	
@@ -161,7 +162,8 @@ app_modules = [
     'ai_hunter_enhanced',  # AI Hunter Enhanced module
     'manga_translator',    # Manga translator module
     'manga_integration',   # Manga GUI integration
-    'manga_settings_dialog', 
+    'manga_settings_dialog',
+    'manga_image_preview', # Manga image preview widget
     'dialog_animations',   # Dialog fade animations
     'spinning',            # Spinning icon helper
     'update_manager',

@@ -111,12 +111,12 @@ class CompactImageViewer(QGraphicsView):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setBackgroundBrush(QBrush(QColor(30, 30, 30)))
         self.setFrameShape(QFrame.Shape.NoFrame)
-        self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)  # Default to pan mode
         
         # State
         self.empty = True
         self.zoom_level = 0
-        self.current_tool = None
+        self.current_tool = 'pan'  # Default to pan tool
         self.rectangles: List[MoveableRectItem] = []
         self.selected_rect: Optional[MoveableRectItem] = None
         
@@ -392,14 +392,14 @@ class MangaImagePreviewWidget(QWidget):
         tools_layout.setContentsMargins(3, 3, 3, 3)
         tools_layout.setSpacing(3)
         
-        self.hand_tool_btn = self._create_tool_button("✋", "Pan")
+        self.hand_tool_btn = self._create_tool_button("✅", "Pan")
         self.hand_tool_btn.setCheckable(True)
+        self.hand_tool_btn.setChecked(True)  # Default to Pan
         self.hand_tool_btn.clicked.connect(lambda: self._set_tool('pan'))
         tools_layout.addWidget(self.hand_tool_btn)
         
         self.box_draw_btn = self._create_tool_button("◭", "Draw Box")
         self.box_draw_btn.setCheckable(True)
-        self.box_draw_btn.setChecked(True)
         self.box_draw_btn.clicked.connect(lambda: self._set_tool('box_draw'))
         tools_layout.addWidget(self.box_draw_btn)
         
@@ -649,12 +649,18 @@ class MangaImagePreviewWidget(QWidget):
         self._show_placeholder_icon()
     
     def _show_placeholder_icon(self):
-        """Display Halgakos.png as placeholder when no image is loaded"""
-        # Try PNG first (high resolution), fallback to ICO
+        """Display Halgakos_NoChibi.png as placeholder when no image is loaded"""
+        # Try NoChibi PNG first (high resolution), then regular PNG, fallback to ICO
+        nochibi_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos_NoChibi.png')
         png_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.png')
         ico_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
         
-        icon_path = png_path if os.path.exists(png_path) else ico_path
+        if os.path.exists(nochibi_path):
+            icon_path = nochibi_path
+        elif os.path.exists(png_path):
+            icon_path = png_path
+        else:
+            icon_path = ico_path
         
         if os.path.exists(icon_path) and not self.viewer.hasPhoto():
             try:

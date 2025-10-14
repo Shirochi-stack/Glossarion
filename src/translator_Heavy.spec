@@ -176,8 +176,9 @@ if platform.system() == 'Windows':
 # Main application files
 
 # Main application files
-# Add icon to data
+# Add icons and images to data
 datas.append(('Halgakos.ico', '.'))
+datas.append(('Halgakos_NoChibi.png', '.'))
 
 app_files = [
     # Core GUI
@@ -223,7 +224,8 @@ app_files = [
     # Manga Translation modules
     ('manga_translator.py', '.'),
     ('manga_integration.py', '.'),
-    ('manga_settings_dialog.py', '.'), 
+    ('manga_settings_dialog.py', '.'),
+    ('manga_image_preview.py', '.'),
     
     # Dialog animations
     ('dialog_animations.py', '.'),
@@ -295,7 +297,8 @@ app_modules = [
     'ai_hunter_enhanced',  # AI Hunter Enhanced module
     'manga_translator',    # Manga translator module
     'manga_integration',   # Manga GUI integration
-    'manga_settings_dialog', 
+    'manga_settings_dialog',
+    'manga_image_preview', # Manga image preview widget
     'dialog_animations',   # Dialog fade animations
     'spinning',            # Spinning icon helper
     'update_manager',
