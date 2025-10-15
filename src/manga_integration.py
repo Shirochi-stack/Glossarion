@@ -8145,19 +8145,12 @@ class MangaTranslationTab:
                 cleaned_image = cv2.inpaint(image, mask, 3, cv2.INPAINT_TELEA)
             
             if cleaned_image is not None:
-                # Save cleaned image
-                output_dir = os.path.join(os.path.dirname(image_path), "2_cleaned")
-                os.makedirs(output_dir, exist_ok=True)
-                output_filename = os.path.basename(image_path)
-                output_path = os.path.join(output_dir, output_filename)
-                
-                cv2.imwrite(output_path, cleaned_image)
-                self._log(f"💾 Saved cleaned image to: 2_cleaned/{output_filename}", "info")
-                
-                # Load cleaned image into preview using thread-safe update queue
-                self.update_queue.put(('clean_preview_update', output_path))
-                
-                self._log(f"✅ Cleaning complete!", "success")
+                # Do NOT save cleaned image at all; overlay directly in preview
+                try:
+                    self.update_queue.put(('clean_preview_overlay', cleaned_image))
+                except Exception:
+                    pass
+                self._log(f"✅ Cleaning complete (in-memory only)", "success")
             else:
                 self._log("❌ Inpainting failed", "error")
                 
@@ -8487,16 +8480,8 @@ class MangaTranslationTab:
                 cleaned_image = cv2.inpaint(image, mask, 3, cv2.INPAINT_TELEA)
             
             if cleaned_image is not None:
-                # Save cleaned image
-                output_dir = os.path.join(os.path.dirname(image_path), "2_cleaned")
-                os.makedirs(output_dir, exist_ok=True)
-                output_filename = os.path.basename(image_path)
-                output_path = os.path.join(output_dir, output_filename)
-                
-                cv2.imwrite(output_path, cleaned_image)
-                print(f"[INPAINT_SYNC] Saved cleaned image to: {output_path}")
-                
-                return output_path
+                # Do NOT save cleaned image at all; return in-memory array
+                return cleaned_image
             else:
                 print(f"[INPAINT_SYNC] Inpainting returned None")
                 return None
@@ -9182,48 +9167,38 @@ class MangaTranslationTab:
         print(f"[DEBUG] _run_translate_background started with {len(recognized_texts)} texts")
         try:
             # STEP 1: Check if we need to run inpainting first
-            cleaned_image_path = None
-            if hasattr(self, '_cleaned_image_path') and self._cleaned_image_path and os.path.exists(self._cleaned_image_path):
-                cleaned_image_path = self._cleaned_image_path
-                print(f"[TRANSLATE] Cleaned image already available: {os.path.basename(cleaned_image_path)}")
-                self._log(f"✅ Using existing cleaned image", "info")
+            cleaned_image_bgr = None
+            # No disk persistence: always compute cleaned image if needed
+            print(f"[TRANSLATE] Running inpainting before translation (in-memory only)...")
+            self._log(f"🧽 Running automatic inpainting before translation (in-memory)", "info")
+            
+            # Extract regions from recognized texts
+            regions = []
+            for text_data in recognized_texts:
+                bbox = text_data['bbox']
+                region_dict = {
+                    'bbox': bbox,
+                    'coords': [[bbox[0], bbox[1]], 
+                              [bbox[0] + bbox[2], bbox[1]], 
+                              [bbox[0] + bbox[2], bbox[1] + bbox[3]], 
+                              [bbox[0], bbox[1] + bbox[3]]],
+                    'confidence': text_data.get('confidence', 1.0)
+                }
+                regions.append(region_dict)
+            
+            # Run inpainting synchronously (returns in-memory BGR image)
+            cleaned_image_bgr = self._run_inpainting_sync(image_path, regions)
+            
+            if cleaned_image_bgr is not None:
+                print(f"[TRANSLATE] Inpainting successful (in-memory)")
+                self._log(f"✅ Inpainting complete (in-memory)", "success")
+                # Update preview with cleaned image overlay on main thread
+                self.update_queue.put(('clean_preview_overlay', cleaned_image_bgr))
             else:
-                # No cleaned image - run inpainting automatically!
-                print(f"[TRANSLATE] No cleaned image found - running inpainting automatically...")
-                self._log(f"🧽 Running automatic inpainting before translation...", "info")
-                
-                # Extract regions from recognized texts
-                regions = []
-                for text_data in recognized_texts:
-                    bbox = text_data['bbox']
-                    region_dict = {
-                        'bbox': bbox,
-                        'coords': [[bbox[0], bbox[1]], 
-                                  [bbox[0] + bbox[2], bbox[1]], 
-                                  [bbox[0] + bbox[2], bbox[1] + bbox[3]], 
-                                  [bbox[0], bbox[1] + bbox[3]]],
-                        'confidence': text_data.get('confidence', 1.0)
-                    }
-                    regions.append(region_dict)
-                
-                # Run inpainting using same logic as Clean button
-                cleaned_image_path = self._run_inpainting_sync(image_path, regions)
-                
-                if cleaned_image_path and os.path.exists(cleaned_image_path):
-                    print(f"[TRANSLATE] Inpainting successful: {os.path.basename(cleaned_image_path)}")
-                    self._log(f"✅ Inpainting complete!", "success")
-                    # Store it for future use
-                    self._cleaned_image_path = cleaned_image_path
-                    # Update preview with cleaned image on main thread
-                    self.update_queue.put(('clean_preview_update', cleaned_image_path))
-                else:
-                    print(f"[TRANSLATE] Inpainting failed or returned no path")
-                    self._log(f"⚠️ Inpainting failed, using original image", "warning")
-                    cleaned_image_path = None
+                print(f"[TRANSLATE] Inpainting failed or returned None; using original image for rendering")
+                self._log(f"⚠️ Inpainting failed, using original image", "warning")
             
             # STEP 2: Run translation
-            # Check if full page context translation is enabled (SAFE for background thread)
-            # Prefer batch snapshot captured on UI thread, else fall back to config
             full_page_context_enabled = False
             if hasattr(self, '_batch_full_page_context_enabled'):
                 full_page_context_enabled = bool(self._batch_full_page_context_enabled)
@@ -9238,26 +9213,21 @@ class MangaTranslationTab:
             print(f"[DEBUG] Full page context enabled: {full_page_context_enabled}")
             
             if full_page_context_enabled:
-                # Use full page context translation (batch all texts together)
                 print(f"[DEBUG] Using FULL PAGE CONTEXT translation mode")
                 self._log(f"📄 Using full page context translation for {len(recognized_texts)} regions", "info")
                 translated_texts = self._translate_with_full_page_context(recognized_texts, image_path)
             else:
-                # Use individual translation mode (one by one)
                 print(f"[DEBUG] Using INDIVIDUAL translation mode")
                 self._log(f"📝 Using individual translation for {len(recognized_texts)} regions", "info")
                 translated_texts = self._translate_individually(recognized_texts, image_path)
             
-            # Send results to main thread with image path for rendering
+            # Send results to main thread with image data for rendering
             print(f"[DEBUG] Sending {len(translated_texts)} translation results to main thread")
-            
-            # Use cleaned image if available, otherwise original
-            render_image_path = cleaned_image_path if cleaned_image_path else image_path
-            print(f"[DEBUG] Will render on: {render_image_path}")
             
             self.update_queue.put(('translate_results', {
                 'translated_texts': translated_texts,
-                'image_path': render_image_path,  # For rendering (cleaned or original)
+                'image_path': image_path,  # Fallback path (original)
+                'image_bgr': cleaned_image_bgr,  # In-memory cleaned image if available
                 'original_image_path': image_path  # For state mapping
             }))
             
@@ -10178,12 +10148,12 @@ class MangaTranslationTab:
             print(f"[DEBUG] Traceback:\n{traceback_str}")
             self._log(f"❌ Rendering failed: {str(e)}", "error")
     
-    def _render_with_manga_translator(self, image_path: str, regions: list):
-        """Render translations using MangaTranslator's PIL pipeline"""
-        print(f"\n{'='*80}")
-        print(f"[RENDER] _render_with_manga_translator CALLED")
-        print(f"[RENDER] image_path: {image_path}")
-        print(f"[RENDER] regions count: {len(regions)}")
+    def _render_with_manga_translator(self, image_path: str, regions, output_path: str = None, image_bgr=None, original_image_path: str = None):
+        """Render translated text using MangaTranslator's PIL pipeline.
+        - image_bgr: optional OpenCV BGR image to render on (in-memory, preferred if provided)
+        - output_path: where to save the rendered image (isolated per-image folder)
+        - original_image_path: the original source image path for mapping/state
+        """
         print(f"{'='*80}\n")
         
         try:
@@ -10233,15 +10203,14 @@ class MangaTranslationTab:
             else:
                 print(f"[RENDER] Using existing MangaTranslator instance")
             
-            # Load original image as numpy array
-            print(f"[RENDER] Loading image...")
-            pil_image = Image.open(image_path)
-            print(f"[RENDER] Image size: {pil_image.size}")
-            
-            # Convert PIL to OpenCV format (BGR)
-            image_rgb = np.array(pil_image.convert('RGB'))
-            image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
-            print(f"[RENDER] Converted to BGR, shape: {image_bgr.shape}")
+            # Prepare image as numpy BGR array
+            if image_bgr is None:
+                print(f"[RENDER] Loading image from path...")
+                pil_image = Image.open(image_path)
+                print(f"[RENDER] Image size: {pil_image.size}")
+                image_rgb = np.array(pil_image.convert('RGB'))
+                image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+            print(f"[RENDER] Using BGR image, shape: {image_bgr.shape}")
             
             # Print region details
             for i, region in enumerate(regions):
@@ -10256,14 +10225,19 @@ class MangaTranslationTab:
             rendered_rgb = cv2.cvtColor(rendered_bgr, cv2.COLOR_BGR2RGB)
             rendered_pil = Image.fromarray(rendered_rgb)
             
-            # Save to permanent 3_translated folder (not temp!)
-            input_dir = os.path.dirname(image_path)
-            output_dir = os.path.join(input_dir, "3_translated")
-            os.makedirs(output_dir, exist_ok=True)
-            output_filename = os.path.basename(image_path)
-            output_path = os.path.join(output_dir, output_filename)
+            # Determine output path
+            if output_path is None:
+                input_dir = os.path.dirname(image_path)
+                output_dir = os.path.join(input_dir, "3_translated")
+                os.makedirs(output_dir, exist_ok=True)
+                output_filename = os.path.basename(image_path)
+                output_path = os.path.join(output_dir, output_filename)
+            else:
+                # Ensure directory exists for provided output path
+                os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                output_filename = os.path.basename(output_path)
             
-            print(f"[RENDER] Saving to: {output_path}")
+            print(f"[RENDER] Saving to: {output_path}\n")
             rendered_pil.save(output_path)
             print(f"[RENDER] Saved successfully, file exists: {os.path.exists(output_path)}")
             
@@ -10273,11 +10247,13 @@ class MangaTranslationTab:
                 self._rendered_images_map = {}
             
             # Determine the original image path for mapping
-            original_path = image_path
-            if '2_cleaned' in image_path:
-                # Get original path by going up one folder and using same filename
-                original_path = os.path.join(os.path.dirname(os.path.dirname(image_path)), os.path.basename(image_path))
-                print(f"[RENDER] Mapped cleaned image back to original: {os.path.basename(original_path)} -> {os.path.basename(output_path)}")
+            original_path = original_image_path or image_path
+            try:
+                if output_path and os.path.basename(os.path.dirname(output_path)).endswith('_translated'):
+                    original_path = os.path.join(os.path.dirname(os.path.dirname(output_path)), os.path.basename(output_path))
+                    print(f"[RENDER] Mapped output back to original: {os.path.basename(original_path)} -> {os.path.basename(output_path)}")
+            except Exception:
+                pass
             
             # Store mapping
             self._rendered_images_map[original_path] = output_path
@@ -10303,7 +10279,7 @@ class MangaTranslationTab:
             finally:
                 self._rendering_in_progress = False
             
-            self._log(f"✅ Rendered to: 3_translated/{output_filename}", "success")
+            self._log(f"✅ Rendered to: {output_filename}", "success")
             
             print(f"[RENDER] _render_with_manga_translator COMPLETED SUCCESSFULLY\n{'='*80}\n")
         
@@ -10313,6 +10289,9 @@ class MangaTranslationTab:
             print(f"[RENDER] Error: {str(e)}")
             import traceback
             traceback_str = traceback.format_exc()
+            print(f"[RENDER] Traceback:\n{traceback_str}")
+            print(f"{'='*80}\n")
+            self._log(f"❌ Rendering error: {str(e)}", "error")
             print(f"[RENDER] Traceback:\n{traceback_str}")
             print(f"{'='*80}\n")
             self._log(f"❌ Rendering error: {str(e)}", "error")
@@ -11513,11 +11492,11 @@ class MangaTranslationTab:
                     print(f"[TRANSLATE] Image exists: {os.path.exists(render_image) if render_image else False}")
                     
                     if render_image and os.path.exists(render_image):
-                        # Check if we're using a cleaned image (from 2_cleaned folder or self._cleaned_image_path)
-                        is_cleaned = ('2_cleaned' in render_image or 
-                                    (hasattr(self, '_cleaned_image_path') and 
-                                     self._cleaned_image_path and 
-                                     render_image == self._cleaned_image_path))
+                        # Check if we're using a cleaned image (saved as *_cleaned in isolated folder)
+                        is_cleaned = (os.path.basename(render_image).lower().endswith('_cleaned' + os.path.splitext(render_image)[1].lower()) or
+                                      (hasattr(self, '_cleaned_image_path') and 
+                                       self._cleaned_image_path and 
+                                       os.path.normpath(render_image) == os.path.normpath(self._cleaned_image_path)))
                         
                         if is_cleaned:
                             print(f"[TRANSLATE] Using cleaned image: {os.path.basename(render_image)}")
@@ -11531,7 +11510,28 @@ class MangaTranslationTab:
                         for i, r in enumerate(regions):
                             print(f"[TRANSLATE]   Region {i}: bbox={r.bounding_box}, text='{r.text[:20]}...', trans='{r.translated_text[:20]}...'")
                         
-                        self._render_with_manga_translator(render_image, regions)
+                        # Compute per-image isolated output path (match single-translate isolation)
+                        original_path_for_output = original_image_path
+                        try:
+                            filename = os.path.basename(original_path_for_output)
+                            base_name = os.path.splitext(filename)[0]
+                            parent_dir = os.path.dirname(original_path_for_output)
+                            output_dir = os.path.join(parent_dir, f"{base_name}_translated")
+                            os.makedirs(output_dir, exist_ok=True)
+                            target_output_path = os.path.join(output_dir, filename)
+                        except Exception:
+                            target_output_path = None
+                        
+                        # Prefer in-memory cleaned image if provided in results
+                        image_bgr = results.get('image_bgr') if isinstance(results, dict) else None
+                        
+                        self._render_with_manga_translator(
+                            render_image,
+                            regions,
+                            output_path=target_output_path,
+                            image_bgr=image_bgr,
+                            original_image_path=original_image_path
+                        )
                         print(f"[TRANSLATE] Returned from _render_with_manga_translator")
                     else:
                         print(f"[TRANSLATE] ERROR: No image path available for rendering or image doesn't exist")
@@ -12145,12 +12145,16 @@ class MangaTranslationTab:
                             self.local_model_status_label.setStyleSheet("color: gray;")
                 
                 elif update[0] == 'clean_preview_update':
-                    _, output_path = update
-                    # Update the image preview with the cleaned image
+                    # Deprecated: no longer saving cleaned images to disk
+                    pass
+                
+                elif update[0] == 'clean_preview_overlay':
+                    _, image_array = update
                     try:
-                        self._update_preview_after_clean(output_path)
+                        # Overlay cleaned image directly (no saving)
+                        self.image_preview_widget.viewer.overlay_image(image_array)
                     except Exception as e:
-                        self._log(f"❌ Failed to update preview: {str(e)}", "error")
+                        self._log(f"❌ Failed to overlay cleaned image: {str(e)}", "error")
                 
                 elif update[0] == 'clean_button_restore':
                     # Restore the clean button to its normal state
