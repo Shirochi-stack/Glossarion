@@ -110,7 +110,8 @@ class DownloadWorker(QObject):
 class QtDownloadJob(QObject):
     progress = Signal(int, float, float)
     finished = Signal(str)
-    error = Signal(str)
+    error = Signal(int, str)  # (QNetworkReply.NetworkError, message)
+    cancelled = Signal()
 
     def __init__(self):
         super().__init__()
@@ -118,6 +119,7 @@ class QtDownloadJob(QObject):
         self.reply: QNetworkReply | None = None
         self._file = None
         self._path = None
+        self._was_cancelled = False
 
     def start(self, url: str, path: str):
         self._path = path
@@ -141,17 +143,30 @@ class QtDownloadJob(QObject):
         self.reply.errorOccurred.connect(self._on_error)
 
     def cancel(self):
+        self._was_cancelled = True
         try:
             if self.reply:
                 self.reply.abort()
+        except Exception:
+            pass
+        # Emit cancelled immediately so UI can update without waiting for Qt signals
+        try:
+            self.cancelled.emit()
         except Exception:
             pass
 
     @Slot()
     def _on_ready_read(self):
         try:
-            if not self.reply or not self._file:
+            # Bail early if cancelled or no reply/file
+            if self._was_cancelled or not self.reply or not self._file:
                 return
+            # Avoid reading from closed device
+            try:
+                if hasattr(self.reply, 'isOpen') and not self.reply.isOpen():
+                    return
+            except Exception:
+                pass
             data = self.reply.readAll()
             if data:
                 self._file.write(bytes(data))
@@ -161,6 +176,8 @@ class QtDownloadJob(QObject):
     @Slot(int, int)
     def _on_progress(self, bytes_received: int, bytes_total: int):
         try:
+            if self._was_cancelled:
+                return
             if bytes_total > 0:
                 p = int(bytes_received * 100 / bytes_total)
                 self.progress.emit(p, bytes_received / (1024 * 1024), bytes_total / (1024 * 1024))
@@ -177,9 +194,16 @@ class QtDownloadJob(QObject):
                 self._on_ready_read()
                 self._file.flush()
                 self._file.close()
-            if self.reply and self.reply.error() == QNetworkReply.NoError:
-                self.finished.emit(self._path)
-                return
+            if self.reply:
+                if self._was_cancelled or self.reply.error() == QNetworkReply.OperationCanceledError:
+                    try:
+                        self.cancelled.emit()
+                    except Exception:
+                        pass
+                    return
+                if self.reply.error() == QNetworkReply.NoError:
+                    self.finished.emit(self._path)
+                    return
             # If there was an error, it should have been emitted already
         finally:
             self.reply and self.reply.deleteLater()
@@ -192,7 +216,14 @@ class QtDownloadJob(QObject):
             err = self.reply.errorString() if self.reply else str(code)
         except Exception:
             err = str(code)
-        self.error.emit(err)
+        # Treat user-initiated abort as cancellation, not an error dialog
+        try:
+            if code == QNetworkReply.OperationCanceledError:
+                self.cancelled.emit()
+                return
+        except Exception:
+            pass
+        self.error.emit(int(code), err)
 
 class UpdateManager(QObject):
     """Handles automatic update checking and installation for Glossarion"""
@@ -1067,6 +1098,7 @@ class UpdateManager(QObject):
             # Show progress and enable Cancel
             self.progress_widget.setVisible(True)
             self.cancel_btn.setVisible(True)
+            self.cancel_btn.setEnabled(True)
             
             # Disable only the download button and asset selector
             try:
@@ -1101,9 +1133,14 @@ class UpdateManager(QObject):
                     try:
                         if hasattr(self, 'download_worker') and self.download_worker:
                             self.download_worker.cancel()
-                        self.progress_label.setText("Cancelling...")
+                        # Immediately update UI to cancelled
+                        self._on_download_cancelled(dialog)
                     except Exception:
-                        pass
+                        # Still try to update UI to cancelled
+                        try:
+                            self._on_download_cancelled(dialog)
+                        except Exception:
+                            pass
                 self.cancel_btn.clicked.connect(do_cancel)
             except Exception as e:
                 msg = QMessageBox(dialog)
@@ -1355,13 +1392,18 @@ class UpdateManager(QObject):
                 self._download_watchdog.stop()
         except Exception:
             pass
-        # Re-enable buttons on error
+        # Re-enable buttons on error and reset UI
         try:
             for btn in dialog.findChildren(QPushButton):
                 btn.setEnabled(True)
-            # Hide cancel button if present
             if hasattr(self, 'cancel_btn'):
                 self.cancel_btn.setVisible(False)
+                self.cancel_btn.setEnabled(True)
+            # Reset progress UI
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(0)
+            self.progress_label.setText("")
+            self.status_label.setText("")
         except Exception:
             pass
         msg = QMessageBox(dialog)
@@ -1413,9 +1455,12 @@ class UpdateManager(QObject):
                 except Exception:
                     pass
             self.qt_downloader = QtDownloadJob()
+            # Reset cancel handled flag for this run
+            self._cancel_handled = False
             self.qt_downloader.progress.connect(self._on_download_progress)
             self.qt_downloader.finished.connect(lambda fp: self.download_complete(dialog, fp))
-            self.qt_downloader.error.connect(lambda msg: self._show_download_error(dialog, msg))
+            self.qt_downloader.cancelled.connect(lambda: self._on_download_cancelled(dialog))
+            self.qt_downloader.error.connect(lambda code, msg: self._on_qtnetwork_error(dialog, code, msg))
             # Watchdog for no progress
             try:
                 if hasattr(self, '_download_watchdog') and self._download_watchdog:
@@ -1434,7 +1479,8 @@ class UpdateManager(QObject):
                     self.cancel_btn.clicked.disconnect()
                 except Exception:
                     pass
-                self.cancel_btn.clicked.connect(lambda: (self.cancel_btn.setEnabled(False), self.qt_downloader.cancel(), self.progress_label.setText("Cancelling...")))
+                # Cancel and immediately reflect UI as cancelled
+                self.cancel_btn.clicked.connect(lambda: (self.cancel_btn.setEnabled(False), self.qt_downloader.cancel(), self._on_download_cancelled(dialog)))
             return
         except Exception:
             pass
@@ -1468,11 +1514,53 @@ class UpdateManager(QObject):
     
     def _on_download_timeout(self, dialog):
         try:
+            # Try cancel on either backend
+            if hasattr(self, 'qt_downloader') and self.qt_downloader:
+                self.qt_downloader.cancel()
             if hasattr(self, 'download_worker') and self.download_worker:
                 self.download_worker.cancel()
         except Exception:
             pass
         self._show_download_error(dialog, "Connection timed out. No data received.")
+
+    def _on_qtnetwork_error(self, dialog, code, message: str):
+        # Handle Qt network errors; treat cancellation gracefully
+        try:
+            if int(code) == int(QNetworkReply.OperationCanceledError):
+                if getattr(self, '_cancel_handled', False):
+                    return
+                self._on_download_cancelled(dialog)
+                return
+        except Exception:
+            pass
+        self._show_download_error(dialog, message)
+
+    def _on_download_cancelled(self, dialog):
+        # Gracefully handle user-cancelled download
+        self._cancel_handled = True
+        try:
+            if hasattr(self, '_download_watchdog') and self._download_watchdog:
+                self._download_watchdog.stop()
+        except Exception:
+            pass
+        try:
+            # Reset progress UI and controls
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(0)
+            self.progress_label.setText("Cancelled")
+            self.status_label.setText("")
+            if hasattr(self, 'cancel_btn'):
+                self.cancel_btn.setVisible(False)
+                self.cancel_btn.setEnabled(True)
+            # Re-enable controls
+            btn = dialog.findChild(QPushButton, "update_download_btn")
+            if btn:
+                btn.setEnabled(True)
+            asset_box = dialog.findChild(QGroupBox, "asset_group")
+            if asset_box:
+                asset_box.setEnabled(True)
+        except Exception:
+            pass
 
     def download_complete(self, dialog, file_path):
         """Handle completed download"""
@@ -1484,6 +1572,7 @@ class UpdateManager(QObject):
         try:
             if hasattr(self, 'cancel_btn'):
                 self.cancel_btn.setVisible(False)
+                self.cancel_btn.setEnabled(True)
         except Exception:
             pass
         dialog.close()

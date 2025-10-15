@@ -9548,8 +9548,18 @@ if __name__ == "__main__":
         main_window._modules_loaded = True
         main_window._modules_loading = False
         
-        # Show the window
-        main_window.show()
+        # Show the window (ensure not minimized)
+        try:
+            from PySide6.QtCore import Qt, QTimer
+            # Clear any minimized state potentially inherited
+            main_window.setWindowState(main_window.windowState() & ~Qt.WindowMinimized)
+            main_window.showNormal()
+            main_window.raise_()
+            main_window.activateWindow()
+            # Re-assert focus shortly after show to avoid race with splash/OS focus
+            QTimer.singleShot(150, lambda: (main_window.raise_(), main_window.activateWindow()))
+        except Exception:
+            main_window.show()
         
         print("✅ Ready to use!")
         
