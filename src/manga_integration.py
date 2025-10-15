@@ -10566,7 +10566,7 @@ class MangaTranslationTab:
                 'font_size_mode': 'auto',
                 'font_size': 0,
                 'auto_min_size': 12,
-'max_font_size': 96,
+                'max_font_size': 96,
                 'font_algorithm': 'smart',
                 'text_color': [0, 0, 0],
                 'force_caps': False,
@@ -10577,6 +10577,41 @@ class MangaTranslationTab:
                 'constrain_to_bubble': True,
                 'text_padding': 4
             }
+
+    def show_recognized_overlays_for_image(self, image_path: str):
+        """Restore recognized (OCR) overlays for the given image and attach tooltips.
+        - Draw detection rectangles if not present
+        - Apply recognition tooltips/updates if recognized_texts exist in state
+        """
+        try:
+            if not hasattr(self, 'image_state_manager') or not image_path:
+                return
+            state = self.image_state_manager.get_state(image_path)
+            if not state:
+                return
+            # Ensure rectangles exist; if not, draw detection regions first
+            need_draw = False
+            try:
+                rects = getattr(self.image_preview_widget.viewer, 'rectangles', [])
+                need_draw = (not rects)
+            except Exception:
+                need_draw = True
+            if need_draw:
+                regions = state.get('detection_regions') or []
+                if regions:
+                    self._current_regions = regions
+                    try:
+                        if hasattr(self.image_preview_widget.viewer, 'clear_rectangles'):
+                            self.image_preview_widget.viewer.clear_rectangles()
+                    except Exception:
+                        pass
+                    self._draw_detection_boxes_on_preview()
+            # Apply recognition data if available
+            recognized_texts = state.get('recognized_texts') or []
+            if recognized_texts:
+                self._update_rectangles_with_recognition(recognized_texts)
+        except Exception as e:
+            print(f"[DEBUG] Error restoring recognized overlays: {e}")
     
     def _create_manga_text_item(self, text: str, x: int, y: int, w: int, h: int, settings: dict):
         """Create a properly sized manga text item using the same algorithm as the main translator"""
