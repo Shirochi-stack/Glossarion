@@ -45,6 +45,7 @@ class DownloadWorker(QObject):
     progress = Signal(int, float, float)  # percent (-1 if unknown), downloaded_MB, total_MB
     finished = Signal(str)  # file path
     error = Signal(str)
+    cancelled = Signal()
 
     def __init__(self, url: str, path: str):
         super().__init__()
@@ -70,7 +71,21 @@ class DownloadWorker(QObject):
                     with open(self.path, 'wb') as f:
                         for chunk in r.iter_content(chunk_size=65536):
                             if self._cancel:
-                                raise Exception("Download cancelled")
+                                try:
+                                    f.flush()
+                                except Exception:
+                                    pass
+                                try:
+                                    f.close()
+                                except Exception:
+                                    pass
+                                try:
+                                    if os.path.exists(self.path):
+                                        os.remove(self.path)
+                                except Exception:
+                                    pass
+                                self.cancelled.emit()
+                                return
                             if not chunk:
                                 continue
                             f.write(chunk)
@@ -96,6 +111,12 @@ class DownloadWorker(QObject):
                 pass
             self.finished.emit(self.path)
         except Exception as e:
+            # On error, ensure partial file is removed
+            try:
+                if os.path.exists(self.path):
+                    os.remove(self.path)
+            except Exception:
+                pass
             self.error.emit(str(e))
 
     @Slot()
@@ -126,7 +147,7 @@ class QtDownloadJob(QObject):
         try:
             self._file = open(path, 'wb')
         except Exception as e:
-            self.error.emit(f"Cannot open file for writing: {e}")
+            self.error.emit(int(QNetworkReply.UnknownNetworkError), f"Cannot open file for writing: {e}")
             return
         req = QNetworkRequest(QUrl(url))
         req.setRawHeader(b'User-Agent', b'Glossarion-Updater')
@@ -144,6 +165,21 @@ class QtDownloadJob(QObject):
 
     def cancel(self):
         self._was_cancelled = True
+        # Close and delete partial file ASAP
+        try:
+            if self._file:
+                try:
+                    self._file.flush()
+                except Exception:
+                    pass
+                try:
+                    self._file.close()
+                except Exception:
+                    pass
+            if self._path and os.path.exists(self._path):
+                os.remove(self._path)
+        except Exception:
+            pass
         try:
             if self.reply:
                 self.reply.abort()
@@ -189,13 +225,33 @@ class QtDownloadJob(QObject):
     @Slot()
     def _on_finished(self):
         try:
+            # Safely close file; only drain buffer when not cancelled and on success
             if self._file:
-                # Write any remaining buffered data
-                self._on_ready_read()
-                self._file.flush()
-                self._file.close()
+                try:
+                    if not self._was_cancelled and self.reply and self.reply.error() == QNetworkReply.NoError:
+                        # Drain any remaining data
+                        self._on_ready_read()
+                except Exception:
+                    pass
+                # Flush/close defensively (file may already be closed)
+                try:
+                    if hasattr(self._file, 'closed') and not self._file.closed:
+                        self._file.flush()
+                except Exception:
+                    pass
+                try:
+                    if hasattr(self._file, 'closed') and not self._file.closed:
+                        self._file.close()
+                except Exception:
+                    pass
             if self.reply:
                 if self._was_cancelled or self.reply.error() == QNetworkReply.OperationCanceledError:
+                    # Ensure partial file is deleted on cancel
+                    try:
+                        if self._path and os.path.exists(self._path):
+                            os.remove(self._path)
+                    except Exception:
+                        pass
                     try:
                         self.cancelled.emit()
                     except Exception:
@@ -204,9 +260,12 @@ class QtDownloadJob(QObject):
                 if self.reply.error() == QNetworkReply.NoError:
                     self.finished.emit(self._path)
                     return
-            # If there was an error, it should have been emitted already
         finally:
-            self.reply and self.reply.deleteLater()
+            try:
+                if self.reply:
+                    self.reply.deleteLater()
+            except Exception:
+                pass
             self.reply = None
             self._file = None
 
@@ -1439,6 +1498,8 @@ class UpdateManager(QObject):
             download_path = new_exe_path
 
         url = asset['browser_download_url']
+        # Track path for cleanup on cancel/error
+        self._current_download_path = download_path
 
         # Reset and show initial progress state
         self.progress_bar.setRange(0, 0)  # indeterminate until we know size
@@ -1494,6 +1555,7 @@ class UpdateManager(QObject):
         self.download_thread.started.connect(self.download_worker.run)
         self.download_worker.progress.connect(self._on_download_progress)
         self.download_worker.finished.connect(lambda fp: self.download_complete(dialog, fp))
+        self.download_worker.cancelled.connect(lambda: self._on_download_cancelled(dialog))
         self.download_worker.error.connect(lambda msg: self._show_download_error(dialog, msg))
         self.download_worker.finished.connect(self.download_thread.quit)
         self.download_worker.error.connect(self.download_thread.quit)
@@ -1541,6 +1603,12 @@ class UpdateManager(QObject):
         try:
             if hasattr(self, '_download_watchdog') and self._download_watchdog:
                 self._download_watchdog.stop()
+        except Exception:
+            pass
+        # Attempt to delete any partial file leftover
+        try:
+            if hasattr(self, '_current_download_path') and self._current_download_path and os.path.exists(self._current_download_path):
+                os.remove(self._current_download_path)
         except Exception:
             pass
         try:
