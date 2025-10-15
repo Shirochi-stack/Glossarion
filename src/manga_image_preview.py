@@ -154,6 +154,12 @@ class CompactImageViewer(QGraphicsView):
         self._loader_worker = None
         self._loading = False
     
+    def resizeEvent(self, event):
+        """Ensure the image refits the view on resize so placeholders fill the area."""
+        super().resizeEvent(event)
+        if self.hasPhoto():
+            self.fitInView()
+    
     def hasPhoto(self) -> bool:
         return not self.empty
     
@@ -679,9 +685,27 @@ class MangaImagePreviewWidget(QWidget):
             }
         """)
         self.thumbnail_list.itemClicked.connect(self._on_thumbnail_clicked)
-        self.thumbnail_list.setVisible(False)  # Hidden by default
         viewer_layout.addWidget(self.thumbnail_list)
-        output_layout.addWidget(self.thumbnail_list)  # Share thumbnails with output tab
+        
+        # Create a second thumbnail list for output tab (can't share same widget)
+        self.output_thumbnail_list = QListWidget()
+        self.output_thumbnail_list.setMaximumWidth(150)
+        self.output_thumbnail_list.setMinimumWidth(120)
+        self.output_thumbnail_list.setIconSize(QSize(100, 100))
+        self.output_thumbnail_list.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.output_thumbnail_list.setViewMode(QListWidget.ViewMode.IconMode)
+        self.output_thumbnail_list.setMovement(QListWidget.Movement.Static)
+        self.output_thumbnail_list.setFlow(QListWidget.Flow.TopToBottom)
+        self.output_thumbnail_list.setWrapping(False)
+        self.output_thumbnail_list.setSpacing(5)
+        self.output_thumbnail_list.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
+        self.output_thumbnail_list.setStyleSheet(self.thumbnail_list.styleSheet())
+        self.output_thumbnail_list.itemClicked.connect(self._on_thumbnail_clicked)
+        output_layout.addWidget(self.output_thumbnail_list)
+        
+        # Both thumbnail lists start hidden
+        self.thumbnail_list.setVisible(False)
+        self.output_thumbnail_list.setVisible(False)
         
         # Store image paths for thumbnails
         self.image_paths = []
@@ -692,8 +716,12 @@ class MangaImagePreviewWidget(QWidget):
         self.viewer.image_loading.connect(self._on_image_loading_started)
         self.viewer.image_loaded.connect(self._on_image_loaded_success)
         
+        # Refitting on tab change ensures current image fills the available space
+        self.viewer_tabs.currentChanged.connect(self._on_tab_changed)
+        
         # Display placeholder icon when no image is loaded
         self._show_placeholder_icon()
+        self._show_output_placeholder()
         
         # Manual Tools - Row 1: Box Drawing & Inpainting
         self.tools_frame = self._create_tool_frame("Manual Tools")
@@ -1039,17 +1067,18 @@ class MangaImagePreviewWidget(QWidget):
         self.image_paths = image_paths
         self._populate_thumbnails()
         
-        # Hide thumbnail list if there's 0 or 1 images (nothing to switch between)
+        # Show/hide thumbnail lists based on image count
         if len(image_paths) <= 1:
             self.thumbnail_list.setVisible(False)
-            self.thumbnail_list.setMaximumWidth(0)  # Collapse completely
+            self.output_thumbnail_list.setVisible(False)
         else:
             self.thumbnail_list.setVisible(True)
-            self.thumbnail_list.setMaximumWidth(150)  # Restore width
+            self.output_thumbnail_list.setVisible(True)
     
     def _populate_thumbnails(self):
         """Populate thumbnail list with images"""
         self.thumbnail_list.clear()
+        self.output_thumbnail_list.clear()
         
         from PySide6.QtWidgets import QListWidgetItem
         from PySide6.QtCore import Qt, QSize
@@ -1070,11 +1099,19 @@ class MangaImagePreviewWidget(QWidget):
         
         # Add items with loading placeholders first
         for i, path in enumerate(self.image_paths):
+            # Add to source thumbnail list
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, path)  # Store path
             item.setText(os.path.basename(path))
             item.setSizeHint(QSize(110, 110))
             self.thumbnail_list.addItem(item)
+            
+            # Add to output thumbnail list
+            output_item = QListWidgetItem()
+            output_item.setData(Qt.ItemDataRole.UserRole, path)
+            output_item.setText(os.path.basename(path))
+            output_item.setSizeHint(QSize(110, 110))
+            self.output_thumbnail_list.addItem(output_item)
         
         # Load thumbnails asynchronously
         def load_all_thumbs():
@@ -1082,10 +1119,15 @@ class MangaImagePreviewWidget(QWidget):
                 result = load_thumb(path, i)
                 if result:
                     idx, img_path, thumb = result
-                    # Update item on main thread
+                    # Update items on main thread (both lists)
                     try:
                         from PySide6.QtCore import QMetaObject, Q_ARG
                         QMetaObject.invokeMethod(self, "_update_thumbnail_item",
+                                                Qt.ConnectionType.QueuedConnection,
+                                                Q_ARG(int, idx),
+                                                Q_ARG(QPixmap, thumb),
+                                                Q_ARG(str, img_path))
+                        QMetaObject.invokeMethod(self, "_update_output_thumbnail_item",
                                                 Qt.ConnectionType.QueuedConnection,
                                                 Q_ARG(int, idx),
                                                 Q_ARG(QPixmap, thumb),
@@ -1109,13 +1151,33 @@ class MangaImagePreviewWidget(QWidget):
         except Exception as e:
             print(f"Error updating thumbnail: {e}")
     
+    @Slot(int, QPixmap, str)
+    def _update_output_thumbnail_item(self, index: int, pixmap: QPixmap, path: str):
+        """Update output thumbnail item with loaded pixmap (called from background thread)"""
+        try:
+            if index < self.output_thumbnail_list.count():
+                item = self.output_thumbnail_list.item(index)
+                icon = QIcon(pixmap)
+                item.setIcon(icon)
+                item.setText("")  # Remove text once icon is loaded
+        except Exception as e:
+            print(f"Error updating output thumbnail: {e}")
+    
     def _update_thumbnail_selection(self, image_path: str):
         """Update which thumbnail is selected based on current image"""
+        # Update both thumbnail lists
         for i in range(self.thumbnail_list.count()):
             item = self.thumbnail_list.item(i)
             item_path = item.data(Qt.ItemDataRole.UserRole)
             if item_path == image_path:
                 self.thumbnail_list.setCurrentItem(item)
+                break
+        
+        for i in range(self.output_thumbnail_list.count()):
+            item = self.output_thumbnail_list.item(i)
+            item_path = item.data(Qt.ItemDataRole.UserRole)
+            if item_path == image_path:
+                self.output_thumbnail_list.setCurrentItem(item)
                 break
     
     def _on_thumbnail_clicked(self, item):
@@ -1152,6 +1214,16 @@ class MangaImagePreviewWidget(QWidget):
         if self.current_image_path:
             self.file_label.setText(f"📄 {os.path.basename(self.current_image_path)}")
             self.file_label.setStyleSheet("color: gray; font-size: 8pt;")  # Back to normal
+        
+    def _on_tab_changed(self, index: int):
+        """Refit the current viewer when tabs are switched to ensure full fill."""
+        try:
+            if index == 0 and self.viewer.hasPhoto():
+                self.viewer.fitInView()
+            elif index == 1 and self.output_viewer.hasPhoto():
+                self.output_viewer.fitInView()
+        except Exception:
+            pass
     
     def clear(self):
         """Clear the preview"""
@@ -1198,6 +1270,21 @@ class MangaImagePreviewWidget(QWidget):
             except Exception as e:
                 # Silently fail if icon can't be loaded
                 pass
+    
+    def _show_output_placeholder(self):
+        """Display WhereIsMyOutput.png as placeholder for no output, scaled to fill like Halgakos_NoChibi."""
+        placeholder_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'WhereIsMyOutput.png')
+        
+        if os.path.exists(placeholder_path):
+            try:
+                # Load at full size (no pre-scaling)
+                placeholder_pixmap = QPixmap(placeholder_path)
+                
+                if not placeholder_pixmap.isNull():
+                    # Set and fit; resizeEvent and tab change will keep it filling the area
+                    self.output_viewer.setPhoto(placeholder_pixmap)
+            except Exception as e:
+                print(f"Error loading output placeholder: {e}")
     
     def _update_toggle_label(self, state):
         """Update the toggle label to show visual feedback"""
@@ -1421,9 +1508,9 @@ class MangaImagePreviewWidget(QWidget):
                         self.viewer_tabs.setCurrentIndex(1)
                         return
             
-            # No translated output found - clear output viewer and show placeholder
+            # No translated output found - show placeholder
             print(f"[DEBUG] No translated output found for: {source_filename}")
-            self.output_viewer.clear_scene()
+            self._show_output_placeholder()
             self.current_translated_path = None
             self.viewer_tabs.setCurrentIndex(0)  # Switch back to source
             
