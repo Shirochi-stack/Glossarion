@@ -772,7 +772,7 @@ class MangaImagePreviewWidget(QWidget):
         tools_layout.addWidget(self.delete_btn)
         
         self.clear_boxes_btn = self._create_tool_button("🧹", "Clear Boxes")
-        self.clear_boxes_btn.clicked.connect(self.viewer.clear_rectangles)
+        self.clear_boxes_btn.clicked.connect(self._on_clear_boxes_clicked)
         tools_layout.addWidget(self.clear_boxes_btn)
         
         self.clear_strokes_btn = self._create_tool_button("❌", "Clear Strokes")
@@ -813,6 +813,9 @@ class MangaImagePreviewWidget(QWidget):
         tools_layout.addWidget(self.box_count_label)
         self.viewer.rectangle_created.connect(self._update_box_count)
         self.viewer.rectangle_deleted.connect(self._update_box_count)
+        # Persist rectangles when created/deleted
+        self.viewer.rectangle_created.connect(lambda _: self._persist_rectangles_state())
+        self.viewer.rectangle_deleted.connect(lambda _: self._persist_rectangles_state())
         
         layout.addWidget(self.tools_frame)
         
@@ -1026,6 +1029,24 @@ class MangaImagePreviewWidget(QWidget):
         """Update box count display"""
         self.box_count_label.setText(str(len(self.viewer.rectangles)))
     
+    def _persist_rectangles_state(self):
+        """Persist current rectangles to image state manager via manga_integration."""
+        try:
+            if not hasattr(self, 'manga_integration') or not self.manga_integration:
+                return
+            image_path = getattr(self, 'current_image_path', None)
+            if not image_path:
+                return
+            # Build regions using the same extractor (with merge) from manga_integration
+            regions = self.manga_integration._extract_regions_from_preview() if hasattr(self.manga_integration, '_extract_regions_from_preview') else []
+            if hasattr(self.manga_integration, 'image_state_manager') and self.manga_integration.image_state_manager:
+                # Persist detection regions for this image
+                self.manga_integration.image_state_manager.update_state(image_path, {
+                    'detection_regions': regions
+                }, save=True)
+        except Exception:
+            pass
+    
     def _update_brush_size(self, value: int):
         """Update brush/eraser size"""
         self.size_label.setText(str(value))
@@ -1036,11 +1057,21 @@ class MangaImagePreviewWidget(QWidget):
         """Clear brush strokes only"""
         self.viewer.clear_brush_strokes()
     
+    def _on_clear_boxes_clicked(self):
+        """Clear all rectangles and persist deletion to state."""
+        try:
+            self.viewer.clear_rectangles()
+            self._update_box_count()
+            self._persist_rectangles_state()  # Persist empty set (or any remaining)
+        except Exception:
+            pass
+    
     def _clear_all(self):
         """Clear all boxes and strokes"""
         self.viewer.clear_rectangles()
         self.viewer.clear_brush_strokes()
         self._update_box_count()
+        self._persist_rectangles_state()
     
     def load_image(self, image_path: str, preserve_rectangles: bool = False, preserve_text_overlays: bool = False):
         """Load an image into the preview (async)
