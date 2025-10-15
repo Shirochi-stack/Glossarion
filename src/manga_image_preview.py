@@ -838,10 +838,30 @@ class MangaImagePreviewWidget(QWidget):
         self.translate_btn.clicked.connect(lambda: self._emit_translate_signal())
         workflow_layout.addWidget(self.translate_btn, stretch=1)
         
-        self.translate_all_btn = self._create_compact_button("Translate All")
-        self.translate_all_btn.clicked.connect(lambda: self._emit_translate_all_signal())
-        self.translate_all_btn.setToolTip("Translate all images in preview")
-        workflow_layout.addWidget(self.translate_all_btn, stretch=1)
+        # Conditionally show Translate All only when experimental flag is enabled
+        enable_translate_all = False
+        try:
+            if self.main_gui and hasattr(self.main_gui, 'config') and isinstance(self.main_gui.config, dict):
+                cfg = self.main_gui.config
+                # Either flat key or nested under an experimental block
+                enable_translate_all = bool(
+                    cfg.get('experimental_translate_all', False) or
+                    (isinstance(cfg.get('experimental'), dict) and cfg.get('experimental', {}).get('translate_all', False))
+                )
+            # Environment override
+            if not enable_translate_all:
+                enable_translate_all = (os.getenv('EXPERIMENTAL_TRANSLATE_ALL', '0') == '1')
+        except Exception:
+            enable_translate_all = False
+        
+        if enable_translate_all:
+            self.translate_all_btn = self._create_compact_button("Translate All")
+            self.translate_all_btn.clicked.connect(lambda: self._emit_translate_all_signal())
+            self.translate_all_btn.setToolTip("Translate all images in preview (experimental)")
+            workflow_layout.addWidget(self.translate_all_btn, stretch=1)
+        else:
+            # Do not create the button at all when experimental is disabled
+            self.translate_all_btn = None
         
         layout.addWidget(self.workflow_frame)
         
