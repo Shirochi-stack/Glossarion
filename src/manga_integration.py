@@ -12176,9 +12176,9 @@ class MangaTranslationTab:
             scrollbar = self.log_text.verticalScrollBar()
             # Distance from bottom
             distance = max(0, scrollbar.maximum() - int(value))
-            # Consider 'near bottom' more generously so auto-scroll isn't disabled too easily
-            near_threshold = max(10, int(scrollbar.pageStep() * 0.5))  # half a page or ≥10px
-            disable_threshold = max(near_threshold + 20, int(scrollbar.pageStep() * 1.2))  # clearly away from bottom
+            # Consider 'near bottom' generously so manual override is disabled when close
+            near_threshold = max(20, int(scrollbar.pageStep() * 0.9))  # ~one page or ≥20px
+            disable_threshold = max(near_threshold + 40, int(scrollbar.pageStep() * 1.5))  # clearly away from bottom
 
             if distance <= near_threshold:
                 # Close enough to bottom — treat as at bottom and re-enable auto-scroll
@@ -12205,7 +12205,7 @@ class MangaTranslationTab:
                 return False
             # If user is near bottom, allow auto-scroll even if they briefly scrolled
             distance = max(0, sb.maximum() - sb.value())
-            near_threshold = max(10, int(sb.pageStep() * 0.5))
+            near_threshold = max(20, int(sb.pageStep() * 0.9))
             if distance <= near_threshold:
                 # Reset manual scroll flag when we detect we're near bottom again
                 self._user_scrolled_up = False
