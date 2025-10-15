@@ -1504,15 +1504,12 @@ class MangaImagePreviewWidget(QWidget):
                         self.output_viewer.load_image(translated_path)
                         self.current_translated_path = translated_path
                         
-                        # Switch to output tab automatically
-                        self.viewer_tabs.setCurrentIndex(1)
                         return
             
             # No translated output found - show placeholder
             print(f"[DEBUG] No translated output found for: {source_filename}")
             self._show_output_placeholder()
             self.current_translated_path = None
-            self.viewer_tabs.setCurrentIndex(0)  # Switch back to source
             
         except Exception as e:
             print(f"[DEBUG] Error checking translated output: {str(e)}")

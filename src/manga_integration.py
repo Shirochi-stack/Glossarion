@@ -10297,8 +10297,6 @@ class MangaTranslationTab:
             try:
                 self.image_preview_widget.output_viewer.load_image(output_path)
                 self.image_preview_widget.current_translated_path = output_path
-                # Switch to the output tab to show result immediately
-                self.image_preview_widget.viewer_tabs.setCurrentIndex(1)
                 print(f"[RENDER] Image loaded into output tab")
             finally:
                 self._rendering_in_progress = False
@@ -12225,8 +12223,6 @@ class MangaTranslationTab:
                             print(f"[PREVIEW_UPDATE] Loading translated image into output tab: {translated_path}")
                             self.image_preview_widget.output_viewer.load_image(translated_path)
                             self.image_preview_widget.current_translated_path = translated_path
-                            # Switch to output tab to show the result
-                            self.image_preview_widget.viewer_tabs.setCurrentIndex(1)
                             print(f"[PREVIEW_UPDATE] ✅ Output tab updated successfully")
                     except Exception as e:
                         print(f"[PREVIEW_UPDATE] ❌ Error updating preview: {e}")
