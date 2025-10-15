@@ -7736,6 +7736,33 @@ class MangaTranslationTab:
                 self.image_preview_widget.detect_btn.setText("Detect Text")
         except Exception:
             pass
+
+    def _clear_detection_state_for_image(self, image_path: str):
+        """Completely clear detection/recognition rectangles for a specific image.
+        - Clears in-memory _current_regions if this is the active image
+        - Clears persisted detection_regions, viewer_rectangles and recognized_texts
+        """
+        try:
+            if not image_path:
+                return
+            # Clear in-memory regions if we're on this image
+            try:
+                if getattr(self, '_current_image_path', None) == image_path:
+                    self._current_regions = []
+            except Exception:
+                pass
+            # Clear persisted state
+            if hasattr(self, 'image_state_manager') and self.image_state_manager:
+                try:
+                    self.image_state_manager.update_state(image_path, {
+                        'detection_regions': [],
+                        'viewer_rectangles': [],
+                        'recognized_texts': []
+                    }, save=True)
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"[STATE] Failed to clear detection state: {e}")
     
     def _persist_current_image_state(self):
         """Persist the current image's state (rectangles, overlays, paths) before switching"""

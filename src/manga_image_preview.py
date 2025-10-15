@@ -1067,7 +1067,9 @@ class MangaImagePreviewWidget(QWidget):
         self.box_count_label.setText(str(len(self.viewer.rectangles)))
     
     def _persist_rectangles_state(self):
-        """Persist current rectangles to image state manager via manga_integration."""
+        """Persist current rectangles to image state manager via manga_integration.
+        Also updates in-memory _current_regions so state won't be re-saved later on selection change.
+        """
         try:
             if not hasattr(self, 'manga_integration') or not self.manga_integration:
                 return
@@ -1076,10 +1078,25 @@ class MangaImagePreviewWidget(QWidget):
                 return
             # Build regions using the same extractor (with merge) from manga_integration
             regions = self.manga_integration._extract_regions_from_preview() if hasattr(self.manga_integration, '_extract_regions_from_preview') else []
+            # Update in-memory regions on integration (prevents re-persist of stale regions)
+            try:
+                if getattr(self.manga_integration, '_current_image_path', None) == image_path:
+                    self.manga_integration._current_regions = regions
+            except Exception:
+                pass
+            # Collect current viewer rectangles geometry for persistence
+            rect_data = []
+            try:
+                for rect_item in getattr(self.viewer, 'rectangles', []) or []:
+                    r = rect_item.rect()
+                    rect_data.append({'x': r.x(), 'y': r.y(), 'width': r.width(), 'height': r.height()})
+            except Exception:
+                rect_data = []
+            # Persist
             if hasattr(self.manga_integration, 'image_state_manager') and self.manga_integration.image_state_manager:
-                # Persist detection regions for this image
                 self.manga_integration.image_state_manager.update_state(image_path, {
-                    'detection_regions': regions
+                    'detection_regions': regions,
+                    'viewer_rectangles': rect_data
                 }, save=True)
         except Exception:
             pass
@@ -1099,7 +1116,15 @@ class MangaImagePreviewWidget(QWidget):
         try:
             self.viewer.clear_rectangles()
             self._update_box_count()
-            self._persist_rectangles_state()  # Persist empty set (or any remaining)
+            # Clear detection state aggressively (both memory and persisted)
+            try:
+                if hasattr(self, 'manga_integration') and self.manga_integration:
+                    if hasattr(self.manga_integration, '_clear_detection_state_for_image'):
+                        self.manga_integration._clear_detection_state_for_image(self.current_image_path)
+            except Exception:
+                pass
+            # Persist empty state (viewer_rectangles/detection_regions)
+            self._persist_rectangles_state()
         except Exception:
             pass
     
