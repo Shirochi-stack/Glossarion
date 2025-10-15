@@ -3299,11 +3299,11 @@ class MangaTranslationTab:
         output_settings_layout.setContentsMargins(20, 10, 0, 0)
         output_settings_layout.setSpacing(10)
         
-        self.create_subfolder_checkbox = self._create_styled_checkbox("Create 'translated' subfolder for output")
-        self.create_subfolder_checkbox.setChecked(bool(getattr(self, 'create_subfolder_value', self.main_gui.config.get('manga_create_subfolder', True))))
+        self.create_cbz_checkbox = self._create_styled_checkbox("Create .cbz file at translation end")
+        self.create_cbz_checkbox.setChecked(bool(getattr(self, 'create_cbz_at_end_value', self.main_gui.config.get('manga_create_cbz_at_end', False))))
         # Persist when toggled
-        self.create_subfolder_checkbox.stateChanged.connect(self._on_create_subfolder_toggle)
-        output_settings_layout.addWidget(self.create_subfolder_checkbox)
+        self.create_cbz_checkbox.stateChanged.connect(self._on_create_cbz_toggle)
+        output_settings_layout.addWidget(self.create_cbz_checkbox)
         output_settings_layout.addStretch()
         
         visual_layout.addWidget(output_settings_frame)
@@ -5226,7 +5226,7 @@ class MangaTranslationTab:
         self.rapidocr_detection_mode_value = self.main_gui.config.get('rapidocr_detection_mode', 'document')
 
         # Output settings
-        self.create_subfolder_value = config.get('manga_create_subfolder', True)
+        self.create_cbz_at_end_value = config.get('manga_create_cbz_at_end', False)
     
     def _save_rendering_settings(self):
         """Save rendering settings with validation"""
@@ -5240,8 +5240,8 @@ class MangaTranslationTab:
                 self.full_page_context_value = bool(self.context_checkbox.isChecked())
             if hasattr(self, 'visual_context_checkbox'):
                 self.visual_context_enabled_value = bool(self.visual_context_checkbox.isChecked())
-            if hasattr(self, 'create_subfolder_checkbox'):
-                self.create_subfolder_value = bool(self.create_subfolder_checkbox.isChecked())
+            if hasattr(self, 'create_cbz_checkbox'):
+                self.create_cbz_at_end_value = bool(self.create_cbz_checkbox.isChecked())
         except Exception:
             pass
         
@@ -5378,8 +5378,8 @@ class MangaTranslationTab:
                 self.main_gui.config['manga_shadow_blur'] = self.shadow_blur_value
             
             # Save output settings
-            if hasattr(self, 'create_subfolder_value'):
-                self.main_gui.config['manga_create_subfolder'] = self.create_subfolder_value
+            if hasattr(self, 'create_cbz_at_end_value'):
+                self.main_gui.config['manga_create_cbz_at_end'] = self.create_cbz_at_end_value
             
             # Save full page context settings
             if hasattr(self, 'full_page_context_value'):
@@ -11583,6 +11583,57 @@ class MangaTranslationTab:
             self._log(f"❌ Failed to process translation results: {str(e)}", "error")
     
     
+    def _create_cbz_from_isolated_folders(self):
+        """Create a single CBZ file from all isolated *_translated folders"""
+        import zipfile
+        
+        try:
+            if not self.selected_files or len(self.selected_files) == 0:
+                return
+            
+            # Get parent directory
+            first_file = self.selected_files[0]
+            parent_dir = os.path.dirname(first_file)
+            
+            # Find all *_translated folders
+            translated_folders = []
+            for item in os.listdir(parent_dir):
+                item_path = os.path.join(parent_dir, item)
+                if os.path.isdir(item_path) and item.endswith('_translated'):
+                    translated_folders.append(item_path)
+            
+            if not translated_folders:
+                self._log("⚠️ No translated folders found for CBZ creation", "warning")
+                return
+            
+            # Create CBZ filename based on parent folder name
+            parent_folder_name = os.path.basename(parent_dir)
+            cbz_filename = f"{parent_folder_name}_translated.cbz"
+            cbz_path = os.path.join(parent_dir, cbz_filename)
+            
+            # Counter for images
+            image_count = 0
+            image_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
+            
+            # Create CBZ (ZIP) file
+            with zipfile.ZipFile(cbz_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                # Sort folders to maintain order
+                for folder in sorted(translated_folders):
+                    # Get all images from this folder
+                    for filename in sorted(os.listdir(folder)):
+                        if filename.lower().endswith(image_extensions):
+                            src_path = os.path.join(folder, filename)
+                            # Add to CBZ with just the filename (flat structure)
+                            zf.write(src_path, filename)
+                            image_count += 1
+            
+            self._log(f"📦 Created CBZ file with {image_count} images: {cbz_filename}", "success")
+            
+        except Exception as e:
+            self._log(f"❌ Error creating CBZ file: {str(e)}", "error")
+            import traceback
+            self._log(traceback.format_exc(), "debug")
+    
     def _finalize_cbz_jobs(self):
         """Package translated outputs back into .cbz for each imported CBZ.
         - Always creates a CLEAN archive with only final translated pages.
@@ -13470,13 +13521,13 @@ class MangaTranslationTab:
             pass
         self._log(f"  Full Page Context: {'Enabled' if self.full_page_context_value else 'Disabled'}", "info")
     
-    def _on_create_subfolder_toggle(self, state=None):
-        """Handle create 'translated' subfolder toggle"""
+    def _on_create_cbz_toggle(self, state=None):
+        """Handle create .cbz file at translation end toggle"""
         try:
-            enabled = bool(self.create_subfolder_checkbox.isChecked()) if hasattr(self, 'create_subfolder_checkbox') else bool(state)
+            enabled = bool(self.create_cbz_checkbox.isChecked()) if hasattr(self, 'create_cbz_checkbox') else bool(state)
         except Exception:
             enabled = bool(state)
-        self.create_subfolder_value = enabled
+        self.create_cbz_at_end_value = enabled
         # Persist with the existing save mechanism
         self._save_rendering_settings()
     
@@ -13728,13 +13779,15 @@ class MangaTranslationTab:
                         except Exception:
                             output_path = None
                         if not output_path:
-                            if self.create_subfolder_value:
-                                output_dir = os.path.join(os.path.dirname(filepath), 'translated')
-                                os.makedirs(output_dir, exist_ok=True)
-                                output_path = os.path.join(output_dir, filename)
-                            else:
-                                base, ext = os.path.splitext(filepath)
-                                output_path = f"{base}_translated{ext}"
+                            # CRITICAL FIX: Create separate folder for EACH image to prevent overlays
+                            # This enables thread-safe parallel translation and instant feedback
+                            base_name = os.path.splitext(filename)[0]
+                            parent_dir = os.path.dirname(filepath)
+                            
+                            # Create unique folder per image for isolation
+                            output_dir = os.path.join(parent_dir, f"{base_name}_translated")
+                            os.makedirs(output_dir, exist_ok=True)
+                            output_path = os.path.join(output_dir, filename)
                         
                         # Start monitoring this image for auto-updating preview
                         self._monitor_translation_output(filepath)
@@ -13958,13 +14011,16 @@ class MangaTranslationTab:
                         if job_output_path:
                             output_path = job_output_path
                         else:
-                            if self.create_subfolder_value:
-                                output_dir = os.path.join(os.path.dirname(filepath), 'translated')
-                                os.makedirs(output_dir, exist_ok=True)
-                                output_path = os.path.join(output_dir, filename)
-                            else:
-                                base, ext = os.path.splitext(filepath)
-                                output_path = f"{base}_translated{ext}"
+                            # CRITICAL FIX: Create separate folder for EACH image to prevent overlays
+                            # This enables thread-safe parallel translation and instant feedback
+                            # Each image gets its own isolated folder like: image001_translated/image001.png
+                            base_name = os.path.splitext(filename)[0]
+                            parent_dir = os.path.dirname(filepath)
+                            
+                            # Create unique folder per image for isolation
+                            output_dir = os.path.join(parent_dir, f"{base_name}_translated")
+                            os.makedirs(output_dir, exist_ok=True)
+                            output_path = os.path.join(output_dir, filename)
                         
                         # Process the image
                         result = self.translator.process_image(filepath, output_path)
@@ -14069,6 +14125,13 @@ class MangaTranslationTab:
             except Exception:
                 pass
             
+            # Create CBZ from isolated folders if enabled
+            if hasattr(self, 'create_cbz_at_end_value') and self.create_cbz_at_end_value:
+                try:
+                    self._create_cbz_from_isolated_folders()
+                except Exception as e:
+                    self._log(f"⚠️ Failed to create CBZ file: {e}", "warning")
+            
             # Final summary - only if not stopped
             if not self.stop_flag.is_set():
                 self._log(f"\n{'='*60}", "info")
@@ -14086,21 +14149,18 @@ class MangaTranslationTab:
                 
                 # Enable download button and preview mode if translation succeeded
                 if self.completed_files > 0 and hasattr(self, 'image_preview_widget'):
-                    # Determine translated folder path
+                    # Determine translated folder path (use parent directory for isolated folders)
                     translated_folder = None
                     if self.selected_files and len(self.selected_files) > 0:
                         first_file = self.selected_files[0]
-                        if self.create_subfolder_value:
-                            translated_folder = os.path.join(os.path.dirname(first_file), 'translated')
-                        else:
-                            # For non-subfolder mode, use parent directory
-                            translated_folder = os.path.dirname(first_file)
+                        # Always use parent directory now - isolated folders are children of this
+                        translated_folder = os.path.dirname(first_file)
                     
                     # Set translated folder via update queue (main thread) for GUI updates
                     if translated_folder and os.path.exists(translated_folder):
                         try:
                             self.update_queue.put(('set_translated_folder', translated_folder))
-                            self._log(f"💻 Preview mode will be updated with translated images from: {translated_folder}", "info")
+                            self._log(f"💻 Preview mode will be updated with isolated translated images", "info")
                         except Exception as e:
                             self._log(f"⚠️ Failed to queue preview mode update: {e}", "warning")
             

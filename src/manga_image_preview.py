@@ -1236,74 +1236,123 @@ class MangaImagePreviewWidget(QWidget):
             print(traceback.format_exc())
     
     def _on_download_images_clicked(self):
-        """Handle download images button - open file dialog to save translated images"""
+        """Handle download images button - consolidate isolated images into structured folder"""
         try:
-            from PySide6.QtWidgets import QFileDialog
+            from PySide6.QtWidgets import QFileDialog, QMessageBox
             import shutil
+            import glob
             
-            # Check if we have a translated folder path stored
-            if not hasattr(self, 'translated_folder_path') or not self.translated_folder_path:
-                print("[DEBUG] No translated folder path available")
+            # Get the parent directory of translated images
+            # Since each image is now in its own *_translated/ folder, we need to find them
+            if not hasattr(self, 'manga_integration') or not self.manga_integration:
+                print("[DEBUG] No manga_integration reference available")
                 return
             
-            if not os.path.exists(self.translated_folder_path):
-                print(f"[DEBUG] Translated folder does not exist: {self.translated_folder_path}")
+            # Get the source directory from selected files
+            if not hasattr(self.manga_integration, 'selected_files') or not self.manga_integration.selected_files:
+                print("[DEBUG] No selected files available")
                 return
             
-            # Get destination folder from user
-            dest_folder = QFileDialog.getExistingDirectory(
-                self,
-                "Select Destination Folder for Translated Images",
-                os.path.expanduser("~"),
-                QFileDialog.Option.ShowDirsOnly
-            )
+            # Get parent directory of the first selected file
+            first_file = self.manga_integration.selected_files[0]
+            parent_dir = os.path.dirname(first_file)
             
-            if not dest_folder:
-                print("[DEBUG] User cancelled folder selection")
+            # Find all *_translated folders in the parent directory
+            translated_folders = []
+            for item in os.listdir(parent_dir):
+                item_path = os.path.join(parent_dir, item)
+                if os.path.isdir(item_path) and item.endswith('_translated'):
+                    translated_folders.append(item_path)
+            
+            if not translated_folders:
+                QMessageBox.warning(
+                    self,
+                    "No Translated Images",
+                    "No translated images found. Please translate some images first."
+                )
                 return
             
-            # Copy all images from translated folder to destination
-            image_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp')
+            print(f"[DEBUG] Found {len(translated_folders)} translated folders")
+            
+            # Create consolidated "translated" folder in parent directory
+            consolidated_folder = os.path.join(parent_dir, 'translated')
+            os.makedirs(consolidated_folder, exist_ok=True)
+            
+            # Copy all images from isolated folders to consolidated folder
+            image_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
             copied_count = 0
             
-            for filename in os.listdir(self.translated_folder_path):
-                if filename.lower().endswith(image_extensions):
-                    src_path = os.path.join(self.translated_folder_path, filename)
-                    dest_path = os.path.join(dest_folder, filename)
-                    shutil.copy2(src_path, dest_path)
-                    copied_count += 1
+            for folder in translated_folders:
+                for filename in os.listdir(folder):
+                    if filename.lower().endswith(image_extensions):
+                        src_path = os.path.join(folder, filename)
+                        dest_path = os.path.join(consolidated_folder, filename)
+                        
+                        # Handle potential filename conflicts
+                        if os.path.exists(dest_path):
+                            base, ext = os.path.splitext(filename)
+                            counter = 1
+                            while os.path.exists(dest_path):
+                                dest_path = os.path.join(consolidated_folder, f"{base}_{counter}{ext}")
+                                counter += 1
+                        
+                        shutil.copy2(src_path, dest_path)
+                        copied_count += 1
             
-            print(f"[DEBUG] Successfully copied {copied_count} translated images to {dest_folder}")
+            print(f"[DEBUG] Successfully consolidated {copied_count} translated images to {consolidated_folder}")
             
-            # Show success message (could be enhanced with a QMessageBox)
-            from PySide6.QtWidgets import QMessageBox
+            # Show success message
             QMessageBox.information(
                 self,
                 "Download Complete",
-                f"Successfully downloaded {copied_count} translated images to:\n{dest_folder}"
+                f"Successfully consolidated {copied_count} translated images into:\n{consolidated_folder}\n\n"
+                f"All images from separate folders have been combined into a single 'translated' folder."
             )
             
         except Exception as e:
             print(f"[DEBUG] Error downloading images: {str(e)}")
             import traceback
             print(traceback.format_exc())
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(
+                self,
+                "Download Error",
+                f"Failed to consolidate images:\n{str(e)}"
+            )
     
     def set_translated_folder(self, folder_path: str):
         """Set the translated folder path and enable download button"""
         self.translated_folder_path = folder_path
+        
+        # NEW: Check for isolated *_translated folders in parent directory
+        has_translated_images = False
+        
         if folder_path and os.path.exists(folder_path):
-            # Check if folder has images
-            image_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp')
-            has_images = any(
-                f.lower().endswith(image_extensions) 
-                for f in os.listdir(folder_path)
-            )
-            self.download_btn.setEnabled(has_images)
-            print(f"[DEBUG] Translated folder set: {folder_path}, has images: {has_images}")
+            parent_dir = os.path.dirname(folder_path) if os.path.isfile(folder_path) else folder_path
+            
+            # Look for isolated *_translated folders
+            image_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
+            for item in os.listdir(parent_dir):
+                item_path = os.path.join(parent_dir, item)
+                if os.path.isdir(item_path) and item.endswith('_translated'):
+                    # Check if this folder has images
+                    if any(f.lower().endswith(image_extensions) for f in os.listdir(item_path)):
+                        has_translated_images = True
+                        break
+            
+            # Also check the folder_path itself for backward compatibility
+            if not has_translated_images and os.path.isdir(folder_path):
+                has_translated_images = any(
+                    f.lower().endswith(image_extensions) 
+                    for f in os.listdir(folder_path)
+                )
+            
+            self.download_btn.setEnabled(has_translated_images)
+            print(f"[DEBUG] Translated images found: {has_translated_images}")
             
             # If manual editing is disabled (preview mode), load translated images
-            if not self.manual_editing_enabled and has_images:
-                self._load_translated_preview(folder_path)
+            if not self.manual_editing_enabled and has_translated_images:
+                self._load_isolated_translated_preview(parent_dir)
         else:
             self.download_btn.setEnabled(False)
     
@@ -1336,5 +1385,45 @@ class MangaImagePreviewWidget(QWidget):
             
         except Exception as e:
             print(f"[DEBUG] Error loading translated preview: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
+    
+    def _load_isolated_translated_preview(self, parent_dir: str):
+        """Load translated images from isolated *_translated folders into preview mode"""
+        try:
+            print(f"[DEBUG] Loading isolated translated images from: {parent_dir}")
+            
+            # Get all translated images from isolated folders
+            image_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
+            translated_images = []
+            
+            # Find all *_translated folders
+            for item in os.listdir(parent_dir):
+                item_path = os.path.join(parent_dir, item)
+                if os.path.isdir(item_path) and item.endswith('_translated'):
+                    # Get images from this folder
+                    for filename in os.listdir(item_path):
+                        if filename.lower().endswith(image_extensions):
+                            translated_images.append(os.path.join(item_path, filename))
+            
+            # Sort by filename for consistent ordering
+            translated_images = sorted(translated_images)
+            
+            if not translated_images:
+                print("[DEBUG] No translated images found in isolated folders")
+                return
+            
+            print(f"[DEBUG] Found {len(translated_images)} translated images in isolated folders")
+            
+            # Update thumbnail list with translated images
+            self.set_image_list(translated_images)
+            
+            # Load the first translated image
+            if translated_images:
+                self.load_image(translated_images[0])
+                print(f"[DEBUG] Loaded first translated image: {os.path.basename(translated_images[0])}")
+            
+        except Exception as e:
+            print(f"[DEBUG] Error loading isolated translated preview: {str(e)}")
             import traceback
             print(traceback.format_exc())
