@@ -8042,23 +8042,41 @@ class MangaTranslationTab:
             self._restore_clean_button()
     
     def _extract_regions_from_preview(self) -> list:
-        """Extract regions from currently displayed rectangles in the preview widget"""
+        """Extract regions from currently displayed rectangles in the preview widget,
+        merging overlapping boxes using the regular pipeline's logic.
+        """
         regions = []
         try:
             if hasattr(self.image_preview_widget, 'viewer') and self.image_preview_widget.viewer.rectangles:
+                # Collect raw bboxes first
+                raw_bboxes = []
                 for rect_item in self.image_preview_widget.viewer.rectangles:
                     rect = rect_item.rect()
-                    # Convert QRectF to region dictionary format
+                    raw_bboxes.append([int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height())])
+                
+                # Merge overlaps using MangaTranslator's implementation
+                try:
+                    from manga_translator import merge_overlapping_boxes
+                    merged_bboxes = merge_overlapping_boxes(raw_bboxes, containment_threshold=0.3, overlap_threshold=0.5)
+                    if len(merged_bboxes) < len(raw_bboxes):
+                        self._log(f"✅ Merged {len(raw_bboxes)} preview boxes → {len(merged_bboxes)} unique boxes", "debug")
+                except Exception as me:
+                    # Fallback to raw if merge not available
+                    merged_bboxes = raw_bboxes
+                    self._log(f"⚠️ Merge unavailable, using raw rectangles: {me}", "debug")
+                
+                # Build region dicts from merged bboxes
+                for (x, y, w, h) in merged_bboxes:
                     region_dict = {
-                        'bbox': [int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height())],  # (x, y, width, height)
-                        'coords': [[int(rect.x()), int(rect.y())], 
-                                  [int(rect.x() + rect.width()), int(rect.y())], 
-                                  [int(rect.x() + rect.width()), int(rect.y() + rect.height())], 
-                                  [int(rect.x()), int(rect.y() + rect.height())]],  # Corner coordinates
-                        'confidence': 1.0  # Manual/detected regions are treated as 100% confidence
+                        'bbox': [int(x), int(y), int(w), int(h)],
+                        'coords': [[int(x), int(y)], 
+                                   [int(x + w), int(y)], 
+                                   [int(x + w), int(y + h)], 
+                                   [int(x), int(y + h)]],
+                        'confidence': 1.0
                     }
                     regions.append(region_dict)
-                self._log(f"🎯 Extracted {len(regions)} regions from preview rectangles", "info")
+                self._log(f"🎯 Extracted {len(regions)} merged regions from preview rectangles", "info")
             else:
                 self._log("⚠️ No rectangles found in preview widget", "warning")
         except Exception as e:
