@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Glossarion Heavy v6.0.7 - PyInstaller Specification File
+Glossarion Heavy v6.0.9 - PyInstaller Specification File
 Enhanced Translation Tool with QA Scanner, AI Hunter, and Manga Translation
 """
 
@@ -12,7 +12,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'H_Glossarion Heavy v6.0.7'  # CHANGED: Updated version
+APP_NAME = 'H_Glossarion Heavy v6.0.9'  # CHANGED: Updated version
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = True  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
@@ -179,6 +179,7 @@ if platform.system() == 'Windows':
 # Add icons and images to data
 datas.append(('Halgakos.ico', '.'))
 datas.append(('Halgakos_NoChibi.png', '.'))
+datas.append(('WhereIsMyOutput.png', '.'))
 
 app_files = [
     # Core GUI

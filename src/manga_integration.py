@@ -8178,7 +8178,11 @@ class MangaTranslationTab:
                     pass
 
                 # Update Output viewer with cleaned image (no tab switch)
-                self.update_queue.put(('preview_update', cleaned_path))
+                # Update Output viewer with cleaned image (include source for image-aware gating)
+                self.update_queue.put(('preview_update', {
+                    'translated_path': cleaned_path,
+                    'source_path': image_path
+                }))
                 self._log(f"✅ Cleaning complete!", "success")
             else:
                 self._log("❌ Inpainting failed", "error")
@@ -9223,7 +9227,11 @@ class MangaTranslationTab:
                 self._log(f"✅ Inpainting complete!", "success")
                 self._cleaned_image_path = cleaned_image_path
                 # Show cleaned image in Output tab (no auto switch)
-                self.update_queue.put(('preview_update', cleaned_image_path))
+                # Show cleaned only if it's the current image once handled on main thread
+                self.update_queue.put(('preview_update', {
+                    'translated_path': cleaned_image_path,
+                    'source_path': image_path
+                }))
             else:
                 print(f"[TRANSLATE] Inpainting failed or returned no path")
                 self._log(f"⚠️ Inpainting failed, using original image", "warning")
@@ -10178,7 +10186,7 @@ class MangaTranslationTab:
             print(f"[DEBUG] Traceback:\n{traceback_str}")
             self._log(f"❌ Rendering failed: {str(e)}", "error")
     
-    def _render_with_manga_translator(self, image_path: str, regions, output_path: str = None, image_bgr=None, original_image_path: str = None):
+    def _render_with_manga_translator(self, image_path: str, regions, output_path: str = None, image_bgr=None, original_image_path: str = None, switch_tab: bool = True):
         """Render translated text using MangaTranslator's PIL pipeline.
         - image_bgr: optional OpenCV BGR image to render on (in-memory, preferred if provided)
         - output_path: where to save the rendered image (isolated per-image folder)
@@ -10303,9 +10311,10 @@ class MangaTranslationTab:
             try:
                 self.image_preview_widget.output_viewer.load_image(output_path)
                 self.image_preview_widget.current_translated_path = output_path
-                # On translation end: switch to the Translated Output tab (no image source switching)
-                self.image_preview_widget.viewer_tabs.setCurrentIndex(1)
-                print(f"[RENDER] Image loaded into output tab and switched to Output tab")
+                # Optionally switch to the Translated Output tab (disabled during batch)
+                if switch_tab and not getattr(self, '_batch_mode_active', False):
+                    self.image_preview_widget.viewer_tabs.setCurrentIndex(1)
+                print(f"[RENDER] Image loaded into output tab")
             finally:
                 self._rendering_in_progress = False
             
@@ -11048,6 +11057,8 @@ class MangaTranslationTab:
         self._log("🚀 Starting batch translation of all images", "info")
         
         try:
+            # Mark batch mode active (used to suppress preview shuffles)
+            self._batch_mode_active = True
             # Snapshot toggles on UI thread so background can read safely
             try:
                 fp = False
@@ -11302,6 +11313,11 @@ class MangaTranslationTab:
             self.update_queue.put(('remove_processing_overlay', None))
             # Restore button
             self.update_queue.put(('translate_all_button_restore', None))
+            # Clear batch mode flag
+            try:
+                self._batch_mode_active = False
+            except Exception:
+                pass
     
     def _restore_translate_all_button(self):
         """Restore the translate all button to its original state"""
@@ -11495,34 +11511,26 @@ class MangaTranslationTab:
                 print(f"[TRANSLATE] Available viewer rectangles: {len(rectangles)}")
                 self._log(f"🎨 Rendering translations with PIL pipeline...", "info")
                 
-                # Build TextRegion objects using region_index mapping to viewer rectangles
+                # Build TextRegion objects using bbox from results (image-aware, no dependency on viewer)
                 from manga_translator import TextRegion
                 regions = []
                 
                 for i, result in enumerate(translated_texts):
-                    region_index = result['original'].get('region_index', i)
-                    print(f"[TRANSLATE] Processing result {i}: region_index={region_index}, rectangles available={len(rectangles)}")
+                    bbox = result.get('bbox')
+                    if not bbox or len(bbox) < 4:
+                        continue
+                    x, y, w, h = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+                    vertices = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
                     
-                    if region_index < len(rectangles):
-                        rect = rectangles[region_index].rect()
-                        x, y, w, h = int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height())
-                        vertices = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
-                        
-                        print(f"[TRANSLATE] Building region {i+1} from rectangle {region_index}: bbox=({x},{y},{w},{h})")
-                        
-                        region = TextRegion(
-                            text=result['original']['text'],
-                            vertices=vertices,
-                            bounding_box=(x, y, w, h),
-                            confidence=1.0,
-                            region_type='text_block'
-                        )
-                        # Set the translation directly
-                        region.translated_text = result['translation']
-                        regions.append(region)
-                        print(f"[TRANSLATE] Region {i+1} added: '{result['original']['text'][:30]}...' -> '{result['translation'][:30]}...'")
-                    else:
-                        print(f"[TRANSLATE] WARNING: region_index {region_index} >= len(rectangles) {len(rectangles)}, skipping")
+                    region = TextRegion(
+                        text=result['original']['text'],
+                        vertices=vertices,
+                        bounding_box=(x, y, w, h),
+                        confidence=1.0,
+                        region_type='text_block'
+                    )
+                    region.translated_text = result['translation']
+                    regions.append(region)
                 
                 print(f"\n[TRANSLATE] Final region count: {len(regions)}")
                 
@@ -11571,7 +11579,8 @@ class MangaTranslationTab:
                             regions,
                             output_path=target_output_path,
                             image_bgr=image_bgr,
-                            original_image_path=original_image_path
+                            original_image_path=original_image_path,
+                            switch_tab=False  # do not switch tabs during batch
                         )
                         print(f"[TRANSLATE] Returned from _render_with_manga_translator")
                     else:
@@ -12250,8 +12259,16 @@ class MangaTranslationTab:
                         # Handle both string and dict formats
                         if isinstance(data, dict):
                             translated_path = data.get('translated_path')
+                            source_path = data.get('source_path')
                         else:
                             translated_path = data
+                            source_path = None
+                        
+                        # During batch mode, only update output preview for the current image
+                        if getattr(self, '_batch_mode_active', False) and source_path and \
+                           source_path != getattr(self.image_preview_widget, 'current_image_path', None):
+                            print(f"[PREVIEW_UPDATE] Skipping preview update (not current image in batch)")
+                            return
                         
                         if hasattr(self, 'image_preview_widget') and os.path.exists(translated_path):
                             print(f"[PREVIEW_UPDATE] Loading translated image into output tab: {translated_path}")
