@@ -9378,6 +9378,46 @@ class MangaTranslationTab:
             print(f"[DEBUG] Visual context enabled: {include_page_image}")
             print(f"[DEBUG] Image path: {image_path}")
             
+            # Get API key and model from main GUI once
+            from unified_api_client import UnifiedClient
+            api_key = self.main_gui.api_key_entry.text().strip() if hasattr(self.main_gui, 'api_key_entry') else ''
+            model = self.main_gui.model_var if hasattr(self.main_gui, 'model_var') else 'gpt-4o-mini'
+            
+            if not api_key:
+                raise ValueError("No API key found in main GUI")
+            
+            # Get or create cached UnifiedClient (reuse across all regions in this batch)
+            client_cache_key = f"{model}_{hash(api_key)}"
+            if not hasattr(self, '_unified_client_cache'):
+                self._unified_client_cache = {}
+            
+            if client_cache_key not in self._unified_client_cache:
+                print(f"[DEBUG] Creating new UnifiedClient with model: {model}")
+                self._unified_client_cache[client_cache_key] = UnifiedClient(model=model, api_key=api_key)
+            else:
+                print(f"[DEBUG] Reusing cached UnifiedClient with model: {model}")
+            
+            client = self._unified_client_cache[client_cache_key]
+            
+            # Get system prompt from GUI profile (same as regular pipeline)
+            system_prompt = self._get_system_prompt_from_gui()
+            if not system_prompt:
+                raise ValueError("No system prompt configured in GUI profile - translation cannot proceed")
+            
+            # Preload image data once if visual context is enabled
+            image_base64 = None
+            if include_page_image and image_path and os.path.exists(image_path):
+                print(f"[DEBUG] Preloading image data for visual context...")
+                try:
+                    with open(image_path, 'rb') as img_file:
+                        image_data = img_file.read()
+                    import base64
+                    image_base64 = base64.b64encode(image_data).decode('utf-8')
+                    print(f"[DEBUG] Image data preloaded: {len(image_base64)} bytes (base64)")
+                except Exception as img_error:
+                    print(f"[DEBUG] Failed to preload image: {str(img_error)}")
+                    image_base64 = None
+            
             translated_texts = []
             
             # Process each recognized text
@@ -9388,90 +9428,26 @@ class MangaTranslationTab:
                 
                 try:
                     # Prepare translation request
-                    if include_page_image and image_path and os.path.exists(image_path):
-                        # Include visual context
+                    prompt = text
+                    messages = []
+                    if system_prompt:
+                        messages.append({"role": "system", "content": system_prompt})
+                    messages.append({"role": "user", "content": prompt})
+                    
+                    if image_base64:
+                        # Visual context translation
                         print(f"[DEBUG] Using visual context for translation")
                         self._log(f"🖼️ Translating with visual context: '{text[:50]}...'", "info")
-                        
-                        # Get system prompt from GUI profile (same as regular pipeline)
-                        system_prompt = self._get_system_prompt_from_gui()
-                        
-                        if not system_prompt:
-                            raise ValueError("No system prompt configured in GUI profile - translation cannot proceed")
-                        
-                        # Just send the text to translate - the system prompt has all instructions
-                        prompt = text
-                        
-                        # Create UnifiedClient for visual context translation
-                        print(f"[DEBUG] Creating UnifiedClient for visual translation...")
-                        try:
-                            from unified_api_client import UnifiedClient
-                            # Get API key and model from main GUI
-                            api_key = self.main_gui.api_key_entry.text().strip() if hasattr(self.main_gui, 'api_key_entry') else ''
-                            model = self.main_gui.model_var if hasattr(self.main_gui, 'model_var') else 'gpt-4o-mini'
-                            
-                            if not api_key:
-                                raise ValueError("No API key found in main GUI")
-                            
-                            client = UnifiedClient(model=model, api_key=api_key)
-                            print(f"[DEBUG] Created UnifiedClient for visual context with model: {model}")
-                            
-                            print(f"[DEBUG] Calling client.send_image()...")
-                            messages = []
-                            if system_prompt:
-                                messages.append({"role": "system", "content": system_prompt})
-                            messages.append({"role": "user", "content": prompt})
-                            # Read image file
-                            with open(image_path, 'rb') as img_file:
-                                image_data = img_file.read()
-                            import base64
-                            image_base64 = base64.b64encode(image_data).decode('utf-8')
-                            
-                            response = client.send_image(messages, image_base64, temperature=0.3, max_tokens=4000)
-                            print(f"[DEBUG] Got response: {response[:100] if response else 'None'}...")
-                            
-                        except Exception as client_error:
-                            print(f"[DEBUG] UnifiedClient creation for visual context error: {str(client_error)}")
-                            raise client_error
+                        print(f"[DEBUG] Calling client.send_image() with cached client...")
+                        response = client.send_image(messages, image_base64, temperature=0.3, max_tokens=4000)
+                        print(f"[DEBUG] Got response: {response[:100] if response else 'None'}...")
                     else:
                         # Text-only translation
                         print(f"[DEBUG] Using text-only translation")
                         self._log(f"📝 Translating text: '{text[:50]}...'", "info")
-                        
-                        # Get system prompt from GUI profile (same as regular pipeline)
-                        system_prompt = self._get_system_prompt_from_gui()
-                        
-                        if not system_prompt:
-                            raise ValueError("No system prompt configured in GUI profile - translation cannot proceed")
-                        
-                        # Just send the text to translate - the system prompt has all instructions
-                        prompt = text
-                        
-                        # Create UnifiedClient for translation (same as main GUI does)
-                        print(f"[DEBUG] Creating UnifiedClient for translation...")
-                        try:
-                            from unified_api_client import UnifiedClient
-                            # Get API key and model from main GUI
-                            api_key = self.main_gui.api_key_entry.text().strip() if hasattr(self.main_gui, 'api_key_entry') else ''
-                            model = self.main_gui.model_var if hasattr(self.main_gui, 'model_var') else 'gpt-4o-mini'
-                            
-                            if not api_key:
-                                raise ValueError("No API key found in main GUI")
-                            
-                            client = UnifiedClient(model=model, api_key=api_key)
-                            print(f"[DEBUG] Created UnifiedClient with model: {model}")
-                            
-                            print(f"[DEBUG] Calling client.send()...")
-                            messages = []
-                            if system_prompt:
-                                messages.append({"role": "system", "content": system_prompt})
-                            messages.append({"role": "user", "content": prompt})
-                            response = client.send(messages, temperature=0.3, max_tokens=4000)
-                            print(f"[DEBUG] Got response: {response[:100] if response else 'None'}...")
-                            
-                        except Exception as client_error:
-                            print(f"[DEBUG] UnifiedClient creation error: {str(client_error)}")
-                            raise client_error
+                        print(f"[DEBUG] Calling client.send() with cached client...")
+                        response = client.send(messages, temperature=0.3, max_tokens=4000)
+                        print(f"[DEBUG] Got response: {response[:100] if response else 'None'}...")
                     
                     # Extract translated text from response (UnifiedClient returns tuple or response object)
                     if hasattr(response, 'content'):
