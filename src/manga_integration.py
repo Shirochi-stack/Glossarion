@@ -7811,9 +7811,10 @@ class MangaTranslationTab:
             if 'rendered_image_path' in state:
                 rendered_path = state['rendered_image_path']
                 if os.path.exists(rendered_path):
-                    # Load the rendered image into preview
-                    self.image_preview_widget.load_image(rendered_path)
-                    print(f"[STATE] Loaded rendered image: {os.path.basename(rendered_path)}")
+                    # Load the rendered image into the OUTPUT viewer (do not replace source)
+                    self.image_preview_widget.output_viewer.load_image(rendered_path)
+                    self.image_preview_widget.current_translated_path = rendered_path
+                    print(f"[STATE] Loaded rendered image into output tab: {os.path.basename(rendered_path)}")
                     
                     # Store mapping
                     if not hasattr(self, '_rendered_images_map'):
@@ -10288,14 +10289,17 @@ class MangaTranslationTab:
                 }, save=True)
                 print(f"[RENDER] Saved rendered image path to state for {os.path.basename(original_path)}")
             
-            # Load the rendered image into preview
-            print(f"[RENDER] Loading rendered image into preview...")
+            # Show the rendered image in the OUTPUT tab (keep source image intact)
+            print(f"[RENDER] Loading rendered image into output tab...")
             
             # SET FLAG to prevent triggering another processing cycle
             self._rendering_in_progress = True
             try:
-                self.image_preview_widget.load_image(output_path, preserve_rectangles=False, preserve_text_overlays=False)
-                print(f"[RENDER] Image loaded into preview")
+                self.image_preview_widget.output_viewer.load_image(output_path)
+                self.image_preview_widget.current_translated_path = output_path
+                # Switch to the output tab to show result immediately
+                self.image_preview_widget.viewer_tabs.setCurrentIndex(1)
+                print(f"[RENDER] Image loaded into output tab")
             finally:
                 self._rendering_in_progress = False
             
@@ -12214,43 +12218,16 @@ class MangaTranslationTab:
                         # Handle both string and dict formats
                         if isinstance(data, dict):
                             translated_path = data.get('translated_path')
-                            source_path = data.get('source_path')
                         else:
                             translated_path = data
-                            source_path = None
                         
                         if hasattr(self, 'image_preview_widget') and os.path.exists(translated_path):
-                            print(f"[PREVIEW_UPDATE] Loading translated image: {translated_path}")
-                            self.image_preview_widget.load_image(translated_path)
-                            print(f"[PREVIEW_UPDATE] ✅ Preview updated successfully")
-                            
-                            # CRITICAL: Update BOTH image_paths AND selected_files to persist translated versions
-                            if source_path:
-                                source_path_norm = os.path.normpath(source_path)
-                                translated_path_norm = os.path.normpath(translated_path)
-                                
-                                # Update image_paths in preview widget
-                                if hasattr(self.image_preview_widget, 'image_paths'):
-                                    for i, img_path in enumerate(self.image_preview_widget.image_paths):
-                                        if os.path.normpath(img_path) == source_path_norm:
-                                            self.image_preview_widget.image_paths[i] = translated_path_norm
-                                            print(f"[PREVIEW_UPDATE] Updated image_paths[{i}] to translated version")
-                                            break
-                                
-                                # Update selected_files list so file selection loads translated versions
-                                if hasattr(self, 'selected_files'):
-                                    for i, img_path in enumerate(self.selected_files):
-                                        if os.path.normpath(img_path) == source_path_norm:
-                                            self.selected_files[i] = translated_path_norm
-                                            print(f"[PREVIEW_UPDATE] Updated selected_files[{i}] to translated version")
-                                            # Also update the file listbox display to show it's translated
-                                            if hasattr(self, 'file_listbox') and i < self.file_listbox.count():
-                                                item = self.file_listbox.item(i)
-                                                if item:
-                                                    base_name = os.path.basename(translated_path_norm)
-                                                    item.setText(f"✅ {base_name}")
-                                                    print(f"[PREVIEW_UPDATE] Updated listbox item {i} display")
-                                            break
+                            print(f"[PREVIEW_UPDATE] Loading translated image into output tab: {translated_path}")
+                            self.image_preview_widget.output_viewer.load_image(translated_path)
+                            self.image_preview_widget.current_translated_path = translated_path
+                            # Switch to output tab to show the result
+                            self.image_preview_widget.viewer_tabs.setCurrentIndex(1)
+                            print(f"[PREVIEW_UPDATE] ✅ Output tab updated successfully")
                     except Exception as e:
                         print(f"[PREVIEW_UPDATE] ❌ Error updating preview: {e}")
                         import traceback
@@ -12285,10 +12262,8 @@ class MangaTranslationTab:
                             # Store original path for state restoration
                             original_image_path = image_path
                             
-                            # CHECK FOR TRANSLATED IMAGE IN ISOLATED FOLDER FIRST
-                            display_image_path = image_path
-                            
-                            # Priority 1: Check for translated image in isolated folder
+                            # Determine if a translated image exists for the OUTPUT tab
+                            translated_image_path = None
                             filename = os.path.basename(image_path)
                             base_name = os.path.splitext(filename)[0]
                             parent_dir = os.path.dirname(image_path)
@@ -12296,29 +12271,31 @@ class MangaTranslationTab:
                             isolated_image = os.path.join(isolated_folder, filename)
                             
                             if os.path.exists(isolated_image):
-                                display_image_path = isolated_image
-                                print(f"[LOAD_IMAGE] Using translated image from isolated folder: {os.path.basename(isolated_image)}")
+                                translated_image_path = isolated_image
+                                print(f"[LOAD_IMAGE] Found translated image in isolated folder: {os.path.basename(isolated_image)}")
                             else:
-                                # Priority 2: Check state manager for rendered image
+                                # Check state manager for rendered image
                                 if hasattr(self, 'image_state_manager'):
                                     state = self.image_state_manager.get_state(original_image_path)
-                                    if state and 'rendered_image_path' in state:
-                                        rendered_path = state['rendered_image_path']
-                                        if os.path.exists(rendered_path):
-                                            display_image_path = rendered_path
-                                            print(f"[LOAD_IMAGE] Using rendered image from state: {os.path.basename(rendered_path)}")
-                                
-                                # Priority 3: Also check _rendered_images_map
-                                if display_image_path == image_path and hasattr(self, '_rendered_images_map') and original_image_path in self._rendered_images_map:
-                                    rendered_path = self._rendered_images_map[original_image_path]
-                                    if os.path.exists(rendered_path):
-                                        display_image_path = rendered_path
-                                        print(f"[LOAD_IMAGE] Using rendered image from map: {os.path.basename(rendered_path)}")
+                                    if state and 'rendered_image_path' in state and os.path.exists(state['rendered_image_path']):
+                                        translated_image_path = state['rendered_image_path']
+                                        print(f"[LOAD_IMAGE] Found rendered image from state: {os.path.basename(translated_image_path)}")
+                                # Check _rendered_images_map
+                                if translated_image_path is None and hasattr(self, '_rendered_images_map') and original_image_path in self._rendered_images_map:
+                                    mapped_path = self._rendered_images_map[original_image_path]
+                                    if os.path.exists(mapped_path):
+                                        translated_image_path = mapped_path
+                                        print(f"[LOAD_IMAGE] Found rendered image from map: {os.path.basename(mapped_path)}")
                             
-                            # Load the correct image (rendered if available, otherwise original/cleaned)
-                            self.image_preview_widget.load_image(display_image_path, 
+                            # Always load the SOURCE into the source viewer
+                            self.image_preview_widget.load_image(original_image_path, 
                                                                 preserve_rectangles=preserve_rectangles,
                                                                 preserve_text_overlays=preserve_overlays)
+                            
+                            # If we have a translated image, load it into the OUTPUT viewer
+                            if translated_image_path:
+                                self.image_preview_widget.output_viewer.load_image(translated_image_path)
+                                self.image_preview_widget.current_translated_path = translated_image_path
                             
                             # Update current image path for state tracking
                             self._current_image_path = original_image_path
