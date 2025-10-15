@@ -10378,17 +10378,13 @@ class MangaTranslationTab:
             # SET FLAG to prevent triggering another processing cycle
             self._rendering_in_progress = True
             try:
-                # During batch, only update output viewer if this render belongs to the current image
-                if not getattr(self, '_batch_mode_active', False) or \
-                   (original_image_path == getattr(self.image_preview_widget, 'current_image_path', None)):
-                    self.image_preview_widget.output_viewer.load_image(output_path)
-                    self.image_preview_widget.current_translated_path = output_path
-                    # Optionally switch to the Translated Output tab (disabled during batch)
-                    if switch_tab and not getattr(self, '_batch_mode_active', False):
-                        self.image_preview_widget.viewer_tabs.setCurrentIndex(1)
-                    print(f"[RENDER] Image loaded into output tab")
-                else:
-                    print(f"[RENDER] Batch active — deferring output viewer update for non-current image")
+                # Always update output viewer (do not gate during batch)
+                self.image_preview_widget.output_viewer.load_image(output_path)
+                self.image_preview_widget.current_translated_path = output_path
+                # Optionally switch to the Translated Output tab (disabled during batch)
+                if switch_tab and not getattr(self, '_batch_mode_active', False):
+                    self.image_preview_widget.viewer_tabs.setCurrentIndex(1)
+                print(f"[RENDER] Image loaded into output tab")
             finally:
                 self._rendering_in_progress = False
             
@@ -11675,6 +11671,12 @@ class MangaTranslationTab:
                     print(f"[TRANSLATE] ❌ No regions to render (regions list is empty after building)")
                     self._log("⚠️ No regions to render", "warning")
                 
+                # If allowed, update on-canvas text overlays for the CURRENT image only
+                try:
+                    self._add_text_overlay_to_viewer(translated_texts)
+                except Exception as _ov_err:
+                    print(f"[TRANSLATE] Overlay update skipped/failed: {_ov_err}")
+                
                 self._log(f"✅ Translation workflow complete!", "success")
             else:
                 self._log("⚠️ No translations were generated", "warning")
@@ -12419,7 +12421,7 @@ class MangaTranslationTab:
                                         translated_image_path = mapped_path
                                         print(f"[LOAD_IMAGE] Found rendered image from map: {os.path.basename(mapped_path)}")
                             
-                            # Always load the SOURCE into the source viewer
+                            # Load the SOURCE into the source viewer (no batch gating)
                             self.image_preview_widget.load_image(original_image_path, 
                                                                 preserve_rectangles=preserve_rectangles,
                                                                 preserve_text_overlays=preserve_overlays)
