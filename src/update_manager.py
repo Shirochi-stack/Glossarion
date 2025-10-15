@@ -649,10 +649,12 @@ class UpdateManager(QObject):
         self.loading_text.setAlignment(Qt.AlignCenter)
         main_layout.addWidget(self.loading_text)
         
-        # Add progress bar
+        # Add progress bar (centered)
         progress_bar = QProgressBar()
         progress_bar.setRange(0, 0)  # Indeterminate mode
-        main_layout.addWidget(progress_bar)
+        progress_bar.setTextVisible(False)
+        progress_bar.setFixedWidth(240)
+        main_layout.addWidget(progress_bar, 0, Qt.AlignHCenter)
         
         # Animation state
         self.loading_animation_active = True
