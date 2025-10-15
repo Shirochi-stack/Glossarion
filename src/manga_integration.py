@@ -12464,8 +12464,7 @@ class MangaTranslationTab:
                         if hasattr(self, 'image_preview_widget'):
                             self.image_preview_widget.set_translated_folder(folder_path)
                             # Only log if manual editing is disabled (preview mode active)
-                            if not self.image_preview_widget.manual_editing_enabled:
-                                self._log(f"✅ Preview mode updated with translated images", "success")
+                            self._log(f"✅ Preview mode updated with translated images", "success")
                     except Exception as e:
                         self._log(f"❌ Failed to set translated folder: {str(e)}", "error")
                     

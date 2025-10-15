@@ -1224,6 +1224,14 @@ class MangaImagePreviewWidget(QWidget):
             # Only clear strokes, keep rectangles for workflow continuity (e.g., after cleaning)
             self._clear_strokes()
         
+        # Also hide any existing translated text overlays immediately to prevent carryover
+        try:
+            if hasattr(self, 'manga_integration') and self.manga_integration:
+                # This hides all overlays and will only show those for the incoming image if any
+                self.manga_integration.show_text_overlays_for_image(image_path)
+        except Exception:
+            pass
+        
         # Reset the preserve flags after use
         self._preserve_rectangles_on_load = False
         self._preserve_text_overlays_on_load = False
@@ -1234,6 +1242,13 @@ class MangaImagePreviewWidget(QWidget):
         if self.current_image_path:
             self.file_label.setText(f"📄 {os.path.basename(self.current_image_path)}")
             self.file_label.setStyleSheet("color: gray; font-size: 8pt;")  # Back to normal
+        
+        # Restore overlays for the newly loaded image (and hide others)
+        try:
+            if hasattr(self, 'manga_integration') and self.manga_integration:
+                self.manga_integration.show_text_overlays_for_image(self.current_image_path)
+        except Exception:
+            pass
         
     def _on_tab_changed(self, index: int):
         """Refit the current viewer when tabs are switched to ensure full fill."""
@@ -1340,9 +1355,7 @@ class MangaImagePreviewWidget(QWidget):
         self.size_label.setVisible(enabled)
         self.box_count_label.setVisible(enabled)
         
-        # Show/hide entire workflow frame (Translation Workflow row)
-        self.workflow_frame.setVisible(enabled)
-        
+        # Keep the Translation Workflow row ALWAYS visible; only toggle manual tools
         # Pan and zoom buttons are ALWAYS visible (explicitly ensure they stay visible)
         self.hand_tool_btn.setVisible(True)
         self.fit_btn.setVisible(True)
@@ -1352,12 +1365,6 @@ class MangaImagePreviewWidget(QWidget):
         # If hiding tools, reset to pan tool
         if not enabled:
             self._set_tool('pan')
-            # Clear any manually loaded image when disabling manual editing
-            if hasattr(self, '_manual_editing_mode'):
-                self._manual_editing_mode = False
-        else:
-            # Enable manual editing isolation mode
-            self._manual_editing_mode = True
         
         # Store state for later use in preview mode
         self.manual_editing_enabled = enabled
