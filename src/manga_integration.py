@@ -11816,7 +11816,7 @@ class MangaTranslationTab:
                             output_path=target_output_path,
                             image_bgr=image_bgr,
                             original_image_path=original_image_path,
-                            switch_tab=False  # do not switch tabs during batch
+                            switch_tab=not getattr(self, '_batch_mode_active', False)
                         )
                         print(f"[TRANSLATE] Returned from _render_with_manga_translator")
                     else:
@@ -12408,6 +12408,12 @@ class MangaTranslationTab:
                         try:
                             # Reset UI to ready state when translation completes
                             self._reset_ui_state()
+                            # Auto-switch to Translated Output tab on completion
+                            try:
+                                if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'viewer_tabs'):
+                                    self.image_preview_widget.viewer_tabs.setCurrentIndex(1)
+                            except Exception:
+                                pass
                         except Exception as e:
                             import traceback
                             print(f"Error resetting UI state: {e}")
