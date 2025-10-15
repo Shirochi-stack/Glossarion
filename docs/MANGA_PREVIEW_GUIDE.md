@@ -1,0 +1,234 @@
+# Manga Image Preview & Manual Editing Guide
+
+## Overview
+The Manga Image Preview section in Glossarion provides a powerful interface for viewing, manually editing, and translating manga images. It features dual viewers (source and translated output), manual editing tools, and an automated translation workflow.
+
+## Interface Layout
+
+### Main Components
+
+1. **Title Bar with Toggle**
+   - 📷 Image Preview & Editing title
+   - "Enable Manual Editing" checkbox with spinning Halgakos icon
+   - Manual editing is **disabled by default** (preview mode)
+
+2. **Dual Viewer Tabs**
+   - **📄 Source Tab**: Original manga images with editing tools
+   - **✨ Translated Output Tab**: Shows translated results
+   - Thumbnails panel (right side) - appears when multiple images loaded
+
+3. **Tool Sections**
+   - **Manual Tools**: Drawing and editing tools (hidden when manual editing disabled)
+   - **Translation Workflow**: Automated translation pipeline buttons
+
+4. **File Info & Download**
+   - Current file display
+   - Download Images button (consolidates translated results)
+
+---
+
+## Getting Started
+
+### 1. Loading Images
+- Images are loaded automatically when selected through the file browser
+- Multiple images create a thumbnail panel for easy navigation
+- Click thumbnails to switch between images
+
+### 2. Enable Manual Editing
+**Important**: Manual editing is disabled by default for safety.
+
+To enable manual editing:
+1. Check the "Enable Manual Editing" checkbox in the title bar
+2. The checkbox will turn blue when enabled
+3. Manual editing tools will become visible
+4. Your preference is automatically saved
+
+---
+
+## Manual Editing Tools
+
+### Navigation & View Controls (Always Visible)
+- **✅ Pan Tool**: Default tool for navigating and selecting objects
+- **⊟ Fit to View**: Resize image to fit window
+- **🔍+ Zoom In**: Increase zoom level
+- **🔍- Zoom Out**: Decrease zoom level
+- **Mouse Wheel + Shift**: Zoom in/out at cursor position
+
+### Drawing Tools (Manual Editing Enabled Only)
+
+#### **◭ Box Drawing Tool**
+- Click and drag to create text detection boxes
+- Boxes appear as semi-transparent pink rectangles with red borders
+- Selected boxes turn yellow with thicker borders
+- Use for manually marking text regions that auto-detection missed
+
+#### **🖌 Brush Tool**
+- Draw red strokes to mark areas needing cleaning/inpainting
+- Adjustable brush size (5-50 pixels using slider)
+- Strokes are semi-transparent red
+- Used to indicate text that should be removed
+
+#### **✏️ Eraser Tool**
+- Draw white strokes to mark areas to keep clean
+- Same size controls as brush tool
+- Strokes are semi-transparent white
+- Used to protect areas from cleaning
+
+### Management Tools
+- **🗑 Delete Selected**: Remove currently selected box (yellow highlight)
+- **🧹 Clear Boxes**: Remove all detection boxes
+- **❌ Clear Strokes**: Remove all brush/eraser strokes
+- **Box Counter**: Shows number of active detection boxes
+
+---
+
+## Translation Workflow
+
+### Automated Translation Pipeline
+The workflow buttons work in sequence:
+
+1. **Detect Text**
+   - Automatically finds text regions using AI detection
+   - Creates green detection boxes around text
+   - RT-DETR model identifies speech bubbles vs. free text
+
+2. **Clean**
+   - Removes detected text from the image
+   - Uses inpainting to fill text areas
+   - Manual brush strokes guide the cleaning process
+
+3. **Recognize Text**
+   - Performs OCR on detected text regions
+   - Extracts original text for translation
+   - Results stored for the translation step
+
+4. **Translate**
+   - Translates recognized text to target language
+   - Renders translated text onto cleaned image
+   - Result appears in "Translated Output" tab
+
+---
+
+## Working with Detection Boxes
+
+### Automatic Detection
+- Green boxes appear after "Detect Text"
+- Different types: text bubbles (always processed) vs. free text (toggle-able)
+- Box colors indicate different classifications
+
+### Right-Click Context Menu
+**Important**: After running "Recognize Text" or "Translate", you can right-click on any detection box to edit the results:
+
+1. **Edit OCR Results**
+   - Right-click any detection box after text recognition
+   - Select "📝 Edit OCR: "[preview text]"" from the context menu
+   - Opens an editable dialog showing the recognized text
+   - Make corrections to fix OCR errors
+   - Click "💾 Save" to apply changes
+
+2. **Edit Translation Results**
+   - Right-click any detection box after translation
+   - Select "🌍 Edit Translation: "[preview text]"" from the context menu
+   - Opens a dialog with both original and translated text
+   - Edit either the original text or the translation
+   - Click "💾 Save & Update Overlay" to apply changes
+   - Text overlays update immediately with your edits
+
+### Manual Editing
+When manual editing is enabled:
+
+1. **Creating New Boxes**
+   - Select Box Drawing tool (◭)
+   - Click and drag to create rectangle
+   - Minimum size required (10x10 pixels)
+
+2. **Selecting Boxes**
+   - Use Pan tool (✅) 
+   - Click on any box to select it
+   - Selected box turns yellow with thicker border
+
+3. **Moving Boxes**
+   - Selected boxes can be dragged to new positions
+   - Hover cursor changes to indicate moveable state
+
+4. **Deleting Boxes**
+   - Select box first (click on it)
+   - Click Delete Selected (🗑) button
+   - Or use Clear Boxes (🧹) to remove all
+
+### Box Persistence
+- Manual boxes are automatically saved per image
+- Restored when switching between images
+- Survives application restarts
+
+---
+
+## Advanced Editing Techniques
+
+### Brush and Eraser Strokes
+1. **Marking Problem Areas**
+   - Use red brush strokes to mark text that needs better cleaning
+   - Helps guide the inpainting algorithm
+   - Useful for stubborn text remnants
+
+2. **Protecting Areas**
+   - Use white eraser strokes to protect important details
+   - Prevents over-cleaning of artwork
+   - Good for preserving fine details near text
+
+3. **Stroke Management**
+   - Adjust brush size with horizontal slider (5-50 pixels)
+   - Current size shown in label next to slider
+   - Clear all strokes with ❌ button
+
+### Multi-Image Workflow
+1. **Thumbnail Navigation**
+   - Thumbnails appear when 2+ images loaded
+   - Click thumbnail to switch images
+   - Each image maintains separate editing state
+
+2. **Consistent Editing**
+   - Settings persist across images
+   - Manual editing toggle remains active
+   - Tool selection stays consistent
+
+---
+
+## Output and Download
+
+### Viewing Results
+- **Source Tab**: Original image with your edits and detection boxes
+- **Translated Output Tab**: Final result with translated text rendered
+- Switch tabs to compare before/after
+
+### Downloading Translated Images
+1. Complete translation workflow for desired images
+2. Green "📥 Download Images" button becomes enabled
+3. Click to consolidate all translated images into single folder
+4. Creates "translated" folder in source directory
+5. Handles filename conflicts automatically
+
+---
+
+
+## Keyboard Shortcuts and Mouse Controls
+
+### Mouse Navigation
+- **Left Click**: Select boxes/tools (Pan mode)
+- **Click + Drag**: Create boxes (Box Draw mode) or draw strokes (Brush/Eraser modes)
+- **Shift + Mouse Wheel**: Zoom in/out at cursor position
+- **Mouse Wheel**: Scroll content when zoomed in
+
+### Tool Selection
+- Tools are selected by clicking their buttons
+- Only one tool active at a time
+- Pan tool is the default and safest option
+
+### View Controls
+- **Fit to View**: Quickly return to full image view
+- **Zoom controls**: Fine-tune magnification level
+- **Tab switching**: Compare source vs. translated output instantly
+
+---
+
+This guide covers the complete functionality of the Manga Image Preview section. Start with the automated workflow, then use manual editing tools to refine results as needed. The interface is designed to be safe by default while providing powerful editing capabilities when enabled.
