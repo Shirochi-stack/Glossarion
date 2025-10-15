@@ -2372,8 +2372,9 @@ class MangaTranslationTab:
         
         self._log(f"📋 OCR provider changed to: {provider_descriptions.get(provider, provider)}", "info")
         
-        # Save the selection
+        # Save the selection (write BOTH keys to keep UIs in sync)
         self.main_gui.config['manga_ocr_provider'] = provider
+        self.main_gui.config['ocr_provider'] = provider
         if hasattr(self.main_gui, 'save_config'):
             self.main_gui.save_config(show_message=False)
         
@@ -2862,7 +2863,13 @@ class MangaTranslationTab:
         provider_values = [p[0] for p in ocr_providers]
         provider_display = [f"{p[0]} - {p[1]}" for p in ocr_providers]
 
-        self.ocr_provider_value = self.main_gui.config.get('manga_ocr_provider', 'custom-api')
+        # Resolve initial provider with robust fallback to avoid accidental 'custom-api'
+        # Prefer explicit manga_ocr_provider, then generic ocr_provider, then default
+        self.ocr_provider_value = (
+            self.main_gui.config.get('manga_ocr_provider')
+            or self.main_gui.config.get('ocr_provider')
+            or 'custom-api'
+        )
         self.provider_combo = QComboBox()
         self.provider_combo.addItems(provider_values)
         self.provider_combo.setCurrentText(self.ocr_provider_value)
@@ -9235,12 +9242,18 @@ class MangaTranslationTab:
                     cleaned_image_path = None
             
             # STEP 2: Run translation
-            # Check if full page context translation is enabled
+            # Check if full page context translation is enabled (SAFE for background thread)
+            # Prefer batch snapshot captured on UI thread, else fall back to config
             full_page_context_enabled = False
-            try:
-                full_page_context_enabled = bool(self.main_gui.config.get('manga_full_page_context', False))
-            except Exception:
-                pass
+            if hasattr(self, '_batch_full_page_context_enabled'):
+                full_page_context_enabled = bool(self._batch_full_page_context_enabled)
+                print(f"[DEBUG] Full page context (batch snapshot): {full_page_context_enabled}")
+            else:
+                try:
+                    full_page_context_enabled = bool(self.main_gui.config.get('manga_full_page_context', False))
+                except Exception:
+                    full_page_context_enabled = False
+                print(f"[DEBUG] Full page context (from config): {full_page_context_enabled}")
             
             print(f"[DEBUG] Full page context enabled: {full_page_context_enabled}")
             
@@ -9368,12 +9381,18 @@ class MangaTranslationTab:
     def _translate_individually(self, recognized_texts: list, image_path: str) -> list:
         """Translate each text individually (original behavior)"""
         try:
-            # Check if visual context is enabled
+            # Check if visual context is enabled (SAFE for background thread)
+            # Prefer batch snapshot captured on UI thread, else fall back to config
             include_page_image = False
-            try:
-                include_page_image = bool(self.include_image_var.get()) if hasattr(self, 'include_image_var') else False
-            except Exception:
-                pass
+            if hasattr(self, '_batch_visual_context_enabled'):
+                include_page_image = bool(self._batch_visual_context_enabled)
+                print(f"[DEBUG] Visual context (batch snapshot): {include_page_image}")
+            else:
+                try:
+                    include_page_image = bool(self.main_gui.config.get('manga_visual_context_enabled', False))
+                except Exception:
+                    include_page_image = False
+                print(f"[DEBUG] Visual context (from config): {include_page_image}")
             
             print(f"[DEBUG] Visual context enabled: {include_page_image}")
             print(f"[DEBUG] Image path: {image_path}")
@@ -11037,6 +11056,25 @@ class MangaTranslationTab:
         self._log("🚀 Starting batch translation of all images", "info")
         
         try:
+            # Snapshot toggles on UI thread so background can read safely
+            try:
+                fp = False
+                vc = False
+                if hasattr(self, 'context_checkbox'):
+                    fp = bool(self.context_checkbox.isChecked())
+                else:
+                    fp = bool(self.main_gui.config.get('manga_full_page_context', False))
+                if hasattr(self, 'visual_context_checkbox'):
+                    vc = bool(self.visual_context_checkbox.isChecked())
+                else:
+                    vc = bool(self.main_gui.config.get('manga_visual_context_enabled', False))
+                # Store snapshots for background thread
+                self._batch_full_page_context_enabled = fp
+                self._batch_visual_context_enabled = vc
+                print(f"[DEBUG] Snapshot toggles for batch: full_page_context={fp}, visual_context={vc}")
+            except Exception as snap_err:
+                print(f"[DEBUG] Toggle snapshot failed: {snap_err}")
+            
             # Check if we have images in the preview
             if not hasattr(self.image_preview_widget, 'image_paths') or not self.image_preview_widget.image_paths:
                 self._log("⚠️ No images loaded in preview", "warning")
@@ -11204,8 +11242,28 @@ class MangaTranslationTab:
                         image_path_for_rendering = image_path
                         self._cleaned_image_path = None
                     
-                    # Step 3: Run translation
-                    translated_texts = self._translate_individually(recognized_texts, image_path)
+                    # Step 3: Run translation (mirror regular translate behavior)
+                    # Decide full-page vs individual using batch snapshot (set on UI thread)
+                    full_page_context_enabled = False
+                    if hasattr(self, '_batch_full_page_context_enabled'):
+                        full_page_context_enabled = bool(self._batch_full_page_context_enabled)
+                        print(f"[DEBUG] (Batch) Full page context: {full_page_context_enabled}")
+                    else:
+                        try:
+                            full_page_context_enabled = bool(self.main_gui.config.get('manga_full_page_context', False))
+                        except Exception:
+                            full_page_context_enabled = False
+                        print(f"[DEBUG] (Batch) Full page context from config: {full_page_context_enabled}")
+                    
+                    if full_page_context_enabled:
+                        print(f"[DEBUG] Using FULL PAGE CONTEXT translation mode (batch)")
+                        self._log(f"📄 [{idx}/{total}] Using full page context translation for {len(recognized_texts)} regions", "info")
+                        translated_texts = self._translate_with_full_page_context(recognized_texts, image_path)
+                    else:
+                        print(f"[DEBUG] Using INDIVIDUAL translation mode (batch)")
+                        self._log(f"📝 [{idx}/{total}] Using individual translation for {len(recognized_texts)} regions", "info")
+                        translated_texts = self._translate_individually(recognized_texts, image_path)
+                    
                     if not translated_texts:
                         self._log(f"⚠️ [{idx}/{total}] Translation failed", "warning")
                         failed_count += 1
@@ -11307,8 +11365,21 @@ class MangaTranslationTab:
     
     def _get_ocr_config(self) -> dict:
         """Get OCR configuration for the selected provider (same as regular pipeline)"""
-        print(f"[DEBUG] Building OCR config for provider: {self.ocr_provider_value}")
-        config = {'provider': self.ocr_provider_value}
+        # Resolve provider robustly: prefer current value, then config fallback
+        provider = None
+        try:
+            provider = getattr(self, 'ocr_provider_value', None)
+            if not provider:
+                provider = self.main_gui.config.get('manga_ocr_provider') or self.main_gui.config.get('ocr_provider')
+        except Exception:
+            provider = None
+        if not provider:
+            provider = 'custom-api'
+        # Normalize aliases
+        if provider in ['azure_document_intelligence', 'azure-document-intel', 'azure_doc_intel']:
+            provider = 'azure-document-intelligence'
+        print(f"[DEBUG] Building OCR config for provider: {provider}")
+        config = {'provider': provider}
         
         if config['provider'] == 'google':
             google_creds = self.main_gui.config.get('google_vision_credentials', '') or \
@@ -11320,8 +11391,15 @@ class MangaTranslationTab:
             else:
                 print(f"[DEBUG] Google credentials not found or missing")
         elif config['provider'] == 'azure':
-            azure_key = self.main_gui.config.get('azure_vision_key', '')
-            azure_endpoint = self.main_gui.config.get('azure_vision_endpoint', '')
+            # Pull from both Vision and Doc Intelligence keys as fallback
+            azure_key = (
+                self.main_gui.config.get('azure_vision_key', '')
+                or self.main_gui.config.get('azure_document_intelligence_key', '')
+            )
+            azure_endpoint = (
+                self.main_gui.config.get('azure_vision_endpoint', '')
+                or self.main_gui.config.get('azure_document_intelligence_endpoint', '')
+            )
             print(f"[DEBUG] Azure key exists: {bool(azure_key)}")
             print(f"[DEBUG] Azure endpoint: {azure_endpoint}")
             if azure_key and azure_endpoint:
@@ -11343,9 +11421,15 @@ class MangaTranslationTab:
                 os.environ['OCR_SYSTEM_PROMPT'] = self.ocr_prompt
                 print(f"[DEBUG] Set OCR_SYSTEM_PROMPT for custom-api")
         elif config['provider'] == 'azure-document-intelligence':
-            # Azure Document Intelligence uses same credentials as regular Azure
-            azure_key = self.main_gui.config.get('azure_vision_key', '')
-            azure_endpoint = self.main_gui.config.get('azure_vision_endpoint', '')
+            # Azure Document Intelligence uses same credentials schema; pull from either bucket
+            azure_key = (
+                self.main_gui.config.get('azure_document_intelligence_key', '')
+                or self.main_gui.config.get('azure_vision_key', '')
+            )
+            azure_endpoint = (
+                self.main_gui.config.get('azure_document_intelligence_endpoint', '')
+                or self.main_gui.config.get('azure_vision_endpoint', '')
+            )
             print(f"[DEBUG] Azure Document Intelligence key exists: {bool(azure_key)}")
             print(f"[DEBUG] Azure Document Intelligence endpoint: {azure_endpoint}")
             if azure_key and azure_endpoint:
