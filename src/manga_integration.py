@@ -10297,7 +10297,9 @@ class MangaTranslationTab:
             try:
                 self.image_preview_widget.output_viewer.load_image(output_path)
                 self.image_preview_widget.current_translated_path = output_path
-                print(f"[RENDER] Image loaded into output tab")
+                # On translation end: switch to the Translated Output tab (no image source switching)
+                self.image_preview_widget.viewer_tabs.setCurrentIndex(1)
+                print(f"[RENDER] Image loaded into output tab and switched to Output tab")
             finally:
                 self._rendering_in_progress = False
             
@@ -11302,36 +11304,29 @@ class MangaTranslationTab:
             pass
     
     def _update_preview_to_rendered_images(self):
-        """Update the preview thumbnails to show rendered/translated images"""
+        """On batch end, show translated result for the CURRENT selection only; do not change lists or selection."""
         try:
             if not hasattr(self, '_rendered_images_map') or not self._rendered_images_map:
                 print("[UPDATE_PREVIEW] No rendered images to show")
                 return
             
-            # Collect all rendered image paths that exist
-            rendered_paths = []
-            for original_path, rendered_path in self._rendered_images_map.items():
-                if os.path.exists(rendered_path):
-                    rendered_paths.append(rendered_path)
-            
-            if not rendered_paths:
-                print("[UPDATE_PREVIEW] No rendered files found on disk")
+            # Determine current selection
+            current_row = self.file_listbox.currentRow() if hasattr(self, 'file_listbox') else -1
+            if current_row is None or current_row < 0 or current_row >= len(self.selected_files):
+                print("[UPDATE_PREVIEW] No current selection; not changing preview")
                 return
+            current_source = self.selected_files[current_row]
             
-            print(f"[UPDATE_PREVIEW] Found {len(rendered_paths)} rendered images")
-            self._log(f"🖼️ Updating preview with {len(rendered_paths)} translated images", "success")
-            
-            # Update the thumbnail list with rendered images
-            if hasattr(self, 'image_preview_widget'):
-                self.image_preview_widget.set_image_list(rendered_paths)
-                
-                # Load the first rendered image
-                if rendered_paths:
-                    first_rendered = rendered_paths[0]
-                    self.image_preview_widget.load_image(first_rendered, preserve_rectangles=False, preserve_text_overlays=False)
-                    print(f"[UPDATE_PREVIEW] Loaded first rendered image: {os.path.basename(first_rendered)}")
-                    self._log(f"👁️ Now showing translated images (3_translated folder)", "info")
-            
+            # If a rendered image exists for the currently selected source, load it into the output tab
+            rendered_path = self._rendered_images_map.get(current_source)
+            if rendered_path and os.path.exists(rendered_path):
+                if hasattr(self, 'image_preview_widget'):
+                    self.image_preview_widget.output_viewer.load_image(rendered_path)
+                    self.image_preview_widget.current_translated_path = rendered_path
+                    print(f"[UPDATE_PREVIEW] Updated output tab for current image: {os.path.basename(rendered_path)}")
+            else:
+                print("[UPDATE_PREVIEW] No rendered image for current selection")
+        
         except Exception as e:
             print(f"[UPDATE_PREVIEW] Error: {str(e)}")
             import traceback
