@@ -7645,8 +7645,27 @@ class MangaTranslationTab:
             
             self._log(f"✅ Found {len(boxes)} text regions", "success")
             
+            # Merge overlapping/nested boxes to avoid duplicates (match regular pipeline)
+            try:
+                from manga_translator import merge_overlapping_boxes
+                # Normalize to int (x,y,w,h)
+                norm_boxes = []
+                for b in boxes:
+                    try:
+                        x, y, w, h = int(b[0]), int(b[1]), int(b[2]), int(b[3])
+                        norm_boxes.append([x, y, w, h])
+                    except Exception:
+                        continue
+                original_count = len(norm_boxes)
+                merged_boxes = merge_overlapping_boxes(norm_boxes, containment_threshold=0.3, overlap_threshold=0.5)
+                if merged_boxes and len(merged_boxes) < original_count:
+                    self._log(f"✅ Merged {original_count} boxes → {len(merged_boxes)} unique regions", "debug")
+                boxes = merged_boxes or norm_boxes
+            except Exception as me:
+                print(f"[DETECT] Merge step failed or unavailable: {me}")
+            
             # Debug: Print first few boxes to inspect
-            print(f"[DETECT] First 3 boxes from detector:")
+            print(f"[DETECT] First 3 boxes from detector/merge:")
             for i, box in enumerate(boxes[:3]):
                 print(f"[DETECT]   Box {i}: {box}")
             
@@ -8393,6 +8412,24 @@ class MangaTranslationTab:
             
             print(f"[DETECT_SYNC] Found {len(boxes)} text regions")
             
+            # Merge overlapping/nested boxes to avoid duplicates (align with regular pipeline)
+            try:
+                from manga_translator import merge_overlapping_boxes
+                norm_boxes = []
+                for b in boxes:
+                    try:
+                        x, y, w, h = int(b[0]), int(b[1]), int(b[2]), int(b[3])
+                        norm_boxes.append([x, y, w, h])
+                    except Exception:
+                        continue
+                original_count = len(norm_boxes)
+                merged_boxes = merge_overlapping_boxes(norm_boxes, containment_threshold=0.3, overlap_threshold=0.5)
+                if merged_boxes and len(merged_boxes) < original_count:
+                    print(f"[DETECT_SYNC] Merged {original_count} boxes → {len(merged_boxes)} unique regions")
+                boxes = merged_boxes or norm_boxes
+            except Exception as me:
+                print(f"[DETECT_SYNC] Merge step failed or unavailable: {me}")
+            
             # Process detection boxes and store regions
             regions = []
             for i, box in enumerate(boxes):
@@ -8952,6 +8989,20 @@ class MangaTranslationTab:
                     self._log("⚠️ No valid regions found in preview", "warning")
                     self._restore_recognize_button()
                     return
+                # Replace viewer rectangles with merged regions so indices align with recognition
+                try:
+                    self._current_regions = regions
+                    if hasattr(self.image_preview_widget, 'viewer') and hasattr(self.image_preview_widget.viewer, 'clear_rectangles'):
+                        self.image_preview_widget.viewer.clear_rectangles()
+                    self._draw_detection_boxes_on_preview()
+                except Exception:
+                    pass
+                # Persist merged regions to state
+                try:
+                    if hasattr(self, 'image_state_manager'):
+                        self.image_state_manager.update_state(image_path, {'detection_regions': regions})
+                except Exception:
+                    pass
                 self._log(f"📝 Starting text recognition on {len(regions)} existing regions using {ocr_config['provider']}", "info")
             else:
                 print("[DEBUG] No rectangles found - will run detection in background")
@@ -9113,6 +9164,20 @@ class MangaTranslationTab:
                 # Extract existing rectangles for recognition
                 regions_for_recognition = self._extract_regions_from_preview()
                 print(f"[DEBUG] Extracted {len(regions_for_recognition)} regions for recognition")
+                # Replace viewer rectangles with merged regions so indices align with recognition
+                try:
+                    self._current_regions = regions_for_recognition
+                    if hasattr(self.image_preview_widget, 'viewer') and hasattr(self.image_preview_widget.viewer, 'clear_rectangles'):
+                        self.image_preview_widget.viewer.clear_rectangles()
+                    self._draw_detection_boxes_on_preview()
+                except Exception:
+                    pass
+                # Persist merged regions to state
+                try:
+                    if hasattr(self, 'image_state_manager'):
+                        self.image_state_manager.update_state(image_path, {'detection_regions': regions_for_recognition})
+                except Exception:
+                    pass
             elif not has_rectangles:
                 # No rectangles - will trigger detection in background
                 regions_for_recognition = None
@@ -9628,13 +9693,51 @@ class MangaTranslationTab:
             
             # Store recognition data for context menu access
             self._recognition_data = {}
+
+            # Helper: compute IoU between two (x,y,w,h) boxes
+            def _iou_xywh(a, b):
+                try:
+                    ax, ay, aw, ah = a
+                    bx, by, bw, bh = b
+                    ax2, ay2 = ax + aw, ay + ah
+                    bx2, by2 = bx + bw, by + bh
+                    x1 = max(ax, bx)
+                    y1 = max(ay, by)
+                    x2 = min(ax2, bx2)
+                    y2 = min(ay2, by2)
+                    inter = max(0, x2 - x1) * max(0, y2 - y1)
+                    area_a = max(0, aw) * max(0, ah)
+                    area_b = max(0, bw) * max(0, bh)
+                    denom = area_a + area_b - inter
+                    return (inter / denom) if denom > 0 else 0.0
+                except Exception:
+                    return 0.0
             
             for i, text_data in enumerate(recognized_texts):
                 region_index = text_data.get('region_index', i)
-                
-                # Find the corresponding rectangle (match by index)
-                if region_index < len(rectangles):
+                rect_item = None
+
+                # Primary mapping: by index
+                if 0 <= region_index < len(rectangles):
                     rect_item = rectangles[region_index]
+                else:
+                    # Fallback: spatially match by highest IoU
+                    bbox = text_data.get('bbox')
+                    if bbox and len(bbox) >= 4 and rectangles:
+                        best_idx = -1
+                        best_iou = 0.0
+                        for idx, r in enumerate(rectangles):
+                            rr = r.rect()
+                            cand = [rr.x(), rr.y(), rr.width(), rr.height()]
+                            iou = _iou_xywh(bbox, cand)
+                            if iou > best_iou:
+                                best_iou = iou
+                                best_idx = idx
+                        if best_idx != -1 and best_iou > 0.05:
+                            rect_item = rectangles[best_idx]
+                            region_index = best_idx  # remap to matched rectangle
+                
+                if rect_item is not None:
                     recognized_text = text_data['text']
                     
                     # Store recognition data for context menu
@@ -9653,7 +9756,7 @@ class MangaTranslationTab:
                     
                     print(f"[DEBUG] Added OCR tooltip to rectangle {region_index}: '{recognized_text[:30]}...'")
                 else:
-                    print(f"[DEBUG] Warning: No rectangle found for region index {region_index}")
+                    print(f"[DEBUG] Warning: No rectangle match for recognition item {i} (region_index={region_index})")
             
             print(f"[DEBUG] OCR tooltip setup complete")
             
