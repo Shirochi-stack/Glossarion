@@ -7934,6 +7934,10 @@ class MangaTranslationTab:
                     pass
             
             # Only draw if this image is currently displayed in the source viewer
+            # Suppress drawing while batch is active
+            if getattr(self, '_batch_mode_active', False):
+                print(f"[DETECT_RESULTS] Batch active — suppressing rectangle draw for {os.path.basename(image_path)}")
+                return
             if not hasattr(self, 'image_preview_widget') or image_path != getattr(self.image_preview_widget, 'current_image_path', None):
                 print(f"[DETECT_RESULTS] Skipping draw; not current image: {os.path.basename(image_path)}")
                 return
@@ -10309,12 +10313,17 @@ class MangaTranslationTab:
             # SET FLAG to prevent triggering another processing cycle
             self._rendering_in_progress = True
             try:
-                self.image_preview_widget.output_viewer.load_image(output_path)
-                self.image_preview_widget.current_translated_path = output_path
-                # Optionally switch to the Translated Output tab (disabled during batch)
-                if switch_tab and not getattr(self, '_batch_mode_active', False):
-                    self.image_preview_widget.viewer_tabs.setCurrentIndex(1)
-                print(f"[RENDER] Image loaded into output tab")
+                # During batch, only update output viewer if this render belongs to the current image
+                if not getattr(self, '_batch_mode_active', False) or \
+                   (original_image_path == getattr(self.image_preview_widget, 'current_image_path', None)):
+                    self.image_preview_widget.output_viewer.load_image(output_path)
+                    self.image_preview_widget.current_translated_path = output_path
+                    # Optionally switch to the Translated Output tab (disabled during batch)
+                    if switch_tab and not getattr(self, '_batch_mode_active', False):
+                        self.image_preview_widget.viewer_tabs.setCurrentIndex(1)
+                    print(f"[RENDER] Image loaded into output tab")
+                else:
+                    print(f"[RENDER] Batch active — deferring output viewer update for non-current image")
             finally:
                 self._rendering_in_progress = False
             
@@ -11059,6 +11068,12 @@ class MangaTranslationTab:
         try:
             # Mark batch mode active (used to suppress preview shuffles)
             self._batch_mode_active = True
+            # Hide any rectangles during batch to prevent shuffle
+            try:
+                if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'viewer'):
+                    self.image_preview_widget.viewer.clear_rectangles()
+            except Exception:
+                pass
             # Snapshot toggles on UI thread so background can read safely
             try:
                 fp = False
@@ -11451,6 +11466,10 @@ class MangaTranslationTab:
                 except Exception:
                     pass
             
+            # Suppress UI overlays while batch is active
+            if getattr(self, '_batch_mode_active', False):
+                print(f"[RECOG_RESULTS] Batch active — suppressing recognition UI updates")
+                return
             # Only update UI and working memory if this is the current image
             if not hasattr(self, 'image_preview_widget') or image_path != getattr(self.image_preview_widget, 'current_image_path', None):
                 print(f"[RECOG_RESULTS] Skipping UI update; not current image: {os.path.basename(image_path) if image_path else 'unknown'}")
@@ -12265,10 +12284,11 @@ class MangaTranslationTab:
                             source_path = None
                         
                         # During batch mode, only update output preview for the current image
-                        if getattr(self, '_batch_mode_active', False) and source_path and \
-                           source_path != getattr(self.image_preview_widget, 'current_image_path', None):
-                            print(f"[PREVIEW_UPDATE] Skipping preview update (not current image in batch)")
-                            return
+                        if getattr(self, '_batch_mode_active', False):
+                            # Only update when the update is for the current image
+                            if not source_path or source_path != getattr(self.image_preview_widget, 'current_image_path', None):
+                                print(f"[PREVIEW_UPDATE] Batch active — skipping update for non-current image")
+                                return
                         
                         if hasattr(self, 'image_preview_widget') and os.path.exists(translated_path):
                             print(f"[PREVIEW_UPDATE] Loading translated image into output tab: {translated_path}")
