@@ -10,7 +10,7 @@ from typing import List, Dict, Optional
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGraphicsView, 
                                QGraphicsScene, QGraphicsPixmapItem, QToolButton, 
                                QLabel, QSlider, QFrame, QPushButton, QGraphicsRectItem,
-                               QSizePolicy, QListWidget, QListWidgetItem)
+                               QSizePolicy, QListWidget, QListWidgetItem, QTabWidget)
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QSize, QThread, QObject, Slot
 from PySide6.QtGui import QPixmap, QImage, QPainter, QColor, QPen, QBrush, QCursor, QIcon
 import numpy as np
@@ -471,6 +471,7 @@ class MangaImagePreviewWidget(QWidget):
     def __init__(self, parent=None, main_gui=None):
         super().__init__(parent)
         self.current_image_path = None
+        self.current_translated_path = None  # Track translated output path
         self.main_gui = main_gui  # Store reference to main GUI for config persistence
         self.manual_editing_enabled = False  # Manual editing is disabled by default (preview mode)
         self.translated_folder_path = None  # Path to translated images folder
@@ -588,18 +589,62 @@ class MangaImagePreviewWidget(QWidget):
         title_layout.addStretch()
         layout.addWidget(title_container)
         
+        # Create tabbed viewer for source/output switching
+        self.viewer_tabs = QTabWidget()
+        self.viewer_tabs.setTabPosition(QTabWidget.TabPosition.North)
+        self.viewer_tabs.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid #3a3a3a;
+                border-radius: 3px;
+            }
+            QTabBar::tab {
+                background-color: #2d2d2d;
+                color: white;
+                padding: 6px 12px;
+                border: 1px solid #3a3a3a;
+                border-bottom: none;
+                border-top-left-radius: 3px;
+                border-top-right-radius: 3px;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                background-color: #5a9fd4;
+                border-color: #7bb3e0;
+            }
+            QTabBar::tab:hover:!selected {
+                background-color: #3a3a3a;
+            }
+        """)
+        
         # Create horizontal layout for viewer + thumbnails
         viewer_container = QWidget()
         viewer_layout = QHBoxLayout(viewer_container)
         viewer_layout.setContentsMargins(0, 0, 0, 0)
         viewer_layout.setSpacing(5)
         
-        # Image viewer (main)
+        # Source image viewer
         self.viewer = CompactImageViewer()
         self.viewer.setMinimumHeight(300)
         viewer_layout.addWidget(self.viewer, stretch=1)
         
-        # Thumbnail list (right side)
+        # Add source tab
+        self.viewer_tabs.addTab(viewer_container, "📄 Source")
+        
+        # Create output viewer container
+        output_container = QWidget()
+        output_layout = QHBoxLayout(output_container)
+        output_layout.setContentsMargins(0, 0, 0, 0)
+        output_layout.setSpacing(5)
+        
+        # Output image viewer
+        self.output_viewer = CompactImageViewer()
+        self.output_viewer.setMinimumHeight(300)
+        output_layout.addWidget(self.output_viewer, stretch=1)
+        
+        # Add output tab
+        self.viewer_tabs.addTab(output_container, "✨ Translated Output")
+        
+        # Thumbnail list (right side) - shared across tabs
         from PySide6.QtWidgets import QListWidget, QListWidgetItem, QScrollArea
         self.thumbnail_list = QListWidget()
         self.thumbnail_list.setMaximumWidth(150)
@@ -636,11 +681,12 @@ class MangaImagePreviewWidget(QWidget):
         self.thumbnail_list.itemClicked.connect(self._on_thumbnail_clicked)
         self.thumbnail_list.setVisible(False)  # Hidden by default
         viewer_layout.addWidget(self.thumbnail_list)
+        output_layout.addWidget(self.thumbnail_list)  # Share thumbnails with output tab
         
         # Store image paths for thumbnails
         self.image_paths = []
         
-        layout.addWidget(viewer_container, stretch=1)
+        layout.addWidget(self.viewer_tabs, stretch=1)
         
         # Connect loading signals to show status
         self.viewer.image_loading.connect(self._on_image_loading_started)
@@ -964,6 +1010,9 @@ class MangaImagePreviewWidget(QWidget):
         self.viewer.load_image(image_path)
         self.current_image_path = image_path
         
+        # Check for translated output and load if available
+        self._check_and_load_translated_output(image_path)
+        
         # Update thumbnail selection
         self._update_thumbnail_selection(image_path)
     
@@ -1095,13 +1144,6 @@ class MangaImagePreviewWidget(QWidget):
         
         # Reset the preserve flags after use
         self._preserve_rectangles_on_load = False
-        
-        # Manage text overlays - hide all overlays when switching images (unless preserve flag is set)
-        preserve_text_overlays = getattr(self, '_preserve_text_overlays_on_load', False)
-        if hasattr(self, 'manga_integration') and not preserve_text_overlays:
-            self.manga_integration.show_text_overlays_for_image(image_path)
-        
-        # Reset the text overlay preserve flag
         self._preserve_text_overlays_on_load = False
     
     @Slot(str)
@@ -1324,7 +1366,7 @@ class MangaImagePreviewWidget(QWidget):
         """Set the translated folder path and enable download button"""
         self.translated_folder_path = folder_path
         
-        # NEW: Check for isolated *_translated folders in parent directory
+        # Check for isolated *_translated folders in parent directory
         has_translated_images = False
         
         if folder_path and os.path.exists(folder_path):
@@ -1349,81 +1391,43 @@ class MangaImagePreviewWidget(QWidget):
             
             self.download_btn.setEnabled(has_translated_images)
             print(f"[DEBUG] Translated images found: {has_translated_images}")
-            
-            # If manual editing is disabled (preview mode), load translated images
-            if not self.manual_editing_enabled and has_translated_images:
-                self._load_isolated_translated_preview(parent_dir)
         else:
             self.download_btn.setEnabled(False)
     
-    def _load_translated_preview(self, folder_path: str):
-        """Load translated images from folder into preview mode"""
+    def _check_and_load_translated_output(self, source_image_path: str):
+        """Check for translated output and load into output tab if available"""
         try:
-            print(f"[DEBUG] Loading translated images from: {folder_path}")
+            # Build the expected translated path based on isolated folder structure
+            source_dir = os.path.dirname(source_image_path)
+            source_filename = os.path.basename(source_image_path)
+            source_name_no_ext = os.path.splitext(source_filename)[0]
             
-            # Get all translated images
-            image_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp')
-            translated_images = sorted([
-                os.path.join(folder_path, f)
-                for f in os.listdir(folder_path)
-                if f.lower().endswith(image_extensions)
-            ])
+            # Look for translated version in isolated folder
+            translated_folder = os.path.join(source_dir, f"{source_name_no_ext}_translated")
             
-            if not translated_images:
-                print("[DEBUG] No translated images found")
-                return
+            if os.path.exists(translated_folder) and os.path.isdir(translated_folder):
+                # Find the translated image in the folder
+                image_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
+                for filename in os.listdir(translated_folder):
+                    if filename.lower().endswith(image_extensions):
+                        translated_path = os.path.join(translated_folder, filename)
+                        print(f"[DEBUG] Found translated output: {translated_path}")
+                        
+                        # Load into output viewer
+                        self.output_viewer.load_image(translated_path)
+                        self.current_translated_path = translated_path
+                        
+                        # Switch to output tab automatically
+                        self.viewer_tabs.setCurrentIndex(1)
+                        return
             
-            print(f"[DEBUG] Found {len(translated_images)} translated images")
-            
-            # Update thumbnail list with translated images
-            self.set_image_list(translated_images)
-            
-            # Load the first translated image
-            if translated_images:
-                self.load_image(translated_images[0])
-                print(f"[DEBUG] Loaded first translated image: {os.path.basename(translated_images[0])}")
+            # No translated output found - clear output viewer and show placeholder
+            print(f"[DEBUG] No translated output found for: {source_filename}")
+            self.output_viewer.clear_scene()
+            self.current_translated_path = None
+            self.viewer_tabs.setCurrentIndex(0)  # Switch back to source
             
         except Exception as e:
-            print(f"[DEBUG] Error loading translated preview: {str(e)}")
-            import traceback
-            print(traceback.format_exc())
-    
-    def _load_isolated_translated_preview(self, parent_dir: str):
-        """Load translated images from isolated *_translated folders into preview mode"""
-        try:
-            print(f"[DEBUG] Loading isolated translated images from: {parent_dir}")
-            
-            # Get all translated images from isolated folders
-            image_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
-            translated_images = []
-            
-            # Find all *_translated folders
-            for item in os.listdir(parent_dir):
-                item_path = os.path.join(parent_dir, item)
-                if os.path.isdir(item_path) and item.endswith('_translated'):
-                    # Get images from this folder
-                    for filename in os.listdir(item_path):
-                        if filename.lower().endswith(image_extensions):
-                            translated_images.append(os.path.join(item_path, filename))
-            
-            # Sort by filename for consistent ordering
-            translated_images = sorted(translated_images)
-            
-            if not translated_images:
-                print("[DEBUG] No translated images found in isolated folders")
-                return
-            
-            print(f"[DEBUG] Found {len(translated_images)} translated images in isolated folders")
-            
-            # Update thumbnail list with translated images
-            self.set_image_list(translated_images)
-            
-            # Load the first translated image
-            if translated_images:
-                self.load_image(translated_images[0])
-                print(f"[DEBUG] Loaded first translated image: {os.path.basename(translated_images[0])}")
-            
-        except Exception as e:
-            print(f"[DEBUG] Error loading isolated translated preview: {str(e)}")
+            print(f"[DEBUG] Error checking translated output: {str(e)}")
             import traceback
             print(traceback.format_exc())

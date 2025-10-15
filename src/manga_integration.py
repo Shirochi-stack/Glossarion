@@ -7464,55 +7464,12 @@ class MangaTranslationTab:
                 # DEBUG: Log the image loading attempt
                 self._log(f"🖼️ Loading preview: {os.path.basename(image_path)}", "debug")
                 
-                # Load the image into the preview (always visible)
+                # Load the image into the preview (always visible) - ALWAYS USE SOURCE
                 if hasattr(self, 'image_preview_widget'):
                     if os.path.exists(image_path):
-                        # CHECK FOR TRANSLATED IMAGE IN ISOLATED FOLDER FIRST
-                        display_image_path = image_path
-                        
-                        # Priority 1: Check for translated image in isolated folder
-                        filename = os.path.basename(image_path)
-                        base_name = os.path.splitext(filename)[0]
-                        parent_dir = os.path.dirname(os.path.normpath(image_path))  # Normalize path to fix slash mixing
-                        isolated_folder = os.path.join(parent_dir, f"{base_name}_translated")
-                        isolated_image = os.path.normpath(os.path.join(isolated_folder, filename))  # Normalize final path
-                        
-                        # DEBUG: Log what we're checking
-                        print(f"[LOAD] Checking for translated image:")
-                        print(f"[LOAD]   Source: {image_path}")
-                        print(f"[LOAD]   Looking for: {isolated_image}")
-                        print(f"[LOAD]   Exists: {os.path.exists(isolated_image)}")
-                        
-                        if os.path.exists(isolated_image):
-                            display_image_path = isolated_image
-                            print(f"[LOAD] ✅ Using translated image from isolated folder: {isolated_image}")
-                            self._log(f"🎯 Loaded translated version", "debug")
-                        else:
-                            print(f"[LOAD] ⚠️ No translated image found, checking rendered images...")
-                            # Priority 2: Check state manager for rendered image
-                            if hasattr(self, 'image_state_manager'):
-                                state = self.image_state_manager.get_state(image_path)
-                                if state and 'rendered_image_path' in state:
-                                    rendered_path = state['rendered_image_path']
-                                    if os.path.exists(rendered_path):
-                                        display_image_path = rendered_path
-                                        print(f"[LOAD] Using rendered image from state: {os.path.basename(rendered_path)}")
-                            
-                            # Priority 3: Also check _rendered_images_map
-                            if display_image_path == image_path and hasattr(self, '_rendered_images_map') and image_path in self._rendered_images_map:
-                                rendered_path = self._rendered_images_map[image_path]
-                                if os.path.exists(rendered_path):
-                                    display_image_path = rendered_path
-                                    print(f"[LOAD] Using rendered image from map: {os.path.basename(rendered_path)}")
-                            
-                            # If still using original, log it
-                            if display_image_path == image_path:
-                                print(f"[LOAD] 📄 Using original source image (no translation/render found)")
-                        
-                        # Load the correct image (translated/rendered if available, otherwise original)
-                        print(f"[LOAD] Final path to load: {display_image_path}")
-                        self.image_preview_widget.load_image(display_image_path)
-                        self._log(f"✅ Preview loaded: {os.path.basename(display_image_path)}", "debug")
+                        # Just load the source image - tabbed view will handle translated output
+                        self.image_preview_widget.load_image(image_path)
+                        self._log(f"✅ Preview loaded: {os.path.basename(image_path)}", "debug")
                     else:
                         self._log(f"❌ Image file not found: {image_path}", "error")
                 else:
