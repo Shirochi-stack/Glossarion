@@ -975,15 +975,15 @@ class MangaImagePreviewWidget(QWidget):
     
     def _emit_translate_signal(self):
         """Emit translate text signal with debugging"""
-        print("[DEBUG] Translate button clicked - emitting signal")
+        print("[TRANSLATE_BUTTON] Translate button clicked - emitting signal", flush=True)
         self.translate_text_clicked.emit()
-        print("[DEBUG] Translate signal emitted")
+        print("[TRANSLATE_BUTTON] Translate signal emitted", flush=True)
     
     def _emit_translate_all_signal(self):
         """Emit translate all signal with debugging"""
-        print("[DEBUG] Translate All button clicked - emitting signal")
+        print("[TRANSLATE_ALL_BUTTON] Translate All button clicked - emitting signal", flush=True)
         self.translate_all_clicked.emit()
-        print("[DEBUG] Translate All signal emitted")
+        print("[TRANSLATE_ALL_BUTTON] Translate All signal emitted", flush=True)
     
     def set_image_list(self, image_paths: list):
         """Set the list of images and populate thumbnails"""
