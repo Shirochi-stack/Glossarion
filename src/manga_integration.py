@@ -9311,6 +9311,7 @@ class MangaTranslationTab:
             if not hasattr(self, '_manga_translator') or self._manga_translator is None:
                 from manga_translator import MangaTranslator
                 from unified_api_client import UnifiedClient
+                import os, json, hashlib
                 
                 # Get OCR config (required by MangaTranslator)
                 ocr_config = self._get_ocr_config()
@@ -9322,7 +9323,31 @@ class MangaTranslationTab:
                 if not api_key:
                     raise ValueError("No API key found in main GUI - cannot create MangaTranslator")
                 
+                # Apply multi-key env from GUI settings so UnifiedClient picks it up
+                try:
+                    use_mk = bool(self.main_gui.config.get('use_multi_api_keys', False))
+                    mk_list = self.main_gui.config.get('multi_api_keys', []) or []
+                    force_rotation = bool(self.main_gui.config.get('force_key_rotation', True))
+                    rotation_frequency = int(self.main_gui.config.get('rotation_frequency', 1))
+                    if use_mk and mk_list:
+                        os.environ['USE_MULTI_API_KEYS'] = '1'
+                        os.environ['USE_MULTI_KEYS'] = '1'
+                        os.environ['MULTI_API_KEYS'] = json.dumps(mk_list)
+                        os.environ['FORCE_KEY_ROTATION'] = '1' if force_rotation else '0'
+                        os.environ['ROTATION_FREQUENCY'] = str(rotation_frequency)
+                    else:
+                        os.environ['USE_MULTI_API_KEYS'] = '0'
+                        os.environ['USE_MULTI_KEYS'] = '0'
+                except Exception as _mk_err:
+                    print(f"[DEBUG] Failed to apply multi-key env: {_mk_err}")
+                
                 unified_client = UnifiedClient(model=model, api_key=api_key)
+                # If multi-key desired, (re)setup pool to ensure keys are loaded for this session
+                try:
+                    if os.getenv('USE_MULTI_API_KEYS', '0') == '1' and mk_list:
+                        UnifiedClient.setup_multi_key_pool(mk_list, force_rotation=force_rotation, rotation_frequency=rotation_frequency)
+                except Exception as _pool_err:
+                    print(f"[DEBUG] setup_multi_key_pool failed: {_pool_err}")
                 
                 # Create MangaTranslator with all required parameters
                 self._manga_translator = MangaTranslator(
@@ -9391,24 +9416,64 @@ class MangaTranslationTab:
             
             # Get API key and model from main GUI once
             from unified_api_client import UnifiedClient
+            import os, json, hashlib
             api_key = self.main_gui.api_key_entry.text().strip() if hasattr(self.main_gui, 'api_key_entry') else ''
             model = self.main_gui.model_var if hasattr(self.main_gui, 'model_var') else 'gpt-4o-mini'
             
             if not api_key:
                 raise ValueError("No API key found in main GUI")
             
+            # Apply multi-key env from GUI settings so UnifiedClient picks it up
+            use_mk = False
+            mk_list = []
+            force_rotation = True
+            rotation_frequency = 1
+            try:
+                use_mk = bool(self.main_gui.config.get('use_multi_api_keys', False))
+                mk_list = self.main_gui.config.get('multi_api_keys', []) or []
+                force_rotation = bool(self.main_gui.config.get('force_key_rotation', True))
+                rotation_frequency = int(self.main_gui.config.get('rotation_frequency', 1))
+                if use_mk and mk_list:
+                    os.environ['USE_MULTI_API_KEYS'] = '1'
+                    os.environ['USE_MULTI_KEYS'] = '1'
+                    os.environ['MULTI_API_KEYS'] = json.dumps(mk_list)
+                    os.environ['FORCE_KEY_ROTATION'] = '1' if force_rotation else '0'
+                    os.environ['ROTATION_FREQUENCY'] = str(rotation_frequency)
+                else:
+                    os.environ['USE_MULTI_API_KEYS'] = '0'
+                    os.environ['USE_MULTI_KEYS'] = '0'
+            except Exception as _mk_err:
+                print(f"[DEBUG] Failed to apply multi-key env: {_mk_err}")
+            
             # Get or create cached UnifiedClient (reuse across all regions in this batch)
-            client_cache_key = f"{model}_{hash(api_key)}"
+            mk_hash = hashlib.sha256(json.dumps(mk_list, sort_keys=True).encode('utf-8')).hexdigest()[:8] if mk_list else 'noMK'
+            desired_mk_flag = 'mk' if use_mk else 'single'
+            client_cache_key = f"{model}_{hash(api_key)}_{desired_mk_flag}_{mk_hash}"
             if not hasattr(self, '_unified_client_cache'):
                 self._unified_client_cache = {}
             
+            create_client = False
             if client_cache_key not in self._unified_client_cache:
-                print(f"[DEBUG] Creating new UnifiedClient with model: {model}")
-                self._unified_client_cache[client_cache_key] = UnifiedClient(model=model, api_key=api_key)
+                create_client = True
             else:
-                print(f"[DEBUG] Reusing cached UnifiedClient with model: {model}")
+                # Verify cached client's multi-key mode matches desired
+                cached = self._unified_client_cache[client_cache_key]
+                if getattr(cached, '_multi_key_mode', False) != bool(use_mk):
+                    create_client = True
             
-            client = self._unified_client_cache[client_cache_key]
+            if create_client:
+                print(f"[DEBUG] Creating new UnifiedClient with model: {model} (multi_key={use_mk})")
+                client = UnifiedClient(model=model, api_key=api_key)
+                # If multi-key desired, ensure pool is initialized/refreshed
+                try:
+                    if use_mk and mk_list:
+                        UnifiedClient.setup_multi_key_pool(mk_list, force_rotation=force_rotation, rotation_frequency=rotation_frequency)
+                except Exception as _pool_err:
+                    print(f"[DEBUG] setup_multi_key_pool failed: {_pool_err}")
+                self._unified_client_cache[client_cache_key] = client
+            else:
+                print(f"[DEBUG] Reusing cached UnifiedClient with model: {model} (multi_key={use_mk})")
+                client = self._unified_client_cache[client_cache_key]
             
             # Get system prompt from GUI profile (same as regular pipeline)
             system_prompt = self._get_system_prompt_from_gui()
