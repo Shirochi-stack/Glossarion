@@ -210,11 +210,11 @@ When manual editing is enabled:
 
 ---
 
-
 ## Keyboard Shortcuts and Mouse Controls
 
 ### Mouse Navigation
 - **Left Click**: Select boxes/tools (Pan mode)
+- **Right Click**: Open context menu on detection boxes (after recognition/translation)
 - **Click + Drag**: Create boxes (Box Draw mode) or draw strokes (Brush/Eraser modes)
 - **Shift + Mouse Wheel**: Zoom in/out at cursor position
 - **Mouse Wheel**: Scroll content when zoomed in
