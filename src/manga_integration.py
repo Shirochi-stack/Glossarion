@@ -12174,21 +12174,46 @@ class MangaTranslationTab:
         """Detect when user manually scrolls in the log"""
         try:
             scrollbar = self.log_text.verticalScrollBar()
-            # Check if we're at the bottom (with small margin)
-            at_bottom = value >= scrollbar.maximum() - 10
+            # Distance from bottom
+            distance = max(0, scrollbar.maximum() - int(value))
+            # Consider 'near bottom' more generously so auto-scroll isn't disabled too easily
+            near_threshold = max(10, int(scrollbar.pageStep() * 0.5))  # half a page or ≥10px
+            disable_threshold = max(near_threshold + 20, int(scrollbar.pageStep() * 1.2))  # clearly away from bottom
 
-            if at_bottom:
-                # User explicitly scrolled to bottom - re-enable auto-scroll
+            if distance <= near_threshold:
+                # Close enough to bottom — treat as at bottom and re-enable auto-scroll
                 self._user_scrolled_up = False
                 self._was_at_bottom = True
-            else:
-                # Only mark as manually scrolled if we were previously at bottom
-                if getattr(self, '_was_at_bottom', True):
-                    self._user_scrolled_up = True
+            elif distance >= disable_threshold:
+                # Only mark as manually scrolled when clearly away from bottom
+                self._user_scrolled_up = True
                 self._was_at_bottom = False
+            # If in between thresholds, keep prior state (prevents flapping)
 
         except Exception:
             pass
+    
+    def _should_autoscroll(self) -> bool:
+        """Return True if we should auto-scroll to bottom based on current scrollbar position and flags."""
+        try:
+            if not hasattr(self, 'log_text') or not self.log_text:
+                return True
+            sb = self.log_text.verticalScrollBar()
+            # If delay not elapsed, don't autoscroll
+            import time as _time
+            if _time.time() < getattr(self, '_autoscroll_delay_until', 0):
+                return False
+            # If user is near bottom, allow auto-scroll even if they briefly scrolled
+            distance = max(0, sb.maximum() - sb.value())
+            near_threshold = max(10, int(sb.pageStep() * 0.5))
+            if distance <= near_threshold:
+                # Reset manual scroll flag when we detect we're near bottom again
+                self._user_scrolled_up = False
+                return True
+            # Otherwise, respect explicit manual-scroll flag
+            return not getattr(self, '_user_scrolled_up', False)
+        except Exception:
+            return True
     
     def _start_autoscroll_delay(self, ms=500):
         """Delay auto-scroll for the specified milliseconds"""
@@ -12265,23 +12290,21 @@ class MangaTranslationTab:
                     
                     cursor.insertText(message, format)
                     
-                    # More aggressive auto-scroll behavior
+                    # Auto-scroll behavior: favor auto-scroll when near bottom, respect manual scroll otherwise
                     try:
                         from PySide6.QtGui import QTextCursor as _QtTextCursor
                         from PySide6.QtCore import QTimer
                         
-                        # Always move cursor to end first
+                        # Move cursor to end (where we inserted) so ensureCursorVisible works when allowed
                         self.log_text.moveCursor(_QtTextCursor.End)
-                        self.log_text.ensureCursorVisible()
                         
-                        # Force scroll to bottom with repeated attempts
-                        scrollbar = self.log_text.verticalScrollBar()
-                        scrollbar.setValue(scrollbar.maximum())
-                        
-                        # Schedule additional scroll attempts with delays
-                        if not getattr(self, '_user_scrolled_up', False):
-                            for delay in [50, 100, 200]:  # Multiple attempts with increasing delays
-                                QTimer.singleShot(delay, lambda: scrollbar.setValue(scrollbar.maximum()))
+                        if self._should_autoscroll():
+                            self.log_text.ensureCursorVisible()
+                            # Also set scrollbar to max now and a few times later in case layout changes
+                            scrollbar = self.log_text.verticalScrollBar()
+                            scrollbar.setValue(scrollbar.maximum())
+                            for delay in [50, 100, 200]:
+                                QTimer.singleShot(delay, lambda sb=scrollbar: (sb.setValue(sb.maximum()) if self._should_autoscroll() else None))
                     except Exception:
                         pass
                 except Exception:
@@ -12380,12 +12403,9 @@ class MangaTranslationTab:
                         
                         cursor.insertText(message, format)
                         
-                        # Scroll to bottom (respect delay and manual scrolling)
+                        # Scroll to bottom (favor auto-scroll when near bottom)
                         try:
-                            import time as _time
-                            # Only auto-scroll if delay passed AND user hasn't scrolled up
-                            if (_time.time() >= getattr(self, '_autoscroll_delay_until', 0) and 
-                                not getattr(self, '_user_scrolled_up', False)):
+                            if self._should_autoscroll():
                                 self.log_text.ensureCursorVisible()
                         except Exception:
                             pass
