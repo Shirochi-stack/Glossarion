@@ -14,7 +14,8 @@ from PySide6.QtWidgets import (
     QRadioButton, QButtonGroup, QGroupBox, QTabWidget, QWidget,
     QTextEdit, QProgressBar, QMessageBox, QApplication
 )
-from PySide6.QtCore import Qt, QTimer, QObject, QThread, Signal, Slot
+from PySide6.QtCore import Qt, QTimer, QObject, QThread, Signal, Slot, QUrl
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 from PySide6.QtGui import QFont, QIcon, QTextCursor
 from datetime import datetime
 
@@ -105,6 +106,93 @@ class DownloadWorker(QObject):
             getattr(self, "_session", None) and self._session.close()
         except Exception:
             pass
+
+class QtDownloadJob(QObject):
+    progress = Signal(int, float, float)
+    finished = Signal(str)
+    error = Signal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.nam = QNetworkAccessManager(self)
+        self.reply: QNetworkReply | None = None
+        self._file = None
+        self._path = None
+
+    def start(self, url: str, path: str):
+        self._path = path
+        try:
+            self._file = open(path, 'wb')
+        except Exception as e:
+            self.error.emit(f"Cannot open file for writing: {e}")
+            return
+        req = QNetworkRequest(QUrl(url))
+        req.setRawHeader(b'User-Agent', b'Glossarion-Updater')
+        req.setRawHeader(b'Accept', b'application/octet-stream')
+        # Follow safe redirects
+        try:
+            req.setAttribute(QNetworkRequest.FollowRedirectsAttribute, True)
+        except Exception:
+            pass
+        self.reply = self.nam.get(req)
+        self.reply.downloadProgress.connect(self._on_progress)
+        self.reply.readyRead.connect(self._on_ready_read)
+        self.reply.finished.connect(self._on_finished)
+        self.reply.errorOccurred.connect(self._on_error)
+
+    def cancel(self):
+        try:
+            if self.reply:
+                self.reply.abort()
+        except Exception:
+            pass
+
+    @Slot()
+    def _on_ready_read(self):
+        try:
+            if not self.reply or not self._file:
+                return
+            data = self.reply.readAll()
+            if data:
+                self._file.write(bytes(data))
+        except Exception as e:
+            self.error.emit(str(e))
+
+    @Slot(int, int)
+    def _on_progress(self, bytes_received: int, bytes_total: int):
+        try:
+            if bytes_total > 0:
+                p = int(bytes_received * 100 / bytes_total)
+                self.progress.emit(p, bytes_received / (1024 * 1024), bytes_total / (1024 * 1024))
+            else:
+                self.progress.emit(-1, bytes_received / (1024 * 1024), 0.0)
+        except Exception:
+            pass
+
+    @Slot()
+    def _on_finished(self):
+        try:
+            if self._file:
+                # Write any remaining buffered data
+                self._on_ready_read()
+                self._file.flush()
+                self._file.close()
+            if self.reply and self.reply.error() == QNetworkReply.NoError:
+                self.finished.emit(self._path)
+                return
+            # If there was an error, it should have been emitted already
+        finally:
+            self.reply and self.reply.deleteLater()
+            self.reply = None
+            self._file = None
+
+    @Slot(QNetworkReply.NetworkError)
+    def _on_error(self, code):
+        try:
+            err = self.reply.errorString() if self.reply else str(code)
+        except Exception:
+            err = str(code)
+        self.error.emit(err)
 
 class UpdateManager(QObject):
     """Handles automatic update checking and installation for Glossarion"""
@@ -721,6 +809,10 @@ class UpdateManager(QObject):
                 border: 1px solid #555555;
                 background-color: #1e1e1e;
             }
+            QRadioButton::indicator:checked:disabled {
+                background-color: #5a9fd4;
+                border: 1px solid #5a9fd4;
+            }
             QGroupBox {
                 color: white;
                 border: 1px solid #555555;
@@ -1305,12 +1397,47 @@ class UpdateManager(QObject):
         url = asset['browser_download_url']
 
         # Reset and show initial progress state
-        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setRange(0, 0)  # indeterminate until we know size
         self.progress_bar.setValue(0)
-        self.progress_label.setText("Starting download...")
+        self.progress_label.setText("Connecting to GitHub...")
         self.status_label.setText("")
 
-        # Create worker thread and start download
+        # Prefer Qt's network stack for async download
+        try:
+            # Clean up any previous job
+            if hasattr(self, 'qt_downloader') and self.qt_downloader:
+                try:
+                    self.qt_downloader.deleteLater()
+                except Exception:
+                    pass
+            self.qt_downloader = QtDownloadJob()
+            self.qt_downloader.progress.connect(self._on_download_progress)
+            self.qt_downloader.finished.connect(lambda fp: self.download_complete(dialog, fp))
+            self.qt_downloader.error.connect(lambda msg: self._show_download_error(dialog, msg))
+            # Watchdog for no progress
+            try:
+                if hasattr(self, '_download_watchdog') and self._download_watchdog:
+                    self._download_watchdog.stop()
+                    self._download_watchdog.deleteLater()
+            except Exception:
+                pass
+            self._download_watchdog = QTimer(self)
+            self._download_watchdog.setInterval(90000)
+            self._download_watchdog.timeout.connect(lambda: self._on_download_timeout(dialog))
+            self._download_watchdog.start()
+            self.qt_downloader.start(url, download_path)
+            # Hook cancel
+            if hasattr(self, 'cancel_btn') and self.cancel_btn:
+                try:
+                    self.cancel_btn.clicked.disconnect()
+                except Exception:
+                    pass
+                self.cancel_btn.clicked.connect(lambda: (self.cancel_btn.setEnabled(False), self.qt_downloader.cancel(), self.progress_label.setText("Cancelling...")))
+            return
+        except Exception:
+            pass
+
+        # Fallback: Create worker thread and start download with requests
         self.download_thread = QThread(self)
         self.download_worker = DownloadWorker(url, download_path)
         self.download_worker.moveToThread(self.download_thread)
@@ -1324,7 +1451,7 @@ class UpdateManager(QObject):
         self.download_worker.error.connect(self.download_thread.quit)
         self.download_thread.finished.connect(self.download_worker.deleteLater)
         self.download_thread.finished.connect(self.download_thread.deleteLater)
-        # Watchdog: cancel if no progress in 20s
+        # Watchdog: cancel if no progress
         try:
             if hasattr(self, '_download_watchdog') and self._download_watchdog:
                 self._download_watchdog.stop()
