@@ -7499,6 +7499,11 @@ class MangaTranslationTab:
     def _on_detect_text_clicked(self):
         """Detect text button - run detection in background thread"""
         try:
+            # GUARD: Prevent processing during rendering
+            if hasattr(self, '_rendering_in_progress') and self._rendering_in_progress:
+                print("[DEBUG] Rendering in progress, ignoring detect click")
+                return
+            
             # Get current image path
             if not hasattr(self, 'image_preview_widget') or not self.image_preview_widget.current_image_path:
                 self._log("⚠️ No image loaded for detection", "warning")
@@ -9019,6 +9024,11 @@ class MangaTranslationTab:
         self._log("🐛 DEBUG: Translate button clicked", "debug")
         
         try:
+            # GUARD: Prevent processing during rendering
+            if hasattr(self, '_rendering_in_progress') and self._rendering_in_progress:
+                print("[DEBUG] Rendering in progress, ignoring translate click")
+                return
+            
             # Check if we have an image loaded
             if not hasattr(self, 'image_preview_widget') or not self.image_preview_widget.current_image_path:
                 self._log("⚠️ No image loaded for translation", "warning")
@@ -10306,8 +10316,14 @@ class MangaTranslationTab:
             
             # Load the rendered image into preview
             print(f"[RENDER] Loading rendered image into preview...")
-            self.image_preview_widget.load_image(output_path, preserve_rectangles=True, preserve_text_overlays=False)
-            print(f"[RENDER] Image loaded into preview")
+            
+            # SET FLAG to prevent triggering another processing cycle
+            self._rendering_in_progress = True
+            try:
+                self.image_preview_widget.load_image(output_path, preserve_rectangles=False, preserve_text_overlays=False)
+                print(f"[RENDER] Image loaded into preview")
+            finally:
+                self._rendering_in_progress = False
             
             self._log(f"✅ Rendered to: 3_translated/{output_filename}", "success")
             
