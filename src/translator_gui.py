@@ -1216,6 +1216,90 @@ Text to analyze:
                 print("API keys encrypted successfully!")
         except Exception as e:
             print(f"Auto-encryption check failed: {e}")
+    
+    def closeEvent(self, event):
+        """Handle window close event properly"""
+        try:
+            print("[CLOSE] Window closing...")
+            
+            # Stop any background operations first
+            self.stop_all_operations()
+            
+            print("[CLOSE] Background operations stopped, accepting close event...")
+            
+            # Accept the close event - this will naturally end the Qt event loop
+            event.accept()
+            
+            # Quit the application - this will cause app.exec() to return
+            from PySide6.QtWidgets import QApplication
+            app = QApplication.instance()
+            if app:
+                print("[CLOSE] Calling app.quit()...")
+                app.quit()
+            
+            print("[CLOSE] Close event handling completed")
+            
+            # DO NOT call sys.exit() from here - let the main function handle it
+            
+        except Exception as e:
+            print(f"[CLOSE] Error during close: {e}")
+            # Even on error, just accept the event and let main function handle exit
+            try:
+                event.accept()
+                from PySide6.QtWidgets import QApplication
+                app = QApplication.instance()
+                if app:
+                    app.quit()
+            except:
+                pass
+    
+    def stop_all_operations(self):
+        """Stop all background operations and threads"""
+        try:
+            print("[CLEANUP] Stopping all background operations...")
+            
+            # Stop any translation operations
+            if hasattr(self, '_translation_thread') and self._translation_thread:
+                try:
+                    print("[CLEANUP] Terminating translation thread...")
+                    self._translation_thread.terminate()
+                    self._translation_thread.wait(1000)  # Wait up to 1 second
+                except:
+                    pass
+            
+            # Stop glossary operations
+            if hasattr(self, '_glossary_thread') and self._glossary_thread:
+                try:
+                    print("[CLEANUP] Terminating glossary thread...")
+                    self._glossary_thread.terminate()
+                    self._glossary_thread.wait(1000)  # Wait up to 1 second
+                except:
+                    pass
+            
+            # Stop executor if it exists
+            if hasattr(self, 'executor') and self.executor:
+                try:
+                    print("[CLEANUP] Shutting down thread pool executor...")
+                    self.executor.shutdown(wait=False)
+                except:
+                    pass
+            
+            # Set any stop flags that might exist
+            if hasattr(self, 'stop_flag'):
+                self.stop_flag.set()
+            
+            # Close any open dialogs
+            if hasattr(self, '_manga_dialog') and self._manga_dialog:
+                try:
+                    print("[CLEANUP] Closing manga dialog...")
+                    self._manga_dialog.close()
+                except:
+                    pass
+            
+            print("[CLEANUP] Background operations stopped")
+            
+        except Exception as e:
+            print(f"[CLEANUP] Error stopping operations: {e}")
         
     def _check_updates_on_startup(self):
         """Check for updates on startup with debug logging (async)"""
@@ -9264,6 +9348,19 @@ Important rules:
 
 if __name__ == "__main__":
     import time
+    import sys
+    
+    # Add global exception handler to catch any unhandled exceptions
+    def global_exception_handler(exc_type, exc_value, exc_traceback):
+        print(f"[GLOBAL_EXCEPTION] Unhandled exception: {exc_type.__name__}: {exc_value}")
+        import traceback
+        traceback.print_exception(exc_type, exc_value, exc_traceback)
+        print("[GLOBAL_EXCEPTION] Forcing exit due to unhandled exception")
+        import os
+        os._exit(1)  # Exit with code 1 for exceptions
+    
+    sys.excepthook = global_exception_handler
+    
     # Ensure console encoding can handle emojis/Unicode in frozen exe environments
     try:
         import io, sys as _sys
@@ -9456,67 +9553,86 @@ if __name__ == "__main__":
         
         print("✅ Ready to use!")
         
-        # Add cleanup handler for graceful shutdown
-        def on_closing():
-            """Handle application shutdown gracefully to avoid GIL issues"""
-            try:
-                # Stop any background threads before destroying GUI
-                if hasattr(main_window, 'stop_all_operations'):
-                    main_window.stop_all_operations()
-                
-                # Give threads a moment to stop
-                import time
-                time.sleep(0.1)
-                
-                # Close window
-                main_window.close()
-            except Exception:
-                # Force exit if cleanup fails
-                import os
-                os._exit(0)
+        # Note: closeEvent is now handled by the TranslatorGUI.closeEvent method
+        # No need to override it here
         
-        # Set the window close handler
-        main_window.closeEvent = lambda event: on_closing()
-        
-        # Add signal handlers for clean shutdown
+        # Add simple signal handlers for clean shutdown
         import signal
         def signal_handler(signum, frame):
             """Handle system signals gracefully"""
-            print(f"Received signal {signum}, shutting down gracefully...")
-            try:
-                on_closing()
-            except Exception:
-                os._exit(1)
+            print(f"[SIGNAL] Received signal {signum}, forcing exit")
+            import os
+            os._exit(0)
         
         # Register signal handlers (Windows-safe)
-        if hasattr(signal, 'SIGINT'):
-            signal.signal(signal.SIGINT, signal_handler)
-        if hasattr(signal, 'SIGTERM'):
-            signal.signal(signal.SIGTERM, signal_handler)
-        
-        # Start main loop with error handling
         try:
-            sys.exit(qapp.exec())
+            if hasattr(signal, 'SIGINT'):
+                signal.signal(signal.SIGINT, signal_handler)
+            if hasattr(signal, 'SIGTERM'):
+                signal.signal(signal.SIGTERM, signal_handler)
         except Exception as e:
-            print(f"Main loop error: {e}")
-        finally:
-            # Ensure cleanup even if mainloop fails
-            try:
-                on_closing()
-            except Exception:
-                pass
+            print(f"[SIGNAL] Could not register signal handlers: {e}")
+        
+        # Start main loop with debugging and proper cleanup
+        exit_code = 0
+        try:
+            print("[MAIN] Starting Qt event loop...")
+            exit_code = qapp.exec()
+            print(f"[MAIN] Qt event loop ended naturally with code: {exit_code}")
+        except Exception as e:
+            print(f"[MAIN] Main loop error: {e}")
+            import traceback
+            traceback.print_exc()
+            exit_code = 1
+        except KeyboardInterrupt:
+            print("[MAIN] Keyboard interrupt received")
+            main_window.stop_all_operations()
+            exit_code = 0
+        
+        # Ensure proper Qt cleanup
+        try:
+            print("[MAIN] Performing final Qt cleanup...")
+            main_window.stop_all_operations()
+            qapp.processEvents()  # Process any remaining events
+            print("[MAIN] Qt cleanup completed")
+        except Exception as e:
+            print(f"[MAIN] Error during Qt cleanup: {e}")
+        
+        print(f"[MAIN] Main function completed with exit code {exit_code}, calling sys.exit({exit_code})...")
+        # Exit with the code returned by Qt event loop
+        import sys
+        try:
+            sys.exit(exit_code)
+        except SystemExit as e:
+            print(f"[MAIN] SystemExit raised with code: {e.code}")
+            raise  # Re-raise to actually exit
+        except Exception as e:
+            print(f"[MAIN] Unexpected error during sys.exit: {e}")
+            import os
+            os._exit(exit_code)
         
     except Exception as e:
         print(f"❌ Failed to start application: {e}")
-        if splash_manager:
-            splash_manager.close_splash()
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
-    
-    finally:
         if splash_manager:
             try:
                 splash_manager.close_splash()
             except:
                 pass
+        import traceback
+        traceback.print_exc()
+        print("[MAIN] Exception occurred, exiting with code 1...")
+        import sys
+        sys.exit(1)
+    
+    finally:
+        if splash_manager and not getattr(splash_manager, '_already_closed', False):
+            try:
+                print("[MAIN] Closing splash screen in finally block...")
+                splash_manager.close_splash()
+                splash_manager._already_closed = True
+                print("[MAIN] Splash screen closed in finally")
+            except Exception as e:
+                print(f"[MAIN] Error closing splash: {e}")
+        elif splash_manager:
+            print("[MAIN] Splash screen already closed, skipping")
+        print("[MAIN] Finally block executed")

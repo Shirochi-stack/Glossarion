@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QRadioButton, QButtonGroup, QGroupBox, QTabWidget, QWidget,
     QTextEdit, QProgressBar, QMessageBox, QApplication
 )
-from PySide6.QtCore import Qt, QTimer, QObject, QThread, Signal
+from PySide6.QtCore import Qt, QTimer, QObject, QThread, Signal, Slot
 from PySide6.QtGui import QFont, QIcon, QTextCursor
 from datetime import datetime
 
@@ -38,6 +38,73 @@ class UpdateCheckWorker(QThread):
         except Exception as e:
             print(f"[DEBUG] Worker thread error: {e}")
             self.error_occurred.emit(str(e))
+
+class DownloadWorker(QObject):
+    """Worker that downloads a file and emits progress via Qt signals"""
+    progress = Signal(int, float, float)  # percent (-1 if unknown), downloaded_MB, total_MB
+    finished = Signal(str)  # file path
+    error = Signal(str)
+
+    def __init__(self, url: str, path: str):
+        super().__init__()
+        self.url = url
+        self.path = path
+        self._cancel = False
+
+    @Slot()
+    def run(self):
+        try:
+            with requests.Session() as s:
+                self._session = s
+                headers = {
+                    'User-Agent': 'Glossarion-Updater',
+                    'Accept': 'application/octet-stream'
+                }
+                with s.get(self.url, headers=headers, stream=True, timeout=(30, 300), allow_redirects=True) as r:
+                    r.raise_for_status()
+                    total_size = int(r.headers.get('content-length', 0))
+                    downloaded = 0
+                    last_emit_percent = -1
+                    last_emit_time = time.time()
+                    with open(self.path, 'wb') as f:
+                        for chunk in r.iter_content(chunk_size=65536):
+                            if self._cancel:
+                                raise Exception("Download cancelled")
+                            if not chunk:
+                                continue
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            now = time.time()
+                            if total_size > 0:
+                                p = int(downloaded * 100 / total_size)
+                                # Throttle: emit only when percent changes or 0.2s passed
+                                if p != last_emit_percent or (now - last_emit_time) >= 0.2:
+                                    last_emit_percent = p
+                                    last_emit_time = now
+                                    self.progress.emit(p, downloaded / (1024 * 1024), total_size / (1024 * 1024))
+                            else:
+                                # Unknown total size (no content-length)
+                                if (now - last_emit_time) >= 0.5:
+                                    last_emit_time = now
+                                    self.progress.emit(-1, downloaded / (1024 * 1024), 0.0)
+            # Emit final progress and finished signal
+            try:
+                if total_size > 0:
+                    self.progress.emit(100, downloaded / (1024 * 1024), total_size / (1024 * 1024))
+            except Exception:
+                pass
+            self.finished.emit(self.path)
+        except Exception as e:
+            self.error.emit(str(e))
+
+    @Slot()
+    def cancel(self):
+        self._cancel = True
+        try:
+            # Attempt to close the session to unblock reads
+            getattr(self, "_session", None) and self._session.close()
+        except Exception:
+            pass
 
 class UpdateManager(QObject):
     """Handles automatic update checking and installation for Glossarion"""
@@ -732,6 +799,7 @@ class UpdateManager(QObject):
                     frame_title = "Available Download"
                 
                 asset_group = QGroupBox(frame_title)
+                asset_group.setObjectName("asset_group")
                 asset_layout = QVBoxLayout()
                 asset_layout.setContentsMargins(10, 10, 10, 10)
                 
@@ -862,7 +930,7 @@ class UpdateManager(QObject):
         progress_layout = QVBoxLayout(self.progress_widget)
         progress_layout.setContentsMargins(0, 10, 0, 10)
         
-        self.progress_label = QLabel("Downloading update...")
+        self.progress_label = QLabel("")
         progress_layout.addWidget(self.progress_label)
         
         self.progress_bar = QProgressBar()
@@ -877,6 +945,11 @@ class UpdateManager(QObject):
         status_font.setPointSize(8)
         self.status_label.setFont(status_font)
         progress_layout.addWidget(self.status_label)
+        
+        # Add cancel button (hidden until download starts)
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setVisible(False)
+        progress_layout.addWidget(self.cancel_btn)
         
         # Hide progress initially
         self.progress_widget.setVisible(False)
@@ -897,32 +970,54 @@ class UpdateManager(QObject):
                 msg.exec()
                 return
             
-            # Show progress
+            # Show progress and enable Cancel
             self.progress_widget.setVisible(True)
+            self.cancel_btn.setVisible(True)
             
-            # Disable all buttons
-            for i in range(button_layout.count()):
-                widget = button_layout.itemAt(i).widget()
-                if widget and isinstance(widget, QPushButton):
-                    widget.setEnabled(False)
+            # Disable only the download button and asset selector
+            try:
+                btn = dialog.findChild(QPushButton, "update_download_btn")
+                if btn:
+                    btn.setEnabled(False)
+                asset_box = dialog.findChild(QGroupBox, "asset_group")
+                if asset_box:
+                    asset_box.setEnabled(False)
+            except Exception:
+                pass
             
             # Reset progress
+            self.progress_bar.setRange(0, 0)  # indeterminate until we know size
             self.progress_bar.setValue(0)
+            self.progress_label.setText("Connecting to GitHub...")
+            self.status_label.setText("")
             self.download_progress = 0
-            
-            # Start download using shared executor if available
+
+            # Wire up cancel behavior (connected after worker is created inside download_update)
             try:
-                if hasattr(self.main_gui, '_ensure_executor'):
-                    self.main_gui._ensure_executor()
-                execu = getattr(self, 'executor', None) or getattr(self.main_gui, 'executor', None)
-                if execu:
-                    execu.submit(self.download_update, dialog)
-                else:
-                    thread = threading.Thread(target=self.download_update, args=(dialog,), daemon=True)
-                    thread.start()
+                self.cancel_btn.clicked.disconnect()
             except Exception:
-                thread = threading.Thread(target=self.download_update, args=(dialog,), daemon=True)
-                thread.start()
+                pass
+
+            # Start download using Qt thread worker (signals/slots)
+            try:
+                self.download_update(dialog)
+                # After starting thread, connect cancel to worker
+                def do_cancel():
+                    self.cancel_btn.setEnabled(False)
+                    try:
+                        if hasattr(self, 'download_worker') and self.download_worker:
+                            self.download_worker.cancel()
+                        self.progress_label.setText("Cancelling...")
+                    except Exception:
+                        pass
+                self.cancel_btn.clicked.connect(do_cancel)
+            except Exception as e:
+                msg = QMessageBox(dialog)
+                msg.setIcon(QMessageBox.Critical)
+                msg.setWindowTitle("Download Error")
+                msg.setText(str(e))
+                msg.exec()
+                self.cancel_btn.setVisible(False)
         
         # Always show download button if we have exe files
         has_exe_files = self.selected_asset is not None
@@ -930,6 +1025,7 @@ class UpdateManager(QObject):
         if self.update_available:
             # Show update-specific buttons
             download_btn = QPushButton("Download Update")
+            download_btn.setObjectName("update_download_btn")
             download_btn.setMinimumHeight(35)
             download_btn.clicked.connect(start_download)
             download_btn.setStyleSheet("""
@@ -988,6 +1084,7 @@ class UpdateManager(QObject):
             if exe_count > 1:
                 # Multiple versions available
                 download_btn = QPushButton("Download Different Path")
+                download_btn.setObjectName("update_download_btn")
                 download_btn.setStyleSheet("""
                     QPushButton {
                         background-color: #17a2b8;
@@ -1002,6 +1099,7 @@ class UpdateManager(QObject):
             else:
                 # Single version available
                 download_btn = QPushButton("Re-download")
+                download_btn.setObjectName("update_download_btn")
                 download_btn.setStyleSheet("""
                     QPushButton {
                         background-color: #6c757d;
@@ -1133,89 +1231,132 @@ class UpdateManager(QObject):
                    "You can manually check for updates from the Help menu.")
         msg.exec()
     
-    def download_update(self, dialog):
-        """Download the update file"""
+    @Slot(int, float, float)
+    def _on_download_progress(self, p: int, downloaded_mb: float, total_mb: float):
+        # Reset watchdog on progress
         try:
-            # Use the selected asset
-            asset = self.selected_asset
-                    
-            if not asset:
-                def show_error():
-                    msg = QMessageBox(dialog)
-                    msg.setIcon(QMessageBox.Critical)
-                    msg.setWindowTitle("Download Error")
-                    msg.setText("No file selected for download.")
-                    msg.exec()
-                QTimer.singleShot(0, show_error)
-                return
-            
-            # Get the current executable path
-            if getattr(sys, 'frozen', False):
-                # Running as compiled executable
-                current_exe = sys.executable
-                download_dir = os.path.dirname(current_exe)
+            if hasattr(self, '_download_watchdog') and self._download_watchdog:
+                self._download_watchdog.start()
+        except Exception:
+            pass
+        """Update progress UI from worker signals"""
+        try:
+            if p >= 0:
+                self.progress_bar.setRange(0, 100)
+                self.progress_bar.setValue(p)
+                self.progress_label.setText(f"Downloading update... {p}%")
+                self.status_label.setText(f"{downloaded_mb:.1f} MB / {total_mb:.1f} MB")
             else:
-                # Running as script
-                current_exe = None
-                download_dir = self.base_dir
-            
-            # Use the exact filename from GitHub
-            original_filename = asset['name']  # e.g., "Glossarion v3.1.3.exe"
-            new_exe_path = os.path.join(download_dir, original_filename)
-            
-            # If new file would overwrite current executable, download to temp name first
-            if current_exe and os.path.normpath(new_exe_path) == os.path.normpath(current_exe):
-                temp_path = new_exe_path + ".new"
-                download_path = temp_path
-            else:
-                download_path = new_exe_path
-            
-            # Download with progress tracking and shorter timeout
-            response = requests.get(asset['browser_download_url'], stream=True, timeout=15)
-            total_size = int(response.headers.get('content-length', 0))
-            
-            downloaded = 0
-            chunk_size = 8192
-            
-            with open(download_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=chunk_size):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        
-                        # Update progress bar
-                        if total_size > 0:
-                            progress = int((downloaded / total_size) * 100)
-                            size_mb = downloaded / (1024 * 1024)
-                            total_mb = total_size / (1024 * 1024)
-                            
-                            # Use QTimer for smoother updates
-                            def update_progress(p=progress, d=size_mb, t=total_mb):
-                                try:
-                                    self.progress_bar.setValue(p)
-                                    self.progress_label.setText(f"Downloading update... {p}%")
-                                    self.status_label.setText(f"{d:.1f} MB / {t:.1f} MB")
-                                except:
-                                    pass  # Dialog might have been closed
-                            
-                            QTimer.singleShot(0, update_progress)
-            
-            # Download complete
-            QTimer.singleShot(0, lambda: self.download_complete(dialog, download_path))
-            
-        except Exception as e:
-            # Capture the error message immediately
-            error_msg = str(e)
-            def show_error():
-                msg = QMessageBox(dialog)
-                msg.setIcon(QMessageBox.Critical)
-                msg.setWindowTitle("Download Failed")
-                msg.setText(error_msg)
-                msg.exec()
-            QTimer.singleShot(0, show_error)
+                # Unknown total size; show indeterminate bar with byte counter
+                self.progress_bar.setRange(0, 0)
+                self.progress_label.setText("Downloading update...")
+                self.status_label.setText(f"{downloaded_mb:.1f} MB downloaded")
+        except Exception:
+            pass
+
+    def _show_download_error(self, dialog, error_msg: str):
+        # Stop watchdog
+        try:
+            if hasattr(self, '_download_watchdog') and self._download_watchdog:
+                self._download_watchdog.stop()
+        except Exception:
+            pass
+        # Re-enable buttons on error
+        try:
+            for btn in dialog.findChildren(QPushButton):
+                btn.setEnabled(True)
+            # Hide cancel button if present
+            if hasattr(self, 'cancel_btn'):
+                self.cancel_btn.setVisible(False)
+        except Exception:
+            pass
+        msg = QMessageBox(dialog)
+        msg.setIcon(QMessageBox.Critical)
+        msg.setWindowTitle("Download Failed")
+        msg.setText(error_msg)
+        msg.exec()
+
+    def download_update(self, dialog):
+        """Start the update download in a QThread and update UI via signals"""
+        # Use the selected asset
+        asset = self.selected_asset
+        if not asset:
+            self._show_download_error(dialog, "No file selected for download.")
+            return
+
+        # Get the current executable path and target directory
+        if getattr(sys, 'frozen', False):
+            current_exe = sys.executable
+            download_dir = os.path.dirname(current_exe)
+        else:
+            current_exe = None
+            download_dir = self.base_dir
+
+        # Use the exact filename from GitHub
+        original_filename = asset['name']  # e.g., "Glossarion v3.1.3.exe"
+        new_exe_path = os.path.join(download_dir, original_filename)
+
+        # If new file would overwrite current executable, download to temp name first
+        if current_exe and os.path.normpath(new_exe_path) == os.path.normpath(current_exe):
+            download_path = new_exe_path + ".new"
+        else:
+            download_path = new_exe_path
+
+        url = asset['browser_download_url']
+
+        # Reset and show initial progress state
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_label.setText("Starting download...")
+        self.status_label.setText("")
+
+        # Create worker thread and start download
+        self.download_thread = QThread(self)
+        self.download_worker = DownloadWorker(url, download_path)
+        self.download_worker.moveToThread(self.download_thread)
+        # Show indeterminate until first data arrives
+        self.download_thread.started.connect(lambda: self._on_download_progress(-1, 0.0, 0.0))
+        self.download_thread.started.connect(self.download_worker.run)
+        self.download_worker.progress.connect(self._on_download_progress)
+        self.download_worker.finished.connect(lambda fp: self.download_complete(dialog, fp))
+        self.download_worker.error.connect(lambda msg: self._show_download_error(dialog, msg))
+        self.download_worker.finished.connect(self.download_thread.quit)
+        self.download_worker.error.connect(self.download_thread.quit)
+        self.download_thread.finished.connect(self.download_worker.deleteLater)
+        self.download_thread.finished.connect(self.download_thread.deleteLater)
+        # Watchdog: cancel if no progress in 20s
+        try:
+            if hasattr(self, '_download_watchdog') and self._download_watchdog:
+                self._download_watchdog.stop()
+                self._download_watchdog.deleteLater()
+        except Exception:
+            pass
+        self._download_watchdog = QTimer(self)
+        self._download_watchdog.setInterval(90000)
+        self._download_watchdog.timeout.connect(lambda: self._on_download_timeout(dialog))
+        self._download_watchdog.start()
+        self.download_thread.start()
     
+    def _on_download_timeout(self, dialog):
+        try:
+            if hasattr(self, 'download_worker') and self.download_worker:
+                self.download_worker.cancel()
+        except Exception:
+            pass
+        self._show_download_error(dialog, "Connection timed out. No data received.")
+
     def download_complete(self, dialog, file_path):
         """Handle completed download"""
+        try:
+            if hasattr(self, '_download_watchdog') and self._download_watchdog:
+                self._download_watchdog.stop()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'cancel_btn'):
+                self.cancel_btn.setVisible(False)
+        except Exception:
+            pass
         dialog.close()
         
         msg = QMessageBox(self.dialog if hasattr(self.dialog, 'show') else None)
