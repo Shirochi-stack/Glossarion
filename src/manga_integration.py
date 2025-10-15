@@ -9157,6 +9157,13 @@ class MangaTranslationTab:
             
             # Get current image path
             image_path = self.image_preview_widget.current_image_path
+
+            # Invalidate stale recognized text from another image
+            try:
+                if has_recognized_text and getattr(self, '_recognized_texts_image_path', None) != image_path:
+                    has_recognized_text = False
+            except Exception:
+                pass
             
             # STEP 3: Prepare regions for recognition if needed
             regions_for_recognition = None
@@ -11694,6 +11701,11 @@ class MangaTranslationTab:
             
             # Store recognized texts for translation on the active image
             self._recognized_texts = recognized_texts
+            # Track which image these recognitions belong to to avoid cross-image reuse
+            try:
+                self._recognized_texts_image_path = image_path
+            except Exception:
+                self._recognized_texts_image_path = None
             
             if recognized_texts:
                 self._log(f"🎉 Recognition Results ({len(recognized_texts)} regions with text):", "success")

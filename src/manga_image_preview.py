@@ -1260,6 +1260,18 @@ class MangaImagePreviewWidget(QWidget):
             if hasattr(self, 'manga_integration') and self.manga_integration:
                 # This hides all overlays and will only show those for the incoming image if any
                 self.manga_integration.show_text_overlays_for_image(image_path)
+                # IMPORTANT: Clear per-image recognition/translation caches to prevent cross-image reuse
+                try:
+                    if hasattr(self.manga_integration, '_recognized_texts'):
+                        del self.manga_integration._recognized_texts
+                    if hasattr(self.manga_integration, '_recognized_texts_image_path'):
+                        del self.manga_integration._recognized_texts_image_path
+                    if hasattr(self.manga_integration, '_recognition_data'):
+                        del self.manga_integration._recognition_data
+                    if hasattr(self.manga_integration, '_translation_data'):
+                        del self.manga_integration._translation_data
+                except Exception:
+                    pass
         except Exception:
             pass
         
