@@ -134,6 +134,7 @@ class CompactImageViewer(QGraphicsView):
         # State
         self.empty = True
         self.zoom_level = 0
+        self.user_zoomed = False  # Prevent auto-fit after manual zoom
         self.current_tool = 'pan'  # Default to pan tool
         self.rectangles: List[MoveableRectItem] = []
         self.selected_rect: Optional[MoveableRectItem] = None
@@ -155,9 +156,9 @@ class CompactImageViewer(QGraphicsView):
         self._loading = False
     
     def resizeEvent(self, event):
-        """Ensure the image refits the view on resize so placeholders fill the area."""
+        """Refit only if user hasn't manually zoomed."""
         super().resizeEvent(event)
-        if self.hasPhoto():
+        if self.hasPhoto() and not self.user_zoomed:
             self.fitInView()
     
     def hasPhoto(self) -> bool:
@@ -230,7 +231,8 @@ class CompactImageViewer(QGraphicsView):
         if pixmap and not pixmap.isNull():
             self.empty = False
             self.photo.setPixmap(pixmap)
-            # Schedule fitInView after pixmap is set to ensure proper sizing
+            # Reset zoom state and fit once on load
+            self.user_zoomed = False
             from PySide6.QtCore import QTimer
             QTimer.singleShot(10, self.fitInView)
         else:
@@ -239,7 +241,7 @@ class CompactImageViewer(QGraphicsView):
         self.zoom_level = 0
     
     def fitInView(self):
-        """Fit the image to view"""
+        """Fit the image to view and clear manual zoom state."""
         if not self.hasPhoto():
             return
         
@@ -254,6 +256,8 @@ class CompactImageViewer(QGraphicsView):
                         viewrect.height() / scenerect.height())
             self.scale(factor, factor)
             self.centerOn(rect.center())
+            # Reset manual zoom flag when performing an explicit fit
+            self.user_zoomed = False
     
     def set_tool(self, tool: str):
         """Set current tool (box_draw, pan, brush, eraser)"""
@@ -271,8 +275,7 @@ class CompactImageViewer(QGraphicsView):
             self.setCursor(Qt.CursorShape.ArrowCursor)
     
     def wheelEvent(self, event):
-        """Handle zoom with mouse wheel (requires Shift key)"""
-        # Only zoom if Shift key is held, otherwise allow normal scrolling
+        """Handle zoom with mouse wheel (Shift+Wheel). Set user_zoomed to prevent auto-fit resets."""
         if self.hasPhoto() and event.modifiers() == Qt.KeyboardModifier.ShiftModifier:
             factor = 1.15
             if event.angleDelta().y() > 0:
@@ -281,8 +284,8 @@ class CompactImageViewer(QGraphicsView):
             else:
                 self.scale(1 / factor, 1 / factor)
                 self.zoom_level -= 1
+            self.user_zoomed = True
         else:
-            # Pass event to parent for normal scrolling
             super().wheelEvent(event)
     
     def mousePressEvent(self, event):
@@ -737,7 +740,7 @@ class MangaImagePreviewWidget(QWidget):
         tools_layout.addWidget(self.hand_tool_btn)
         
         self.fit_btn = self._create_tool_button("⊟", "Fit to View")
-        self.fit_btn.clicked.connect(self.viewer.fitInView)
+        self.fit_btn.clicked.connect(self._fit_active_view)
         tools_layout.addWidget(self.fit_btn)
         
         self.zoom_in_btn = self._create_tool_button("🔍+", "Zoom In (Shift+Wheel)")
@@ -997,10 +1000,24 @@ class MangaImagePreviewWidget(QWidget):
         frame.setProperty("title", title)
         return frame
     
+    def _active_viewer(self) -> CompactImageViewer:
+        """Return the viewer for the active tab (source or output)."""
+        try:
+            return self.output_viewer if (self.viewer_tabs.currentIndex() == 1) else self.viewer
+        except Exception:
+            return self.viewer
+    
     def _set_tool(self, tool: str):
         """Set active tool and update button states"""
         print(f"[DEBUG] Setting tool to: {tool}")
+        # Always set on source viewer
         self.viewer.set_tool(tool)
+        # For pan tool, also apply to output viewer so panning works there
+        try:
+            if tool == 'pan' and hasattr(self, 'output_viewer') and self.output_viewer:
+                self.output_viewer.set_tool('pan')
+        except Exception:
+            pass
         
         # Update button states
         self.hand_tool_btn.setChecked(tool == 'pan')
@@ -1017,13 +1034,33 @@ class MangaImagePreviewWidget(QWidget):
         }
         print(f"[DEBUG] Active tool: {tool_names.get(tool, tool)}")
     
+    def _fit_active_view(self):
+        """Fit the active viewer to view (source or output)."""
+        v = self._active_viewer()
+        try:
+            v.fitInView()
+        except Exception:
+            pass
+    
     def _zoom_in(self):
-        """Zoom in"""
-        self.viewer.scale(1.15, 1.15)
+        """Zoom in on the active viewer"""
+        v = self._active_viewer()
+        try:
+            v.scale(1.15, 1.15)
+            if hasattr(v, 'user_zoomed'):
+                v.user_zoomed = True
+        except Exception:
+            pass
     
     def _zoom_out(self):
-        """Zoom out"""
-        self.viewer.scale(1 / 1.15, 1 / 1.15)
+        """Zoom out on the active viewer"""
+        v = self._active_viewer()
+        try:
+            v.scale(1 / 1.15, 1 / 1.15)
+            if hasattr(v, 'user_zoomed'):
+                v.user_zoomed = True
+        except Exception:
+            pass
     
     def _update_box_count(self):
         """Update box count display"""
@@ -1300,23 +1337,32 @@ class MangaImagePreviewWidget(QWidget):
             pass
         
     def _on_tab_changed(self, index: int):
-        """Refit the current viewer when tabs are switched to ensure full fill."""
+        """Refit only if user hasn't manually zoomed, to avoid resetting zoom."""
         try:
-            if index == 0 and self.viewer.hasPhoto():
+            if index == 0 and self.viewer.hasPhoto() and not getattr(self.viewer, 'user_zoomed', False):
                 self.viewer.fitInView()
-            elif index == 1 and self.output_viewer.hasPhoto():
+            elif index == 1 and self.output_viewer.hasPhoto() and not getattr(self.output_viewer, 'user_zoomed', False):
                 self.output_viewer.fitInView()
         except Exception:
             pass
     
     def clear(self):
         """Clear the preview"""
+        # Clear source viewer
         self.viewer.clear_scene()
         self.current_image_path = None
         self.file_label.setText("No image loaded")
         self._update_box_count()
-        # Show placeholder icon when cleared
         self._show_placeholder_icon()
+        
+        # Clear translated output viewer as well (cosmetic reset)
+        try:
+            if hasattr(self, 'output_viewer') and self.output_viewer:
+                self.output_viewer.clear_scene()
+                self.current_translated_path = None
+                self._show_output_placeholder()
+        except Exception:
+            pass
     
     def _show_placeholder_icon(self):
         """Display Halgakos_NoChibi.png as placeholder when no image is loaded"""
