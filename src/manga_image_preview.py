@@ -50,6 +50,18 @@ class MoveableRectItem(QGraphicsRectItem):
     def hoverLeaveEvent(self, event):
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         super().hoverLeaveEvent(event)
+        
+    def mousePressEvent(self, event):
+        """Ensure only this rectangle is selected to avoid multi-move of multiple items."""
+        try:
+            if event.button() == Qt.MouseButton.LeftButton:
+                sc = self.scene()
+                if sc is not None:
+                    sc.clearSelection()
+                self.setSelected(True)
+        except Exception:
+            pass
+        super().mousePressEvent(event)
 
 
 class ImageLoaderWorker(QObject):

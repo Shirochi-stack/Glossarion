@@ -7894,7 +7894,7 @@ class MangaTranslationTab:
                 from PySide6.QtGui import QPen, QBrush, QColor
                 from manga_image_preview import MoveableRectItem
                 
-                for rect_data in state['viewer_rectangles']:
+                for idx, rect_data in enumerate(state['viewer_rectangles']):
                     rect = QRectF(rect_data['x'], rect_data['y'], rect_data['width'], rect_data['height'])
                     pen = QPen(QColor(0, 255, 0), 1)
                     pen.setCosmetic(True)
@@ -7902,6 +7902,12 @@ class MangaTranslationTab:
                     rect_item = MoveableRectItem(rect, pen=pen, brush=brush)
                     viewer._scene.addItem(rect_item)
                     viewer.rectangles.append(rect_item)
+                    # Attach region index and move-sync handler
+                    try:
+                        rect_item.region_index = idx
+                        self._attach_move_sync_to_rectangle(rect_item, idx)
+                    except Exception:
+                        pass
                 
                 print(f"[STATE] Restored {len(state['viewer_rectangles'])} viewer rectangles")
             
@@ -7960,7 +7966,7 @@ class MangaTranslationTab:
                 from PySide6.QtGui import QPen, QBrush, QColor
                 from manga_image_preview import MoveableRectItem
                 
-                for rect_data in state['viewer_rectangles']:
+                for idx, rect_data in enumerate(state['viewer_rectangles']):
                     rect = QRectF(rect_data['x'], rect_data['y'], rect_data['width'], rect_data['height'])
                     pen = QPen(QColor(0, 255, 0), 1)
                     pen.setCosmetic(True)
@@ -7968,6 +7974,12 @@ class MangaTranslationTab:
                     rect_item = MoveableRectItem(rect, pen=pen, brush=brush)
                     viewer._scene.addItem(rect_item)
                     viewer.rectangles.append(rect_item)
+                    # Attach region index and move-sync handler
+                    try:
+                        rect_item.region_index = idx
+                        self._attach_move_sync_to_rectangle(rect_item, idx)
+                    except Exception:
+                        pass
                 
                 print(f"[STATE] Restored {len(state['viewer_rectangles'])} viewer rectangles")
             
@@ -8049,6 +8061,13 @@ class MangaTranslationTab:
                     
                     viewer._scene.addItem(rect_item)
                     viewer.rectangles.append(rect_item)
+                    
+                    # Track region index on the rectangle and attach move-sync handler
+                    try:
+                        rect_item.region_index = i
+                        self._attach_move_sync_to_rectangle(rect_item, i)
+                    except Exception:
+                        pass
             
             print(f"[DRAW_BOXES] Final rectangles count after drawing: {len(viewer.rectangles)}")
         
@@ -9822,6 +9841,11 @@ class MangaTranslationTab:
                     
                     # Add context menu support to rectangle
                     self._add_context_menu_to_rectangle(rect_item, region_index)
+                    # Attach move-sync so moving the rectangle moves the overlay
+                    try:
+                        self._attach_move_sync_to_rectangle(rect_item, region_index)
+                    except Exception:
+                        pass
                     
                     print(f"[DEBUG] Added OCR tooltip to rectangle {region_index}: '{recognized_text[:30]}...'")
                 else:
@@ -10081,6 +10105,113 @@ class MangaTranslationTab:
             
         except Exception as e:
             print(f"[DEBUG] Error adding context menu: {str(e)}")
+    
+    def _attach_move_sync_to_rectangle(self, rect_item, region_index: int):
+        """Attach a move handler so that when the blue rectangle is moved,
+        the corresponding text overlay group moves with it and state is persisted.
+        Safe to call multiple times; attaches once per item.
+        """
+        try:
+            # Avoid duplicate attachment
+            if getattr(rect_item, '_move_sync_attached', False):
+                return
+            rect_item._move_sync_attached = True
+            # Ensure region_index is present on the item
+            rect_item.region_index = region_index
+            
+            original_release = rect_item.mouseReleaseEvent
+            
+            def _on_rect_release(ev, r=rect_item, idx=region_index):
+                try:
+                    # Call original release
+                    try:
+                        original_release(ev)
+                    except Exception:
+                        pass
+                    
+                    # Desired new top-left in SCENE coordinates (use sceneBoundingRect, not local rect)
+                    rr = r.sceneBoundingRect()
+                    new_x, new_y = int(rr.x()), int(rr.y())
+                    
+                    # Find matching overlay group for this region on the current image
+                    current_image = getattr(self.image_preview_widget, 'current_image_path', None)
+                    overlays_map = getattr(self, '_text_overlays_by_image', {}) or {}
+                    groups = overlays_map.get(current_image, [])
+                    target = None
+                    for g in groups:
+                        if getattr(g, '_overlay_region_index', None) == idx:
+                            target = g
+                            break
+                    
+                    if target is not None:
+                        # Compute delta to move overlay group's sceneBoundingRect to new rect top-left
+                        br = target.sceneBoundingRect()
+                        dx = new_x - int(br.x())
+                        dy = new_y - int(br.y())
+                        if dx != 0 or dy != 0:
+                            try:
+                                target.moveBy(dx, dy)
+                            except Exception:
+                                # Fallback to setPos relative move
+                                try:
+                                    from PySide6.QtCore import QPointF
+                                    target.setPos(target.pos() + QPointF(dx, dy))
+                                except Exception:
+                                    pass
+                            # Force scene update
+                            try:
+                                self.image_preview_widget.viewer._scene.update()
+                            except Exception:
+                                pass
+                        
+                        # Persist overlay offsets too (tie overlays to rectangles)
+                        try:
+                            self._persist_overlay_offsets_for_current_image()
+                        except Exception:
+                            pass
+                    
+                    # Persist rectangles state
+                    try:
+                        if hasattr(self.image_preview_widget, '_persist_rectangles_state'):
+                            self.image_preview_widget._persist_rectangles_state()
+                    except Exception:
+                        pass
+                except Exception as e:
+                    print(f"[DEBUG] Rectangle move sync failed: {e}")
+            
+            rect_item.mouseReleaseEvent = _on_rect_release
+        except Exception as e:
+            print(f"[DEBUG] Failed to attach move sync: {e}")
+    
+    def _persist_overlay_offsets_for_current_image(self):
+        """Persist overlay offsets relative to their rectangles for the current image.
+        Stored as overlay_offsets: {region_index: [dx, dy]} in image_state_manager.
+        """
+        try:
+            current_image = getattr(self.image_preview_widget, 'current_image_path', None)
+            if not current_image:
+                return
+            overlays_map = getattr(self, '_text_overlays_by_image', {}) or {}
+            groups = overlays_map.get(current_image, [])
+            rects = getattr(self.image_preview_widget.viewer, 'rectangles', []) or []
+            offsets = {}
+            for g in groups:
+                idx = getattr(g, '_overlay_region_index', None)
+                if idx is None or not (0 <= int(idx) < len(rects)):
+                    continue
+                try:
+                    br_g = g.sceneBoundingRect()
+                    br_r = rects[int(idx)].sceneBoundingRect()
+                    dx = int(br_g.x() - br_r.x())
+                    dy = int(br_g.y() - br_r.y())
+                    offsets[str(int(idx))] = [dx, dy]
+                except Exception:
+                    pass
+            if hasattr(self, 'image_state_manager'):
+                self.image_state_manager.update_state(current_image, {'overlay_offsets': offsets}, save=True)
+                print(f"[STATE] Persisted overlay offsets for {os.path.basename(current_image)}: {len(offsets)} entries")
+        except Exception as e:
+            print(f"[STATE] Failed to persist overlay offsets: {e}")
     
     def _show_ocr_popup(self, ocr_text: str, region_index: int = None):
         """Show OCR text in a popup dialog with edit capability"""
@@ -10695,52 +10826,140 @@ class MangaTranslationTab:
             # Create new list for this image's overlays
             self._text_overlays_by_image[current_image] = []
             
+            # Load any saved overlay offsets for this image
+            saved_offsets = {}
+            try:
+                if hasattr(self, 'image_state_manager') and self.image_state_manager:
+                    st = self.image_state_manager.get_state(current_image) or {}
+                    saved_offsets = st.get('overlay_offsets') or {}
+            except Exception:
+                saved_offsets = {}
+            
             # Get manga rendering settings
             manga_settings = self._get_manga_rendering_settings()
             
             print(f"[DEBUG] Using manga rendering settings: {manga_settings}")
             
-            for result in translated_texts:
+            for i, result in enumerate(translated_texts):
                 try:
-                    bbox = result['bbox']
-                    translation = result['translation']
+                    bbox = result.get('bbox')
+                    translation = result.get('translation', '')
+                    region_index = (result.get('original', {}) or {}).get('region_index', i)
                     
-                    if len(bbox) >= 4:
+                    if bbox and len(bbox) >= 4:
                         x, y, w, h = bbox
                         
                         # Create background rectangle if enabled in settings
+                        bg_rect = None
                         if manga_settings.get('show_background', True):
-                            bg_rect = self._create_background_shape(
-                                x, y, w, h, manga_settings
-                            )
+                            bg_rect = self._create_background_shape(x, y, w, h, manga_settings)
                             if bg_rect:
                                 bg_rect.setZValue(10)  # Above image, below text
                                 viewer._scene.addItem(bg_rect)
-                                self._text_overlays_by_image[current_image].append(bg_rect)
                         
                         # Apply text formatting
-                        text = translation
-                        if manga_settings.get('force_caps', False):
-                            text = text.upper()
+                        text = translation.upper() if manga_settings.get('force_caps', False) else translation
                         
                         # Create text item with proper manga text rendering
-                        text_item, final_font_size = self._create_manga_text_item(
-                            text, x, y, w, h, manga_settings
-                        )
-                        
+                        text_item, final_font_size = self._create_manga_text_item(text, x, y, w, h, manga_settings)
                         if text_item is None:
                             print(f"[DEBUG] Failed to create text item for: {text[:30]}...")
+                            # Clean up orphan bg if created
+                            try:
+                                if bg_rect:
+                                    viewer._scene.removeItem(bg_rect)
+                            except Exception:
+                                pass
                             continue
                         
-                        # Position and layering
-                        # Note: _create_manga_text_item already positions with padding; avoid double-insetting here
-                        text_item.setZValue(11)  # Above background
-                        
-                        # Add to scene
+                        # Add text to scene (needed before grouping)
                         viewer._scene.addItem(text_item)
-                        self._text_overlays_by_image[current_image].append(text_item)
+                        # Make text item ignore mouse events so rectangles receive input
+                        try:
+                            from PySide6.QtCore import Qt
+                            text_item.setAcceptedMouseButtons(Qt.NoButton)
+                        except Exception:
+                            pass
                         
-                        print(f"[DEBUG] Added text overlay at ({x},{y}) with font size {final_font_size}: '{translation[:30]}...'")
+                        # Group background + text so they stay together
+                        if bg_rect:
+                            group = viewer._scene.createItemGroup([bg_rect, text_item])
+                            # Also make bg_rect ignore mouse events
+                            try:
+                                from PySide6.QtCore import Qt
+                                bg_rect.setAcceptedMouseButtons(Qt.NoButton)
+                            except Exception:
+                                pass
+                        else:
+                            group = viewer._scene.createItemGroup([text_item])
+                        group.setZValue(12)
+                        from PySide6.QtWidgets import QGraphicsItem
+                        # Disable user interaction on overlays; movement controlled by rectangles only
+                        try:
+                            from PySide6.QtCore import Qt
+                            group.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+                            group.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+                            group.setAcceptedMouseButtons(Qt.NoButton)
+                        except Exception:
+                            pass
+                        
+                        # Attach metadata for sync from rectangle moves
+                        group._overlay_region_index = region_index
+                        group._overlay_bbox_size = (w, h)
+                        group._overlay_image_path = current_image
+                        
+                        # Apply saved offset for this region if present
+                        try:
+                            off = None
+                            # support str and int keys
+                            if str(int(region_index)) in saved_offsets:
+                                off = saved_offsets[str(int(region_index))]
+                            elif int(region_index) in saved_offsets:
+                                off = saved_offsets[int(region_index)]
+                            if off and len(off) >= 2:
+                                dx_off, dy_off = int(off[0]), int(off[1])
+                                if dx_off != 0 or dy_off != 0:
+                                    group.moveBy(dx_off, dy_off)
+                        except Exception:
+                            pass
+                        
+                        # Monkey-patch mouse release remains (harmless since overlays are not movable)
+                        original_release = group.mouseReleaseEvent
+                        def _on_release(ev, grp=group):
+                            try:
+                                original_release(ev)
+                            except Exception:
+                                pass
+                            try:
+                                # Compute new top-left from scene bounding rect
+                                br = grp.sceneBoundingRect()
+                                new_x, new_y = int(br.x()), int(br.y())
+                                w_, h_ = grp._overlay_bbox_size
+                                # Update viewer rectangle for this region if available
+                                rects = getattr(self.image_preview_widget.viewer, 'rectangles', [])
+                                idx = int(grp._overlay_region_index) if grp._overlay_region_index is not None else -1
+                                if 0 <= idx < len(rects):
+                                    from PySide6.QtCore import QRectF as _QRectF
+                                    rects[idx].setRect(_QRectF(new_x, new_y, w_, h_))
+                                    # Also trigger a scene update so handles refresh
+                                    try:
+                                        self.image_preview_widget.viewer._scene.update()
+                                    except Exception:
+                                        pass
+                                # Persist new rectangles state
+                                try:
+                                    if hasattr(self.image_preview_widget, '_persist_rectangles_state'):
+                                        self.image_preview_widget._persist_rectangles_state()
+                                except Exception:
+                                    pass
+                            except Exception as move_err:
+                                print(f"[DEBUG] Overlay move update failed: {move_err}")
+                        group.mouseReleaseEvent = _on_release
+                        
+                        # Track overlay group for cleanup
+                        self._text_overlays_by_image[current_image].append(group)
+                        
+                        print(f"[DEBUG] Added text overlay at ({x},{y}) with font size {final_font_size}: region={region_index}, text='{translation[:30]}...'")
                 
                 except Exception as text_error:
                     print(f"[DEBUG] Error adding text overlay: {str(text_error)}")
@@ -10750,6 +10969,12 @@ class MangaTranslationTab:
             
             overlay_count = len(self._text_overlays_by_image.get(current_image, []))
             print(f"[DEBUG] Added {overlay_count} text overlay items for image: {os.path.basename(current_image)}")
+            
+            # Persist initial overlay offsets so they survive session
+            try:
+                self._persist_overlay_offsets_for_current_image()
+            except Exception:
+                pass
             
             # Force scene update to ensure overlays are visible
             viewer._scene.update()
