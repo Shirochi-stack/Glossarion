@@ -8901,45 +8901,129 @@ class MangaTranslationTab:
             if provider == 'custom-api':
                 print(f"[OCR_REGIONS] Running custom-api OCR on cropped regions (required for API indexing)")
                 try:
-                    # Ensure OCR prompt is set in environment from GUI
-                    if hasattr(self, 'ocr_prompt') and self.ocr_prompt:
-                        os.environ['OCR_SYSTEM_PROMPT'] = self.ocr_prompt
-                        print(f"[OCR_REGIONS] Set OCR_SYSTEM_PROMPT from GUI config")
-                    
-                    # Load custom-api provider if needed - MUST PASS API KEY!
+                    # Set environment variables exactly like Start Translation (excluding SYSTEM_PROMPT)
+                    # 1) Fetch API key and model from GUI
+                    api_key = None
+                    if hasattr(self, 'main_gui'):
+                        if hasattr(self.main_gui, 'api_key_entry'):
+                            try:
+                                if hasattr(self.main_gui.api_key_entry, 'text'):
+                                    api_key_candidate = self.main_gui.api_key_entry.text()
+                                elif hasattr(self.main_gui.api_key_entry, 'get'):
+                                    api_key_candidate = self.main_gui.api_key_entry.get()
+                                else:
+                                    api_key_candidate = ''
+                                if api_key_candidate and api_key_candidate.strip():
+                                    api_key = api_key_candidate.strip()
+                            except Exception:
+                                pass
+                        if not api_key and hasattr(self.main_gui, 'config') and self.main_gui.config.get('api_key'):
+                            api_key = self.main_gui.config.get('api_key')
+
+                    # 2) Apply all environment variables from GUI except SYSTEM_PROMPT
+                    try:
+                        if hasattr(self, 'main_gui') and hasattr(self.main_gui, '_get_environment_variables'):
+                            env_vars = self.main_gui._get_environment_variables(
+                                epub_path='',  # Not needed for manga
+                                api_key=api_key or ''
+                            )
+                            for key, value in env_vars.items():
+                                if key == 'SYSTEM_PROMPT':
+                                    # DON'T SET THE TRANSLATION SYSTEM PROMPT FOR OCR
+                                    continue
+                                os.environ[key] = str(value)
+                            self._log("✅ Set environment variables for custom-api OCR (excluded SYSTEM_PROMPT)", "info")
+                        else:
+                            print("[OCR_REGIONS] _get_environment_variables not available on main_gui")
+                    except Exception as env_err:
+                        print(f"[OCR_REGIONS] Failed to apply GUI environment variables: {env_err}")
+
+                    # 3) Set OCR prompt from GUI or fallback to default strict OCR prompt
+                    try:
+                        if hasattr(self, 'ocr_prompt') and self.ocr_prompt:
+                            os.environ['OCR_SYSTEM_PROMPT'] = self.ocr_prompt
+                            self._log(f"✅ Using custom OCR prompt from GUI ({len(self.ocr_prompt)} chars)", "info")
+                            self._log(f"OCR Prompt being set: {self.ocr_prompt[:150]}...", "debug")
+                        else:
+                            os.environ['OCR_SYSTEM_PROMPT'] = (
+                                "YOU ARE A TEXT EXTRACTION MACHINE. EXTRACT EXACTLY WHAT YOU SEE.\n\n"
+                                "ABSOLUTE RULES:\n"
+                                "1. OUTPUT ONLY THE VISIBLE TEXT/SYMBOLS - NOTHING ELSE\n"
+                                "2. NEVER TRANSLATE OR MODIFY\n"
+                                "3. NEVER EXPLAIN, DESCRIBE, OR COMMENT\n"
+                                "4. NEVER SAY \"I can't\" or \"I cannot\" or \"no text\" or \"blank image\"\n"
+                                "5. IF YOU SEE DOTS, OUTPUT THE DOTS: .\n"
+                                "6. IF YOU SEE PUNCTUATION, OUTPUT THE PUNCTUATION\n"
+                                "7. IF YOU SEE A SINGLE CHARACTER, OUTPUT THAT CHARACTER\n"
+                                "8. IF YOU SEE NOTHING, OUTPUT NOTHING (empty response)\n\n"
+                                "LANGUAGE PRESERVATION:\n"
+                                "- Korean text → Output in Korean\n"
+                                "- Japanese text → Output in Japanese\n"
+                                "- Chinese text → Output in Chinese\n"
+                                "- English text → Output in English\n"
+                                "- CJK quotation marks (「」『』【】《》〈〉) → Preserve exactly as shown\n\n"
+                                "FORMATTING:\n"
+                                "- OUTPUT ALL TEXT ON A SINGLE LINE WITH NO LINE BREAKS\n"
+                                "- NEVER use \\n or line breaks in your output\n\n"
+                                "FORBIDDEN RESPONSES:\n"
+                                "- \"I can see this appears to be...\"\n"
+                                "- \"I cannot make out any clear text...\"\n"
+                                "- \"This appears to be blank...\"\n"
+                                "- \"If there is text present...\"\n"
+                                "- ANY explanatory text\n\n"
+                                "YOUR ONLY OUTPUT: The exact visible text. Nothing more. Nothing less.\n"
+                                "If image has a dot → Output: .\n"
+                                "If image has two dots → Output: . .\n"
+                                "If image has text → Output: [that text]\n"
+                                "If image is truly blank → Output: [empty/no response]"
+                            )
+                            self._log("✅ Using default OCR prompt", "info")
+                    except Exception:
+                        pass
+
+                    # 4) Respect user settings: set non-intrusive defaults only when bubble detection is OFF
+                    try:
+                        ms = self.main_gui.config.setdefault('manga_settings', {})
+                        ocr_set = ms.setdefault('ocr', {})
+                        changed = False
+                        bubble_enabled = bool(ocr_set.get('bubble_detection_enabled', False))
+                        if not bubble_enabled:
+                            if 'detector_type' not in ocr_set:
+                                ocr_set['detector_type'] = 'rtdetr_onnx'
+                                changed = True
+                            if not ocr_set.get('rtdetr_model_url') and not ocr_set.get('bubble_model_path'):
+                                ocr_set['rtdetr_model_url'] = 'ogkalu/comic-text-and-bubble-detector'
+                                changed = True
+                            if changed and hasattr(self.main_gui, 'save_config'):
+                                self.main_gui.save_config(show_message=False)
+                        # Do not preload bubble detector here for custom-api
+                        self._preloaded_bd = None
+                    except Exception:
+                        self._preloaded_bd = None
+
+                    # 5) Load custom-api provider if needed - MUST PASS API KEY/MODEL
                     if not self.ocr_manager.get_provider(provider).is_loaded:
                         print(f"[OCR_REGIONS] Loading OCR provider: {provider}")
-                        
-                        # Build load_kwargs with API key and model (same as manga_translator.py)
                         load_kwargs = {}
-                        if hasattr(self, 'main_gui'):
-                            # Get API key from GUI
-                            if hasattr(self.main_gui, 'api_key_entry'):
-                                try:
-                                    if hasattr(self.main_gui.api_key_entry, 'text'):
-                                        api_key = self.main_gui.api_key_entry.text()
-                                    elif hasattr(self.main_gui.api_key_entry, 'get'):
-                                        api_key = self.main_gui.api_key_entry.get()
-                                    else:
-                                        api_key = ''
-                                    if api_key:
-                                        load_kwargs['api_key'] = api_key
-                                        print(f"[OCR_REGIONS] Got API key from GUI")
-                                except Exception:
-                                    pass
-                            # Get model from GUI
-                            if hasattr(self.main_gui, 'model_var'):
-                                try:
-                                    if hasattr(self.main_gui.model_var, 'get'):
-                                        model = self.main_gui.model_var.get()
-                                    else:
-                                        model = self.main_gui.model_var
-                                    if model:
-                                        load_kwargs['model'] = model
-                                        print(f"[OCR_REGIONS] Using model: {model}")
-                                except Exception:
-                                    pass
-                        
+                        if api_key:
+                            load_kwargs['api_key'] = api_key
+                            print(f"[OCR_REGIONS] Got API key from GUI")
+                        # Model from GUI
+                        model = 'gpt-4o-mini'
+                        if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'model_var'):
+                            try:
+                                if hasattr(self.main_gui.model_var, 'get'):
+                                    model = self.main_gui.model_var.get()
+                                else:
+                                    model = self.main_gui.model_var
+                            except Exception as e:
+                                print(f"[OCR_REGIONS] Error getting model from model_var: {e}")
+                                model = 'gpt-4o-mini'
+                        elif hasattr(self, 'main_gui') and hasattr(self.main_gui, 'config') and self.main_gui.config.get('model'):
+                            model = self.main_gui.config.get('model')
+                        if model:
+                            load_kwargs['model'] = model
+                            print(f"[OCR_REGIONS] Using model: {model}")
                         load_success = self.ocr_manager.load_provider(provider, **load_kwargs)
                         print(f"[OCR_REGIONS] Provider load result: {load_success}")
                         if not load_success:
@@ -9656,12 +9740,63 @@ class MangaTranslationTab:
                 # Get OCR config (required by MangaTranslator)
                 ocr_config = self._get_ocr_config()
                 
-                # Create UnifiedClient (required by MangaTranslator)
-                api_key = self.main_gui.api_key_entry.text().strip() if hasattr(self.main_gui, 'api_key_entry') else ''
-                model = self.main_gui.model_var if hasattr(self.main_gui, 'model_var') else 'gpt-4o-mini'
+                # Create UnifiedClient (required by MangaTranslator) - same method as regular translation
+                # Get API key - support both PySide6 and Tkinter
+                api_key = None
+                if hasattr(self.main_gui, 'api_key_entry'):
+                    try:
+                        if hasattr(self.main_gui.api_key_entry, 'text'):
+                            api_key_candidate = self.main_gui.api_key_entry.text()
+                        elif hasattr(self.main_gui.api_key_entry, 'get'):
+                            api_key_candidate = self.main_gui.api_key_entry.get()
+                        else:
+                            api_key_candidate = ''
+                        if api_key_candidate and api_key_candidate.strip():
+                            api_key = api_key_candidate.strip()
+                    except Exception:
+                        pass
+                if not api_key and hasattr(self.main_gui, 'config') and self.main_gui.config.get('api_key'):
+                    api_key = self.main_gui.config.get('api_key')
+                
+                # Get model - support both PySide6 and Tkinter (same as regular translation)
+                model = 'gpt-4o-mini'  # default
+                if hasattr(self.main_gui, 'model_var'):
+                    try:
+                        # Check if it's a tkinter StringVar (has .get() method)
+                        if hasattr(self.main_gui.model_var, 'get'):
+                            model = self.main_gui.model_var.get()
+                        else:
+                            # PySide6 - model_var is just a string
+                            model = self.main_gui.model_var
+                    except Exception as e:
+                        print(f"[DEBUG] Error getting model from model_var: {e}")
+                        model = 'gpt-4o-mini'  # fallback
+                elif hasattr(self.main_gui, 'config') and self.main_gui.config.get('model'):
+                    model = self.main_gui.config.get('model')
                 
                 if not api_key:
                     raise ValueError("No API key found in main GUI - cannot create MangaTranslator")
+                
+                print(f"[DEBUG] Full page context using API key: {'*' * min(8, len(api_key))}... (model: {model})")
+                
+                # CRITICAL: Apply ALL environment variables exactly like Start Translation
+                try:
+                    env_vars = self.main_gui._get_environment_variables(
+                        epub_path='',  # Not needed for manga
+                        api_key=api_key
+                    )
+                    # Apply ALL environment variables (excluding SYSTEM_PROMPT for OCR)
+                    for key, value in env_vars.items():
+                        if key == 'SYSTEM_PROMPT':
+                            continue  # Don't set translation prompt for OCR
+                        os.environ[key] = str(value)
+                    print(f"[DEBUG] Applied {len(env_vars)} environment variables from main GUI exactly like Start Translation")
+                    # Clear any cached manga translator instance since environment changed
+                    if hasattr(self, '_manga_translator'):
+                        self._manga_translator = None
+                        print(f"[DEBUG] Cleared MangaTranslator cache due to environment changes")
+                except Exception as env_err:
+                    print(f"[DEBUG] Failed to apply GUI environment variables: {env_err}")
                 
                 # Apply multi-key env from GUI settings so UnifiedClient picks it up
                 try:
@@ -9754,14 +9889,123 @@ class MangaTranslationTab:
             print(f"[DEBUG] Visual context enabled: {include_page_image}")
             print(f"[DEBUG] Image path: {image_path}")
             
-            # Get API key and model from main GUI once
+            # Get API key and model from main GUI once (same method as regular translation)
             from unified_api_client import UnifiedClient
             import os, json, hashlib
-            api_key = self.main_gui.api_key_entry.text().strip() if hasattr(self.main_gui, 'api_key_entry') else ''
-            model = self.main_gui.model_var if hasattr(self.main_gui, 'model_var') else 'gpt-4o-mini'
+            
+            # Get API key - support both PySide6 and Tkinter
+            api_key = None
+            if hasattr(self.main_gui, 'api_key_entry'):
+                try:
+                    if hasattr(self.main_gui.api_key_entry, 'text'):
+                        api_key_candidate = self.main_gui.api_key_entry.text()
+                    elif hasattr(self.main_gui.api_key_entry, 'get'):
+                        api_key_candidate = self.main_gui.api_key_entry.get()
+                    else:
+                        api_key_candidate = ''
+                    if api_key_candidate and api_key_candidate.strip():
+                        api_key = api_key_candidate.strip()
+                except Exception:
+                    pass
+            if not api_key and hasattr(self.main_gui, 'config') and self.main_gui.config.get('api_key'):
+                api_key = self.main_gui.config.get('api_key')
+            
+            # Get model - support both PySide6 and Tkinter (same as regular translation)
+            model = 'gpt-4o-mini'  # default
+            if hasattr(self.main_gui, 'model_var'):
+                try:
+                    # Check if it's a tkinter StringVar (has .get() method)
+                    if hasattr(self.main_gui.model_var, 'get'):
+                        model = self.main_gui.model_var.get()
+                    else:
+                        # PySide6 - model_var is just a string
+                        model = self.main_gui.model_var
+                except Exception as e:
+                    print(f"[DEBUG] Error getting model from model_var: {e}")
+                    model = 'gpt-4o-mini'  # fallback
+            elif hasattr(self.main_gui, 'config') and self.main_gui.config.get('model'):
+                model = self.main_gui.config.get('model')
             
             if not api_key:
                 raise ValueError("No API key found in main GUI")
+            
+            print(f"[DEBUG] Using API key: {'*' * min(8, len(api_key))}... (model: {model})")
+            
+            # STEP 1: Manually ensure critical GUI variables are set FIRST
+            # This ensures the most important values are definitely applied
+            try:
+                # Send interval / delay
+                if hasattr(self.main_gui, 'delay_entry'):
+                    if hasattr(self.main_gui.delay_entry, 'text'):
+                        delay = self.main_gui.delay_entry.text()
+                    elif hasattr(self.main_gui.delay_entry, 'get'):
+                        delay = self.main_gui.delay_entry.get()
+                    else:
+                        delay = '1.0'
+                    os.environ['SEND_INTERVAL_SECONDS'] = str(delay)
+                    print(f"[DEBUG] Set SEND_INTERVAL_SECONDS: {delay}")
+                
+                # Max output tokens
+                if hasattr(self.main_gui, 'max_output_tokens'):
+                    os.environ['MAX_OUTPUT_TOKENS'] = str(self.main_gui.max_output_tokens)
+                    print(f"[DEBUG] Set MAX_OUTPUT_TOKENS: {self.main_gui.max_output_tokens}")
+                
+                # Batch translation settings
+                if hasattr(self.main_gui, 'batch_translation_var'):
+                    batch_enabled = '1' if self.main_gui.batch_translation_var else '0'
+                    os.environ['BATCH_TRANSLATION'] = batch_enabled
+                    print(f"[DEBUG] Set BATCH_TRANSLATION: {batch_enabled}")
+                
+                if hasattr(self.main_gui, 'batch_size_var'):
+                    os.environ['BATCH_SIZE'] = str(self.main_gui.batch_size_var)
+                    print(f"[DEBUG] Set BATCH_SIZE: {self.main_gui.batch_size_var}")
+                
+                if hasattr(self.main_gui, 'conservative_batching_var'):
+                    conservative = '1' if self.main_gui.conservative_batching_var else '0'
+                    os.environ['CONSERVATIVE_BATCHING'] = conservative
+                    print(f"[DEBUG] Set CONSERVATIVE_BATCHING: {conservative}")
+                
+                # Temperature
+                if hasattr(self.main_gui, 'trans_temp'):
+                    if hasattr(self.main_gui.trans_temp, 'text'):
+                        temp = self.main_gui.trans_temp.text()
+                    elif hasattr(self.main_gui.trans_temp, 'get'):
+                        temp = self.main_gui.trans_temp.get()
+                    else:
+                        temp = '0.3'
+                    os.environ['TRANSLATION_TEMPERATURE'] = str(temp)
+                    print(f"[DEBUG] Set TRANSLATION_TEMPERATURE: {temp}")
+                
+                # Translation history limit
+                if hasattr(self.main_gui, 'trans_history'):
+                    if hasattr(self.main_gui.trans_history, 'text'):
+                        hist = self.main_gui.trans_history.text()
+                    elif hasattr(self.main_gui.trans_history, 'get'):
+                        hist = self.main_gui.trans_history.get()
+                    else:
+                        hist = '3'
+                    os.environ['TRANSLATION_HISTORY_LIMIT'] = str(hist)
+                    print(f"[DEBUG] Set TRANSLATION_HISTORY_LIMIT: {hist}")
+                
+                print(f"[DEBUG] Manually set critical GUI variables for individual translate")
+                
+            except Exception as manual_env_err:
+                print(f"[DEBUG] Failed to set manual GUI variables: {manual_env_err}")
+            
+            # STEP 2: Apply all other environment variables from main GUI
+            # This ensures all GUI settings are respected
+            try:
+                if hasattr(self.main_gui, '_get_environment_variables'):
+                    env_vars = self.main_gui._get_environment_variables(
+                        epub_path='',  # Not needed for manga
+                        api_key=api_key
+                    )
+                    # Apply all environment variables
+                    for key, value in env_vars.items():
+                        os.environ[key] = str(value)
+                    print(f"[DEBUG] Applied {len(env_vars)} environment variables from main GUI")
+            except Exception as env_err:
+                print(f"[DEBUG] Failed to apply GUI environment variables: {env_err}")
             
             # Apply multi-key env from GUI settings so UnifiedClient picks it up
             use_mk = False
@@ -9785,35 +10029,15 @@ class MangaTranslationTab:
             except Exception as _mk_err:
                 print(f"[DEBUG] Failed to apply multi-key env: {_mk_err}")
             
-            # Get or create cached UnifiedClient (reuse across all regions in this batch)
-            mk_hash = hashlib.sha256(json.dumps(mk_list, sort_keys=True).encode('utf-8')).hexdigest()[:8] if mk_list else 'noMK'
-            desired_mk_flag = 'mk' if use_mk else 'single'
-            client_cache_key = f"{model}_{hash(api_key)}_{desired_mk_flag}_{mk_hash}"
-            if not hasattr(self, '_unified_client_cache'):
-                self._unified_client_cache = {}
-            
-            create_client = False
-            if client_cache_key not in self._unified_client_cache:
-                create_client = True
-            else:
-                # Verify cached client's multi-key mode matches desired
-                cached = self._unified_client_cache[client_cache_key]
-                if getattr(cached, '_multi_key_mode', False) != bool(use_mk):
-                    create_client = True
-            
-            if create_client:
-                print(f"[DEBUG] Creating new UnifiedClient with model: {model} (multi_key={use_mk})")
-                client = UnifiedClient(model=model, api_key=api_key)
-                # If multi-key desired, ensure pool is initialized/refreshed
-                try:
-                    if use_mk and mk_list:
-                        UnifiedClient.setup_multi_key_pool(mk_list, force_rotation=force_rotation, rotation_frequency=rotation_frequency)
-                except Exception as _pool_err:
-                    print(f"[DEBUG] setup_multi_key_pool failed: {_pool_err}")
-                self._unified_client_cache[client_cache_key] = client
-            else:
-                print(f"[DEBUG] Reusing cached UnifiedClient with model: {model} (multi_key={use_mk})")
-                client = self._unified_client_cache[client_cache_key]
+            # Create fresh UnifiedClient (no caching to avoid environment variable conflicts)
+            print(f"[DEBUG] Creating fresh UnifiedClient with model: {model} (multi_key={use_mk})")
+            client = UnifiedClient(model=model, api_key=api_key)
+            # If multi-key desired, ensure pool is initialized/refreshed
+            try:
+                if use_mk and mk_list:
+                    UnifiedClient.setup_multi_key_pool(mk_list, force_rotation=force_rotation, rotation_frequency=rotation_frequency)
+            except Exception as _pool_err:
+                print(f"[DEBUG] setup_multi_key_pool failed: {_pool_err}")
             
             # Get system prompt from GUI profile (same as regular pipeline)
             system_prompt = self._get_system_prompt_from_gui()
@@ -9836,7 +10060,24 @@ class MangaTranslationTab:
             
             translated_texts = []
             
-            # Process each recognized text
+            # CRITICAL: Apply ALL environment variables exactly like Start Translation
+            try:
+                env_vars = self.main_gui._get_environment_variables(
+                    epub_path='',  # Not needed for manga
+                    api_key=api_key
+                )
+                # Apply ALL environment variables
+                for key, value in env_vars.items():
+                    os.environ[key] = str(value)
+                print(f"[DEBUG] Applied {len(env_vars)} environment variables from main GUI exactly like Start Translation")
+            except Exception as env_err:
+                print(f"[DEBUG] Failed to apply GUI environment variables: {env_err}")
+            
+            # Read parameters from environment variables (now set from GUI)
+            temperature = float(os.environ.get('TRANSLATION_TEMPERATURE', '0.3'))
+            max_tokens = int(os.environ.get('MAX_OUTPUT_TOKENS', '4000'))
+            
+            print(f"[DEBUG] Using parameters from environment (set from GUI): temperature={temperature}, max_tokens={max_tokens}")
             print(f"[DEBUG] Processing {len(recognized_texts)} recognized texts for individual translation")
             for i, text_data in enumerate(recognized_texts):
                 text = text_data['text']
@@ -9854,15 +10095,15 @@ class MangaTranslationTab:
                         # Visual context translation
                         print(f"[DEBUG] Using visual context for translation")
                         self._log(f"🖼️ Translating with visual context: '{text[:50]}...'", "info")
-                        print(f"[DEBUG] Calling client.send_image() with cached client...")
-                        response = client.send_image(messages, image_base64, temperature=0.3, max_tokens=4000)
+                        print(f"[DEBUG] Calling client.send_image() with GUI settings (temp={temperature}, max_tokens={max_tokens})...")
+                        response = client.send_image(messages, image_base64, temperature=temperature, max_tokens=max_tokens)
                         print(f"[DEBUG] Got response: {response[:100] if response else 'None'}...")
                     else:
                         # Text-only translation
                         print(f"[DEBUG] Using text-only translation")
                         self._log(f"📝 Translating text: '{text[:50]}...'", "info")
-                        print(f"[DEBUG] Calling client.send() with cached client...")
-                        response = client.send(messages, temperature=0.3, max_tokens=4000)
+                        print(f"[DEBUG] Calling client.send() with GUI settings (temp={temperature}, max_tokens={max_tokens})...")
+                        response = client.send(messages, temperature=temperature, max_tokens=max_tokens)
                         print(f"[DEBUG] Got response: {response[:100] if response else 'None'}...")
                     
                     # Extract translated text from response (UnifiedClient returns tuple or response object)
