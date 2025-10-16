@@ -10177,6 +10177,48 @@ class MangaTranslationTab:
                                 return lambda: self._show_translation_popup(self._translation_data[idx], idx)
                             trans_action.triggered.connect(make_trans_handler(actual_index))
                             menu.addAction(trans_action)
+
+                            # Save Position (per-region) — mirrors Save & Update Overlay without requiring text changes
+                            savepos_action = QAction("💾 Save Position", menu)
+                            def make_savepos_handler(idx):
+                                def _handler():
+                                    try:
+                                        # Persist rectangles only (avoid touching detection regions)
+                                        try:
+                                            if hasattr(self.image_preview_widget, '_persist_rectangles_state'):
+                                                self.image_preview_widget._persist_rectangles_state()
+                                        except Exception:
+                                            pass
+                                        # Get current translation text for region
+                                        trans_text = None
+                                        try:
+                                            td = getattr(self, '_translation_data', {}) or {}
+                                            if idx in td:
+                                                trans_text = td[idx].get('translation', '')
+                                            elif hasattr(self, '_translated_texts') and self._translated_texts:
+                                                for t in self._translated_texts:
+                                                    if t.get('original', {}).get('region_index') == idx:
+                                                        trans_text = t.get('translation', '')
+                                                        break
+                                        except Exception:
+                                            trans_text = None
+                                        if trans_text is None:
+                                            return
+                                        # Show processing and update only this region
+                                        old_overlay = None
+                                        try:
+                                            self._add_processing_overlay()
+                                            self._update_single_text_overlay(int(idx), trans_text)
+                                        finally:
+                                            try:
+                                                self._remove_processing_overlay()
+                                            except Exception:
+                                                pass
+                                    except Exception as _err:
+                                        print(f"[DEBUG] Save Position failed for idx={idx}: {_err}")
+                                return _handler
+                            savepos_action.triggered.connect(make_savepos_handler(actual_index))
+                            menu.addAction(savepos_action)
                         
                         if not menu.isEmpty():
                             # Set menu properties for better display
@@ -12606,52 +12648,6 @@ class MangaTranslationTab:
             except Exception:
                 pass
             
-            # Auto-clear rectangles when there is no translated output for the current image
-            if not translated_texts:
-                try:
-                    # Only clear UI if this result corresponds to the currently displayed image
-                    curr = getattr(self.image_preview_widget, 'current_image_path', None)
-                    if curr:
-                        import os
-                        curr_n = os.path.normpath(curr)
-                        img_n = os.path.normpath(image_path) if image_path else None
-                        orig_n = os.path.normpath(original_image_path) if original_image_path else None
-                        if curr_n == img_n or curr_n == orig_n:
-                            # Clear rectangles from viewer
-                            try:
-                                if hasattr(self.image_preview_widget, 'viewer') and hasattr(self.image_preview_widget.viewer, 'clear_rectangles'):
-                                    self.image_preview_widget.viewer.clear_rectangles()
-                                    try:
-                                        self.image_preview_widget._update_box_count()
-                                    except Exception:
-                                        pass
-                            except Exception:
-                                pass
-                            # Clear persisted detection/recognition state and overlays
-                            try:
-                                if hasattr(self, '_clear_detection_state_for_image'):
-                                    self._clear_detection_state_for_image(original_image_path or curr)
-                            except Exception:
-                                pass
-                            try:
-                                if hasattr(self, 'clear_text_overlays_for_image'):
-                                    # Clear for both original and current paths to be safe
-                                    self.clear_text_overlays_for_image(original_image_path or curr)
-                                    if image_path and image_path != (original_image_path or curr):
-                                        self.clear_text_overlays_for_image(image_path)
-                            except Exception:
-                                pass
-                            # Persist empty viewer rectangles state
-                            try:
-                                self.image_preview_widget._persist_rectangles_state()
-                            except Exception:
-                                pass
-                    # Log status
-                    self._log("⚠️ No translated output — cleared rectangles and overlays", "warning")
-                except Exception:
-                    pass
-                return
-            
             # Log summary of translations
             if translated_texts:
                 self._log(f"🎉 Translation Results ({len(translated_texts)} regions translated):", "success")
@@ -12763,7 +12759,7 @@ class MangaTranslationTab:
                     self._add_text_overlay_to_viewer(translated_texts)
                 except Exception as _ov_err:
                     print(f"[TRANSLATE] Overlay update skipped/failed: {_ov_err}")
-            
+                
                 self._log(f"✅ Translation workflow complete!", "success")
             else:
                 self._log("⚠️ No translations were generated", "warning")

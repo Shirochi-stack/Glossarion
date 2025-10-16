@@ -796,11 +796,6 @@ class MangaImagePreviewWidget(QWidget):
         self.box_draw_btn.clicked.connect(lambda: self._set_tool('box_draw'))
         tools_layout.addWidget(self.box_draw_btn)
         
-        # Save positions button (map emoji)
-        self.save_pos_btn = self._create_tool_button("🗺️", "Save Positions (rectangles + overlays)")
-        self.save_pos_btn.clicked.connect(self._on_save_positions_clicked)
-        tools_layout.addWidget(self.save_pos_btn)
-        
         self.brush_btn = self._create_tool_button("🖌", "Brush")
         self.brush_btn.setCheckable(True)
         self.brush_btn.clicked.connect(lambda: self._set_tool('brush'))
@@ -1141,95 +1136,6 @@ class MangaImagePreviewWidget(QWidget):
         self.viewer.brush_size = value
         self.viewer.eraser_size = value
 
-    def _on_save_positions_clicked(self):
-        """Persist positions and update ONLY the regions whose rectangles moved (no global effects).
-        Mirrors the per-region behavior of "Save & Update Overlay" for all moved rectangles.
-        """
-        try:
-            old_text = self.save_pos_btn.text()
-            self.save_pos_btn.setEnabled(False)
-            self.save_pos_btn.setText("Saving…")
-            # Subtle processing overlay
-            try:
-                if hasattr(self, 'manga_integration') and self.manga_integration:
-                    self.manga_integration._add_processing_overlay()
-            except Exception:
-                pass
-
-            # Persist current rectangles (viewer_rectangles only)
-            self._persist_rectangles_state()
-
-            moved_indices = []
-            try:
-                # Determine which rectangles moved compared to last_render_positions
-                if hasattr(self, 'manga_integration') and self.manga_integration and \
-                   hasattr(self.manga_integration, 'image_state_manager') and self.manga_integration.image_state_manager and \
-                   self.current_image_path:
-                    st = self.manga_integration.image_state_manager.get_state(self.current_image_path) or {}
-                    last_pos = st.get('last_render_positions') or {}
-                    rects = getattr(self.viewer, 'rectangles', []) or []
-                    for i, r in enumerate(rects):
-                        br = r.sceneBoundingRect()
-                        cur = [int(br.x()), int(br.y()), int(br.width()), int(br.height())]
-                        lp = last_pos.get(str(int(i)))
-                        if lp is None:
-                            # No baseline — skip to avoid touching unrelated regions
-                            continue
-                        try:
-                            lp_i = list(map(int, lp)) if isinstance(lp, (list, tuple)) else None
-                        except Exception:
-                            lp_i = None
-                        if not lp_i or len(lp_i) < 4:
-                            continue
-                        if cur != lp_i:
-                            moved_indices.append(i)
-            except Exception:
-                moved_indices = []
-
-            # If nothing detected as moved, optionally update selected region only
-            if not moved_indices and getattr(self.viewer, 'selected_rect', None) is not None:
-                try:
-                    sel_idx = self.viewer.rectangles.index(self.viewer.selected_rect)
-                    moved_indices = [sel_idx]
-                except Exception:
-                    pass
-
-            # Update only moved regions using per-region renderer
-            if hasattr(self, 'manga_integration') and self.manga_integration and hasattr(self.manga_integration, '_update_single_text_overlay'):
-                # Build a quick lookup for translations
-                trans_lookup = {}
-                try:
-                    if hasattr(self.manga_integration, '_translation_data') and isinstance(self.manga_integration._translation_data, dict):
-                        for k, v in self.manga_integration._translation_data.items():
-                            trans_lookup[int(k)] = v.get('translation', '')
-                    if not trans_lookup and hasattr(self.manga_integration, '_translated_texts') and self.manga_integration._translated_texts:
-                        for t in self.manga_integration._translated_texts:
-                            idx = t.get('original', {}).get('region_index')
-                            if idx is not None:
-                                trans_lookup[int(idx)] = t.get('translation', '')
-                except Exception:
-                    pass
-
-                for idx in moved_indices:
-                    trans_text = trans_lookup.get(int(idx))
-                    if trans_text is None:
-                        continue
-                    try:
-                        self.manga_integration._update_single_text_overlay(int(idx), trans_text)
-                    except Exception as one_err:
-                        print(f"[DEBUG] Single-region update failed for idx={idx}: {one_err}")
-
-            print(f"[DEBUG] Save Positions: updated {len(moved_indices)} region(s)")
-        except Exception as e:
-            print(f"[DEBUG] Failed to save positions: {e}")
-        finally:
-            try:
-                if hasattr(self, 'manga_integration') and self.manga_integration:
-                    self.manga_integration._remove_processing_overlay()
-            except Exception:
-                pass
-            self.save_pos_btn.setText(old_text)
-            self.save_pos_btn.setEnabled(True)
     
     def _clear_strokes(self):
         """Clear brush strokes only"""
@@ -1639,8 +1545,6 @@ class MangaImagePreviewWidget(QWidget):
         
         # Show/hide manual editing tools ONLY (not pan/zoom which are always visible)
         self.box_draw_btn.setVisible(enabled)
-        if hasattr(self, 'save_pos_btn'):
-            self.save_pos_btn.setVisible(enabled)
         self.brush_btn.setVisible(enabled)
         self.eraser_btn.setVisible(enabled)
         self.delete_btn.setVisible(enabled)
