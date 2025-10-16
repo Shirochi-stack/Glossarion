@@ -9308,7 +9308,6 @@ class MangaTranslationTab:
     
     def _on_translate_text_clicked(self):
         """Translate recognized text using the selected API - runs full pipeline if needed"""
-        print("[TRANSLATE_HANDLER] _on_translate_text_clicked called!", flush=True)
         self._log("🐛 Translate button clicked - starting translation", "info")
         
         try:
@@ -12195,7 +12194,6 @@ class MangaTranslationTab:
     
     def _on_translate_all_clicked(self):
         """Translate all images in the preview list"""
-        print("[TRANSLATE_ALL_HANDLER] _on_translate_all_clicked called!", flush=True)
         self._log("🚀 Starting batch translation of all images", "info")
         
         try:

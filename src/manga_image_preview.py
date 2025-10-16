@@ -1046,7 +1046,6 @@ class MangaImagePreviewWidget(QWidget):
     
     def _set_tool(self, tool: str):
         """Set active tool and update button states"""
-        print(f"[DEBUG] Setting tool to: {tool}")
         # Always set on source viewer
         self.viewer.set_tool(tool)
         # For pan tool, also apply to output viewer so panning works there
@@ -1061,15 +1060,6 @@ class MangaImagePreviewWidget(QWidget):
         self.box_draw_btn.setChecked(tool == 'box_draw')
         self.brush_btn.setChecked(tool == 'brush')
         self.eraser_btn.setChecked(tool == 'eraser')
-        
-        # Show user feedback
-        tool_names = {
-            'pan': 'Pan/Select Tool',
-            'box_draw': 'Box Drawing Tool', 
-            'brush': 'Brush Tool (Red strokes)',
-            'eraser': 'Eraser Tool (White strokes)'
-        }
-        print(f"[DEBUG] Active tool: {tool_names.get(tool, tool)}")
     
     def _fit_active_view(self):
         """Fit the active viewer to view (source or output)."""
@@ -1220,22 +1210,16 @@ class MangaImagePreviewWidget(QWidget):
         self._update_thumbnail_selection(image_path)
     
     def _emit_recognize_signal(self):
-        """Emit recognize text signal with debugging"""
-        print("[DEBUG] Recognize button clicked - emitting signal")
+        """Emit recognize text signal"""
         self.recognize_text_clicked.emit()
-        print("[DEBUG] Recognize signal emitted")
     
     def _emit_translate_signal(self):
-        """Emit translate text signal with debugging"""
-        print("[TRANSLATE_BUTTON] Translate button clicked - emitting signal", flush=True)
+        """Emit translate text signal"""
         self.translate_text_clicked.emit()
-        print("[TRANSLATE_BUTTON] Translate signal emitted", flush=True)
     
     def _emit_translate_all_signal(self):
-        """Emit translate all signal with debugging"""
-        print("[TRANSLATE_ALL_BUTTON] Translate All button clicked - emitting signal", flush=True)
+        """Emit translate all signal"""
         self.translate_all_clicked.emit()
-        print("[TRANSLATE_ALL_BUTTON] Translate All signal emitted", flush=True)
     
     def set_image_list(self, image_paths: list):
         """Set the list of images and populate thumbnails"""
@@ -1541,7 +1525,6 @@ class MangaImagePreviewWidget(QWidget):
         from PySide6.QtCore import Qt
         enabled = (state == Qt.CheckState.Checked.value)
         
-        print(f"[DEBUG] Manual editing toggled: {enabled}")
         
         # Show/hide manual editing tools ONLY (not pan/zoom which are always visible)
         self.box_draw_btn.setVisible(enabled)
@@ -1574,23 +1557,11 @@ class MangaImagePreviewWidget(QWidget):
         try:
             if self.main_gui and hasattr(self.main_gui, 'config'):
                 self.main_gui.config['manga_manual_editing_enabled'] = enabled
-                print(f"[DEBUG] Set manga_manual_editing_enabled = {enabled}")
                 # Save config to disk
                 if hasattr(self.main_gui, 'save_config'):
                     self.main_gui.save_config(show_message=False)
-                    print(f"[DEBUG] Config saved to disk")
-                else:
-                    print(f"[DEBUG] save_config method not found on main_gui")
-            else:
-                print(f"[DEBUG] main_gui or config not available")
-        except Exception as e:
-            print(f"[DEBUG] Error saving config: {e}")
-            import traceback
-            traceback.print_exc()
-    
-            print(f"[DEBUG] Error loading manual file: {str(e)}")
-            import traceback
-            print(traceback.format_exc())
+        except Exception:
+            pass
     
     def _on_download_images_clicked(self):
         """Handle download images button - consolidate isolated images into structured folder"""
@@ -1602,12 +1573,10 @@ class MangaImagePreviewWidget(QWidget):
             # Get the parent directory of translated images
             # Since each image is now in its own *_translated/ folder, we need to find them
             if not hasattr(self, 'manga_integration') or not self.manga_integration:
-                print("[DEBUG] No manga_integration reference available")
                 return
             
             # Get the source directory from selected files
             if not hasattr(self.manga_integration, 'selected_files') or not self.manga_integration.selected_files:
-                print("[DEBUG] No selected files available")
                 return
             
             # Get parent directory of the first selected file
@@ -1629,7 +1598,6 @@ class MangaImagePreviewWidget(QWidget):
                 )
                 return
             
-            print(f"[DEBUG] Found {len(translated_folders)} translated folders")
             
             # Create consolidated "translated" folder in parent directory
             consolidated_folder = os.path.join(parent_dir, 'translated')
@@ -1656,7 +1624,6 @@ class MangaImagePreviewWidget(QWidget):
                         shutil.copy2(src_path, dest_path)
                         copied_count += 1
             
-            print(f"[DEBUG] Successfully consolidated {copied_count} translated images to {consolidated_folder}")
             
             # Show success message
             QMessageBox.information(
@@ -1667,9 +1634,6 @@ class MangaImagePreviewWidget(QWidget):
             )
             
         except Exception as e:
-            print(f"[DEBUG] Error downloading images: {str(e)}")
-            import traceback
-            print(traceback.format_exc())
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.critical(
                 self,
@@ -1705,7 +1669,6 @@ class MangaImagePreviewWidget(QWidget):
                 )
             
             self.download_btn.setEnabled(has_translated_images)
-            print(f"[DEBUG] Translated images found: {has_translated_images}")
         else:
             self.download_btn.setEnabled(False)
     
@@ -1724,7 +1687,6 @@ class MangaImagePreviewWidget(QWidget):
             # Helper to load an output image
             def _load_output(path: str):
                 if path and os.path.exists(path):
-                    print(f"[DEBUG] Loading output image into output tab: {path}")
                     self.output_viewer.load_image(path)
                     self.current_translated_path = path
                     return True
@@ -1761,11 +1723,9 @@ class MangaImagePreviewWidget(QWidget):
                         break
 
             if cleaned_path and _load_output(cleaned_path):
-                print(f"[DEBUG] No translated image found; showing cleaned image instead: {cleaned_path}")
                 return
 
             # 3) Nothing found — show placeholder
-            print(f"[DEBUG] No translated or cleaned output found for: {source_filename}")
             self._show_output_placeholder()
             self.current_translated_path = None
 
@@ -1798,7 +1758,5 @@ class MangaImagePreviewWidget(QWidget):
             except Exception:
                 pass
 
-        except Exception as e:
-            print(f"[DEBUG] Error checking translated output: {str(e)}")
-            import traceback
-            print(traceback.format_exc())
+        except Exception:
+            pass
