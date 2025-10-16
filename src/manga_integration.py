@@ -10633,13 +10633,8 @@ class MangaTranslationTab(QObject):
                                 return lambda: self._show_translation_popup(self._translation_data[idx], idx)
                             trans_action.triggered.connect(make_trans_handler(actual_index))
                             menu.addAction(trans_action)
-
-                            # Save Position (per-region) — mirrors Save & Update Overlay without requiring text changes
-                            savepos_action = QAction("💾 Save Position", menu)
-                            def make_savepos_handler(idx):
-                                return lambda: self._save_position_async(idx)
-                            savepos_action.triggered.connect(make_savepos_handler(actual_index))
-                            menu.addAction(savepos_action)
+                            
+                            # Save Position removed - now done automatically on rectangle movement
                         
                         if not menu.isEmpty():
                             # Set menu properties for better display
@@ -11620,47 +11615,12 @@ class MangaTranslationTab(QObject):
             
             if executor_exists:
                 print(f"[DEBUG] Using ThreadPoolExecutor for overlay task")
-                try:
-                    print(f"[DEBUG] Submitting task to executor...")
-                    future = self.main_gui.executor.submit(_save_overlay_task)
-                    print(f"[DEBUG] Task submitted successfully, waiting for result...")
-                    
-                    # Handle the result on the main thread with timeout
-                    success = future.result(timeout=30)  # 30 second timeout
-                    print(f"[DEBUG] ThreadPoolExecutor completed with success={success}")
-                    
-                except concurrent.futures.TimeoutError:
-                    print(f"[DEBUG] ThreadPoolExecutor timed out after 30 seconds")
-                    print(f"[DEBUG] Falling back to direct execution")
-                    try:
-                        success = _save_overlay_task()
-                        print(f"[DEBUG] Fallback direct execution completed with success={success}")
-                    except Exception as fallback_error:
-                        print(f"[DEBUG] Fallback execution also failed: {fallback_error}")
-                        import traceback
-                        print(f"[DEBUG] Fallback traceback: {traceback.format_exc()}")
-                        
-                except Exception as executor_error:
-                    print(f"[DEBUG] ThreadPoolExecutor failed with error: {executor_error}")
-                    import traceback
-                    print(f"[DEBUG] Executor error traceback: {traceback.format_exc()}")
-                    print(f"[DEBUG] Falling back to direct execution")
-                    try:
-                        success = _save_overlay_task()
-                        print(f"[DEBUG] Fallback direct execution completed with success={success}")
-                    except Exception as fallback_error:
-                        print(f"[DEBUG] Fallback execution also failed: {fallback_error}")
-                        import traceback
-                        print(f"[DEBUG] Fallback traceback: {traceback.format_exc()}")
+                future = self.main_gui.executor.submit(_save_overlay_task)
+                print(f"[DEBUG] Task submitted to executor (fire-and-forget for responsiveness)")
+                # Don't wait for completion - fire and forget for responsiveness
             else:
-                print(f"[DEBUG] No executor available, running save overlay directly")
-                try:
-                    success = _save_overlay_task()
-                    print(f"[DEBUG] Direct execution completed with success={success}")
-                except Exception as direct_error:
-                    print(f"[DEBUG] Direct execution failed: {direct_error}")
-                    import traceback
-                    print(f"[DEBUG] Direct execution traceback: {traceback.format_exc()}")
+                print(f"[DEBUG] No executor available, running save overlay synchronously")
+                _save_overlay_task()
             
             print(f"[DEBUG] _save_overlay_async: METHOD COMPLETION")
             
