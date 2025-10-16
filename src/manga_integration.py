@@ -15537,9 +15537,6 @@ class MangaTranslationTab:
                                     # Use thread-safe queue to update preview from parallel worker
                                     if hasattr(self, 'image_preview_widget'):
                                         current_path = self.image_preview_widget.current_image_path
-                                        print(f"[PREVIEW_UPDATE] Translation completed for: {filename}")
-                                        print(f"[PREVIEW_UPDATE]   Current preview path: {current_path}")
-                                        print(f"[PREVIEW_UPDATE]   Source filepath: {filepath}")
                                         print(f"[PREVIEW_UPDATE]   Translated output: {result.get('output_path')}")
                                         
                                         # Normalize paths for comparison (fix slash mixing on Windows)
@@ -15549,9 +15546,6 @@ class MangaTranslationTab:
                                         # Match if showing original OR any translated version of this image
                                         is_current = (norm_current == norm_source or 
                                                      (norm_current and os.path.dirname(norm_current).endswith(f"{os.path.splitext(os.path.basename(filepath))[0]}_translated")))
-                                        print(f"[PREVIEW_UPDATE]   Normalized current: {norm_current}")
-                                        print(f"[PREVIEW_UPDATE]   Normalized source: {norm_source}")
-                                        print(f"[PREVIEW_UPDATE]   Is current image: {is_current}")
                                         
                                         if is_current:
                                             # Use queue for thread-safe GUI update with source path for persistence
