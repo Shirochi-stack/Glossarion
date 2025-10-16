@@ -11581,7 +11581,21 @@ class MangaTranslationTab(QObject):
                     self.pending_tasks = Queue()
                     self.active_tasks = set()  # Track active region indices
                     self.microsecond_lock = threading.Lock()  # Microsecond precision lock
-                    self.executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="AutoSave")
+                    
+                    # Get max_workers from manga settings
+                    max_workers = 4  # Default fallback
+                    try:
+                        if hasattr(parent, 'main_gui') and hasattr(parent.main_gui, 'config'):
+                            manga_settings = parent.main_gui.config.get('manga_settings', {})
+                            advanced_settings = manga_settings.get('advanced', {})
+                            max_workers = advanced_settings.get('max_workers', 4)
+                            print(f"[PARALLEL] Using max_workers from settings: {max_workers}")
+                        else:
+                            print(f"[PARALLEL] Using default max_workers: {max_workers}")
+                    except Exception as e:
+                        print(f"[PARALLEL] Error reading max_workers from settings, using default: {e}")
+                    
+                    self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="AutoSave")
                     self.processing_count = 0  # Track number of active processes
                     self.count_lock = threading.Lock()  # Lock for processing count
                     
@@ -11592,7 +11606,7 @@ class MangaTranslationTab(QObject):
                         name="AutoSaveCoordinator"
                     )
                     self.coordinator_thread.start()
-                    print(f"[PARALLEL] Initialized parallel save system with 4 worker threads")
+                    print(f"[PARALLEL] Initialized parallel save system with {max_workers} worker threads")
                 
                 def queue_save_task(self, region_index: int):
                     """Queue a save task for the given region index."""
