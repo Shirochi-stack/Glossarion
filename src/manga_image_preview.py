@@ -51,6 +51,19 @@ class MoveableRectItem(QGraphicsRectItem):
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         super().hoverLeaveEvent(event)
         
+    def mouseReleaseEvent(self, event):
+        try:
+            super().mouseReleaseEvent(event)
+        finally:
+            try:
+                # Notify viewer about move completion
+                if hasattr(self, '_viewer') and self._viewer:
+                    r = self.sceneBoundingRect()
+                    # Emit moved signal with SCENE coordinates
+                    self._viewer.rectangle_moved.emit(r)
+            except Exception:
+                pass
+        
     def mousePressEvent(self, event):
         """Ensure only this rectangle is selected to avoid multi-move of multiple items."""
         try:
@@ -117,6 +130,7 @@ class CompactImageViewer(QGraphicsView):
     rectangle_created = Signal(QRectF)
     rectangle_selected = Signal(QRectF)
     rectangle_deleted = Signal(QRectF)
+    rectangle_moved = Signal(QRectF)
     image_loading = Signal(str)  # emitted when starting to load
     image_loaded = Signal(str)   # emitted when image successfully loaded
     
@@ -307,6 +321,11 @@ class CompactImageViewer(QGraphicsView):
             self.start_point = scene_pos
             rect = QRectF(scene_pos, scene_pos)
             self.current_rect = MoveableRectItem(rect)
+            # Attach viewer reference so item can emit moved signal
+            try:
+                self.current_rect._viewer = self
+            except Exception:
+                pass
             self._scene.addItem(self.current_rect)
         elif self.current_tool in ['brush', 'eraser'] and event.button() == Qt.MouseButton.LeftButton:
             self.drawing = True
@@ -435,6 +454,11 @@ class CompactImageViewer(QGraphicsView):
             rect_item = MoveableRectItem(rect)
             rect_item.setPen(QPen(color, 2))
             rect_item.setBrush(QBrush(QColor(color.red(), color.green(), color.blue(), 50)))  # Semi-transparent
+            # Attach viewer reference so item can emit moved signal
+            try:
+                rect_item._viewer = self
+            except Exception:
+                pass
             
             self._scene.addItem(rect_item)
             self.rectangles.append(rect_item)
@@ -833,9 +857,10 @@ class MangaImagePreviewWidget(QWidget):
         tools_layout.addWidget(self.box_count_label)
         self.viewer.rectangle_created.connect(self._update_box_count)
         self.viewer.rectangle_deleted.connect(self._update_box_count)
-        # Persist rectangles when created/deleted
+        # Persist rectangles when created/deleted/moved
         self.viewer.rectangle_created.connect(lambda _: self._persist_rectangles_state())
         self.viewer.rectangle_deleted.connect(lambda _: self._persist_rectangles_state())
+        self.viewer.rectangle_moved.connect(lambda _: self._persist_rectangles_state())
         
         layout.addWidget(self.tools_frame)
         
@@ -1117,7 +1142,10 @@ class MangaImagePreviewWidget(QWidget):
         self.viewer.eraser_size = value
 
     def _on_save_positions_clicked(self):
-        """Persist rectangle/overlay positions and re-render output to reflect changes."""
+        """Persist rectangle/overlay positions and perform the same update as Save & Update Overlay.
+        - If a rectangle is selected and we have translation text for it, update only that region
+        - Otherwise, re-render using current positions (stable full render)
+        """
         try:
             # Disable and animate
             old_text = self.save_pos_btn.text()
@@ -1136,10 +1164,44 @@ class MangaImagePreviewWidget(QWidget):
             if hasattr(self, 'manga_integration') and self.manga_integration:
                 if hasattr(self.manga_integration, '_persist_overlay_offsets_for_current_image'):
                     self.manga_integration._persist_overlay_offsets_for_current_image()
-                # Re-render entire output using current positions (stable)
-                if hasattr(self.manga_integration, 'save_positions_and_rerender'):
+                
+                # Try to update only the selected region like Save & Update Overlay
+                region_idx = None
+                try:
+                    if getattr(self.viewer, 'selected_rect', None) is not None:
+                        region_idx = self.viewer.rectangles.index(self.viewer.selected_rect)
+                except Exception:
+                    region_idx = None
+                
+                do_full = True
+                if region_idx is not None and hasattr(self.manga_integration, '_update_single_text_overlay'):
+                    # Get current translation text for region
+                    trans_text = None
+                    try:
+                        if hasattr(self.manga_integration, '_translation_data') and \
+                           isinstance(self.manga_integration._translation_data, dict) and \
+                           region_idx in self.manga_integration._translation_data:
+                            trans_text = self.manga_integration._translation_data[region_idx].get('translation', '')
+                        elif hasattr(self.manga_integration, '_translated_texts') and self.manga_integration._translated_texts:
+                            # Fallback: find by region_index in translated_texts
+                            for t in self.manga_integration._translated_texts:
+                                if t.get('original', {}).get('region_index') == region_idx:
+                                    trans_text = t.get('translation', '')
+                                    break
+                    except Exception:
+                        trans_text = None
+                    
+                    if trans_text is not None:
+                        try:
+                            self.manga_integration._update_single_text_overlay(int(region_idx), trans_text)
+                            do_full = False
+                        except Exception:
+                            do_full = True
+                
+                # Fallback to full re-render if we couldn't update a single region
+                if do_full and hasattr(self.manga_integration, 'save_positions_and_rerender'):
                     self.manga_integration.save_positions_and_rerender()
-            print("[DEBUG] Positions saved + output re-rendered")
+            print("[DEBUG] Positions saved and overlay updated")
         except Exception as e:
             print(f"[DEBUG] Failed to save positions: {e}")
         finally:
@@ -1783,6 +1845,35 @@ class MangaImagePreviewWidget(QWidget):
             print(f"[DEBUG] No translated or cleaned output found for: {source_filename}")
             self._show_output_placeholder()
             self.current_translated_path = None
+
+            # Auto-clear blue rectangles and related state when no output exists
+            try:
+                # Clear rectangles from viewer and update count
+                if hasattr(self, 'viewer') and hasattr(self.viewer, 'clear_rectangles'):
+                    self.viewer.clear_rectangles()
+                    try:
+                        self._update_box_count()
+                    except Exception:
+                        pass
+                # Clear persisted detection/recognition state and overlays for this image
+                if hasattr(self, 'manga_integration') and self.manga_integration:
+                    try:
+                        if hasattr(self.manga_integration, '_clear_detection_state_for_image'):
+                            self.manga_integration._clear_detection_state_for_image(source_image_path)
+                    except Exception:
+                        pass
+                    try:
+                        if hasattr(self.manga_integration, 'clear_text_overlays_for_image'):
+                            self.manga_integration.clear_text_overlays_for_image(source_image_path)
+                    except Exception:
+                        pass
+                # Persist empty rectangles to state (viewer_rectangles)
+                try:
+                    self._persist_rectangles_state()
+                except Exception:
+                    pass
+            except Exception:
+                pass
 
         except Exception as e:
             print(f"[DEBUG] Error checking translated output: {str(e)}")

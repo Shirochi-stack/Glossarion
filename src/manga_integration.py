@@ -7849,11 +7849,34 @@ class MangaTranslationTab:
             
             print(f"[STATE] Restoring state for {os.path.basename(image_path)}")
             
-            # Restore detection regions
-            if 'detection_regions' in state:
+            # Prefer viewer_rectangles (latest manual adjustments) to restore boxes; fallback to detection_regions
+            used_boxes = False
+            if 'viewer_rectangles' in state and state['viewer_rectangles']:
+                viewer = self.image_preview_widget.viewer
+                if hasattr(viewer, 'clear_rectangles'):
+                    viewer.clear_rectangles()
+                from PySide6.QtCore import QRectF, Qt
+                from PySide6.QtGui import QPen, QBrush, QColor
+                from manga_image_preview import MoveableRectItem
+                for rect_data in state['viewer_rectangles']:
+                    rect = QRectF(rect_data['x'], rect_data['y'], rect_data['width'], rect_data['height'])
+                    pen = QPen(QColor(0, 255, 0), 1)
+                    pen.setCosmetic(True)
+                    brush = QBrush(QColor(0, 255, 0, 50))
+                    rect_item = MoveableRectItem(rect, pen=pen, brush=brush)
+                    # Attach viewer for move signal
+                    try:
+                        rect_item._viewer = viewer
+                    except Exception:
+                        pass
+                    viewer._scene.addItem(rect_item)
+                    viewer.rectangles.append(rect_item)
+                print(f"[STATE] Restored {len(state['viewer_rectangles'])} viewer rectangles (preferred)")
+                used_boxes = True
+            
+            if not used_boxes and 'detection_regions' in state:
                 self._current_regions = state['detection_regions']
                 print(f"[STATE] Restored {len(self._current_regions)} detection regions")
-                
                 # Redraw detection boxes on preview
                 if hasattr(self.image_preview_widget.viewer, 'clear_rectangles'):
                     self.image_preview_widget.viewer.clear_rectangles()
@@ -7900,6 +7923,11 @@ class MangaTranslationTab:
                     pen.setCosmetic(True)
                     brush = QBrush(QColor(0, 255, 0, 50))
                     rect_item = MoveableRectItem(rect, pen=pen, brush=brush)
+                    # Attach viewer reference so moved emits
+                    try:
+                        rect_item._viewer = viewer
+                    except Exception:
+                        pass
                     viewer._scene.addItem(rect_item)
                     viewer.rectangles.append(rect_item)
                     # Attach region index and move-sync handler
@@ -7935,11 +7963,34 @@ class MangaTranslationTab:
             
             print(f"[STATE] Restoring overlays for {os.path.basename(image_path)}")
             
-            # Restore detection regions
-            if 'detection_regions' in state:
+            # Prefer viewer_rectangles (latest manual adjustments) to restore boxes; fallback to detection_regions
+            used_boxes = False
+            if 'viewer_rectangles' in state and state['viewer_rectangles']:
+                viewer = self.image_preview_widget.viewer
+                if hasattr(viewer, 'clear_rectangles'):
+                    viewer.clear_rectangles()
+                from PySide6.QtCore import QRectF, Qt
+                from PySide6.QtGui import QPen, QBrush, QColor
+                from manga_image_preview import MoveableRectItem
+                for rect_data in state['viewer_rectangles']:
+                    rect = QRectF(rect_data['x'], rect_data['y'], rect_data['width'], rect_data['height'])
+                    pen = QPen(QColor(0, 255, 0), 1)
+                    pen.setCosmetic(True)
+                    brush = QBrush(QColor(0, 255, 0, 50))
+                    rect_item = MoveableRectItem(rect, pen=pen, brush=brush)
+                    # Attach viewer for move signal
+                    try:
+                        rect_item._viewer = viewer
+                    except Exception:
+                        pass
+                    viewer._scene.addItem(rect_item)
+                    viewer.rectangles.append(rect_item)
+                print(f"[STATE] Restored {len(state['viewer_rectangles'])} viewer rectangles (preferred)")
+                used_boxes = True
+            
+            if not used_boxes and 'detection_regions' in state:
                 self._current_regions = state['detection_regions']
                 print(f"[STATE] Restored {len(self._current_regions)} detection regions")
-                
                 # Redraw detection boxes on preview
                 if hasattr(self.image_preview_widget.viewer, 'clear_rectangles'):
                     self.image_preview_widget.viewer.clear_rectangles()
@@ -7994,6 +8045,11 @@ class MangaTranslationTab:
                     pen.setCosmetic(True)
                     brush = QBrush(QColor(0, 255, 0, 50))
                     rect_item = MoveableRectItem(rect, pen=pen, brush=brush)
+                    # Attach viewer reference so moved emits
+                    try:
+                        rect_item._viewer = viewer
+                    except Exception:
+                        pass
                     viewer._scene.addItem(rect_item)
                     viewer.rectangles.append(rect_item)
                     # Attach region index and move-sync handler
@@ -8116,6 +8172,12 @@ class MangaTranslationTab:
                     # Explicitly disable antialiasing on this item to prevent blur artifacts
                     from PySide6.QtWidgets import QGraphicsItem
                     rect_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemUsesExtendedStyleOption, False)
+                    
+                    # Attach viewer reference so item can emit moved signal
+                    try:
+                        rect_item._viewer = viewer
+                    except Exception:
+                        pass
                     
                     viewer._scene.addItem(rect_item)
                     viewer.rectangles.append(rect_item)
