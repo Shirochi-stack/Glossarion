@@ -7983,6 +7983,16 @@ class MangaTranslationTab:
                 
                 print(f"[STATE] Restored {len(state['viewer_rectangles'])} viewer rectangles")
             
+            # If translated_texts exist and rectangles are present, restore text overlays on source viewer
+            try:
+                translated_texts = state.get('translated_texts') or []
+                rects_exist = bool(getattr(self.image_preview_widget.viewer, 'rectangles', []))
+                if translated_texts and rects_exist and hasattr(self, '_add_text_overlay_to_viewer'):
+                    self._add_text_overlay_to_viewer(translated_texts)
+                    print(f"[STATE] Restored {len(translated_texts)} text overlays from persisted state")
+            except Exception as e2:
+                print(f"[STATE] Failed to restore text overlays: {e2}")
+            
             print(f"[STATE] Overlay restoration complete for {os.path.basename(image_path)}")
             
         except Exception as e:
@@ -12321,6 +12331,12 @@ class MangaTranslationTab:
             
             # Store translated texts
             self._translated_texts = translated_texts
+            # Persist translated_texts to state for overlay restoration across sessions
+            try:
+                if hasattr(self, 'image_state_manager') and original_image_path:
+                    self.image_state_manager.update_state(original_image_path, {'translated_texts': translated_texts})
+            except Exception:
+                pass
             
             # Log summary of translations
             if translated_texts:

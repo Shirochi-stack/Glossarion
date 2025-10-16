@@ -772,6 +772,11 @@ class MangaImagePreviewWidget(QWidget):
         self.box_draw_btn.clicked.connect(lambda: self._set_tool('box_draw'))
         tools_layout.addWidget(self.box_draw_btn)
         
+        # Save positions button (map emoji)
+        self.save_pos_btn = self._create_tool_button("🗺️", "Save Positions (rectangles + overlays)")
+        self.save_pos_btn.clicked.connect(self._on_save_positions_clicked)
+        tools_layout.addWidget(self.save_pos_btn)
+        
         self.brush_btn = self._create_tool_button("🖌", "Brush")
         self.brush_btn.setCheckable(True)
         self.brush_btn.clicked.connect(lambda: self._set_tool('brush'))
@@ -1110,13 +1115,26 @@ class MangaImagePreviewWidget(QWidget):
         self.size_label.setText(str(value))
         self.viewer.brush_size = value
         self.viewer.eraser_size = value
+
+    def _on_save_positions_clicked(self):
+        """Persist rectangle and overlay positions to state"""
+        try:
+            # Persist rectangles
+            self._persist_rectangles_state()
+            # Persist overlay offsets via integration
+            if hasattr(self, 'manga_integration') and self.manga_integration:
+                if hasattr(self.manga_integration, '_persist_overlay_offsets_for_current_image'):
+                    self.manga_integration._persist_overlay_offsets_for_current_image()
+            print("[DEBUG] Positions saved (rectangles + overlays)")
+        except Exception as e:
+            print(f"[DEBUG] Failed to save positions: {e}")
     
     def _clear_strokes(self):
         """Clear brush strokes only"""
         self.viewer.clear_brush_strokes()
     
     def _on_clear_boxes_clicked(self):
-        """Clear all rectangles and persist deletion to state."""
+        """Clear all rectangles and persist deletion to state. Also clear text overlays and their persisted offsets."""
         try:
             self.viewer.clear_rectangles()
             self._update_box_count()
@@ -1125,6 +1143,20 @@ class MangaImagePreviewWidget(QWidget):
                 if hasattr(self, 'manga_integration') and self.manga_integration:
                     if hasattr(self.manga_integration, '_clear_detection_state_for_image'):
                         self.manga_integration._clear_detection_state_for_image(self.current_image_path)
+                    # Clear overlays from scene and persisted offsets/positions
+                    try:
+                        self.manga_integration.clear_text_overlays_for_image(self.current_image_path)
+                    except Exception:
+                        pass
+                    try:
+                        if hasattr(self.manga_integration, 'image_state_manager') and self.manga_integration.image_state_manager and self.current_image_path:
+                            st = self.manga_integration.image_state_manager.get_state(self.current_image_path) or {}
+                            st.pop('overlay_offsets', None)
+                            st.pop('last_render_positions', None)
+                            st.pop('translated_texts', None)
+                            self.manga_integration.image_state_manager.set_state(self.current_image_path, st, save=True)
+                    except Exception:
+                        pass
             except Exception:
                 pass
             # Persist empty state (viewer_rectangles/detection_regions)
@@ -1137,6 +1169,24 @@ class MangaImagePreviewWidget(QWidget):
         self.viewer.clear_rectangles()
         self.viewer.clear_brush_strokes()
         self._update_box_count()
+        # Also clear overlays and persisted overlay state
+        try:
+            if hasattr(self, 'manga_integration') and self.manga_integration and self.current_image_path:
+                try:
+                    self.manga_integration.clear_text_overlays_for_image(self.current_image_path)
+                except Exception:
+                    pass
+                try:
+                    if hasattr(self.manga_integration, 'image_state_manager') and self.manga_integration.image_state_manager:
+                        st = self.manga_integration.image_state_manager.get_state(self.current_image_path) or {}
+                        st.pop('overlay_offsets', None)
+                        st.pop('last_render_positions', None)
+                        st.pop('translated_texts', None)
+                        self.manga_integration.image_state_manager.set_state(self.current_image_path, st, save=True)
+                except Exception:
+                    pass
+        except Exception:
+            pass
         self._persist_rectangles_state()
     
     def load_image(self, image_path: str, preserve_rectangles: bool = False, preserve_text_overlays: bool = False):
@@ -1378,6 +1428,23 @@ class MangaImagePreviewWidget(QWidget):
     def clear(self):
         """Clear the preview"""
         # Clear source viewer
+        try:
+            # Also clear overlays for current image persistently
+            if hasattr(self, 'manga_integration') and self.manga_integration and self.current_image_path:
+                try:
+                    self.manga_integration.clear_text_overlays_for_image(self.current_image_path)
+                except Exception:
+                    pass
+                try:
+                    if hasattr(self.manga_integration, 'image_state_manager') and self.manga_integration.image_state_manager:
+                        st = self.manga_integration.image_state_manager.get_state(self.current_image_path) or {}
+                        st.pop('overlay_offsets', None)
+                        st.pop('last_render_positions', None)
+                        self.manga_integration.image_state_manager.set_state(self.current_image_path, st, save=True)
+                except Exception:
+                    pass
+        except Exception:
+            pass
         self.viewer.clear_scene()
         self.current_image_path = None
         self.file_label.setText("No image loaded")
@@ -1470,6 +1537,8 @@ class MangaImagePreviewWidget(QWidget):
         
         # Show/hide manual editing tools ONLY (not pan/zoom which are always visible)
         self.box_draw_btn.setVisible(enabled)
+        if hasattr(self, 'save_pos_btn'):
+            self.save_pos_btn.setVisible(enabled)
         self.brush_btn.setVisible(enabled)
         self.eraser_btn.setVisible(enabled)
         self.delete_btn.setVisible(enabled)
