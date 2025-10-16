@@ -8046,9 +8046,9 @@ class MangaTranslator:
                     free_text_iterations = 0
                     self._log(f"📏 Auto mode (B&W): kernel={kernel_size}x{kernel_size}px, text=2, empty=2, free=0", "info")
                 else:
-                    text_bubble_iterations = 4
-                    empty_bubble_iterations = 4
-                    free_text_iterations = 4
+                    text_bubble_iterations = 3
+                    empty_bubble_iterations = 3
+                    free_text_iterations = 3
                     self._log(f"📏 Auto mode (Color): kernel={kernel_size}x{kernel_size}px, all=4", "info")
             except Exception:
                 # Fallback to configured behavior on any error
