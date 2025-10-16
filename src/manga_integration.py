@@ -10666,181 +10666,131 @@ class MangaTranslationTab:
                 
                 regions = []
                 
-                # Load any saved per-region overlay offsets for this image (to apply in final render)
+                # Prepare dimensions and last positions
+                from PIL import Image as _PILImage
+                try:
+                    src_w, src_h = _PILImage.open(current_image).size
+                except Exception:
+                    src_w, src_h = (1, 1)
                 saved_offsets = {}
+                last_pos = {}
                 try:
                     current_state = self.image_state_manager.get_state(current_image) if hasattr(self, 'image_state_manager') else None
                     if current_state:
                         saved_offsets = current_state.get('overlay_offsets') or {}
+                        last_pos = current_state.get('last_render_positions') or {}
                 except Exception:
-                    saved_offsets = {}
+                    saved_offsets, last_pos = {}, {}
                 
-                # Build TextRegion objects from translation data using IoU to map to current rectangles
-                def _iou(a, b):
-                    try:
-                        ax, ay, aw, ah = a
-                        bx, by, bw, bh = b
-                        ax2, ay2 = ax + aw, ay + ah
-                        bx2, by2 = bx + bw, by + bh
-                        x1 = max(ax, bx); y1 = max(ay, by)
-                        x2 = min(ax2, bx2); y2 = min(ay2, by2)
-                        inter = max(0, x2 - x1) * max(0, y2 - y1)
-                        area_a = max(0, aw) * max(0, ah)
-                        area_b = max(0, bw) * max(0, bh)
-                        den = area_a + area_b - inter
-                        return (inter / den) if den > 0 else 0.0
-                    except Exception:
-                        return 0.0
-                
+                # Build TextRegion objects for ALL regions
                 for idx_key in sorted(self._translation_data.keys()):
-                    # Render only the edited region to avoid affecting others
-                    if region_index is not None and int(idx_key) != int(region_index):
-                        continue
                     trans_data = self._translation_data[idx_key]
-                    # Prefer stored bbox to find the best current rectangle
-                    src_bbox = trans_data.get('bbox')
-                    match_idx = -1
-                    best_iou = 0.0
-                    if src_bbox and rectangles:
-                        for i, r in enumerate(rectangles):
-                            br = r.sceneBoundingRect()
-                            cand = [int(br.x()), int(br.y()), int(br.width()), int(br.height())]
-                            iou = _iou(src_bbox, cand)
-                            if iou > best_iou:
-                                best_iou = iou
-                                match_idx = i
-                    if match_idx == -1:
-                        # Fallback to index if IoU failed
-                        if 0 <= idx_key < len(rectangles):
-                            match_idx = idx_key
+                    if region_index is not None and int(idx_key) == int(region_index):
+                        # Edited region — use current rectangle
+                        if int(idx_key) < len(rectangles):
+                            rect = rectangles[int(idx_key)].sceneBoundingRect()
+                            sx, sy, sw, sh = int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height())
                         else:
-                            continue
-                    rect = rectangles[match_idx].sceneBoundingRect()
-                    x, y, w, h = int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height())
+                            lp = last_pos.get(str(int(idx_key)))
+                            if not lp:
+                                continue
+                            sx, sy, sw, sh = map(int, lp)
+                    else:
+                        # Unedited region — lock to last render position if available
+                        lp = last_pos.get(str(int(idx_key)))
+                        if not lp:
+                            if int(idx_key) < len(rectangles):
+                                rect = rectangles[int(idx_key)].sceneBoundingRect()
+                                lp = [int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height())]
+                            else:
+                                continue
+                        sx, sy, sw, sh = map(int, lp)
                     
-                    # Apply saved offset ONLY for the region being updated
-                    try:
-                        if region_index is not None and match_idx == int(region_index):
-                            key = str(int(match_idx))
-                            off = saved_offsets.get(key) or saved_offsets.get(match_idx)
-                            if off and len(off) >= 2:
-                                dx_off, dy_off = int(off[0]), int(off[1])
-                                x += dx_off
-                                y += dy_off
-                    except Exception:
-                        pass
-                    
-                    vertices = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
                     region = TextRegion(
                         text=trans_data['original'],
-                        vertices=vertices,
-                        bounding_box=(x, y, w, h),
+                        vertices=[(sx, sy), (sx + sw, sy), (sx + sw, sy + sh), (sx, sy + sh)],
+                        bounding_box=(sx, sy, sw, sh),
                         confidence=1.0,
                         region_type='text_block'
                     )
                     region.translated_text = trans_data['translation']
                     regions.append(region)
-                    print(f"[DEBUG] Region map src={idx_key} -> rect={match_idx}, off={saved_offsets.get(str(int(match_idx))) if saved_offsets else None}")
+                
+                print(f"[DEBUG] Prepared {len(regions)} regions (edited idx={region_index}) using last_render_positions for stability")
                 
                 if regions:
                     print(f"[DEBUG] ✅ Built {len(regions)} regions, selecting base image for renderer...")
-                    # Choose base image for in-place region update (prefer existing rendered output)
+                    # Choose base image for CONSISTENT re-render (prefer cleaned base)
                     base_image = None
                     try:
                         if hasattr(self, 'image_state_manager') and self.image_state_manager:
                             st = self.image_state_manager.get_state(current_image) or {}
-                            cand = st.get('rendered_image_path')
+                            cand = st.get('cleaned_image_path')
                             if cand and os.path.exists(cand):
                                 base_image = cand
                     except Exception:
                         pass
-                    # 2) Session mapping cache
                     if base_image is None:
                         try:
-                            if hasattr(self, '_rendered_images_map') and current_image in self._rendered_images_map:
-                                cand = self._rendered_images_map[current_image]
-                                if cand and os.path.exists(cand):
-                                    base_image = cand
-                        except Exception:
-                            pass
-                    # 3) Currently displayed translated image
-                    if base_image is None:
-                        try:
-                            cand = getattr(self.image_preview_widget, 'current_translated_path', None)
+                            cand = getattr(self, '_cleaned_image_path', None)
                             if cand and os.path.exists(cand):
                                 base_image = cand
                         except Exception:
                             pass
-                    # 4) Cleaned image (if no translated yet)
+                    # Fallback to current translated if no cleaned
                     if base_image is None:
                         try:
                             cand = None
                             if hasattr(self, 'image_state_manager') and self.image_state_manager:
                                 st = self.image_state_manager.get_state(current_image) or {}
-                                cand = st.get('cleaned_image_path')
+                                cand = st.get('rendered_image_path')
+                            if not cand and hasattr(self, '_rendered_images_map'):
+                                cand = self._rendered_images_map.get(current_image)
                             if not cand:
-                                cand = getattr(self, '_cleaned_image_path', None)
+                                cand = getattr(self.image_preview_widget, 'current_translated_path', None)
                             if cand and os.path.exists(cand):
                                 base_image = cand
                         except Exception:
                             pass
-                    # Final fallback: original source
                     if base_image is None:
                         base_image = current_image
                     
-                    # Scale regions to base image dimensions if needed
+                    # Scale regions (from source coords) to base image dimensions if needed
                     try:
                         from PIL import Image as _PILImage
-                        src_w, src_h = _PILImage.open(current_image).size
                         base_w, base_h = _PILImage.open(base_image).size
                         if (src_w, src_h) != (base_w, base_h):
                             sx = base_w / max(1, float(src_w))
                             sy = base_h / max(1, float(src_h))
                             print(f"[DEBUG] Scaling regions from src ({src_w}x{src_h}) -> base ({base_w}x{base_h}) with factors (sx={sx:.4f}, sy={sy:.4f})")
                             from manga_translator import TextRegion as _TR
-                            scaled_regions = []
+                            scaled = []
                             for r in regions:
                                 x, y, w, h = r.bounding_box
-                                nx = int(round(x * sx))
-                                ny = int(round(y * sy))
-                                nw = int(round(w * sx))
-                                nh = int(round(h * sy))
+                                nx = int(round(x * sx)); ny = int(round(y * sy)); nw = int(round(w * sx)); nh = int(round(h * sy))
                                 v = [(nx, ny), (nx + nw, ny), (nx + nw, ny + nh), (nx, ny + nh)]
                                 nr = _TR(text=r.text, vertices=v, bounding_box=(nx, ny, nw, nh), confidence=r.confidence, region_type=r.region_type)
                                 nr.translated_text = r.translated_text
-                                scaled_regions.append(nr)
-                            regions = scaled_regions
+                                scaled.append(nr)
+                            regions = scaled
                     except Exception as scale_err:
                         print(f"[DEBUG] Region scaling skipped due to error: {scale_err}")
                     
                     print(f"[DEBUG] Rendering base image: {os.path.basename(base_image)} (original: {os.path.basename(current_image)})")
-                    # Prepare to clear old region position in-place using last recorded render positions
+                    # Full re-render: overwrite existing translated image path if available
                     try:
-                        state = self.image_state_manager.get_state(current_image) if hasattr(self, 'image_state_manager') else {}
-                        last_pos = (state or {}).get('last_render_positions', {})
-                        prev_rect = last_pos.get(str(int(region_index))) if region_index is not None else None
-                        if prev_rect and isinstance(prev_rect, (list, tuple)) and len(prev_rect) >= 4:
-                            # Store for renderer to clear before drawing
-                            self._pending_clear_rects = [(int(prev_rect[0]), int(prev_rect[1]), int(prev_rect[2]), int(prev_rect[3]))]
-                            self._pending_clear_index = int(region_index)
-                        else:
-                            self._pending_clear_rects = []
-                            self._pending_clear_index = None
+                        rendered_path = None
+                        if hasattr(self, 'image_state_manager') and self.image_state_manager:
+                            st = self.image_state_manager.get_state(current_image) or {}
+                            rendered_path = st.get('rendered_image_path')
+                        if not rendered_path and hasattr(self, '_rendered_images_map'):
+                            rendered_path = self._rendered_images_map.get(current_image)
+                        if not rendered_path:
+                            rendered_path = getattr(self.image_preview_widget, 'current_translated_path', None)
                     except Exception:
-                        self._pending_clear_rects = []
-                        self._pending_clear_index = None
-                    
-                    # In-place update: write back to the same translated file if we have one
-                    output_path = base_image if (base_image and base_image != current_image) else None
+                        rendered_path = None
+                    output_path = rendered_path if (rendered_path and os.path.exists(os.path.dirname(rendered_path))) else None
                     self._render_with_manga_translator(base_image, regions, output_path=output_path, original_image_path=current_image, switch_tab=True)
-                    # Clear pending markers
-                    try:
-                        if hasattr(self, '_pending_clear_rects'):
-                            del self._pending_clear_rects
-                        if hasattr(self, '_pending_clear_index'):
-                            del self._pending_clear_index
-                    except Exception:
-                        pass
                 else:
                     print(f"[DEBUG] ❌ No regions to render")
                     self._log("⚠️ No regions to render", "warning")
