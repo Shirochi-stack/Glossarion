@@ -9851,16 +9851,28 @@ class MangaTranslationTab:
             self._log(f"❌ Error adding translation overlays: {str(e)}", "error")
     
     def _add_processing_overlay(self):
-        """Add a pulsing overlay effect to indicate processing"""
+        """Add a pulsing overlay effect to indicate processing on the active viewer (source or output)."""
         try:
-            if not hasattr(self, 'image_preview_widget') or not hasattr(self.image_preview_widget, 'viewer'):
+            if not hasattr(self, 'image_preview_widget'):
                 return
             
             from PySide6.QtWidgets import QGraphicsRectItem
             from PySide6.QtCore import QRectF, QPropertyAnimation, QEasingCurve, Qt
             from PySide6.QtGui import QBrush, QColor
             
-            viewer = self.image_preview_widget.viewer
+            # Choose target viewer based on active tab; default to source viewer
+            viewer = None
+            try:
+                if hasattr(self.image_preview_widget, 'viewer_tabs') and \
+                   self.image_preview_widget.viewer_tabs.currentIndex() == 1 and \
+                   hasattr(self.image_preview_widget, 'output_viewer'):
+                    viewer = self.image_preview_widget.output_viewer
+            except Exception:
+                viewer = None
+            if viewer is None:
+                viewer = getattr(self.image_preview_widget, 'viewer', None)
+            if viewer is None:
+                return
             
             # Create overlay rectangle covering entire scene
             scene_rect = viewer._scene.sceneRect()
@@ -9872,6 +9884,7 @@ class MangaTranslationTab:
             # Add to scene
             viewer._scene.addItem(overlay)
             self._processing_overlay = overlay
+            self._processing_overlay_viewer = viewer
             
             # Create pulsing animation using QObject wrapper
             from PySide6.QtCore import QObject
@@ -9901,10 +9914,39 @@ class MangaTranslationTab:
             self._pulse_animation.setLoopCount(-1)  # Infinite loop
             self._pulse_animation.start()
             
-            print(f"[DEBUG] Added processing overlay with pulsing animation")
+            print(f"[DEBUG] Added processing overlay with pulsing animation (active tab)")
             
         except Exception as e:
             print(f"[DEBUG] Error adding processing overlay: {str(e)}")
+
+    def _remove_processing_overlay(self):
+        """Remove the processing overlay effect"""
+        try:
+            if hasattr(self, '_pulse_animation'):
+                self._pulse_animation.stop()
+                del self._pulse_animation
+            
+            if hasattr(self, '_processing_overlay'):
+                # Remove from the viewer where it was added (source or output)
+                viewer = getattr(self, '_processing_overlay_viewer', None)
+                if viewer is None and hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'viewer'):
+                    viewer = self.image_preview_widget.viewer
+                if viewer is not None and hasattr(viewer, '_scene'):
+                    try:
+                        viewer._scene.removeItem(self._processing_overlay)
+                    except Exception:
+                        pass
+                del self._processing_overlay
+            
+            if hasattr(self, '_opacity_wrapper'):
+                del self._opacity_wrapper
+            if hasattr(self, '_processing_overlay_viewer'):
+                del self._processing_overlay_viewer
+            
+            print(f"[DEBUG] Removed processing overlay")
+            
+        except Exception as e:
+            print(f"[DEBUG] Error removing processing overlay: {str(e)}")
     
     def _remove_processing_overlay(self):
         """Remove the processing overlay effect"""
