@@ -12645,6 +12645,11 @@ class MangaTranslationTab:
                                 print(f"[PREVIEW_UPDATE] Batch active — skipping update for non-current image")
                                 return
                         
+                        # Outside batch mode: if a source_path is provided, only update if it matches current image
+                        if source_path and source_path != getattr(self.image_preview_widget, 'current_image_path', None):
+                            print(f"[PREVIEW_UPDATE] Skipping update for non-current image outside batch mode")
+                            return
+                        
                         if hasattr(self, 'image_preview_widget') and os.path.exists(translated_path):
                             print(f"[PREVIEW_UPDATE] Loading translated image into output tab: {translated_path}")
                             self.image_preview_widget.output_viewer.load_image(translated_path)
