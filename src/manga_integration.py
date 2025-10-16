@@ -12606,6 +12606,52 @@ class MangaTranslationTab:
             except Exception:
                 pass
             
+            # Auto-clear rectangles when there is no translated output for the current image
+            if not translated_texts:
+                try:
+                    # Only clear UI if this result corresponds to the currently displayed image
+                    curr = getattr(self.image_preview_widget, 'current_image_path', None)
+                    if curr:
+                        import os
+                        curr_n = os.path.normpath(curr)
+                        img_n = os.path.normpath(image_path) if image_path else None
+                        orig_n = os.path.normpath(original_image_path) if original_image_path else None
+                        if curr_n == img_n or curr_n == orig_n:
+                            # Clear rectangles from viewer
+                            try:
+                                if hasattr(self.image_preview_widget, 'viewer') and hasattr(self.image_preview_widget.viewer, 'clear_rectangles'):
+                                    self.image_preview_widget.viewer.clear_rectangles()
+                                    try:
+                                        self.image_preview_widget._update_box_count()
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+                            # Clear persisted detection/recognition state and overlays
+                            try:
+                                if hasattr(self, '_clear_detection_state_for_image'):
+                                    self._clear_detection_state_for_image(original_image_path or curr)
+                            except Exception:
+                                pass
+                            try:
+                                if hasattr(self, 'clear_text_overlays_for_image'):
+                                    # Clear for both original and current paths to be safe
+                                    self.clear_text_overlays_for_image(original_image_path or curr)
+                                    if image_path and image_path != (original_image_path or curr):
+                                        self.clear_text_overlays_for_image(image_path)
+                            except Exception:
+                                pass
+                            # Persist empty viewer rectangles state
+                            try:
+                                self.image_preview_widget._persist_rectangles_state()
+                            except Exception:
+                                pass
+                    # Log status
+                    self._log("⚠️ No translated output — cleared rectangles and overlays", "warning")
+                except Exception:
+                    pass
+                return
+            
             # Log summary of translations
             if translated_texts:
                 self._log(f"🎉 Translation Results ({len(translated_texts)} regions translated):", "success")
@@ -12717,7 +12763,7 @@ class MangaTranslationTab:
                     self._add_text_overlay_to_viewer(translated_texts)
                 except Exception as _ov_err:
                     print(f"[TRANSLATE] Overlay update skipped/failed: {_ov_err}")
-                
+            
                 self._log(f"✅ Translation workflow complete!", "success")
             else:
                 self._log("⚠️ No translations were generated", "warning")
