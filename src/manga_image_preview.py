@@ -333,9 +333,24 @@ class CompactImageViewer(QGraphicsView):
         elif self.current_tool == 'pan' and event.button() == Qt.MouseButton.LeftButton:
             # Check if we clicked on a rectangle to select it
             item = self.itemAt(event.pos())
+            print(f"[SELECTION] Pan click - item at pos: {type(item).__name__ if item else 'None'}")
+            
             if isinstance(item, MoveableRectItem):
+                print(f"[SELECTION] Selecting rectangle directly")
                 self._select_rectangle(item)
+            elif hasattr(item, 'region_index'):
+                # This is a text overlay - find the corresponding blue rectangle
+                region_idx = item.region_index
+                print(f"[SELECTION] Clicked text overlay for region {region_idx}")
+                if 0 <= region_idx < len(self.rectangles):
+                    target_rect = self.rectangles[region_idx]
+                    print(f"[SELECTION] Selecting blue rectangle {region_idx}")
+                    self._select_rectangle(target_rect)
+                else:
+                    print(f"[SELECTION] No rectangle found for region {region_idx}")
+                    self._select_rectangle(None)
             else:
+                print(f"[SELECTION] Deselecting all")
                 self._select_rectangle(None)  # Deselect all
             super().mousePressEvent(event)
         else:
@@ -383,8 +398,11 @@ class CompactImageViewer(QGraphicsView):
     
     def _select_rectangle(self, rect_item: Optional[MoveableRectItem]):
         """Select a rectangle and update visual feedback"""
+        print(f"[SELECTION] _select_rectangle called with: {type(rect_item).__name__ if rect_item else 'None'}")
+        
         # Deselect previous selection
         if self.selected_rect:
+            print(f"[SELECTION] Deselecting previous rectangle")
             # Check if this was a blue rectangle (has recognized text) and restore blue color
             pen = self.selected_rect.pen()
             current_color = pen.color()
@@ -404,8 +422,11 @@ class CompactImageViewer(QGraphicsView):
         # Select new rectangle
         self.selected_rect = rect_item
         if self.selected_rect:
+            print(f"[SELECTION] Rectangle selected - turning yellow")
             self.selected_rect.setPen(QPen(QColor(255, 255, 0), 3))  # Yellow for selected, thicker
             self.rectangle_selected.emit(self.selected_rect.rect())
+        else:
+            print(f"[SELECTION] No rectangle selected")
     
     def _draw_brush_stroke(self, stroke: dict):
         """Draw a brush stroke visually on the scene"""
@@ -493,33 +514,59 @@ class CompactImageViewer(QGraphicsView):
     
     def delete_selected_rectangle(self):
         """Delete currently selected rectangle and associated text overlays"""
+        print(f"[DELETE] delete_selected_rectangle called. selected_rect = {type(self.selected_rect).__name__ if self.selected_rect else 'None'}")
         if self.selected_rect:
+            print(f"[DELETE] Attempting to delete selected rectangle")
+            
             # Get region index for blue rectangles (ones with recognized text)
             region_index = None
-            if hasattr(self.selected_rect, 'region_index'):
-                region_index = self.selected_rect.region_index
+            rect_to_delete = self.selected_rect
+            
+            # Check if this rectangle has a region_index (blue rectangle with recognized text)
+            if hasattr(rect_to_delete, 'region_index'):
+                region_index = rect_to_delete.region_index
+                print(f"[DELETE] Found region_index attribute: {region_index}")
             else:
                 # Try to find index by position in rectangles list
                 try:
-                    region_index = self.rectangles.index(self.selected_rect)
+                    region_index = self.rectangles.index(rect_to_delete)
+                    print(f"[DELETE] Using list position as region_index: {region_index}")
                 except ValueError:
+                    print(f"[DELETE] Rectangle not found in list, using None")
                     region_index = None
             
+            # Check if this is a blue rectangle (has blue color)
+            is_blue_rect = False
+            try:
+                pen_color = rect_to_delete.pen().color()
+                if pen_color in [QColor(0, 150, 255), QColor(255, 255, 0)]:  # Blue or selected yellow
+                    is_blue_rect = True
+                    print(f"[DELETE] Detected blue rectangle (color: {pen_color.name()})")
+            except Exception:
+                pass
+            
+            print(f"[DELETE] Deleting rectangle - region_index: {region_index}, is_blue: {is_blue_rect}")
+            
             # Remove from scene and list
-            self._scene.removeItem(self.selected_rect)
-            self.rectangles.remove(self.selected_rect)
+            self._scene.removeItem(rect_to_delete)
+            self.rectangles.remove(rect_to_delete)
             
-            # Notify parent widget about deletion (including region index for overlay cleanup)
-            self.rectangle_deleted.emit(self.selected_rect.rect())
-            
-            # If this widget has a manga_integration parent, clean up blue rectangle overlays
-            if region_index is not None and hasattr(self, 'manga_integration') and self.manga_integration:
-                try:
-                    self.manga_integration._clean_up_deleted_rectangle_overlays(region_index)
-                except Exception:
-                    pass
-            
+            # Clear selection
             self.selected_rect = None
+            
+            # Notify parent widget about deletion
+            self.rectangle_deleted.emit(rect_to_delete.rect())
+            
+            # If this is a blue rectangle, clean up overlays
+            if (region_index is not None and is_blue_rect and 
+                hasattr(self, 'manga_integration') and self.manga_integration):
+                try:
+                    print(f"[DELETE] Calling cleanup for blue rectangle region {region_index}")
+                    self.manga_integration._clean_up_deleted_rectangle_overlays(region_index)
+                except Exception as e:
+                    print(f"[DELETE] Cleanup failed: {e}")
+            else:
+                print(f"[DELETE] No cleanup needed - not a blue rectangle or no region_index")
     
     def clear_scene(self):
         """Clear entire scene"""
@@ -831,6 +878,10 @@ class MangaImagePreviewWidget(QWidget):
         self.box_draw_btn.setCheckable(True)
         self.box_draw_btn.clicked.connect(lambda: self._set_tool('box_draw'))
         tools_layout.addWidget(self.box_draw_btn)
+        
+        self.save_overlay_btn = self._create_tool_button("💾", "Save & Update Overlay")
+        self.save_overlay_btn.clicked.connect(self._on_save_overlay_clicked)
+        tools_layout.addWidget(self.save_overlay_btn)
         
         self.brush_btn = self._create_tool_button("🖌", "Brush")
         self.brush_btn.setCheckable(True)
@@ -1257,6 +1308,24 @@ class MangaImagePreviewWidget(QWidget):
         """Emit translate all signal"""
         self.translate_all_clicked.emit()
     
+    def _on_save_overlay_clicked(self):
+        """Re-render overlay and switch to translated output tab"""
+        try:
+            # Check if we have manga integration available
+            if not hasattr(self, 'manga_integration') or not self.manga_integration:
+                return
+            
+            # Just call the same method that "Save Position" uses
+            # This re-renders the overlay without changing positions
+            self.manga_integration._update_single_text_overlay(0, "")
+            
+            # Switch to translated output tab
+            if hasattr(self, 'viewer_tabs'):
+                self.viewer_tabs.setCurrentIndex(1)  # Switch to output tab
+        
+        except Exception:
+            pass
+    
     def set_image_list(self, image_paths: list):
         """Set the list of images and populate thumbnails"""
         self.image_paths = image_paths
@@ -1564,6 +1633,7 @@ class MangaImagePreviewWidget(QWidget):
         
         # Show/hide manual editing tools ONLY (not pan/zoom which are always visible)
         self.box_draw_btn.setVisible(enabled)
+        self.save_overlay_btn.setVisible(enabled)
         self.brush_btn.setVisible(enabled)
         self.eraser_btn.setVisible(enabled)
         self.delete_btn.setVisible(enabled)

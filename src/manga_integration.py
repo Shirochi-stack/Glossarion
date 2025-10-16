@@ -8007,6 +8007,9 @@ class MangaTranslationTab:
                 if translated_texts:
                     self._translation_data = {}
                     for i, result in enumerate(translated_texts):
+                        # Skip deleted entries
+                        if isinstance(result, dict) and result.get('deleted'):
+                            continue
                         idx = result.get('original', {}).get('region_index', i)
                         self._translation_data[int(idx)] = {
                             'original': result.get('original', {}).get('text', ''),
@@ -8060,8 +8063,15 @@ class MangaTranslationTab:
                 translated_texts = state.get('translated_texts') or []
                 rects_exist = bool(getattr(self.image_preview_widget.viewer, 'rectangles', []))
                 if translated_texts and rects_exist and hasattr(self, '_add_text_overlay_to_viewer'):
-                    self._add_text_overlay_to_viewer(translated_texts)
-                    print(f"[STATE] Restored {len(translated_texts)} text overlays from persisted state")
+                    # Filter out deleted text overlays
+                    active_translated_texts = []
+                    for i, result in enumerate(translated_texts):
+                        if not (isinstance(result, dict) and result.get('deleted')):
+                            active_translated_texts.append(result)
+                    
+                    if active_translated_texts:
+                        self._add_text_overlay_to_viewer(active_translated_texts)
+                        print(f"[STATE] Restored {len(active_translated_texts)} text overlays from persisted state (skipped {len(translated_texts) - len(active_translated_texts)} deleted)")
             except Exception as e2:
                 print(f"[STATE] Failed to restore text overlays: {e2}")
             
@@ -8070,24 +8080,31 @@ class MangaTranslationTab:
                 translated_texts = state.get('translated_texts') or []
                 rects_exist = bool(getattr(self.image_preview_widget.viewer, 'rectangles', []))
                 if translated_texts and rects_exist and hasattr(self, '_add_text_overlay_to_viewer'):
-                    # Ensure _translation_data is populated for context menu
-                    if not hasattr(self, '_translation_data') or not self._translation_data:
-                        self._translation_data = {}
-                        for i, result in enumerate(translated_texts):
-                            idx = result.get('original', {}).get('region_index', i)
-                            self._translation_data[int(idx)] = {
-                                'original': result.get('original', {}).get('text', ''),
-                                'translation': result.get('translation', '')
-                            }
-                    self._add_text_overlay_to_viewer(translated_texts)
-                    # Reattach context menus
-                    rects = getattr(self.image_preview_widget.viewer, 'rectangles', []) or []
-                    for idx, rect_item in enumerate(rects):
-                        try:
-                            self._add_context_menu_to_rectangle(rect_item, idx)
-                        except Exception:
-                            pass
-                    print(f"[STATE] Restored {len(translated_texts)} text overlays from persisted state")
+                    # Filter out deleted text overlays
+                    active_translated_texts = []
+                    for i, result in enumerate(translated_texts):
+                        if not (isinstance(result, dict) and result.get('deleted')):
+                            active_translated_texts.append(result)
+                    
+                    if active_translated_texts:
+                        # Ensure _translation_data is populated for context menu (only for active overlays)
+                        if not hasattr(self, '_translation_data') or not self._translation_data:
+                            self._translation_data = {}
+                            for i, result in enumerate(active_translated_texts):
+                                idx = result.get('original', {}).get('region_index', i)
+                                self._translation_data[int(idx)] = {
+                                    'original': result.get('original', {}).get('text', ''),
+                                    'translation': result.get('translation', '')
+                                }
+                        self._add_text_overlay_to_viewer(active_translated_texts)
+                        # Reattach context menus
+                        rects = getattr(self.image_preview_widget.viewer, 'rectangles', []) or []
+                        for idx, rect_item in enumerate(rects):
+                            try:
+                                self._add_context_menu_to_rectangle(rect_item, idx)
+                            except Exception:
+                                pass
+                        print(f"[STATE] Restored {len(active_translated_texts)} text overlays from persisted state (skipped {len(translated_texts) - len(active_translated_texts)} deleted)")
             except Exception as e2:
                 print(f"[STATE] Failed to restore text overlays: {e2}")
             
@@ -10734,7 +10751,10 @@ class MangaTranslationTab:
         try:
             current_image = getattr(self.image_preview_widget, 'current_image_path', None)
             if not current_image:
+                print(f"[CLEANUP] No current image, skipping cleanup for region {region_index}")
                 return
+            
+            print(f"[CLEANUP] Starting cleanup for region {region_index} on image {os.path.basename(current_image)}")
             
             # Remove from recognition data
             if hasattr(self, '_recognition_data') and region_index in self._recognition_data:
@@ -10785,9 +10805,17 @@ class MangaTranslationTab:
                         if region_index < len(recognized_texts):
                             recognized_texts[region_index] = {'deleted': True}
                     
+                    # CRITICAL: Also remove from translated_texts which are restored on image load
+                    translated_texts = state.get('translated_texts', [])
+                    if translated_texts and region_index < len(translated_texts):
+                        # Mark as deleted rather than removing to preserve indices
+                        if region_index < len(translated_texts):
+                            translated_texts[region_index] = {'deleted': True}
+                    
                     # Update state
                     state['overlay_offsets'] = overlay_offsets
                     state['recognized_texts'] = recognized_texts
+                    state['translated_texts'] = translated_texts
                     
                     self.image_state_manager.set_state(current_image, state, save=True)
                     print(f"[DELETE] Cleaned up persisted state for region {region_index}")
@@ -11473,32 +11501,67 @@ class MangaTranslationTab:
                         
                         # Add text to scene (needed before grouping)
                         viewer._scene.addItem(text_item)
-                        # Make text item ignore mouse events so rectangles receive input
+                        
+                        # Make text item completely non-interactive
                         try:
                             from PySide6.QtCore import Qt
+                            from PySide6.QtWidgets import QGraphicsItem
                             text_item.setAcceptedMouseButtons(Qt.NoButton)
+                            text_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+                            text_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+                            text_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsFocusable, False)
+                            text_item.setAcceptHoverEvents(False)
                         except Exception:
                             pass
                         
-                        # Group background + text so they stay together
+                        # Create a transparent rectangle overlay that covers the text and forwards clicks
+                        overlay_rect = QGraphicsRectItem(x, y, w, h)
+                        overlay_rect.setBrush(QBrush(QColor(0, 0, 0, 0)))  # Completely transparent
+                        overlay_rect.setPen(QPen(QColor(0, 0, 0, 0)))  # No border
+                        overlay_rect.setZValue(20)  # Above everything else to capture clicks
+                        
+                        # Store the region index on the overlay for identification
+                        overlay_rect.region_index = region_index
+                        
+                        # Make text item completely non-interactive to avoid conflicts
+                        try:
+                            text_item.setAcceptedMouseButtons(Qt.NoButton)
+                            text_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+                            text_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+                            text_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsFocusable, False)
+                            text_item.setAcceptHoverEvents(False)
+                        except Exception:
+                            pass
+                        
+                        viewer._scene.addItem(overlay_rect)
+                        
+                        # Group background + text + overlay so they stay together
+                        group_items = [text_item, overlay_rect]
                         if bg_rect:
-                            group = viewer._scene.createItemGroup([bg_rect, text_item])
-                            # Also make bg_rect ignore mouse events
+                            group_items.insert(0, bg_rect)  # bg_rect first (lowest z-order)
+                            # Make bg_rect completely non-interactive
                             try:
                                 from PySide6.QtCore import Qt
+                                from PySide6.QtWidgets import QGraphicsItem
                                 bg_rect.setAcceptedMouseButtons(Qt.NoButton)
+                                bg_rect.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+                                bg_rect.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+                                bg_rect.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsFocusable, False)
+                                bg_rect.setAcceptHoverEvents(False)
                             except Exception:
                                 pass
-                        else:
-                            group = viewer._scene.createItemGroup([text_item])
+                        
+                        group = viewer._scene.createItemGroup(group_items)
                         group.setZValue(12)
                         from PySide6.QtWidgets import QGraphicsItem
                         # Disable user interaction on overlays; movement controlled by rectangles only
+                        # But allow child items (like text) to handle mouse events
                         try:
                             from PySide6.QtCore import Qt
                             group.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
                             group.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
-                            group.setAcceptedMouseButtons(Qt.NoButton)
+                            # Don't block mouse buttons on group level - let child items handle them
+                            # group.setAcceptedMouseButtons(Qt.NoButton)
                         except Exception:
                             pass
                         
