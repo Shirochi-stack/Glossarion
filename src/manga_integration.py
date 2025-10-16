@@ -11212,6 +11212,46 @@ class MangaTranslationTab:
                 print(f"[DEBUG] No executor available, running save position directly")
                 _save_position_task()
             
+            # After the task completes, directly load rendered output like the working button
+            print(f"[DEBUG] Save Position: Loading rendered output directly...")
+            try:
+                current_image_path = getattr(self.image_preview_widget, 'current_image_path', None)
+                if not current_image_path:
+                    print(f"[DEBUG] Save Position: No current image path")
+                else:
+                    # Look for rendered image in the expected location
+                    source_dir = os.path.dirname(current_image_path)
+                    source_filename = os.path.basename(current_image_path)
+                    
+                    # Check various possible locations for translated images
+                    possible_paths = [
+                        # 3_translated folder
+                        os.path.join(source_dir, "3_translated", source_filename),
+                        # isolated folder
+                        os.path.join(source_dir, f"{os.path.splitext(source_filename)[0]}_translated", source_filename),
+                        # same directory with _translated suffix
+                        os.path.join(source_dir, f"{os.path.splitext(source_filename)[0]}_translated{os.path.splitext(source_filename)[1]}")
+                    ]
+                    
+                    print(f"[DEBUG] Save Position: Looking for rendered images at:")
+                    for path in possible_paths:
+                        print(f"[DEBUG] Save Position:   {path} - exists: {os.path.exists(path)}")
+                        if os.path.exists(path):
+                            print(f"[DEBUG] Save Position: Found rendered image, loading into output viewer...")
+                            self.image_preview_widget.output_viewer.load_image(path)
+                            self.image_preview_widget.current_translated_path = path
+                            # Switch to output tab
+                            if hasattr(self.image_preview_widget, 'viewer_tabs'):
+                                self.image_preview_widget.viewer_tabs.setCurrentIndex(1)  # Switch to output tab
+                            print(f"[DEBUG] Save Position: Successfully loaded {os.path.basename(path)} into output viewer")
+                            break
+                    else:
+                        print(f"[DEBUG] Save Position: No rendered image found in expected locations")
+            except Exception as e:
+                print(f"[DEBUG] Save Position: Error loading rendered output: {e}")
+                import traceback
+                traceback.print_exc()
+            
         except Exception as err:
             print(f"[DEBUG] Save Position failed to start for region {region_index}: {err}")
         finally:
@@ -11927,6 +11967,49 @@ class MangaTranslationTab:
             
         except Exception as e:
             print(f"[GUI] Error in _load_rendered_image_to_output_tab: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    @Slot()
+    def _load_rendered_output_direct(self):
+        """Direct method to find and load rendered image into output tab - same as working button approach"""
+        try:
+            current_image_path = getattr(self.image_preview_widget, 'current_image_path', None)
+            if not current_image_path:
+                print(f"[DIRECT] No current image path")
+                return
+            
+            # Look for rendered image in the expected location
+            source_dir = os.path.dirname(current_image_path)
+            source_filename = os.path.basename(current_image_path)
+            
+            # Check various possible locations for translated images
+            possible_paths = [
+                # 3_translated folder
+                os.path.join(source_dir, "3_translated", source_filename),
+                # isolated folder
+                os.path.join(source_dir, f"{os.path.splitext(source_filename)[0]}_translated", source_filename),
+                # same directory with _translated suffix
+                os.path.join(source_dir, f"{os.path.splitext(source_filename)[0]}_translated{os.path.splitext(source_filename)[1]}")
+            ]
+            
+            print(f"[DIRECT] Looking for rendered images at:")
+            for path in possible_paths:
+                print(f"[DIRECT]   {path} - exists: {os.path.exists(path)}")
+                if os.path.exists(path):
+                    print(f"[DIRECT] Found rendered image, loading into output viewer...")
+                    self.image_preview_widget.output_viewer.load_image(path)
+                    self.image_preview_widget.current_translated_path = path
+                    # Switch to output tab
+                    if hasattr(self.image_preview_widget, 'viewer_tabs'):
+                        self.image_preview_widget.viewer_tabs.setCurrentIndex(1)  # Switch to output tab
+                    print(f"[DIRECT] Successfully loaded {os.path.basename(path)} into output viewer")
+                    return
+            
+            print(f"[DIRECT] No rendered image found in expected locations")
+            
+        except Exception as e:
+            print(f"[DIRECT] Error in _load_rendered_output_direct: {e}")
             import traceback
             traceback.print_exc()
     
