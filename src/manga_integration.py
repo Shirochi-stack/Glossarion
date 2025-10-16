@@ -8044,43 +8044,65 @@ class MangaTranslationTab:
             self._log(f"⚠️ Error drawing detection boxes: {str(e)}", "warning")
     
     def _on_clean_image_clicked(self):
-        """Simplified clean button - run inpainting in background thread"""
+        """Clean button: ensure regions exist (auto-detect if needed) then run inpainting in background."""
         try:
             # Get current image path
             if not hasattr(self, 'image_preview_widget') or not self.image_preview_widget.current_image_path:
                 self._log("⚠️ No image loaded for cleaning", "warning")
                 return
-            
-            # Check if we have any rectangles displayed in the preview (either from detection or manually drawn)
-            if not hasattr(self.image_preview_widget, 'viewer') or not self.image_preview_widget.viewer.rectangles:
-                self._log("⚠️ No text regions to clean. Please run 'Detect Text' or manually draw boxes first.", "warning")
-                return
-            
-            # No need to check for original image path - we can clean any loaded image with rectangles
-            
+
             # Disable the clean button to prevent multiple clicks
             if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'clean_btn'):
                 self.image_preview_widget.clean_btn.setEnabled(False)
                 self.image_preview_widget.clean_btn.setText("Cleaning...")
-            
+
             # Add processing overlay effect
             self._add_processing_overlay()
-            
-            # Use the original image path for cleaning (not the current preview which might have boxes)
+
+            # Determine base image path
             image_path = self._original_image_path if hasattr(self, '_original_image_path') and self._original_image_path else self.image_preview_widget.current_image_path
-            
-            # Extract regions from currently displayed rectangles in the preview
-            regions = self._extract_regions_from_preview()
-            
+
+            # Prepare regions: use existing rectangles if any; otherwise run detection synchronously
+            has_rectangles = (hasattr(self.image_preview_widget, 'viewer') and
+                              self.image_preview_widget.viewer.rectangles and
+                              len(self.image_preview_widget.viewer.rectangles) > 0)
+
+            regions = None
+            if has_rectangles:
+                regions = self._extract_regions_from_preview()
+            else:
+                # Auto-run detection (equivalent to clicking Detect Text first)
+                self._log("🔍 No regions found — running automatic detection before cleaning...", "info")
+                detection_config = self._get_detection_config() or {}
+                # Exclude empty container bubbles to avoid cleaning non-text areas
+                if detection_config.get('detect_empty_bubbles', True):
+                    detection_config['detect_empty_bubbles'] = False
+                regions = self._run_detection_sync(image_path, detection_config)
+                if not regions or len(regions) == 0:
+                    self._log("⚠️ No text regions detected to clean", "warning")
+                    self._restore_clean_button()
+                    return
+                # Draw detected boxes on preview for user feedback
+                try:
+                    self.update_queue.put(('detect_results', {
+                        'image_path': image_path,
+                        'regions': regions
+                    }))
+                    # Persist detection state
+                    if hasattr(self, 'image_state_manager'):
+                        self.image_state_manager.update_state(image_path, {'detection_regions': regions})
+                except Exception:
+                    pass
+
             self._log(f"🧽 Starting background cleaning: {os.path.basename(image_path)}", "info")
-            
+
             # Run inpainting in background thread
             import threading
-            thread = threading.Thread(target=self._run_clean_background, 
-                                    args=(image_path, regions),
-                                    daemon=True)
+            thread = threading.Thread(target=self._run_clean_background,
+                                      args=(image_path, regions),
+                                      daemon=True)
             thread.start()
-            
+
         except Exception as e:
             import traceback
             self._log(f"❌ Clean setup failed: {str(e)}", "error")
@@ -8249,7 +8271,8 @@ class MangaTranslationTab:
                 # Update Output viewer with cleaned image (include source for image-aware gating)
                 self.update_queue.put(('preview_update', {
                     'translated_path': cleaned_path,
-                    'source_path': image_path
+                    'source_path': image_path,
+                    'switch_to_output': True
                 }))
                 self._log(f"✅ Cleaning complete!", "success")
             else:
@@ -12560,16 +12583,18 @@ class MangaTranslationTab:
                         self._log(f"❌ Failed to restore translate button: {str(e)}", "error")
                 
                 elif update[0] == 'preview_update':
-                    # Update preview to show translated image (thread-safe)
+                    # Update preview to show translated/cleaned image (thread-safe)
                     _, data = update
                     try:
                         # Handle both string and dict formats
                         if isinstance(data, dict):
                             translated_path = data.get('translated_path')
                             source_path = data.get('source_path')
+                            switch_to_output = bool(data.get('switch_to_output', False))
                         else:
                             translated_path = data
                             source_path = None
+                            switch_to_output = False
                         
                         # During batch mode, only update output preview for the current image
                         if getattr(self, '_batch_mode_active', False):
@@ -12582,6 +12607,12 @@ class MangaTranslationTab:
                             print(f"[PREVIEW_UPDATE] Loading translated image into output tab: {translated_path}")
                             self.image_preview_widget.output_viewer.load_image(translated_path)
                             self.image_preview_widget.current_translated_path = translated_path
+                            # Auto-switch to the Translated Output tab if requested (e.g., after cleaning)
+                            try:
+                                if switch_to_output and hasattr(self.image_preview_widget, 'viewer_tabs'):
+                                    self.image_preview_widget.viewer_tabs.setCurrentIndex(1)
+                            except Exception:
+                                pass
                             print(f"[PREVIEW_UPDATE] ✅ Output tab updated successfully")
                     except Exception as e:
                         print(f"[PREVIEW_UPDATE] ❌ Error updating preview: {e}")

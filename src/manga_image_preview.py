@@ -1629,35 +1629,65 @@ class MangaImagePreviewWidget(QWidget):
             self.download_btn.setEnabled(False)
     
     def _check_and_load_translated_output(self, source_image_path: str):
-        """Check for translated output and load into output tab if available"""
+        """Check for translated output and load into output tab if available.
+        If none found, fall back to cleaned image if present."""
         try:
             # Build the expected translated path based on isolated folder structure
             source_dir = os.path.dirname(source_image_path)
             source_filename = os.path.basename(source_image_path)
             source_name_no_ext = os.path.splitext(source_filename)[0]
-            
+
             # Look for translated version in isolated folder
             translated_folder = os.path.join(source_dir, f"{source_name_no_ext}_translated")
-            
+
+            # Helper to load an output image
+            def _load_output(path: str):
+                if path and os.path.exists(path):
+                    print(f"[DEBUG] Loading output image into output tab: {path}")
+                    self.output_viewer.load_image(path)
+                    self.current_translated_path = path
+                    return True
+                return False
+
+            # 1) Prefer any translated image inside the isolated folder
             if os.path.exists(translated_folder) and os.path.isdir(translated_folder):
-                # Find the translated image in the folder
                 image_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
                 for filename in os.listdir(translated_folder):
                     if filename.lower().endswith(image_extensions):
                         translated_path = os.path.join(translated_folder, filename)
-                        print(f"[DEBUG] Found translated output: {translated_path}")
-                        
-                        # Load into output viewer
-                        self.output_viewer.load_image(translated_path)
-                        self.current_translated_path = translated_path
-                        
-                        return
-            
-            # No translated output found - show placeholder
-            print(f"[DEBUG] No translated output found for: {source_filename}")
+                        if _load_output(translated_path):
+                            return
+
+            # 2) No translated image found — try cleaned image from state or naming convention
+            cleaned_path = None
+            try:
+                if hasattr(self, 'manga_integration') and self.manga_integration and \
+                   hasattr(self.manga_integration, 'image_state_manager') and self.manga_integration.image_state_manager:
+                    state = self.manga_integration.image_state_manager.get_state(source_image_path) or {}
+                    cand = state.get('cleaned_image_path')
+                    if cand and os.path.exists(cand):
+                        cleaned_path = cand
+            except Exception:
+                pass
+
+            if not cleaned_path and os.path.exists(translated_folder):
+                # Look for files matching *_cleaned.* inside the isolated folder
+                image_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
+                for filename in os.listdir(translated_folder):
+                    name_lower = filename.lower()
+                    if name_lower.startswith(f"{source_name_no_ext.lower()}_cleaned") and name_lower.endswith(image_extensions):
+                        cleaned_path = os.path.join(translated_folder, filename)
+                        break
+
+            if cleaned_path and _load_output(cleaned_path):
+                print(f"[DEBUG] No translated image found; showing cleaned image instead: {cleaned_path}")
+                return
+
+            # 3) Nothing found — show placeholder
+            print(f"[DEBUG] No translated or cleaned output found for: {source_filename}")
             self._show_output_placeholder()
             self.current_translated_path = None
-            
+
         except Exception as e:
             print(f"[DEBUG] Error checking translated output: {str(e)}")
             import traceback
