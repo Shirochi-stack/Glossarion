@@ -1309,22 +1309,76 @@ class MangaImagePreviewWidget(QWidget):
         self.translate_all_clicked.emit()
     
     def _on_save_overlay_clicked(self):
-        """Re-render overlay and switch to translated output tab"""
+        """Re-render overlay and switch to translated output tab using async executor"""
+        print("[DEBUG] _on_save_overlay_clicked: Button handler called!")
+        
         try:
             # Check if we have manga integration available
             if not hasattr(self, 'manga_integration') or not self.manga_integration:
+                print("[DEBUG] _on_save_overlay_clicked: No manga_integration available")
                 return
             
-            # Just call the same method that "Save Position" uses
+            print("[DEBUG] _on_save_overlay_clicked: Calling _save_overlay_async with region_index=0")
+            
+            # Use the new async method that utilizes ThreadPoolExecutor
             # This re-renders the overlay without changing positions
-            self.manga_integration._update_single_text_overlay(0, "")
+            self.manga_integration._save_overlay_async(0, "")
+            
+            print("[DEBUG] _on_save_overlay_clicked: _save_overlay_async call completed")
+            
+            # TEST: Try to manually load any existing rendered image into output tab
+            print("[DEBUG] _on_save_overlay_clicked: Testing direct output loading...")
+            self._test_load_rendered_output()
             
             # Switch to translated output tab
             if hasattr(self, 'viewer_tabs'):
+                print("[DEBUG] _on_save_overlay_clicked: Switching to output tab")
                 self.viewer_tabs.setCurrentIndex(1)  # Switch to output tab
+            else:
+                print("[DEBUG] _on_save_overlay_clicked: No viewer_tabs available")
         
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[DEBUG] _on_save_overlay_clicked: Exception caught: {e}")
+            import traceback
+            print(f"[DEBUG] _on_save_overlay_clicked: Traceback:\n{traceback.format_exc()}")
+    
+    def _test_load_rendered_output(self):
+        """Test method to find and load any rendered image directly"""
+        try:
+            if not self.current_image_path:
+                print("[TEST] No current image path")
+                return
+            
+            # Look for rendered image in the expected location
+            source_dir = os.path.dirname(self.current_image_path)
+            source_filename = os.path.basename(self.current_image_path)
+            
+            # Check various possible locations for translated images
+            possible_paths = [
+                # 3_translated folder
+                os.path.join(source_dir, "3_translated", source_filename),
+                # isolated folder
+                os.path.join(source_dir, f"{os.path.splitext(source_filename)[0]}_translated", source_filename),
+                # same directory with _translated suffix
+                os.path.join(source_dir, f"{os.path.splitext(source_filename)[0]}_translated{os.path.splitext(source_filename)[1]}")
+            ]
+            
+            print(f"[TEST] Looking for rendered images at:")
+            for path in possible_paths:
+                print(f"[TEST]   {path} - exists: {os.path.exists(path)}")
+                if os.path.exists(path):
+                    print(f"[TEST] Found rendered image, loading into output viewer...")
+                    self.output_viewer.load_image(path)
+                    self.current_translated_path = path
+                    print(f"[TEST] Successfully loaded {os.path.basename(path)} into output viewer")
+                    return
+            
+            print(f"[TEST] No rendered image found in expected locations")
+            
+        except Exception as e:
+            print(f"[TEST] Error in _test_load_rendered_output: {e}")
+            import traceback
+            traceback.print_exc()
     
     def set_image_list(self, image_paths: list):
         """Set the list of images and populate thumbnails"""

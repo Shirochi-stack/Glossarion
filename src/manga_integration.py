@@ -10976,17 +10976,17 @@ class MangaTranslationTab:
                     # Refresh the text overlay for this region
                     if changed:
                         try:
-                            # Animate button and show processing overlay
+                            # Animate button during async operation
                             old_text = save_btn.text()
                             save_btn.setEnabled(False)
                             save_btn.setText("Saving…")
-                            self._add_processing_overlay()
-                            # Perform render (blocking)
-                            self._update_single_text_overlay(region_index, new_translation)
+                            
+                            # Use the async method that utilizes ThreadPoolExecutor
+                            # This handles processing overlay internally
+                            self._save_overlay_async(region_index, new_translation)
                         finally:
-                            # Restore UI and close dialog
+                            # Restore button state
                             try:
-                                self._remove_processing_overlay()
                                 save_btn.setText(old_text)
                                 save_btn.setEnabled(True)
                             except Exception:
@@ -11218,6 +11218,121 @@ class MangaTranslationTab:
             # Always remove the processing overlay
             try:
                 self._remove_processing_overlay()
+            except Exception as e:
+                print(f"[DEBUG] Failed to remove processing overlay: {e}")
+
+    def _save_overlay_async(self, region_index: int = 0, new_translation: str = ""):
+        """Save & Update Overlay functionality using ThreadPoolExecutor on main thread.
+        
+        Args:
+            region_index: Region index to update (default 0 for full re-render)
+            new_translation: Specific translation text to use (empty string for original behavior)
+        """
+        print(f"\n{'='*80}")
+        print(f"[DEBUG] _save_overlay_async: METHOD ENTRY")
+        print(f"[DEBUG] Args: region_index={region_index}, new_translation='{new_translation}'")
+        print(f"{'='*80}\n")
+        
+        try:
+            print(f"[DEBUG] Save & Update Overlay triggered for region {region_index}, translation='{new_translation}'")
+            
+            # Show processing overlay immediately on main thread
+            self._add_processing_overlay()
+            
+            def _save_overlay_task():
+                """The actual save overlay task - runs via executor but stays on the main thread"""
+                print(f"[DEBUG] _save_overlay_task: TASK FUNCTION ENTRY")
+                try:
+                    print(f"[DEBUG] Save & Update Overlay task executing for region {region_index}")
+                    
+                    # Persist rectangles state
+                    try:
+                        if hasattr(self.image_preview_widget, '_persist_rectangles_state'):
+                            print(f"[DEBUG] Persisting rectangles state...")
+                            self.image_preview_widget._persist_rectangles_state()
+                            print(f"[DEBUG] Rectangles state persisted successfully")
+                        else:
+                            print(f"[DEBUG] No _persist_rectangles_state method available")
+                    except Exception as e:
+                        print(f"[DEBUG] Failed to persist rectangles state: {e}")
+                    
+                    # Call _update_single_text_overlay directly with the provided parameters
+                    # This matches the original behavior exactly
+                    print(f"[DEBUG] Calling _update_single_text_overlay({region_index}, '{new_translation}')")
+                    self._update_single_text_overlay(int(region_index), new_translation)
+                    print(f"[DEBUG] _update_single_text_overlay call completed successfully")
+                    print(f"[DEBUG] Save & Update Overlay task completed for region {region_index}")
+                    return True
+                    
+                except Exception as e:
+                    print(f"[DEBUG] Save & Update Overlay task failed for region {region_index}: {e}")
+                    import traceback
+                    print(f"[DEBUG] Traceback: {traceback.format_exc()}")
+                    return False
+            
+            # Check executor availability with detailed logging
+            has_main_gui = hasattr(self, 'main_gui')
+            has_executor_attr = has_main_gui and hasattr(self.main_gui, 'executor')
+            executor_exists = has_executor_attr and self.main_gui.executor is not None
+            
+            print(f"[DEBUG] Executor check: has_main_gui={has_main_gui}, has_executor_attr={has_executor_attr}, executor_exists={executor_exists}")
+            
+            if executor_exists:
+                print(f"[DEBUG] Using ThreadPoolExecutor for overlay task")
+                try:
+                    print(f"[DEBUG] Submitting task to executor...")
+                    future = self.main_gui.executor.submit(_save_overlay_task)
+                    print(f"[DEBUG] Task submitted successfully, waiting for result...")
+                    
+                    # Handle the result on the main thread with timeout
+                    success = future.result(timeout=30)  # 30 second timeout
+                    print(f"[DEBUG] ThreadPoolExecutor completed with success={success}")
+                    
+                except concurrent.futures.TimeoutError:
+                    print(f"[DEBUG] ThreadPoolExecutor timed out after 30 seconds")
+                    print(f"[DEBUG] Falling back to direct execution")
+                    try:
+                        success = _save_overlay_task()
+                        print(f"[DEBUG] Fallback direct execution completed with success={success}")
+                    except Exception as fallback_error:
+                        print(f"[DEBUG] Fallback execution also failed: {fallback_error}")
+                        import traceback
+                        print(f"[DEBUG] Fallback traceback: {traceback.format_exc()}")
+                        
+                except Exception as executor_error:
+                    print(f"[DEBUG] ThreadPoolExecutor failed with error: {executor_error}")
+                    import traceback
+                    print(f"[DEBUG] Executor error traceback: {traceback.format_exc()}")
+                    print(f"[DEBUG] Falling back to direct execution")
+                    try:
+                        success = _save_overlay_task()
+                        print(f"[DEBUG] Fallback direct execution completed with success={success}")
+                    except Exception as fallback_error:
+                        print(f"[DEBUG] Fallback execution also failed: {fallback_error}")
+                        import traceback
+                        print(f"[DEBUG] Fallback traceback: {traceback.format_exc()}")
+            else:
+                print(f"[DEBUG] No executor available, running save overlay directly")
+                try:
+                    success = _save_overlay_task()
+                    print(f"[DEBUG] Direct execution completed with success={success}")
+                except Exception as direct_error:
+                    print(f"[DEBUG] Direct execution failed: {direct_error}")
+                    import traceback
+                    print(f"[DEBUG] Direct execution traceback: {traceback.format_exc()}")
+            
+            print(f"[DEBUG] _save_overlay_async: METHOD COMPLETION")
+            
+        except Exception as err:
+            print(f"[DEBUG] Save & Update Overlay failed to start for region {region_index}: {err}")
+            import traceback
+            print(f"[DEBUG] Method error traceback: {traceback.format_exc()}")
+        finally:
+            # Always remove the processing overlay
+            try:
+                print(f"[DEBUG] Removing processing overlay...")
+                self._remove_processing_overlay()
+                print(f"[DEBUG] Processing overlay removed successfully")
             except Exception as e:
                 print(f"[DEBUG] Failed to remove processing overlay: {e}")
 
@@ -11728,20 +11843,18 @@ class MangaTranslationTab:
                 print(f"[RENDER] Failed to update last_render_positions: {_lp}")
             
             # Show the rendered image in the OUTPUT tab (keep source image intact)
-            print(f"[RENDER] Loading rendered image into output tab...")
+            print(f"[RENDER] About to call GUI method to load rendered image...")
+            print(f"[RENDER] output_path exists: {os.path.exists(output_path)}")
+            print(f"[RENDER] switch_tab: {switch_tab}")
+            print(f"[RENDER] Calling _load_rendered_image_to_output_tab now...")
             
-            # SET FLAG to prevent triggering another processing cycle
-            self._rendering_in_progress = True
-            try:
-                # Always update output viewer (do not gate during batch)
-                self.image_preview_widget.output_viewer.load_image(output_path)
-                self.image_preview_widget.current_translated_path = output_path
-                # Optionally switch to the Translated Output tab (disabled during batch)
-                if switch_tab and not getattr(self, '_batch_mode_active', False):
-                    self.image_preview_widget.viewer_tabs.setCurrentIndex(1)
-                print(f"[RENDER] Image loaded into output tab")
-            finally:
-                self._rendering_in_progress = False
+            # For GUI operations, we need to be on the main thread
+            # The renderer itself completed, now handle the GUI update
+            # Use QTimer to ensure this runs on the main thread
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(0, lambda: self._load_rendered_image_to_output_tab(rendered_pil, output_path, switch_tab))
+            
+            print(f"[RENDER] GUI method call completed")
             
             self._log(f"✅ Rendered to: {output_filename}", "success")
             
@@ -11759,6 +11872,63 @@ class MangaTranslationTab:
             print(f"[RENDER] Traceback:\n{traceback_str}")
             print(f"{'='*80}\n")
             self._log(f"❌ Rendering error: {str(e)}", "error")
+    
+    def _load_rendered_image_to_output_tab(self, rendered_pil, output_path, switch_tab=True):
+        """Load rendered image into the output tab - must be called on main thread"""
+        print(f"[GUI] === _load_rendered_image_to_output_tab CALLED ===")
+        print(f"[GUI] output_path: {output_path}")
+        print(f"[GUI] switch_tab: {switch_tab}")
+        try:
+            print(f"[GUI] Loading rendered image into output tab: {os.path.basename(output_path)}")
+            
+            # Check current thread for debugging
+            from PySide6.QtCore import QThread
+            from PySide6.QtWidgets import QApplication
+            
+            current_thread = QThread.currentThread()
+            main_thread = QApplication.instance().thread() if QApplication.instance() else None
+            print(f"[GUI] Thread check: current={current_thread}, main={main_thread}, same={current_thread == main_thread}")
+            
+            # Display in output viewer (using correct load_image method)
+            try:
+                if hasattr(self.image_preview_widget, 'output_viewer') and self.image_preview_widget.output_viewer:
+                    # Use the same method as _check_and_load_translated_output
+                    self.image_preview_widget.output_viewer.load_image(output_path)
+                    # Store the translated image path
+                    self.image_preview_widget.current_translated_path = output_path
+                    print(f"[GUI] Successfully loaded image into output viewer using load_image")
+                else:
+                    print(f"[GUI] No output_viewer available")
+            except Exception as output_err:
+                print(f"[GUI] Error loading image to output viewer: {output_err}")
+                import traceback
+                traceback.print_exc()
+            
+            # Switch to output tab if requested (correct widget reference)
+            if switch_tab:
+                try:
+                    if hasattr(self.image_preview_widget, 'viewer_tabs') and self.image_preview_widget.viewer_tabs:
+                        # Find the output tab index by looking for the tab with "Output" or "Translated" in the name
+                        tab_widget = self.image_preview_widget.viewer_tabs
+                        for i in range(tab_widget.count()):
+                            tab_text = tab_widget.tabText(i).lower()
+                            if 'output' in tab_text or 'translated' in tab_text:
+                                tab_widget.setCurrentIndex(i)
+                                print(f"[GUI] Switched to output tab (index {i}, text: '{tab_widget.tabText(i)}')")
+                                break
+                        else:
+                            print(f"[GUI] Could not find output tab. Available tabs: {[tab_widget.tabText(i) for i in range(tab_widget.count())]}")
+                    else:
+                        print(f"[GUI] No viewer_tabs available for switching")
+                except Exception as tab_err:
+                    print(f"[GUI] Error switching to output tab: {tab_err}")
+                    import traceback
+                    traceback.print_exc()
+            
+        except Exception as e:
+            print(f"[GUI] Error in _load_rendered_image_to_output_tab: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _add_text_overlay_to_viewer(self, translated_texts: list):
         """Add translated text as graphics items overlay on the viewer"""
