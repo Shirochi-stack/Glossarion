@@ -1332,6 +1332,12 @@ class MangaImagePreviewWidget(QWidget):
             print("[DEBUG] _on_save_overlay_clicked: Testing direct output loading...")
             self._test_load_rendered_output()
             
+            # Also schedule a delayed check to catch newly rendered files
+            from PySide6.QtCore import QTimer
+            print("[DEBUG] _on_save_overlay_clicked: Scheduling delayed output check...")
+            QTimer.singleShot(1500, self._test_load_rendered_output)  # Check again after 1.5 seconds
+            QTimer.singleShot(3000, self._test_load_rendered_output)  # Check again after 3 seconds
+            
             # Switch to translated output tab
             if hasattr(self, 'viewer_tabs'):
                 print("[DEBUG] _on_save_overlay_clicked: Switching to output tab")

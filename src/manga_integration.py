@@ -11311,7 +11311,10 @@ class MangaTranslationTab(QObject):
             print(f"[DEBUG] Error aliasing overlays: {str(e)}")
     
     def _save_position_async(self, region_index: int):
-        """Save position and update overlay for a specific region using thread pool executor."""
+        """Save position and update overlay for a specific region using thread pool executor.
+        
+        Simplified version that only updates the overlay without attempting preview updates.
+        """
         try:
             print(f"[DEBUG] Save Position triggered for region {region_index}")
             
@@ -11348,19 +11351,19 @@ class MangaTranslationTab(QObject):
                 print(f"[DEBUG] Submitting save position task to thread pool executor")
                 future = self.main_gui.executor.submit(render_task)
                 # Don't wait for completion - fire and forget for responsiveness
-                # Start periodic check for output update
-                self._start_output_refresh_check()
+                print(f"[DEBUG] Save position task submitted (no preview update)")
             else:
                 print(f"[DEBUG] No executor available, running save position synchronously")
                 render_task()
-                # Immediately refresh output since it was synchronous
-                from PySide6.QtCore import QTimer
-                QTimer.singleShot(500, self._refresh_output_tab)
+                print(f"[DEBUG] Save position task completed synchronously (no preview update)")
             
         except Exception as err:
             print(f"[DEBUG] Save Position failed for region {region_index}: {err}")
             import traceback
             print(f"[DEBUG] Method error traceback: {traceback.format_exc()}")
+    # NOTE: Auto-save position is now simplified to only update overlays without attempting
+    # to update the translated output preview. Users can manually click "Save & Update Overlay"
+    # if they want to see the updated preview in the output tab.
     
     def _get_translation_text_for_region(self, region_index: int) -> str:
         """Get translation text for a region (main thread safe)"""
@@ -11623,8 +11626,9 @@ class MangaTranslationTab(QObject):
                 future = self.main_gui.executor.submit(_save_overlay_task)
                 print(f"[DEBUG] Task submitted to executor (fire-and-forget for responsiveness)")
                 # Don't wait for completion - fire and forget for responsiveness
-                # Start periodic check for output update
-                self._start_output_refresh_check()
+                # Start periodic check for output update after a short delay
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(1000, self._start_output_refresh_check)  # Wait 1 second before starting periodic refresh
             else:
                 print(f"[DEBUG] No executor available, running save overlay synchronously")
                 _save_overlay_task()
@@ -11662,7 +11666,7 @@ class MangaTranslationTab(QObject):
             self._output_refresh_start_time = time.time()
             self._output_refresh_count = 0
             
-            self._output_refresh_timer.start(1000)  # Check every 1 second
+            self._output_refresh_timer.start(2000)  # Check every 2 seconds (reduced frequency)
             print(f"[DEBUG] Started output refresh checking timer")
         except Exception as e:
             print(f"[DEBUG] Error starting output refresh check: {e}")
@@ -11741,19 +11745,6 @@ class MangaTranslationTab(QObject):
             return file_mtime > ref_mtime
         except Exception:
             return True  # Assume newer on error
-            
-        except Exception as err:
-            print(f"[DEBUG] Save & Update Overlay failed to start for region {region_index}: {err}")
-            import traceback
-            print(f"[DEBUG] Method error traceback: {traceback.format_exc()}")
-        finally:
-            # Always remove the processing overlay
-            try:
-                print(f"[DEBUG] Removing processing overlay...")
-                self._remove_processing_overlay()
-                print(f"[DEBUG] Processing overlay removed successfully")
-            except Exception as e:
-                print(f"[DEBUG] Failed to remove processing overlay: {e}")
 
     def _update_single_text_overlay(self, region_index: int, new_translation: str):
         """Update overlay after editing by rendering with MangaTranslator (same as regular pipeline)"""
