@@ -11914,14 +11914,11 @@ class MangaTranslationTab(QObject):
                     
                     # Show different indicators based on parallel count
                     if active_count == 1:
-                        button.setText("⏳")
+                        button.setText("⏳1")
                         button.setToolTip("Auto-saving 1 rectangle position...")
-                    elif active_count <= 3:
-                        button.setText(f"⏳×{active_count}")
-                        button.setToolTip(f"Auto-saving {active_count} rectangle positions in parallel...")
                     else:
-                        button.setText(f"⏳⚡{active_count}")
-                        button.setToolTip(f"Auto-saving {active_count} rectangle positions in parallel (high performance mode)...")
+                        button.setText(f"⏳{active_count}")
+                        button.setToolTip(f"Auto-saving {active_count} rectangle positions in parallel...")
                     
                     button.setEnabled(False)
                 else:
