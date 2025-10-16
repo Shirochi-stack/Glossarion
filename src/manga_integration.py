@@ -10852,14 +10852,13 @@ class MangaTranslationTab:
                     print(f"[DEBUG] Rendering base image: {os.path.basename(base_image)} (original: {os.path.basename(current_image)})")
                     # Full re-render: overwrite existing translated image path if available
                     try:
-                        rendered_path = None
-                        if hasattr(self, 'image_state_manager') and self.image_state_manager:
+                        # Strongly prefer overwriting the image currently shown in the output tab
+                        rendered_path = getattr(self.image_preview_widget, 'current_translated_path', None)
+                        if not rendered_path and hasattr(self, 'image_state_manager') and self.image_state_manager:
                             st = self.image_state_manager.get_state(current_image) or {}
                             rendered_path = st.get('rendered_image_path')
                         if not rendered_path and hasattr(self, '_rendered_images_map'):
                             rendered_path = self._rendered_images_map.get(current_image)
-                        if not rendered_path:
-                            rendered_path = getattr(self.image_preview_widget, 'current_translated_path', None)
                     except Exception:
                         rendered_path = None
                     output_path = rendered_path if (rendered_path and os.path.exists(os.path.dirname(rendered_path))) else None
@@ -11005,10 +11004,15 @@ class MangaTranslationTab:
             # Determine output path (overwrite existing rendered if possible)
             output_path = None
             try:
-                st = self.image_state_manager.get_state(current_image) if hasattr(self, 'image_state_manager') else {}
-                rp = (st or {}).get('rendered_image_path')
-                if rp and os.path.exists(os.path.dirname(rp)):
-                    output_path = rp
+                # Strongly prefer the currently displayed translated image
+                cp = getattr(self.image_preview_widget, 'current_translated_path', None)
+                if cp and os.path.exists(os.path.dirname(cp)):
+                    output_path = cp
+                if output_path is None and hasattr(self, 'image_state_manager') and self.image_state_manager:
+                    st = self.image_state_manager.get_state(current_image) or {}
+                    rp = st.get('rendered_image_path')
+                    if rp and os.path.exists(os.path.dirname(rp)):
+                        output_path = rp
             except Exception:
                 output_path = None
             
