@@ -544,7 +544,10 @@ class RetranslationMixin:
                     if composite_key in prog.get("chapters", {}):
                         matched_info = prog["chapters"][composite_key]
                 
-                # Fallback: iterate through all entries matching chapter number
+                # Fallback: iterate through all entries matching chapter number,
+                # but only accept when it clearly refers to the same source file.
+                # This prevents files like "000_information.xhtml" and "0153_0.xhtml"
+                # (both parsed as chapter 0) from being conflated.
                 if not matched_info:
                     for chapter_key, chapter_info in prog.get("chapters", {}).items():
                         actual_num = chapter_info.get('actual_num')
@@ -553,8 +556,13 @@ class RetranslationMixin:
                             actual_num = chapter_info.get('chapter_num')
                         
                         if actual_num is not None and actual_num == chapter_num:
-                            matched_info = chapter_info
-                            break
+                            orig_base = os.path.basename(chapter_info.get('original_basename', '') or '')
+                            out_file = chapter_info.get('output_file')
+                            # Only treat as a match if the original basename matches this filename,
+                            # or, when original_basename is missing, the output_file matches what we expect.
+                            if (orig_base and orig_base == filename) or (not orig_base and out_file and out_file == expected_response):
+                                matched_info = chapter_info
+                                break
             
             # Determine if translation file exists
             file_exists = os.path.exists(response_path)
@@ -1644,13 +1652,19 @@ class RetranslationMixin:
                     matched_info = chapter_info
                     break
             
-            # If no match by output_file, try matching by chapter number
+            # If no match by output_file, try matching by chapter number,
+            # but avoid conflating different files that share the same numeric chapter.
             if not matched_info:
                 for chapter_key, chapter_info in data['prog'].get("chapters", {}).items():
                     actual_num = chapter_info.get('actual_num') or chapter_info.get('chapter_num')
                     if actual_num is not None and actual_num == info['num']:
-                        matched_info = chapter_info
-                        break
+                        orig_base = os.path.basename(chapter_info.get('original_basename', '') or '')
+                        target_filename = info.get('original_filename') or ''
+                        # Accept match only if the original_basename matches the OPF filename,
+                        # or, when missing, if the output_file matches the current entry's output file.
+                        if (orig_base and orig_base == target_filename) or (not orig_base and chapter_info.get('output_file') == info['output_file']):
+                            matched_info = chapter_info
+                            break
             
             # Update status based on current state from progress file
             if matched_info:
