@@ -1117,17 +1117,40 @@ class MangaImagePreviewWidget(QWidget):
         self.viewer.eraser_size = value
 
     def _on_save_positions_clicked(self):
-        """Persist rectangle and overlay positions to state"""
+        """Persist rectangle/overlay positions and re-render output to reflect changes."""
         try:
+            # Disable and animate
+            old_text = self.save_pos_btn.text()
+            self.save_pos_btn.setEnabled(False)
+            self.save_pos_btn.setText("Saving…")
+            # Show processing overlay
+            try:
+                if hasattr(self, 'manga_integration') and self.manga_integration:
+                    self.manga_integration._add_processing_overlay()
+            except Exception:
+                pass
+            
             # Persist rectangles
             self._persist_rectangles_state()
             # Persist overlay offsets via integration
             if hasattr(self, 'manga_integration') and self.manga_integration:
                 if hasattr(self.manga_integration, '_persist_overlay_offsets_for_current_image'):
                     self.manga_integration._persist_overlay_offsets_for_current_image()
-            print("[DEBUG] Positions saved (rectangles + overlays)")
+                # Re-render entire output using current positions (stable)
+                if hasattr(self.manga_integration, 'save_positions_and_rerender'):
+                    self.manga_integration.save_positions_and_rerender()
+            print("[DEBUG] Positions saved + output re-rendered")
         except Exception as e:
             print(f"[DEBUG] Failed to save positions: {e}")
+        finally:
+            # Remove overlay and restore button
+            try:
+                if hasattr(self, 'manga_integration') and self.manga_integration:
+                    self.manga_integration._remove_processing_overlay()
+            except Exception:
+                pass
+            self.save_pos_btn.setText(old_text)
+            self.save_pos_btn.setEnabled(True)
     
     def _clear_strokes(self):
         """Clear brush strokes only"""

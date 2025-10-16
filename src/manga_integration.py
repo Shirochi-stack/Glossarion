@@ -7956,6 +7956,28 @@ class MangaTranslationTab:
                 self._cleaned_image_path = state['cleaned_image_path']
                 print(f"[STATE] Restored cleaned image path: {os.path.basename(self._cleaned_image_path)}")
             
+            # Restore translation_data from persisted translated_texts so Edit Translation menu works after reload
+            try:
+                translated_texts = state.get('translated_texts') or []
+                if translated_texts:
+                    self._translation_data = {}
+                    for i, result in enumerate(translated_texts):
+                        idx = result.get('original', {}).get('region_index', i)
+                        self._translation_data[int(idx)] = {
+                            'original': result.get('original', {}).get('text', ''),
+                            'translation': result.get('translation', '')
+                        }
+                    # Reattach context menus for rectangles
+                    rects = getattr(self.image_preview_widget.viewer, 'rectangles', []) or []
+                    for idx, rect_item in enumerate(rects):
+                        try:
+                            self._add_context_menu_to_rectangle(rect_item, idx)
+                        except Exception:
+                            pass
+                    print(f"[STATE] Restored translation_data for {len(self._translation_data)} regions")
+            except Exception as te:
+                print(f"[STATE] Failed to restore translation_data: {te}")
+            
             # Restore viewer rectangles (if no detection regions were restored)
             if 'viewer_rectangles' in state and not ('detection_regions' in state):
                 viewer = self.image_preview_widget.viewer
@@ -7989,6 +8011,32 @@ class MangaTranslationTab:
                 rects_exist = bool(getattr(self.image_preview_widget.viewer, 'rectangles', []))
                 if translated_texts and rects_exist and hasattr(self, '_add_text_overlay_to_viewer'):
                     self._add_text_overlay_to_viewer(translated_texts)
+                    print(f"[STATE] Restored {len(translated_texts)} text overlays from persisted state")
+            except Exception as e2:
+                print(f"[STATE] Failed to restore text overlays: {e2}")
+            
+            # If translated_texts exist and rectangles are present, restore text overlays on source viewer
+            try:
+                translated_texts = state.get('translated_texts') or []
+                rects_exist = bool(getattr(self.image_preview_widget.viewer, 'rectangles', []))
+                if translated_texts and rects_exist and hasattr(self, '_add_text_overlay_to_viewer'):
+                    # Ensure _translation_data is populated for context menu
+                    if not hasattr(self, '_translation_data') or not self._translation_data:
+                        self._translation_data = {}
+                        for i, result in enumerate(translated_texts):
+                            idx = result.get('original', {}).get('region_index', i)
+                            self._translation_data[int(idx)] = {
+                                'original': result.get('original', {}).get('text', ''),
+                                'translation': result.get('translation', '')
+                            }
+                    self._add_text_overlay_to_viewer(translated_texts)
+                    # Reattach context menus
+                    rects = getattr(self.image_preview_widget.viewer, 'rectangles', []) or []
+                    for idx, rect_item in enumerate(rects):
+                        try:
+                            self._add_context_menu_to_rectangle(rect_item, idx)
+                        except Exception:
+                            pass
                     print(f"[STATE] Restored {len(translated_texts)} text overlays from persisted state")
             except Exception as e2:
                 print(f"[STATE] Failed to restore text overlays: {e2}")
@@ -10568,7 +10616,22 @@ class MangaTranslationTab:
                     
                     # Refresh the text overlay for this region
                     if changed:
-                        self._update_single_text_overlay(region_index, new_translation)
+                        try:
+                            # Animate button and show processing overlay
+                            old_text = save_btn.text()
+                            save_btn.setEnabled(False)
+                            save_btn.setText("Saving…")
+                            self._add_processing_overlay()
+                            # Perform render (blocking)
+                            self._update_single_text_overlay(region_index, new_translation)
+                        finally:
+                            # Restore UI and close dialog
+                            try:
+                                self._remove_processing_overlay()
+                                save_btn.setText(old_text)
+                                save_btn.setEnabled(True)
+                            except Exception:
+                                pass
                 
                 dialog.accept()
             save_btn.clicked.connect(save_changes)
@@ -10815,6 +10878,145 @@ class MangaTranslationTab:
             print(f"[DEBUG] Traceback:\n{traceback_str}")
             self._log(f"❌ Rendering failed: {str(e)}", "error")
     
+    def save_positions_and_rerender(self):
+        """Persist current positions and re-render entire output using locked positions for stability.
+        - Uses translated_texts from state if available; falls back to in-memory _translated_texts/_translation_data
+        - Prefers cleaned base for quality; overwrites existing translated image if present
+        """
+        try:
+            current_image = getattr(self.image_preview_widget, 'current_image_path', None)
+            if not current_image:
+                return
+            # Build text regions list
+            # Load translated_texts
+            translated_texts = []
+            try:
+                if hasattr(self, 'image_state_manager') and self.image_state_manager:
+                    st = self.image_state_manager.get_state(current_image) or {}
+                    translated_texts = st.get('translated_texts') or []
+            except Exception:
+                translated_texts = []
+            if not translated_texts and hasattr(self, '_translated_texts'):
+                translated_texts = self._translated_texts or []
+            if not translated_texts and hasattr(self, '_translation_data') and isinstance(self._translation_data, dict):
+                # Fallback: synthesize from rectangles and _translation_data
+                for idx, td in self._translation_data.items():
+                    try:
+                        rects = getattr(self.image_preview_widget.viewer, 'rectangles', []) or []
+                        if 0 <= int(idx) < len(rects):
+                            br = rects[int(idx)].sceneBoundingRect()
+                            bbox = [int(br.x()), int(br.y()), int(br.width()), int(br.height())]
+                            translated_texts.append({'original': {'text': td.get('original',''), 'region_index': int(idx)}, 'translation': td.get('translation',''), 'bbox': bbox})
+                    except Exception:
+                        continue
+            if not translated_texts:
+                print("[SAVE_POS] No translated_texts available to render; aborting")
+                return
+            
+            # Load last positions
+            last_pos = {}
+            try:
+                st = self.image_state_manager.get_state(current_image) if hasattr(self, 'image_state_manager') else {}
+                last_pos = (st or {}).get('last_render_positions', {}) or {}
+            except Exception:
+                last_pos = {}
+            
+            # Build regions from last_pos or rectangles
+            from manga_translator import TextRegion
+            regions = []
+            rects = getattr(self.image_preview_widget.viewer, 'rectangles', []) or []
+            for i, result in enumerate(translated_texts):
+                try:
+                    region_index = result.get('original', {}).get('region_index', i)
+                    lp = last_pos.get(str(int(region_index)))
+                    if lp and len(lp) >= 4:
+                        x, y, w, h = map(int, lp)
+                    elif 0 <= int(region_index) < len(rects):
+                        br = rects[int(region_index)].sceneBoundingRect()
+                        x, y, w, h = int(br.x()), int(br.y()), int(br.width()), int(br.height())
+                    else:
+                        bbox = result.get('bbox') or []
+                        if len(bbox) >= 4:
+                            x, y, w, h = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+                        else:
+                            continue
+                    vertices = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
+                    tr = TextRegion(text=result['original']['text'], vertices=vertices, bounding_box=(x, y, w, h), confidence=1.0, region_type='text_block')
+                    tr.translated_text = result['translation']
+                    regions.append(tr)
+                except Exception:
+                    continue
+            if not regions:
+                print("[SAVE_POS] No regions built; aborting")
+                return
+            
+            # Choose base image
+            base_image = None
+            try:
+                st = self.image_state_manager.get_state(current_image) if hasattr(self, 'image_state_manager') else {}
+                cand = (st or {}).get('cleaned_image_path')
+                if cand and os.path.exists(cand):
+                    base_image = cand
+            except Exception:
+                base_image = None
+            if base_image is None:
+                try:
+                    cand = getattr(self, '_cleaned_image_path', None)
+                    if cand and os.path.exists(cand):
+                        base_image = cand
+                except Exception:
+                    pass
+            if base_image is None:
+                try:
+                    cand = None
+                    st = self.image_state_manager.get_state(current_image) if hasattr(self, 'image_state_manager') else {}
+                    cand = (st or {}).get('rendered_image_path')
+                    if not cand and hasattr(self, '_rendered_images_map'):
+                        cand = self._rendered_images_map.get(current_image)
+                    if not cand:
+                        cand = getattr(self.image_preview_widget, 'current_translated_path', None)
+                    if cand and os.path.exists(cand):
+                        base_image = cand
+                except Exception:
+                    pass
+            if base_image is None:
+                base_image = current_image
+            
+            # Scale regions if base dims differ
+            try:
+                from PIL import Image as _PIL
+                src_w, src_h = _PIL.open(current_image).size
+                base_w, base_h = _PIL.open(base_image).size
+                if (src_w, src_h) != (base_w, base_h):
+                    sx = base_w / max(1, float(src_w)); sy = base_h / max(1, float(src_h))
+                    from manga_translator import TextRegion as _TR
+                    scaled = []
+                    for r in regions:
+                        x, y, w, h = r.bounding_box
+                        nx, ny, nw, nh = int(round(x*sx)), int(round(y*sy)), int(round(w*sx)), int(round(h*sy))
+                        v = [(nx, ny), (nx+nw, ny), (nx+nw, ny+nh), (nx, ny+nh)]
+                        nr = _TR(text=r.text, vertices=v, bounding_box=(nx, ny, nw, nh), confidence=r.confidence, region_type=r.region_type)
+                        nr.translated_text = r.translated_text
+                        scaled.append(nr)
+                    regions = scaled
+            except Exception:
+                pass
+            
+            # Determine output path (overwrite existing rendered if possible)
+            output_path = None
+            try:
+                st = self.image_state_manager.get_state(current_image) if hasattr(self, 'image_state_manager') else {}
+                rp = (st or {}).get('rendered_image_path')
+                if rp and os.path.exists(os.path.dirname(rp)):
+                    output_path = rp
+            except Exception:
+                output_path = None
+            
+            # Render
+            self._render_with_manga_translator(base_image, regions, output_path=output_path, original_image_path=current_image, switch_tab=True)
+        except Exception as e:
+            print(f"[SAVE_POS] Error: {e}")
+
     def _render_with_manga_translator(self, image_path: str, regions, output_path: str = None, image_bgr=None, original_image_path: str = None, switch_tab: bool = True):
         """Render translated text using MangaTranslator's PIL pipeline.
         - image_bgr: optional OpenCV BGR image to render on (in-memory, preferred if provided)
