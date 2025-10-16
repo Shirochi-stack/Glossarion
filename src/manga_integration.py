@@ -7966,11 +7966,36 @@ class MangaTranslationTab:
                 from PySide6.QtCore import QRectF, Qt
                 from PySide6.QtGui import QPen, QBrush, QColor
                 from manga_image_preview import MoveableRectItem
-                for rect_data in state['viewer_rectangles']:
+                # Check if there are OCR or translated texts to determine rectangle colors
+                recognized_texts = state.get('recognized_texts', [])
+                translated_texts = state.get('translated_texts', [])
+                has_ocr_text = bool([t for t in recognized_texts if not (isinstance(t, dict) and t.get('deleted'))])
+                has_translated_text = bool([t for t in translated_texts if not (isinstance(t, dict) and t.get('deleted'))])
+                has_any_text = has_ocr_text or has_translated_text
+                
+                for idx, rect_data in enumerate(state['viewer_rectangles']):
                     rect = QRectF(rect_data['x'], rect_data['y'], rect_data['width'], rect_data['height'])
-                    pen = QPen(QColor(0, 255, 0), 1)
+                    
+                    # Use blue color if this rectangle has any recognized text (OCR or translated), green otherwise
+                    has_text_for_this_rect = False
+                    if has_any_text and idx < max(len(recognized_texts), len(translated_texts)):
+                        # Check if this specific rectangle has text (either OCR or translated)
+                        has_recognized = (idx < len(recognized_texts) and 
+                                        not (isinstance(recognized_texts[idx], dict) and recognized_texts[idx].get('deleted')))
+                        has_translation = (idx < len(translated_texts) and 
+                                         not (isinstance(translated_texts[idx], dict) and translated_texts[idx].get('deleted')))
+                        has_text_for_this_rect = has_recognized or has_translation
+                    
+                    if has_text_for_this_rect:
+                        # Blue for rectangles with recognized/translated text
+                        pen = QPen(QColor(0, 150, 255), 2)
+                        brush = QBrush(QColor(0, 150, 255, 50))
+                    else:
+                        # Green for detection-only rectangles
+                        pen = QPen(QColor(0, 255, 0), 1)
+                        brush = QBrush(QColor(0, 255, 0, 50))
+                    
                     pen.setCosmetic(True)
-                    brush = QBrush(QColor(0, 255, 0, 50))
                     rect_item = MoveableRectItem(rect, pen=pen, brush=brush)
                     # Attach viewer for move signal
                     try:
@@ -8036,11 +8061,36 @@ class MangaTranslationTab:
                 from PySide6.QtGui import QPen, QBrush, QColor
                 from manga_image_preview import MoveableRectItem
                 
+                # Check if there are OCR or translated texts to determine rectangle colors
+                recognized_texts = state.get('recognized_texts', [])
+                translated_texts = state.get('translated_texts', [])
+                has_ocr_text = bool([t for t in recognized_texts if not (isinstance(t, dict) and t.get('deleted'))])
+                has_translated_text = bool([t for t in translated_texts if not (isinstance(t, dict) and t.get('deleted'))])
+                has_any_text = has_ocr_text or has_translated_text
+                
                 for idx, rect_data in enumerate(state['viewer_rectangles']):
                     rect = QRectF(rect_data['x'], rect_data['y'], rect_data['width'], rect_data['height'])
-                    pen = QPen(QColor(0, 255, 0), 1)
+                    
+                    # Use blue color if this rectangle has any recognized text (OCR or translated), green otherwise
+                    has_text_for_this_rect = False
+                    if has_any_text and idx < max(len(recognized_texts), len(translated_texts)):
+                        # Check if this specific rectangle has text (either OCR or translated)
+                        has_recognized = (idx < len(recognized_texts) and 
+                                        not (isinstance(recognized_texts[idx], dict) and recognized_texts[idx].get('deleted')))
+                        has_translation = (idx < len(translated_texts) and 
+                                         not (isinstance(translated_texts[idx], dict) and translated_texts[idx].get('deleted')))
+                        has_text_for_this_rect = has_recognized or has_translation
+                    
+                    if has_text_for_this_rect:
+                        # Blue for rectangles with recognized/translated text
+                        pen = QPen(QColor(0, 150, 255), 2)
+                        brush = QBrush(QColor(0, 150, 255, 50))
+                    else:
+                        # Green for detection-only rectangles
+                        pen = QPen(QColor(0, 255, 0), 1)
+                        brush = QBrush(QColor(0, 255, 0, 50))
+                    
                     pen.setCosmetic(True)
-                    brush = QBrush(QColor(0, 255, 0, 50))
                     rect_item = MoveableRectItem(rect, pen=pen, brush=brush)
                     # Attach viewer reference so moved emits
                     try:
@@ -8049,10 +8099,15 @@ class MangaTranslationTab:
                         pass
                     viewer._scene.addItem(rect_item)
                     viewer.rectangles.append(rect_item)
-                    # Attach region index and move-sync handler
+                    # Attach region index and move-sync handler for blue rectangles (ones with text)
                     try:
-                        rect_item.region_index = idx
-                        self._attach_move_sync_to_rectangle(rect_item, idx)
+                        if has_text_for_this_rect:
+                            rect_item.region_index = idx
+                            self._attach_move_sync_to_rectangle(rect_item, idx)
+                        else:
+                            # Remove any region_index from green rectangles that don't have text
+                            if hasattr(rect_item, 'region_index'):
+                                delattr(rect_item, 'region_index')
                     except Exception:
                         pass
                 
@@ -8189,6 +8244,7 @@ class MangaTranslationTab:
                         rect_item._viewer = viewer
                     except Exception:
                         pass
+                    
                     
                     viewer._scene.addItem(rect_item)
                     viewer.rectangles.append(rect_item)
