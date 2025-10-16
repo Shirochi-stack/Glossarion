@@ -10814,9 +10814,33 @@ class MangaTranslationTab:
                         print(f"[DEBUG] Region scaling skipped due to error: {scale_err}")
                     
                     print(f"[DEBUG] Rendering base image: {os.path.basename(base_image)} (original: {os.path.basename(current_image)})")
+                    # Prepare to clear old region position in-place using last recorded render positions
+                    try:
+                        state = self.image_state_manager.get_state(current_image) if hasattr(self, 'image_state_manager') else {}
+                        last_pos = (state or {}).get('last_render_positions', {})
+                        prev_rect = last_pos.get(str(int(region_index))) if region_index is not None else None
+                        if prev_rect and isinstance(prev_rect, (list, tuple)) and len(prev_rect) >= 4:
+                            # Store for renderer to clear before drawing
+                            self._pending_clear_rects = [(int(prev_rect[0]), int(prev_rect[1]), int(prev_rect[2]), int(prev_rect[3]))]
+                            self._pending_clear_index = int(region_index)
+                        else:
+                            self._pending_clear_rects = []
+                            self._pending_clear_index = None
+                    except Exception:
+                        self._pending_clear_rects = []
+                        self._pending_clear_index = None
+                    
                     # In-place update: write back to the same translated file if we have one
                     output_path = base_image if (base_image and base_image != current_image) else None
                     self._render_with_manga_translator(base_image, regions, output_path=output_path, original_image_path=current_image, switch_tab=True)
+                    # Clear pending markers
+                    try:
+                        if hasattr(self, '_pending_clear_rects'):
+                            del self._pending_clear_rects
+                        if hasattr(self, '_pending_clear_index'):
+                            del self._pending_clear_index
+                    except Exception:
+                        pass
                 else:
                     print(f"[DEBUG] ❌ No regions to render")
                     self._log("⚠️ No regions to render", "warning")
@@ -10895,6 +10919,50 @@ class MangaTranslationTab:
                 image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
             print(f"[RENDER] Using BGR image, shape: {image_bgr.shape}")
             
+            # Pre-clear old region rectangles from translated output using cleaned image if available
+            try:
+                clear_rects = getattr(self, '_pending_clear_rects', []) if hasattr(self, '_pending_clear_rects') else []
+                if clear_rects:
+                    # Find cleaned image for original_image_path
+                    cleaned_bgr = None
+                    try:
+                        cleaned_path = None
+                        if original_image_path and hasattr(self, 'image_state_manager') and self.image_state_manager:
+                            st = self.image_state_manager.get_state(original_image_path) or {}
+                            cleaned_path = st.get('cleaned_image_path')
+                        if not cleaned_path:
+                            cand = getattr(self, '_cleaned_image_path', None)
+                            cleaned_path = cand if cand and os.path.exists(cand) else None
+                        if cleaned_path and os.path.exists(cleaned_path):
+                            pil_clean = Image.open(cleaned_path).convert('RGB')
+                            clean_rgb = np.array(pil_clean)
+                            cleaned_bgr_full = cv2.cvtColor(clean_rgb, cv2.COLOR_RGB2BGR)
+                            # Scale cleaned to match current base dims if needed
+                            if (cleaned_bgr_full.shape[1], cleaned_bgr_full.shape[0]) != (image_bgr.shape[1], image_bgr.shape[0]):
+                                cleaned_bgr = cv2.resize(
+                                    cleaned_bgr_full,
+                                    (image_bgr.shape[1], image_bgr.shape[0]),
+                                    interpolation=cv2.INTER_CUBIC
+                                )
+                            else:
+                                cleaned_bgr = cleaned_bgr_full
+                    except Exception as _ce:
+                        print(f"[RENDER] Cleaned preload failed: {_ce}")
+                        cleaned_bgr = None
+                    
+                    for (cx, cy, cw, ch) in clear_rects:
+                        x1 = max(0, int(cx)); y1 = max(0, int(cy))
+                        x2 = min(image_bgr.shape[1], int(cx + cw)); y2 = min(image_bgr.shape[0], int(cy + ch))
+                        if x2 > x1 and y2 > y1:
+                            if cleaned_bgr is not None:
+                                image_bgr[y1:y2, x1:x2] = cleaned_bgr[y1:y2, x1:x2]
+                            else:
+                                # Fallback: fill with background color (white)
+                                image_bgr[y1:y2, x1:x2] = (255, 255, 255)
+                    print(f"[RENDER] Cleared {len(clear_rects)} old region(s) prior to re-render")
+            except Exception as _clr:
+                print(f"[RENDER] Pre-clear failed: {_clr}")
+            
             # Print region details
             for i, region in enumerate(regions):
                 print(f"[RENDER] Region {i}: text='{region.text[:30] if region.text else 'None'}...', translated='{region.translated_text[:30] if region.translated_text else 'None'}...'")
@@ -10947,6 +11015,41 @@ class MangaTranslationTab:
                     'rendered_image_path': output_path
                 }, save=True)
                 print(f"[RENDER] Saved rendered image path to state for {os.path.basename(original_path)}")
+            
+            # Update last_render_positions for robust future single-region updates
+            try:
+                if original_image_path and hasattr(self, 'image_state_manager') and self.image_state_manager:
+                    state = self.image_state_manager.get_state(original_image_path) or {}
+                    last_pos = state.get('last_render_positions') or {}
+                    # Map each rendered region back to a rectangle index via IoU
+                    try:
+                        rects = getattr(self.image_preview_widget.viewer, 'rectangles', []) or []
+                        def _iou(a, b):
+                            ax, ay, aw, ah = a; bx, by, bw, bh = b
+                            ax2, ay2 = ax + aw, ay + ah; bx2, by2 = bx + bw, by + bh
+                            x1 = max(ax, bx); y1 = max(ay, by); x2 = min(ax2, bx2); y2 = min(ay2, by2)
+                            inter = max(0, x2 - x1) * max(0, y2 - y1)
+                            area_a = max(0, aw) * max(0, ah); area_b = max(0, bw) * max(0, bh)
+                            den = area_a + area_b - inter
+                            return (inter / den) if den > 0 else 0.0
+                        for r in regions:
+                            rx, ry, rw, rh = int(r.bounding_box[0]), int(r.bounding_box[1]), int(r.bounding_box[2]), int(r.bounding_box[3])
+                            best_idx, best_iou = None, 0.0
+                            for i, rect_item in enumerate(rects):
+                                br = rect_item.sceneBoundingRect()
+                                cand = [int(br.x()), int(br.y()), int(br.width()), int(br.height())]
+                                iou = _iou([rx, ry, rw, rh], cand)
+                                if iou > best_iou:
+                                    best_iou, best_idx = iou, i
+                            if best_idx is not None:
+                                last_pos[str(int(best_idx))] = [rx, ry, rw, rh]
+                    except Exception:
+                        pass
+                    state['last_render_positions'] = last_pos
+                    self.image_state_manager.set_state(original_image_path, state, save=True)
+                    print(f"[RENDER] Updated last_render_positions for {len(last_pos)} region(s)")
+            except Exception as _lp:
+                print(f"[RENDER] Failed to update last_render_positions: {_lp}")
             
             # Show the rendered image in the OUTPUT tab (keep source image intact)
             print(f"[RENDER] Loading rendered image into output tab...")
