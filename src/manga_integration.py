@@ -11316,24 +11316,17 @@ class MangaTranslationTab(QObject):
             print(f"[DEBUG] Error aliasing overlays: {str(e)}")
     
     def _save_position_async(self, region_index: int):
-        """Save position and update overlay for a specific region using proper background thread."""
+        """Save position and update overlay for a specific region using thread pool executor."""
         try:
             print(f"[DEBUG] Save Position triggered for region {region_index}")
             
-            # Show processing overlay immediately on main thread
-            self._add_processing_overlay()
+            # NO blue pulse effect - skip processing overlay
+            # self._add_processing_overlay()
             
-            # Get all data needed for rendering from GUI on main thread
-            render_data = self._extract_render_data_for_region(region_index)
-            if not render_data:
-                self._remove_processing_overlay()
-                return
-            
-            # Get translation text
+            # Get translation text first
             trans_text = self._get_translation_text_for_region(region_index)
             if not trans_text:
                 print(f"[DEBUG] No translation text found for region {region_index}")
-                self._remove_processing_overlay()
                 return
             
             # Persist rectangles state on main thread
@@ -11343,30 +11336,31 @@ class MangaTranslationTab(QObject):
             except Exception as e:
                 print(f"[DEBUG] Failed to persist rectangles state: {e}")
             
-            # Start background thread with extracted data
-            self.worker_thread = QThread()
-            self.save_worker = SavePositionWorker(self, region_index, trans_text, render_data)
+            # Use thread pool executor for parallel threading
+            def render_task():
+                """Background task to update overlay"""
+                try:
+                    print(f"[DEBUG] Background render task started for region {region_index}")
+                    # Call the existing overlay update method - it handles all the heavy lifting
+                    self._update_single_text_overlay(region_index, trans_text)
+                    return True
+                except Exception as e:
+                    print(f"[DEBUG] Background render task failed: {e}")
+                    return False
             
-            # Move worker to thread
-            self.save_worker.moveToThread(self.worker_thread)
-            
-            # Connect signals
-            self.worker_thread.started.connect(self.save_worker.run)
-            self.save_worker.finished.connect(self._on_save_position_finished)
-            self.save_worker.progress.connect(self._on_save_progress)
-            self.save_worker.finished.connect(self.worker_thread.quit)
-            self.save_worker.finished.connect(self.save_worker.deleteLater)
-            self.worker_thread.finished.connect(self.worker_thread.deleteLater)
-            
-            # Start the thread
-            self.worker_thread.start()
+            # Submit to executor if available, otherwise run synchronously
+            if hasattr(self.main_gui, 'executor') and self.main_gui.executor:
+                print(f"[DEBUG] Submitting save position task to thread pool executor")
+                future = self.main_gui.executor.submit(render_task)
+                # Don't wait for completion - fire and forget for responsiveness
+            else:
+                print(f"[DEBUG] No executor available, running save position synchronously")
+                render_task()
             
         except Exception as err:
-            print(f"[DEBUG] Save Position failed to start for region {region_index}: {err}")
+            print(f"[DEBUG] Save Position failed for region {region_index}: {err}")
             import traceback
             print(f"[DEBUG] Method error traceback: {traceback.format_exc()}")
-            # Remove overlay on error
-            self._remove_processing_overlay()
     
     def _get_translation_text_for_region(self, region_index: int) -> str:
         """Get translation text for a region (main thread safe)"""
@@ -11551,10 +11545,10 @@ class MangaTranslationTab(QObject):
                     print(f"[DEBUG] Loading rendered image: {os.path.basename(rendered_path)}")
                     self.image_preview_widget.output_viewer.load_image(rendered_path)
                     self.image_preview_widget.current_translated_path = rendered_path
-                    # Switch to output tab
-                    if hasattr(self.image_preview_widget, 'viewer_tabs'):
-                        self.image_preview_widget.viewer_tabs.setCurrentIndex(1)
-                    print(f"[DEBUG] Successfully loaded and switched to output tab")
+                    # NO auto tab switch on save position - keep user on current tab
+                    # if hasattr(self.image_preview_widget, 'viewer_tabs'):
+                    #     self.image_preview_widget.viewer_tabs.setCurrentIndex(1)
+                    print(f"[DEBUG] Successfully loaded rendered image (no tab switch)")
                 except Exception as e:
                     print(f"[DEBUG] Error loading rendered output: {e}")
             
@@ -11834,7 +11828,7 @@ class MangaTranslationTab(QObject):
                     except Exception:
                         rendered_path = None
                     output_path = rendered_path if (rendered_path and os.path.exists(os.path.dirname(rendered_path))) else None
-                    self._render_with_manga_translator(base_image, regions, output_path=output_path, original_image_path=current_image, switch_tab=True)
+                    self._render_with_manga_translator(base_image, regions, output_path=output_path, original_image_path=current_image, switch_tab=False)
                 else:
                     print(f"[DEBUG] ❌ No regions to render")
                     self._log("⚠️ No regions to render", "warning")
@@ -11989,7 +11983,7 @@ class MangaTranslationTab(QObject):
                 output_path = None
             
             # Render
-            self._render_with_manga_translator(base_image, regions, output_path=output_path, original_image_path=current_image, switch_tab=True)
+            self._render_with_manga_translator(base_image, regions, output_path=output_path, original_image_path=current_image, switch_tab=False)
         except Exception as e:
             print(f"[SAVE_POS] Error: {e}")
 

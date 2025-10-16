@@ -943,6 +943,8 @@ class MangaImagePreviewWidget(QWidget):
         self.viewer.rectangle_created.connect(lambda _: self._persist_rectangles_state())
         self.viewer.rectangle_deleted.connect(lambda _: self._persist_rectangles_state())
         self.viewer.rectangle_moved.connect(lambda _: self._persist_rectangles_state())
+        # Auto-apply save position on rectangle movement
+        self.viewer.rectangle_moved.connect(self._on_rectangle_moved)
         
         layout.addWidget(self.tools_frame)
         
@@ -1800,6 +1802,26 @@ class MangaImagePreviewWidget(QWidget):
                 "Download Error",
                 f"Failed to consolidate images:\n{str(e)}"
             )
+    
+    def _on_rectangle_moved(self, rect: QRectF):
+        """Handle rectangle movement - automatically apply save position"""
+        try:
+            # Find which rectangle was moved by comparing scene coordinates
+            moved_index = -1
+            for idx, rectangle in enumerate(self.viewer.rectangles):
+                if rectangle.sceneBoundingRect() == rect:
+                    moved_index = idx
+                    break
+            
+            if moved_index >= 0:
+                print(f"[DEBUG] Rectangle {moved_index} moved, auto-applying save position")
+                # Auto-trigger save position for the moved rectangle
+                if hasattr(self, 'manga_integration') and self.manga_integration:
+                    # Use a small delay to ensure rectangle position is fully updated
+                    from PySide6.QtCore import QTimer
+                    QTimer.singleShot(100, lambda: self.manga_integration._save_position_async(moved_index))
+        except Exception as e:
+            print(f"[DEBUG] Error in _on_rectangle_moved: {e}")
     
     def set_translated_folder(self, folder_path: str):
         """Set the translated folder path and enable download button"""
