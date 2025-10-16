@@ -2777,18 +2777,11 @@ class MangaTranslationTab:
         self.image_preview_widget.manga_integration = self
         
         # Connect image preview workflow signals to translation methods
-        print("[DEBUG] Connecting workflow signals...")
         self.image_preview_widget.detect_text_clicked.connect(self._on_detect_text_clicked)
-        print("[DEBUG] Connected detect_text_clicked")
         self.image_preview_widget.clean_image_clicked.connect(self._on_clean_image_clicked)
-        print("[DEBUG] Connected clean_image_clicked")
         self.image_preview_widget.recognize_text_clicked.connect(self._on_recognize_text_clicked)
-        print("[DEBUG] Connected recognize_text_clicked")
         self.image_preview_widget.translate_text_clicked.connect(self._on_translate_text_clicked)
-        print("[DEBUG] Connected translate_text_clicked")
         self.image_preview_widget.translate_all_clicked.connect(self._on_translate_all_clicked)
-        print("[DEBUG] Connected translate_all_clicked")
-        print("[DEBUG] All workflow signals connected successfully!")
         
         # Settings frame - GOES TO LEFT COLUMN
         settings_frame = QGroupBox("Translation Settings")
@@ -9313,7 +9306,6 @@ class MangaTranslationTab:
         try:
             # GUARD: Prevent processing during rendering
             if hasattr(self, '_rendering_in_progress') and self._rendering_in_progress:
-                print("[DEBUG] Rendering in progress, ignoring translate click")
                 return
             
             # Check if we have an image loaded
@@ -9328,7 +9320,6 @@ class MangaTranslationTab:
             
             if not has_rectangles:
                 # No rectangles - need to run detection first
-                print("[DEBUG] No rectangles found - need to run detection AND recognition")
                 self._log("🔍 No text regions found - running automatic detection and recognition...", "info")
                 # Clear any stale recognized texts
                 if hasattr(self, '_recognized_texts'):
@@ -9342,7 +9333,6 @@ class MangaTranslationTab:
             if not has_recognized_text:
                 if has_rectangles:
                     # Have rectangles but no recognized text - need to run recognition only
-                    print("[DEBUG] Rectangles exist but no recognized text - need to run recognition")
                     self._log("📝 Text regions found but not recognized - running OCR...", "info")
                 # If no rectangles, we already logged the message above
                 # In both cases, we need to run recognition (which will detect if needed)
@@ -9370,7 +9360,6 @@ class MangaTranslationTab:
             if has_rectangles and not has_recognized_text:
                 # Extract existing rectangles for recognition
                 regions_for_recognition = self._extract_regions_from_preview()
-                print(f"[DEBUG] Extracted {len(regions_for_recognition)} regions for recognition")
                 # Replace viewer rectangles with merged regions so indices align with recognition
                 try:
                     self._current_regions = regions_for_recognition
@@ -9388,23 +9377,19 @@ class MangaTranslationTab:
             elif not has_rectangles:
                 # No rectangles - will trigger detection in background
                 regions_for_recognition = None
-                print("[DEBUG] No rectangles - will detect in background")
             
             # STEP 4: Start translation workflow
             if has_recognized_text:
                 # Already have recognized text - proceed directly to translation
                 self._log(f"🌍 Starting translation of {len(self._recognized_texts)} text regions", "info")
-                print(f"[DEBUG] Starting background translation thread...")
                 
                 import threading
                 thread = threading.Thread(target=self._run_translate_background, 
                                         args=(self._recognized_texts.copy(), image_path),
                                         daemon=True)
                 thread.start()
-                print(f"[DEBUG] Background translation thread started")
             else:
                 # Need to run detection/recognition first, then translate
-                print(f"[DEBUG] Starting full pipeline: detect -> recognize -> translate")
                 self._log("🚀 Running full translation pipeline...", "info")
                 
                 import threading
@@ -9412,7 +9397,6 @@ class MangaTranslationTab:
                                         args=(image_path, regions_for_recognition),
                                         daemon=True)
                 thread.start()
-                print(f"[DEBUG] Full pipeline thread started")
             
         except Exception as e:
             import traceback
@@ -9500,7 +9484,6 @@ class MangaTranslationTab:
     
     def _run_translate_background(self, recognized_texts: list, image_path: str):
         """Run translation in background thread"""
-        print(f"[DEBUG] _run_translate_background started with {len(recognized_texts)} texts")
         try:
             # STEP 1: Inpaint and save cleaned image to isolated folder (so it can be shown in Output tab before render)
             self._log(f"🧽 Running automatic inpainting before translation...", "info")
@@ -9535,27 +9518,21 @@ class MangaTranslationTab:
             full_page_context_enabled = False
             if hasattr(self, '_batch_full_page_context_enabled'):
                 full_page_context_enabled = bool(self._batch_full_page_context_enabled)
-                print(f"[DEBUG] Full page context (batch snapshot): {full_page_context_enabled}")
             else:
                 try:
                     full_page_context_enabled = bool(self.main_gui.config.get('manga_full_page_context', False))
                 except Exception:
                     full_page_context_enabled = False
-                print(f"[DEBUG] Full page context (from config): {full_page_context_enabled}")
 
-            print(f"[DEBUG] Full page context enabled: {full_page_context_enabled}")
 
             if full_page_context_enabled:
-                print(f"[DEBUG] Using FULL PAGE CONTEXT translation mode")
                 self._log(f"📄 Using full page context translation for {len(recognized_texts)} regions", "info")
                 translated_texts = self._translate_with_full_page_context(recognized_texts, image_path)
             else:
-                print(f"[DEBUG] Using INDIVIDUAL translation mode")
                 self._log(f"📝 Using individual translation for {len(recognized_texts)} regions", "info")
                 translated_texts = self._translate_individually(recognized_texts, image_path)
 
             # Send results to main thread with render image path
-            print(f"[DEBUG] Sending {len(translated_texts)} translation results to main thread")
             render_image_path = cleaned_image_path if cleaned_image_path else image_path
             self.update_queue.put(('translate_results', {
                 'translated_texts': translated_texts,
@@ -9564,7 +9541,6 @@ class MangaTranslationTab:
             }))
             
             self._log(f"✅ Translation complete! Translated {len(translated_texts)} text regions", "success")
-            print(f"[DEBUG] Translation background thread completed successfully")
             
         except Exception as e:
             import traceback
@@ -12185,6 +12161,13 @@ class MangaTranslationTab:
         try:
             # Remove processing overlay effect
             self._remove_processing_overlay()
+            
+            # CRITICAL: Restore print hijacking if MangaTranslator exists
+            if hasattr(self, '_manga_translator') and self._manga_translator:
+                try:
+                    self._manga_translator.restore_print()
+                except Exception:
+                    pass
             
             if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'translate_btn'):
                 self.image_preview_widget.translate_btn.setEnabled(True)
