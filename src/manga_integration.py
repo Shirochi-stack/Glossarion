@@ -7411,18 +7411,30 @@ class MangaTranslationTab:
             self.image_preview_widget.set_image_list(self.selected_files)
     
     def _remove_selected(self):
-        """Remove selected files from the list"""
+        """Remove selected files from the list and clear preview if the current image was removed."""
         selected_items = self.file_listbox.selectedItems()
         
         if not selected_items:
             return
         
+        # Track current image and removed paths
+        current_path = getattr(self, '_current_image_path', None)
+        removed_paths = set()
+        
         # Remove in reverse order to maintain indices
-        for item in selected_items:
-            row = self.file_listbox.row(item)
+        rows = sorted([self.file_listbox.row(item) for item in selected_items], reverse=True)
+        for row in rows:
             self.file_listbox.takeItem(row)
             if 0 <= row < len(self.selected_files):
+                removed_paths.add(self.selected_files[row])
                 del self.selected_files[row]
+        
+        # If the current image was removed or list is now empty, clear both viewers
+        if (current_path and current_path in removed_paths) or self.file_listbox.count() == 0:
+            if hasattr(self, 'image_preview_widget'):
+                self.image_preview_widget.clear()
+                self.image_preview_widget.set_image_list([])
+            self._current_image_path = None
     
     def _clear_all(self):
         """Clear all files from the list"""
@@ -10459,8 +10471,39 @@ class MangaTranslationTab:
                         print(f"[DEBUG] Region {idx}: '{trans_data['original'][:30]}...' -> '{trans_data['translation'][:30]}...'")
                 
                 if regions:
-                    print(f"[DEBUG] ✅ Built {len(regions)} regions, calling PIL renderer...")
-                    self._render_with_manga_translator(current_image, regions)
+                    print(f"[DEBUG] ✅ Built {len(regions)} regions, selecting base image for renderer...")
+                    # Prefer cleaned image as base if available; fallback to original source
+                    base_image = None
+                    try:
+                        # 1) State manager entry (authoritative)
+                        if hasattr(self, 'image_state_manager') and self.image_state_manager:
+                            st = self.image_state_manager.get_state(current_image) or {}
+                            cand = st.get('cleaned_image_path')
+                            if cand and os.path.exists(cand):
+                                base_image = cand
+                    except Exception:
+                        pass
+                    # 2) Session vars
+                    if base_image is None:
+                        try:
+                            cand = getattr(self, '_cleaned_image_path', None)
+                            if cand and os.path.exists(cand):
+                                base_image = cand
+                        except Exception:
+                            pass
+                    # 3) Current translated path if it looks like a cleaned image
+                    if base_image is None:
+                        try:
+                            cand = getattr(self.image_preview_widget, 'current_translated_path', None)
+                            if cand and os.path.exists(cand) and ('clean' in os.path.basename(cand).lower()):
+                                base_image = cand
+                        except Exception:
+                            pass
+                    # Final fallback: the original current image
+                    if base_image is None:
+                        base_image = current_image
+                    print(f"[DEBUG] Rendering base image: {os.path.basename(base_image)} (original: {os.path.basename(current_image)})")
+                    self._render_with_manga_translator(base_image, regions, original_image_path=current_image, switch_tab=True)
                 else:
                     print(f"[DEBUG] ❌ No regions to render")
                     self._log("⚠️ No regions to render", "warning")
