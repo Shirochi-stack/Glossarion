@@ -1554,7 +1554,9 @@ class MangaImagePreviewWidget(QWidget):
         self.size_label.setVisible(enabled)
         self.box_count_label.setVisible(enabled)
         
-        # Keep the Translation Workflow row ALWAYS visible; only toggle manual tools
+        # Show/hide the entire Translation Workflow frame based on manual editing toggle
+        self.workflow_frame.setVisible(enabled)
+        
         # Pan and zoom buttons are ALWAYS visible (explicitly ensure they stay visible)
         self.hand_tool_btn.setVisible(True)
         self.fit_btn.setVisible(True)

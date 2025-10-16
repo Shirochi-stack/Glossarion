@@ -5144,13 +5144,18 @@ def main(log_callback=None, stop_callback=None):
         actual_num = c['actual_chapter_num']
         
         # Skip special files (chapter 0) if translation is disabled
+        # IMPORTANT: Do NOT treat files with digits (including 0) in their name as special.
         if not translate_special and raw_num == 0:
-            # Track skipped special files
-            if not hasattr(config, '_skipped_special_files'):
-                config._skipped_special_files = []
-            config._skipped_special_files.append(c.get('original_basename', f'Chapter {actual_num}'))
-            chunks_per_chapter[idx] = 0
-            continue
+            name = c.get('original_basename') or os.path.basename(c.get('filename', ''))
+            name_noext = os.path.splitext(name)[0] if name else ''
+            has_digits_in_name = bool(re.search(r'\d', name_noext))
+            if not has_digits_in_name:
+                # Track skipped special files
+                if not hasattr(config, '_skipped_special_files'):
+                    config._skipped_special_files = []
+                config._skipped_special_files.append(c.get('original_basename', f'Chapter {actual_num}'))
+                chunks_per_chapter[idx] = 0
+                continue
 
         if start is not None:
             if not (start <= c['actual_chapter_num'] <= end):
@@ -5331,7 +5336,11 @@ def main(log_callback=None, stop_callback=None):
             # Skip special files (chapter 0) if translation is disabled
             raw_num = c.get('raw_chapter_num', FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config))
             if not translate_special and raw_num == 0:
-                continue
+                name = c.get('original_basename') or os.path.basename(c.get('filename', ''))
+                name_noext = os.path.splitext(name)[0] if name else ''
+                has_digits_in_name = bool(re.search(r'\d', name_noext))
+                if not has_digits_in_name:
+                    continue
             
             # Skip chapters outside the range
             if start is not None and not (start <= actual_num <= end):
@@ -5644,7 +5653,11 @@ def main(log_callback=None, stop_callback=None):
             # Skip special files (chapter 0) if translation is disabled
             raw_num = c.get('raw_chapter_num', FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config))
             if not translate_special and raw_num == 0:
-                continue
+                name = c.get('original_basename') or os.path.basename(c.get('filename', ''))
+                name_noext = os.path.splitext(name)[0] if name else ''
+                has_digits_in_name = bool(re.search(r'\d', name_noext))
+                if not has_digits_in_name:
+                    continue
             
             if start is not None and not (start <= actual_num <= end):
                 # Skip silently (already summarized in earlier pass)
