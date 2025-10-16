@@ -8150,7 +8150,7 @@ class MangaTranslationTab:
                 # Collect raw bboxes first
                 raw_bboxes = []
                 for rect_item in self.image_preview_widget.viewer.rectangles:
-                    rect = rect_item.rect()
+                    rect = rect_item.sceneBoundingRect()
                     raw_bboxes.append([int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height())])
                 
                 # Merge overlaps using MangaTranslator's implementation
@@ -9815,7 +9815,7 @@ class MangaTranslationTab:
                         best_idx = -1
                         best_iou = 0.0
                         for idx, r in enumerate(rectangles):
-                            rr = r.rect()
+                            rr = r.sceneBoundingRect()
                             cand = [rr.x(), rr.y(), rr.width(), rr.height()]
                             iou = _iou_xywh(bbox, cand)
                             if iou > best_iou:
@@ -9870,9 +9870,15 @@ class MangaTranslationTab:
             self._translation_data = {}
             for i, result in enumerate(translated_texts):
                 region_index = result['original'].get('region_index', i)
+                # Capture bbox for stable remapping via IoU during re-render
+                bbox_val = result.get('bbox')
+                if not bbox_val and 0 <= region_index < len(self.image_preview_widget.viewer.rectangles):
+                    rr = self.image_preview_widget.viewer.rectangles[region_index].sceneBoundingRect()
+                    bbox_val = [int(rr.x()), int(rr.y()), int(rr.width()), int(rr.height())]
                 self._translation_data[region_index] = {
                     'original': result['original']['text'],
-                    'translation': result['translation']
+                    'translation': result['translation'],
+                    'bbox': bbox_val
                 }
             
             # Add text overlay to the viewer
@@ -10133,7 +10139,7 @@ class MangaTranslationTab:
                     rr = r.sceneBoundingRect()
                     new_x, new_y = int(rr.x()), int(rr.y())
                     
-                    # Find matching overlay group for this region on the current image
+                    # Find the overlay group to move — prefer exact index, else best IoU match
                     current_image = getattr(self.image_preview_widget, 'current_image_path', None)
                     overlays_map = getattr(self, '_text_overlays_by_image', {}) or {}
                     groups = overlays_map.get(current_image, [])
@@ -10142,17 +10148,49 @@ class MangaTranslationTab:
                         if getattr(g, '_overlay_region_index', None) == idx:
                             target = g
                             break
+                    if target is None:
+                        # Fallback to IoU-based match
+                        def _iou(a, b):
+                            try:
+                                ax, ay, aw, ah = a
+                                bx, by, bw, bh = b
+                                ax2, ay2 = ax + aw, ay + ah
+                                bx2, by2 = bx + bw, by + bh
+                                x1 = max(ax, bx); y1 = max(ay, by)
+                                x2 = min(ax2, bx2); y2 = min(ay2, by2)
+                                inter = max(0, x2 - x1) * max(0, y2 - y1)
+                                area_a = max(0, aw) * max(0, ah)
+                                area_b = max(0, bw) * max(0, bh)
+                                den = area_a + area_b - inter
+                                return (inter / den) if den > 0 else 0.0
+                            except Exception:
+                                return 0.0
+                        best_iou = 0.0
+                        for g in groups:
+                            brg = g.sceneBoundingRect()
+                            iou = _iou([new_x, new_y, int(rr.width()), int(rr.height())], [int(brg.x()), int(brg.y()), int(brg.width()), int(brg.height())])
+                            if iou > best_iou:
+                                best_iou = iou
+                                target = g
                     
                     if target is not None:
-                        # Compute delta to move overlay group's sceneBoundingRect to new rect top-left
+                        # Compute desired target position preserving any saved offset for this rectangle index
+                        try:
+                            saved_offsets = {}
+                            if hasattr(self, 'image_state_manager') and current_image:
+                                st = self.image_state_manager.get_state(current_image) or {}
+                                saved_offsets = st.get('overlay_offsets') or {}
+                            off = saved_offsets.get(str(int(idx))) or saved_offsets.get(int(idx)) or [0, 0]
+                            off_x, off_y = int(off[0]) if isinstance(off, (list, tuple)) and len(off) > 0 else 0, int(off[1]) if isinstance(off, (list, tuple)) and len(off) > 1 else 0
+                        except Exception:
+                            off_x, off_y = 0, 0
                         br = target.sceneBoundingRect()
-                        dx = new_x - int(br.x())
-                        dy = new_y - int(br.y())
+                        dx = (new_x + off_x) - int(br.x())
+                        dy = (new_y + off_y) - int(br.y())
                         if dx != 0 or dy != 0:
                             try:
                                 target.moveBy(dx, dy)
                             except Exception:
-                                # Fallback to setPos relative move
                                 try:
                                     from PySide6.QtCore import QPointF
                                     target.setPos(target.pos() + QPointF(dx, dy))
@@ -10164,9 +10202,9 @@ class MangaTranslationTab:
                             except Exception:
                                 pass
                         
-                        # Persist overlay offsets too (tie overlays to rectangles)
+                        # Persist only this region's overlay offset to avoid touching others
                         try:
-                            self._persist_overlay_offsets_for_current_image()
+                            self._persist_single_overlay_offset(current_image, idx, target)
                         except Exception:
                             pass
                     
@@ -10184,8 +10222,9 @@ class MangaTranslationTab:
             print(f"[DEBUG] Failed to attach move sync: {e}")
     
     def _persist_overlay_offsets_for_current_image(self):
-        """Persist overlay offsets relative to their rectangles for the current image.
-        Stored as overlay_offsets: {region_index: [dx, dy]} in image_state_manager.
+        """Persist overlay offsets relative to the best-matching rectangle for the current image.
+        Uses IoU to robustly tie each overlay group to a rectangle, then stores dx,dy per matched index.
+        NOTE: Prefer _persist_single_overlay_offset during interactive edits to avoid global remap.
         """
         try:
             current_image = getattr(self.image_preview_widget, 'current_image_path', None)
@@ -10195,23 +10234,70 @@ class MangaTranslationTab:
             groups = overlays_map.get(current_image, [])
             rects = getattr(self.image_preview_widget.viewer, 'rectangles', []) or []
             offsets = {}
+            
+            def _iou(a, b):
+                try:
+                    ax, ay, aw, ah = a
+                    bx, by, bw, bh = b
+                    ax2, ay2 = ax + aw, ay + ah
+                    bx2, by2 = bx + bw, by + bh
+                    x1 = max(ax, bx); y1 = max(ay, by)
+                    x2 = min(ax2, bx2); y2 = min(ay2, by2)
+                    inter = max(0, x2 - x1) * max(0, y2 - y1)
+                    area_a = max(0, aw) * max(0, ah)
+                    area_b = max(0, bw) * max(0, bh)
+                    den = area_a + area_b - inter
+                    return (inter / den) if den > 0 else 0.0
+                except Exception:
+                    return 0.0
+            
             for g in groups:
-                idx = getattr(g, '_overlay_region_index', None)
-                if idx is None or not (0 <= int(idx) < len(rects)):
-                    continue
                 try:
                     br_g = g.sceneBoundingRect()
-                    br_r = rects[int(idx)].sceneBoundingRect()
-                    dx = int(br_g.x() - br_r.x())
-                    dy = int(br_g.y() - br_r.y())
-                    offsets[str(int(idx))] = [dx, dy]
+                    gx, gy, gw, gh = int(br_g.x()), int(br_g.y()), int(br_g.width()), int(br_g.height())
+                    # Find best rectangle by IoU
+                    best_idx, best_iou = -1, 0.0
+                    for i, r in enumerate(rects):
+                        br_r = r.sceneBoundingRect()
+                        rx, ry, rw, rh = int(br_r.x()), int(br_r.y()), int(br_r.width()), int(br_r.height())
+                        iou = _iou([gx, gy, gw, gh], [rx, ry, rw, rh])
+                        if iou > best_iou:
+                            best_iou, best_idx = iou, i
+                    if best_idx != -1:
+                        br_r = rects[best_idx].sceneBoundingRect()
+                        dx = int(br_g.x() - br_r.x())
+                        dy = int(br_g.y() - br_r.y())
+                        offsets[str(best_idx)] = [dx, dy]
                 except Exception:
-                    pass
+                    continue
             if hasattr(self, 'image_state_manager'):
                 self.image_state_manager.update_state(current_image, {'overlay_offsets': offsets}, save=True)
                 print(f"[STATE] Persisted overlay offsets for {os.path.basename(current_image)}: {len(offsets)} entries")
         except Exception as e:
             print(f"[STATE] Failed to persist overlay offsets: {e}")
+    
+    def _persist_single_overlay_offset(self, image_path: str, rect_index: int, group):
+        """Persist only one overlay offset (dx,dy) for the given rectangle index.
+        Avoids recomputing offsets for other overlays to prevent global shifts.
+        """
+        try:
+            if not image_path or rect_index is None:
+                return
+            rects = getattr(self.image_preview_widget.viewer, 'rectangles', []) or []
+            if not (0 <= int(rect_index) < len(rects)):
+                return
+            br_g = group.sceneBoundingRect()
+            br_r = rects[int(rect_index)].sceneBoundingRect()
+            dx = int(br_g.x() - br_r.x())
+            dy = int(br_g.y() - br_r.y())
+            if hasattr(self, 'image_state_manager'):
+                state = self.image_state_manager.get_state(image_path) or {}
+                off = state.get('overlay_offsets') or {}
+                off[str(int(rect_index))] = [dx, dy]
+                self.image_state_manager.update_state(image_path, {'overlay_offsets': off}, save=True)
+                print(f"[STATE] Persisted single overlay offset for idx={rect_index}: ({dx},{dy})")
+        except Exception as e:
+            print(f"[STATE] Failed to persist single overlay offset: {e}")
     
     def _show_ocr_popup(self, ocr_text: str, region_index: int = None):
         """Show OCR text in a popup dialog with edit capability"""
@@ -10580,26 +10666,81 @@ class MangaTranslationTab:
                 
                 regions = []
                 
-                # Build TextRegion objects from translation data
-                for idx in sorted(self._translation_data.keys()):
-                    if idx < len(rectangles):
-                        rect = rectangles[idx].rect()
-                        trans_data = self._translation_data[idx]
-                        
-                        x, y, w, h = int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height())
-                        vertices = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
-                        
-                        region = TextRegion(
-                            text=trans_data['original'],
-                            vertices=vertices,
-                            bounding_box=(x, y, w, h),
-                            confidence=1.0,
-                            region_type='text_block'
-                        )
-                        # Set the translation directly
-                        region.translated_text = trans_data['translation']
-                        regions.append(region)
-                        print(f"[DEBUG] Region {idx}: '{trans_data['original'][:30]}...' -> '{trans_data['translation'][:30]}...'")
+                # Load any saved per-region overlay offsets for this image (to apply in final render)
+                saved_offsets = {}
+                try:
+                    current_state = self.image_state_manager.get_state(current_image) if hasattr(self, 'image_state_manager') else None
+                    if current_state:
+                        saved_offsets = current_state.get('overlay_offsets') or {}
+                except Exception:
+                    saved_offsets = {}
+                
+                # Build TextRegion objects from translation data using IoU to map to current rectangles
+                def _iou(a, b):
+                    try:
+                        ax, ay, aw, ah = a
+                        bx, by, bw, bh = b
+                        ax2, ay2 = ax + aw, ay + ah
+                        bx2, by2 = bx + bw, by + bh
+                        x1 = max(ax, bx); y1 = max(ay, by)
+                        x2 = min(ax2, bx2); y2 = min(ay2, by2)
+                        inter = max(0, x2 - x1) * max(0, y2 - y1)
+                        area_a = max(0, aw) * max(0, ah)
+                        area_b = max(0, bw) * max(0, bh)
+                        den = area_a + area_b - inter
+                        return (inter / den) if den > 0 else 0.0
+                    except Exception:
+                        return 0.0
+                
+                for idx_key in sorted(self._translation_data.keys()):
+                    # Render only the edited region to avoid affecting others
+                    if region_index is not None and int(idx_key) != int(region_index):
+                        continue
+                    trans_data = self._translation_data[idx_key]
+                    # Prefer stored bbox to find the best current rectangle
+                    src_bbox = trans_data.get('bbox')
+                    match_idx = -1
+                    best_iou = 0.0
+                    if src_bbox and rectangles:
+                        for i, r in enumerate(rectangles):
+                            br = r.sceneBoundingRect()
+                            cand = [int(br.x()), int(br.y()), int(br.width()), int(br.height())]
+                            iou = _iou(src_bbox, cand)
+                            if iou > best_iou:
+                                best_iou = iou
+                                match_idx = i
+                    if match_idx == -1:
+                        # Fallback to index if IoU failed
+                        if 0 <= idx_key < len(rectangles):
+                            match_idx = idx_key
+                        else:
+                            continue
+                    rect = rectangles[match_idx].sceneBoundingRect()
+                    x, y, w, h = int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height())
+                    
+                    # Apply saved offset ONLY for the region being updated
+                    try:
+                        if region_index is not None and match_idx == int(region_index):
+                            key = str(int(match_idx))
+                            off = saved_offsets.get(key) or saved_offsets.get(match_idx)
+                            if off and len(off) >= 2:
+                                dx_off, dy_off = int(off[0]), int(off[1])
+                                x += dx_off
+                                y += dy_off
+                    except Exception:
+                        pass
+                    
+                    vertices = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
+                    region = TextRegion(
+                        text=trans_data['original'],
+                        vertices=vertices,
+                        bounding_box=(x, y, w, h),
+                        confidence=1.0,
+                        region_type='text_block'
+                    )
+                    region.translated_text = trans_data['translation']
+                    regions.append(region)
+                    print(f"[DEBUG] Region map src={idx_key} -> rect={match_idx}, off={saved_offsets.get(str(int(match_idx))) if saved_offsets else None}")
                 
                 if regions:
                     print(f"[DEBUG] ✅ Built {len(regions)} regions, selecting base image for renderer...")
@@ -10622,17 +10763,43 @@ class MangaTranslationTab:
                                 base_image = cand
                         except Exception:
                             pass
-                    # 3) Current translated path if it looks like a cleaned image
+                    # 3) If an existing translated image is loaded, prefer its base dimensions
                     if base_image is None:
                         try:
                             cand = getattr(self.image_preview_widget, 'current_translated_path', None)
-                            if cand and os.path.exists(cand) and ('clean' in os.path.basename(cand).lower()):
+                            if cand and os.path.exists(cand):
                                 base_image = cand
                         except Exception:
                             pass
                     # Final fallback: the original current image
                     if base_image is None:
                         base_image = current_image
+                    
+                    # Scale regions to base image dimensions if needed
+                    try:
+                        from PIL import Image as _PILImage
+                        src_w, src_h = _PILImage.open(current_image).size
+                        base_w, base_h = _PILImage.open(base_image).size
+                        if (src_w, src_h) != (base_w, base_h):
+                            sx = base_w / max(1, float(src_w))
+                            sy = base_h / max(1, float(src_h))
+                            print(f"[DEBUG] Scaling regions from src ({src_w}x{src_h}) -> base ({base_w}x{base_h}) with factors (sx={sx:.4f}, sy={sy:.4f})")
+                            from manga_translator import TextRegion as _TR
+                            scaled_regions = []
+                            for r in regions:
+                                x, y, w, h = r.bounding_box
+                                nx = int(round(x * sx))
+                                ny = int(round(y * sy))
+                                nw = int(round(w * sx))
+                                nh = int(round(h * sy))
+                                v = [(nx, ny), (nx + nw, ny), (nx + nw, ny + nh), (nx, ny + nh)]
+                                nr = _TR(text=r.text, vertices=v, bounding_box=(nx, ny, nw, nh), confidence=r.confidence, region_type=r.region_type)
+                                nr.translated_text = r.translated_text
+                                scaled_regions.append(nr)
+                            regions = scaled_regions
+                    except Exception as scale_err:
+                        print(f"[DEBUG] Region scaling skipped due to error: {scale_err}")
+                    
                     print(f"[DEBUG] Rendering base image: {os.path.basename(base_image)} (original: {os.path.basename(current_image)})")
                     self._render_with_manga_translator(base_image, regions, original_image_path=current_image, switch_tab=True)
                 else:
@@ -10969,12 +11136,6 @@ class MangaTranslationTab:
             
             overlay_count = len(self._text_overlays_by_image.get(current_image, []))
             print(f"[DEBUG] Added {overlay_count} text overlay items for image: {os.path.basename(current_image)}")
-            
-            # Persist initial overlay offsets so they survive session
-            try:
-                self._persist_overlay_offsets_for_current_image()
-            except Exception:
-                pass
             
             # Force scene update to ensure overlays are visible
             viewer._scene.update()

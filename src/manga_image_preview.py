@@ -1079,8 +1079,8 @@ class MangaImagePreviewWidget(QWidget):
         self.box_count_label.setText(str(len(self.viewer.rectangles)))
     
     def _persist_rectangles_state(self):
-        """Persist current rectangles to image state manager via manga_integration.
-        Also updates in-memory _current_regions so state won't be re-saved later on selection change.
+        """Persist current rectangles (viewer_rectangles only) to image state manager.
+        Avoid updating detection_regions here to prevent unintended remapping of all regions.
         """
         try:
             if not hasattr(self, 'manga_integration') or not self.manga_integration:
@@ -1088,28 +1088,20 @@ class MangaImagePreviewWidget(QWidget):
             image_path = getattr(self, 'current_image_path', None)
             if not image_path:
                 return
-            # Build regions using the same extractor (with merge) from manga_integration
-            regions = self.manga_integration._extract_regions_from_preview() if hasattr(self.manga_integration, '_extract_regions_from_preview') else []
-            # Update in-memory regions on integration (prevents re-persist of stale regions)
-            try:
-                if getattr(self.manga_integration, '_current_image_path', None) == image_path:
-                    self.manga_integration._current_regions = regions
-            except Exception:
-                pass
             # Collect current viewer rectangles geometry for persistence
             rect_data = []
             try:
                 for rect_item in getattr(self.viewer, 'rectangles', []) or []:
-                    r = rect_item.rect()
+                    r = rect_item.sceneBoundingRect()
                     rect_data.append({'x': r.x(), 'y': r.y(), 'width': r.width(), 'height': r.height()})
             except Exception:
                 rect_data = []
-            # Persist
+            # Persist ONLY viewer_rectangles to avoid cascading changes to all overlays
             if hasattr(self.manga_integration, 'image_state_manager') and self.manga_integration.image_state_manager:
-                self.manga_integration.image_state_manager.update_state(image_path, {
-                    'detection_regions': regions,
-                    'viewer_rectangles': rect_data
-                }, save=True)
+                # Merge into existing state without touching detection_regions
+                prev = self.manga_integration.image_state_manager.get_state(image_path) or {}
+                prev['viewer_rectangles'] = rect_data
+                self.manga_integration.image_state_manager.set_state(image_path, prev, save=True)
         except Exception:
             pass
     
