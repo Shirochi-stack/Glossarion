@@ -13104,6 +13104,13 @@ class MangaTranslationTab(QObject):
             # Get manga rendering settings
             manga_settings = self._get_manga_rendering_settings()
             
+            # Source tab overlays should not force any background opacity
+            try:
+                manga_settings['show_background'] = False
+                manga_settings['bg_opacity'] = 0
+            except Exception:
+                pass
+            
             print(f"[DEBUG] Using manga rendering settings: {manga_settings}")
             
             for i, result in enumerate(translated_texts):
