@@ -348,13 +348,8 @@ class _StreamToGuiLog:
         except Exception:
             pass
 
-class MangaTranslationTab(QObject):
+class MangaTranslationTab:
     """GUI interface for manga translation integrated with TranslatorGUI"""
-    
-    # Qt signals for thread communication
-    show_processing_overlay_signal = Signal()
-    remove_processing_overlay_signal = Signal()
-    update_overlay_signal = Signal(int, str)  # idx, trans_text
     
     # Class-level cancellation flag for all instances
     _global_cancelled = False
@@ -390,14 +385,6 @@ class MangaTranslationTab(QObject):
             dialog: The dialog window (PySide6 QDialog)
             scroll_area: The scroll area widget (PySide6 QScrollArea, optional)
         """
-        # Initialize QObject parent
-        super().__init__()
-        
-        # Connect signals to slots
-        self.show_processing_overlay_signal.connect(self._add_processing_overlay)
-        self.remove_processing_overlay_signal.connect(self._remove_processing_overlay)
-        self.update_overlay_signal.connect(self._handle_overlay_update)
-        
         # CRITICAL: Set thread limits FIRST before any imports or processing
         import os
         parallel_enabled = main_gui.config.get('manga_settings', {}).get('advanced', {}).get('parallel_processing', False)
@@ -10484,49 +10471,7 @@ class MangaTranslationTab(QObject):
                             # Save Position (per-region) — mirrors Save & Update Overlay without requiring text changes
                             savepos_action = QAction("💾 Save Position", menu)
                             def make_savepos_handler(idx):
-                                def _handler():
-                                    try:
-                                        # Simple background thread for just the heavy rendering
-                                        import threading
-                                        def simple_save_worker():
-                                            try:
-                                                # Persist rectangles only (avoid touching detection regions)
-                                                try:
-                                                    if hasattr(self.image_preview_widget, '_persist_rectangles_state'):
-                                                        self.image_preview_widget._persist_rectangles_state()
-                                                except Exception:
-                                                    pass
-                                                
-                                                # Get current translation text for region
-                                                trans_text = None
-                                                try:
-                                                    td = getattr(self, '_translation_data', {}) or {}
-                                                    if idx in td:
-                                                        trans_text = td[idx].get('translation', '')
-                                                    elif hasattr(self, '_translated_texts') and self._translated_texts:
-                                                        for t in self._translated_texts:
-                                                            if t.get('original', {}).get('region_index') == idx:
-                                                                trans_text = t.get('translation', '')
-                                                                break
-                                                except Exception:
-                                                    trans_text = None
-                                                
-                                                if trans_text is None:
-                                                    return
-                                                
-                                                # Update only this region - DO NOT SWITCH TABS
-                                                self._update_single_text_overlay_simple(int(idx), trans_text)
-                                                
-                                            except Exception as _err:
-                                                print(f"[DEBUG] Simple save position failed for idx={idx}: {_err}")
-                                        
-                                        # Start simple background thread
-                                        thread = threading.Thread(target=simple_save_worker, daemon=True)
-                                        thread.start()
-                                        
-                                    except Exception as e:
-                                        print(f"[DEBUG] Save Position setup failed: {e}")
-                                return _handler
+                                return lambda: self._save_position_async(idx)
                             savepos_action.triggered.connect(make_savepos_handler(actual_index))
                             menu.addAction(savepos_action)
                         
@@ -11204,31 +11149,78 @@ class MangaTranslationTab(QObject):
         except Exception as e:
             print(f"[DEBUG] Error aliasing overlays: {str(e)}")
     
-    def _update_single_text_overlay_simple(self, region_index: int, new_translation: str):
-        """Simple update for Save Position - no processing overlay, just render the translation"""
+    def _save_position_async(self, region_index: int):
+        """Save position and update overlay for a specific region using ThreadPoolExecutor on main thread."""
         try:
-            print(f"[SAVE_POS] Simple update for region {region_index}: '{new_translation[:30]}...'")
+            print(f"[DEBUG] Save Position triggered for region {region_index}")
             
-            current_image = self.image_preview_widget.current_image_path
-            if not current_image:
-                print(f"[SAVE_POS] No current image, skipping update")
-                return
+            # Show processing overlay immediately on main thread
+            self._add_processing_overlay()
             
-            # Use the existing full update method but without UI disruption
-            if hasattr(self, '_translation_data') and region_index in self._translation_data:
-                # Update the translation data
-                self._translation_data[region_index]['translation'] = new_translation
+            def _save_position_task():
+                """The actual save position task - runs via executor but stays on the main thread"""
+                try:
+                    print(f"[DEBUG] Save Position task executing for region {region_index}")
+                    
+                    # Persist rectangles state
+                    try:
+                        if hasattr(self.image_preview_widget, '_persist_rectangles_state'):
+                            self.image_preview_widget._persist_rectangles_state()
+                    except Exception as e:
+                        print(f"[DEBUG] Failed to persist rectangles state: {e}")
+                    
+                    # Get current translation text for region
+                    trans_text = None
+                    try:
+                        td = getattr(self, '_translation_data', {}) or {}
+                        if region_index in td:
+                            trans_text = td[region_index].get('translation', '')
+                        elif hasattr(self, '_translated_texts') and self._translated_texts:
+                            for t in self._translated_texts:
+                                if t.get('original', {}).get('region_index') == region_index:
+                                    trans_text = t.get('translation', '')
+                                    break
+                    except Exception as e:
+                        print(f"[DEBUG] Failed to get translation text: {e}")
+                        trans_text = None
+                    
+                    if trans_text is None:
+                        print(f"[DEBUG] No translation text found for region {region_index}")
+                        return False
+                    
+                    # Update the overlay using the synchronous method
+                    self._update_single_text_overlay(int(region_index), trans_text)
+                    print(f"[DEBUG] Save Position task completed for region {region_index}")
+                    return True
+                    
+                except Exception as e:
+                    print(f"[DEBUG] Save Position task failed for region {region_index}: {e}")
+                    import traceback
+                    print(f"[DEBUG] Traceback: {traceback.format_exc()}")
+                    return False
+            
+            # Use executor if available, otherwise run directly
+            if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'executor') and self.main_gui.executor:
+                print(f"[DEBUG] Submitting save position task to ThreadPoolExecutor")
+                future = self.main_gui.executor.submit(_save_position_task)
                 
-                # Call the update method with a flag to prevent tab switching
-                self._update_single_text_overlay_no_tab_switch(region_index, new_translation)
-                
-                print(f"[SAVE_POS] Simple update completed for region {region_index}")
+                # Handle the result on the main thread
+                from concurrent.futures import wait
+                success = future.result()  # This blocks but we're on main thread, so it's OK
+                print(f"[DEBUG] Save Position future completed with success={success}")
             else:
-                print(f"[SAVE_POS] No translation data for region {region_index}")
-                
-        except Exception as e:
-            print(f"[SAVE_POS] Error in simple update: {e}")
-    
+                print(f"[DEBUG] No executor available, running save position directly")
+                _save_position_task()
+            
+        except Exception as err:
+            print(f"[DEBUG] Save Position failed to start for region {region_index}: {err}")
+        finally:
+            # Always remove the processing overlay
+            try:
+                self._remove_processing_overlay()
+            except Exception as e:
+                print(f"[DEBUG] Failed to remove processing overlay: {e}")
+
     def _update_single_text_overlay(self, region_index: int, new_translation: str):
         """Update overlay after editing by rendering with MangaTranslator (same as regular pipeline)"""
         print(f"\n{'='*60}")
@@ -11395,218 +11387,6 @@ class MangaTranslationTab(QObject):
             print(f"[DEBUG] Traceback:\n{traceback_str}")
             self._log(f"❌ Rendering failed: {str(e)}", "error")
     
-    def _update_single_text_overlay_no_tab_switch(self, region_index: int, new_translation: str):
-        """Update overlay after editing by rendering with MangaTranslator (no tab switch for Save Position)
-        Runs the rendering operation on a background thread to avoid blocking the UI.
-        """
-        print(f"\n{'='*60}")
-        print(f"[DEBUG] _update_single_text_overlay_no_tab_switch called for region {region_index}")
-        print(f"[DEBUG] new_translation: '{new_translation[:50]}...'")
-        print(f"{'='*60}\n")
-        
-        try:
-            current_image = self.image_preview_widget.current_image_path
-            
-            if not current_image:
-                print(f"[DEBUG] ERROR: No current image path, cannot update overlay")
-                self._log("❌ No image loaded", "error")
-                return
-            
-            print(f"[DEBUG] Current image: {current_image}")
-            print(f"[DEBUG] Manual edit complete for region {region_index}. Preparing for background rendering...")
-            self._log(f"🔄 Preparing background rendering for edited translation...", "info")
-            
-            # Prepare data for rendering ON MAIN THREAD (UI-dependent operations)
-            if hasattr(self, '_translation_data') and self._translation_data:
-                from manga_translator import TextRegion
-                
-                rectangles = self.image_preview_widget.viewer.rectangles
-                print(f"[DEBUG] Found {len(rectangles)} rectangles and {len(self._translation_data)} translations")
-                
-                regions = []
-                
-                # Prepare dimensions and last positions
-                from PIL import Image as _PILImage
-                try:
-                    src_w, src_h = _PILImage.open(current_image).size
-                except Exception:
-                    src_w, src_h = (1, 1)
-                saved_offsets = {}
-                last_pos = {}
-                try:
-                    current_state = self.image_state_manager.get_state(current_image) if hasattr(self, 'image_state_manager') else None
-                    if current_state:
-                        saved_offsets = current_state.get('overlay_offsets') or {}
-                        last_pos = current_state.get('last_render_positions') or {}
-                except Exception:
-                    saved_offsets, last_pos = {}, {}
-                
-                # Build TextRegion objects for ALL regions
-                for idx_key in sorted(self._translation_data.keys()):
-                    trans_data = self._translation_data[idx_key]
-                    if region_index is not None and int(idx_key) == int(region_index):
-                        # Edited region — use current rectangle
-                        if int(idx_key) < len(rectangles):
-                            rect = rectangles[int(idx_key)].sceneBoundingRect()
-                            sx, sy, sw, sh = int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height())
-                        else:
-                            lp = last_pos.get(str(int(idx_key)))
-                            if not lp:
-                                continue
-                            sx, sy, sw, sh = map(int, lp)
-                    else:
-                        # Unedited region — lock to last render position if available
-                        lp = last_pos.get(str(int(idx_key)))
-                        if not lp:
-                            if int(idx_key) < len(rectangles):
-                                rect = rectangles[int(idx_key)].sceneBoundingRect()
-                                lp = [int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height())]
-                            else:
-                                continue
-                        sx, sy, sw, sh = map(int, lp)
-                    
-                    region = TextRegion(
-                        text=trans_data['original'],
-                        vertices=[(sx, sy), (sx + sw, sy), (sx + sw, sy + sh), (sx, sy + sh)],
-                        bounding_box=(sx, sy, sw, sh),
-                        confidence=1.0,
-                        region_type='text_block'
-                    )
-                    region.translated_text = trans_data['translation']
-                    regions.append(region)
-                
-                print(f"[DEBUG] Prepared {len(regions)} regions (edited idx={region_index}) using last_render_positions for stability")
-                
-                if regions:
-                    print(f"[DEBUG] ✅ Built {len(regions)} regions, selecting base image for renderer...")
-                    # Choose base image for CONSISTENT re-render (prefer cleaned base)
-                    base_image = None
-                    try:
-                        if hasattr(self, 'image_state_manager') and self.image_state_manager:
-                            st = self.image_state_manager.get_state(current_image) or {}
-                            cand = st.get('cleaned_image_path')
-                            if cand and os.path.exists(cand):
-                                base_image = cand
-                    except Exception:
-                        pass
-                    if base_image is None:
-                        try:
-                            cand = getattr(self, '_cleaned_image_path', None)
-                            if cand and os.path.exists(cand):
-                                base_image = cand
-                        except Exception:
-                            pass
-                    # Fallback to current translated if no cleaned
-                    if base_image is None:
-                        try:
-                            cand = None
-                            if hasattr(self, 'image_state_manager') and self.image_state_manager:
-                                st = self.image_state_manager.get_state(current_image) or {}
-                                cand = st.get('rendered_image_path')
-                            if not cand and hasattr(self, '_rendered_images_map'):
-                                cand = self._rendered_images_map.get(current_image)
-                            if not cand:
-                                cand = getattr(self.image_preview_widget, 'current_translated_path', None)
-                            if cand and os.path.exists(cand):
-                                base_image = cand
-                        except Exception:
-                            pass
-                    if base_image is None:
-                        base_image = current_image
-                    
-                    # Scale regions (from source coords) to base image dimensions if needed
-                    try:
-                        from PIL import Image as _PILImage
-                        base_w, base_h = _PILImage.open(base_image).size
-                        if (src_w, src_h) != (base_w, base_h):
-                            sx = base_w / max(1, float(src_w))
-                            sy = base_h / max(1, float(src_h))
-                            print(f"[DEBUG] Scaling regions from src ({src_w}x{src_h}) -> base ({base_w}x{base_h}) with factors (sx={sx:.4f}, sy={sy:.4f})")
-                            from manga_translator import TextRegion as _TR
-                            scaled = []
-                            for r in regions:
-                                x, y, w, h = r.bounding_box
-                                nx = int(round(x * sx)); ny = int(round(y * sy)); nw = int(round(w * sx)); nh = int(round(h * sy))
-                                v = [(nx, ny), (nx + nw, ny), (nx + nw, ny + nh), (nx, ny + nh)]
-                                nr = _TR(text=r.text, vertices=v, bounding_box=(nx, ny, nw, nh), confidence=r.confidence, region_type=r.region_type)
-                                nr.translated_text = r.translated_text
-                                scaled.append(nr)
-                            regions = scaled
-                    except Exception as scale_err:
-                        print(f"[DEBUG] Region scaling skipped due to error: {scale_err}")
-                    
-                    print(f"[DEBUG] Rendering base image: {os.path.basename(base_image)} (original: {os.path.basename(current_image)})")
-                    # Full re-render: overwrite existing translated image path if available
-                    try:
-                        # Strongly prefer overwriting the image currently shown in the output tab
-                        rendered_path = getattr(self.image_preview_widget, 'current_translated_path', None)
-                        if not rendered_path and hasattr(self, 'image_state_manager') and self.image_state_manager:
-                            st = self.image_state_manager.get_state(current_image) or {}
-                            rendered_path = st.get('rendered_image_path')
-                        if not rendered_path and hasattr(self, '_rendered_images_map'):
-                            rendered_path = self._rendered_images_map.get(current_image)
-                    except Exception:
-                        rendered_path = None
-                    output_path = rendered_path if (rendered_path and os.path.exists(os.path.dirname(rendered_path))) else None
-                    
-                    # START BACKGROUND RENDERING THREAD
-                    self._start_background_rendering(
-                        base_image=base_image, 
-                        regions=regions, 
-                        output_path=output_path, 
-                        original_image_path=current_image,
-                        switch_tab=False,
-                        region_index=region_index
-                    )
-                else:
-                    print(f"[DEBUG] ❌ No regions to render")
-                    self._log("⚠️ No regions to render", "warning")
-            else:
-                print(f"[DEBUG] ❌ No translation data available")
-                self._log("⚠️ No translation data", "warning")
-            
-        except Exception as e:
-            print(f"[DEBUG] ❌ ERROR in _update_single_text_overlay_no_tab_switch: {str(e)}")
-            import traceback
-            traceback_str = traceback.format_exc()
-            print(f"[DEBUG] Traceback:\n{traceback_str}")
-            self._log(f"❌ Rendering failed: {str(e)}", "error")
-    
-    def _start_background_rendering(self, base_image, regions, output_path, original_image_path, switch_tab, region_index):
-        """Start the rendering operation on a background thread"""
-        def background_render_thread():
-            try:
-                # Lower priority for rendering operations to avoid blocking UI
-                try:
-                    _lower_current_thread_priority_and_affinity()
-                except Exception:
-                    pass
-                
-                print(f"[DEBUG] Background rendering started for region {region_index}")
-                
-                # Run the actual rendering
-                self._render_with_manga_translator(
-                    image_path=base_image,
-                    regions=regions,
-                    output_path=output_path,
-                    original_image_path=original_image_path,
-                    switch_tab=switch_tab
-                )
-                
-                print(f"[DEBUG] Background rendering completed for region {region_index}")
-                
-            except Exception as e:
-                print(f"[DEBUG] Background rendering error for region {region_index}: {str(e)}")
-                import traceback
-                traceback_str = traceback.format_exc()
-                print(f"[DEBUG] Background render traceback:\n{traceback_str}")
-                self._log(f"❌ Background rendering failed: {str(e)}", "error")
-        
-        # Start the background thread
-        import threading
-        render_thread = threading.Thread(target=background_render_thread, daemon=True)
-        render_thread.start()
-    
     def save_positions_and_rerender(self):
         """Persist current positions and re-render entire output using locked positions for stability.
         - Uses translated_texts from state if available; falls back to in-memory _translated_texts/_translation_data
@@ -11750,262 +11530,6 @@ class MangaTranslationTab(QObject):
             self._render_with_manga_translator(base_image, regions, output_path=output_path, original_image_path=current_image, switch_tab=True)
         except Exception as e:
             print(f"[SAVE_POS] Error: {e}")
-
-    @Slot(int, str)
-    def _handle_overlay_update(self, idx: int, trans_text: str):
-        """Handle overlay update on main thread - lightweight UI updates only"""
-        try:
-            print(f"[DEBUG] Handling overlay update for region {idx} on main thread")
-            
-            # Only do lightweight operations here - the heavy work was done in background
-            # Just persist rectangles (quick operation)
-            try:
-                if hasattr(self.image_preview_widget, '_persist_rectangles_state'):
-                    self.image_preview_widget._persist_rectangles_state()
-            except Exception as e:
-                print(f"[DEBUG] Rectangle persistence failed: {e}")
-            
-            print(f"[DEBUG] Overlay update completed for region {idx}")
-            
-        except Exception as e:
-            print(f"[DEBUG] Save position operation failed: {e}")
-        finally:
-            # Always remove processing overlay
-            self.remove_processing_overlay_signal.emit()
-    
-    def _run_save_position_background(self, idx: int):
-        """Run save position functionality in a background thread to prevent UI blocking"""
-        import threading
-        
-        # CAPTURE ALL UI DATA FIRST (on main thread) before starting background thread
-        try:
-            # Get current image path
-            current_image = getattr(self.image_preview_widget, 'current_image_path', None)
-            if not current_image:
-                print(f"[DEBUG] No current image for region {idx}")
-                return
-            
-            # Get rectangles data from UI (capture positions now)
-            rectangles_data = []
-            try:
-                rectangles = getattr(self.image_preview_widget.viewer, 'rectangles', []) or []
-                for rect_item in rectangles:
-                    r = rect_item.sceneBoundingRect()
-                    rectangles_data.append({
-                        'x': int(r.x()), 
-                        'y': int(r.y()), 
-                        'width': int(r.width()), 
-                        'height': int(r.height())
-                    })
-            except Exception as e:
-                print(f"[DEBUG] Failed to capture rectangles: {e}")
-                rectangles_data = []
-            
-            # Get translation data
-            translation_data_copy = None
-            trans_text = None
-            try:
-                td = getattr(self, '_translation_data', {}) or {}
-                if idx in td:
-                    translation_data_copy = dict(td)  # Make a copy
-                    trans_text = td[idx].get('translation', '')
-                elif hasattr(self, '_translated_texts') and self._translated_texts:
-                    for t in self._translated_texts:
-                        if t.get('original', {}).get('region_index') == idx:
-                            trans_text = t.get('translation', '')
-                            break
-            except Exception as e:
-                print(f"[DEBUG] Failed to get translation text: {e}")
-            
-            # Get other UI-dependent data
-            current_translated_path = getattr(self.image_preview_widget, 'current_translated_path', None)
-            
-        except Exception as capture_err:
-            print(f"[DEBUG] Failed to capture UI data: {capture_err}")
-            return
-        
-        if trans_text is None:
-            print(f"[DEBUG] No translation text found for region {idx}")
-            return
-        
-        def save_position_worker():
-            try:
-                print(f"[DEBUG] Starting background save position for region {idx}")
-                
-                # Show processing overlay on main thread
-                self.show_processing_overlay_signal.emit()
-                
-                print(f"[DEBUG] Found translation text for region {idx}, performing heavy processing in background")
-                
-                # DO ALL HEAVY PROCESSING HERE IN BACKGROUND THREAD
-                # Use captured data instead of accessing UI elements
-                try:
-                    # Call thread-safe version of update with captured data
-                    self._update_single_text_overlay_threadsafe(
-                        idx, trans_text, current_image, rectangles_data, 
-                        translation_data_copy, current_translated_path
-                    )
-                    print(f"[DEBUG] Background processing completed successfully for region {idx}")
-                    
-                    # Signal lightweight UI update on main thread
-                    self.update_overlay_signal.emit(idx, trans_text)
-                    
-                except Exception as heavy_err:
-                    print(f"[DEBUG] Heavy processing failed for region {idx}: {heavy_err}")
-                    import traceback
-                    print(f"[DEBUG] Traceback: {traceback.format_exc()}")
-                    # Still signal completion so overlay gets removed
-                    self.update_overlay_signal.emit(idx, trans_text)
-                
-            except Exception as _err:
-                print(f"[DEBUG] Save Position background worker failed for idx={idx}: {_err}")
-                # Make sure to remove processing overlay even on error
-                self.remove_processing_overlay_signal.emit()
-        
-        # Start the background thread
-        thread = threading.Thread(target=save_position_worker, daemon=True)
-        thread.start()
-        print(f"[DEBUG] Started Save Position background thread for region {idx}")
-
-    def _update_single_text_overlay_threadsafe(self, region_index: int, new_translation: str, current_image: str, 
-                                             rectangles_data: list, translation_data: dict, current_translated_path: str):
-        """Thread-safe version of _update_single_text_overlay that doesn't access Qt UI elements"""
-        try:
-            print(f"[DEBUG] Thread-safe overlay update for region {region_index}")
-            
-            if not translation_data or region_index not in translation_data:
-                print(f"[DEBUG] No translation data for region {region_index}")
-                return
-            
-            # Build regions using captured data instead of accessing UI
-            from manga_translator import TextRegion
-            regions = []
-            
-            # Get saved state data
-            saved_offsets = {}
-            last_pos = {}
-            try:
-                if hasattr(self, 'image_state_manager') and self.image_state_manager:
-                    current_state = self.image_state_manager.get_state(current_image)
-                    if current_state:
-                        saved_offsets = current_state.get('overlay_offsets') or {}
-                        last_pos = current_state.get('last_render_positions') or {}
-            except Exception:
-                saved_offsets, last_pos = {}, {}
-            
-            # Get source image dimensions
-            try:
-                from PIL import Image
-                src_w, src_h = Image.open(current_image).size
-            except Exception:
-                src_w, src_h = (1, 1)
-            
-            # Build TextRegion objects for ALL regions using captured rectangles data
-            for idx_key in sorted(translation_data.keys()):
-                trans_data = translation_data[idx_key]
-                if region_index is not None and int(idx_key) == int(region_index):
-                    # Edited region — use current rectangle from captured data
-                    if int(idx_key) < len(rectangles_data):
-                        rect_data = rectangles_data[int(idx_key)]
-                        sx, sy, sw, sh = rect_data['x'], rect_data['y'], rect_data['width'], rect_data['height']
-                    else:
-                        lp = last_pos.get(str(int(idx_key)))
-                        if not lp:
-                            continue
-                        sx, sy, sw, sh = map(int, lp)
-                else:
-                    # Unedited region — lock to last render position if available
-                    lp = last_pos.get(str(int(idx_key)))
-                    if not lp:
-                        if int(idx_key) < len(rectangles_data):
-                            rect_data = rectangles_data[int(idx_key)]
-                            lp = [rect_data['x'], rect_data['y'], rect_data['width'], rect_data['height']]
-                        else:
-                            continue
-                    sx, sy, sw, sh = map(int, lp)
-                
-                region = TextRegion(
-                    text=trans_data['original'],
-                    vertices=[(sx, sy), (sx + sw, sy), (sx + sw, sy + sh), (sx, sy + sh)],
-                    bounding_box=(sx, sy, sw, sh),
-                    confidence=1.0,
-                    region_type='text_block'
-                )
-                region.translated_text = trans_data['translation']
-                regions.append(region)
-            
-            print(f"[DEBUG] Prepared {len(regions)} regions (edited idx={region_index}) using captured data")
-            
-            if regions:
-                print(f"[DEBUG] ✅ Built {len(regions)} regions, selecting base image for renderer...")
-                # Choose base image for CONSISTENT re-render (prefer cleaned base)
-                base_image = None
-                try:
-                    if hasattr(self, 'image_state_manager') and self.image_state_manager:
-                        st = self.image_state_manager.get_state(current_image) or {}
-                        cand = st.get('cleaned_image_path')
-                        if cand and os.path.exists(cand):
-                            base_image = cand
-                except Exception:
-                    pass
-                if base_image is None:
-                    try:
-                        cand = getattr(self, '_cleaned_image_path', None)
-                        if cand and os.path.exists(cand):
-                            base_image = cand
-                    except Exception:
-                        pass
-                # Fallback to current translated if no cleaned
-                if base_image is None:
-                    try:
-                        cand = None
-                        if hasattr(self, 'image_state_manager') and self.image_state_manager:
-                            st = self.image_state_manager.get_state(current_image) or {}
-                            cand = st.get('rendered_image_path')
-                        if not cand and hasattr(self, '_rendered_images_map'):
-                            cand = self._rendered_images_map.get(current_image)
-                        if not cand:
-                            cand = current_translated_path
-                        if cand and os.path.exists(cand):
-                            base_image = cand
-                    except Exception:
-                        pass
-                if base_image is None:
-                    base_image = current_image
-                
-                # Scale regions if needed
-                try:
-                    from PIL import Image as _PILImage
-                    base_w, base_h = _PILImage.open(base_image).size
-                    if (src_w, src_h) != (base_w, base_h):
-                        sx = base_w / max(1, float(src_w))
-                        sy = base_h / max(1, float(src_h))
-                        print(f"[DEBUG] Scaling regions from src ({src_w}x{src_h}) -> base ({base_w}x{base_h})")
-                        from manga_translator import TextRegion as _TR
-                        scaled = []
-                        for r in regions:
-                            x, y, w, h = r.bounding_box
-                            nx = int(round(x * sx)); ny = int(round(y * sy)); nw = int(round(w * sx)); nh = int(round(h * sy))
-                            v = [(nx, ny), (nx + nw, ny), (nx + nw, ny + nh), (nx, ny + nh)]
-                            nr = _TR(text=r.text, vertices=v, bounding_box=(nx, ny, nw, nh), confidence=r.confidence, region_type=r.region_type)
-                            nr.translated_text = r.translated_text
-                            scaled.append(nr)
-                        regions = scaled
-                except Exception as scale_err:
-                    print(f"[DEBUG] Region scaling skipped due to error: {scale_err}")
-                
-                print(f"[DEBUG] Rendering base image: {os.path.basename(base_image)} (original: {os.path.basename(current_image)})")
-                # Full re-render: overwrite existing translated image path if available
-                rendered_path = current_translated_path if (current_translated_path and os.path.exists(os.path.dirname(current_translated_path))) else None
-                self._render_with_manga_translator(base_image, regions, output_path=rendered_path, original_image_path=current_image, switch_tab=True)
-            else:
-                print(f"[DEBUG] ❌ No regions to render")
-                
-        except Exception as e:
-            print(f"[DEBUG] ❌ ERROR in _update_single_text_overlay_threadsafe: {str(e)}")
-            import traceback
-            traceback_str = traceback.format_exc()
-            print(f"[DEBUG] Traceback:\n{traceback_str}")
 
     def _render_with_manga_translator(self, image_path: str, regions, output_path: str = None, image_bgr=None, original_image_path: str = None, switch_tab: bool = True):
         """Render translated text using MangaTranslator's PIL pipeline.
