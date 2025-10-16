@@ -1142,70 +1142,87 @@ class MangaImagePreviewWidget(QWidget):
         self.viewer.eraser_size = value
 
     def _on_save_positions_clicked(self):
-        """Persist rectangle/overlay positions and perform the same update as Save & Update Overlay.
-        - If a rectangle is selected and we have translation text for it, update only that region
-        - Otherwise, re-render using current positions (stable full render)
+        """Persist positions and update ONLY the regions whose rectangles moved (no global effects).
+        Mirrors the per-region behavior of "Save & Update Overlay" for all moved rectangles.
         """
         try:
-            # Disable and animate
             old_text = self.save_pos_btn.text()
             self.save_pos_btn.setEnabled(False)
             self.save_pos_btn.setText("Saving…")
-            # Show processing overlay
+            # Subtle processing overlay
             try:
                 if hasattr(self, 'manga_integration') and self.manga_integration:
                     self.manga_integration._add_processing_overlay()
             except Exception:
                 pass
-            
-            # Persist rectangles
+
+            # Persist current rectangles (viewer_rectangles only)
             self._persist_rectangles_state()
-            # Persist overlay offsets via integration
-            if hasattr(self, 'manga_integration') and self.manga_integration:
-                if hasattr(self.manga_integration, '_persist_overlay_offsets_for_current_image'):
-                    self.manga_integration._persist_overlay_offsets_for_current_image()
-                
-                # Try to update only the selected region like Save & Update Overlay
-                region_idx = None
-                try:
-                    if getattr(self.viewer, 'selected_rect', None) is not None:
-                        region_idx = self.viewer.rectangles.index(self.viewer.selected_rect)
-                except Exception:
-                    region_idx = None
-                
-                do_full = True
-                if region_idx is not None and hasattr(self.manga_integration, '_update_single_text_overlay'):
-                    # Get current translation text for region
-                    trans_text = None
-                    try:
-                        if hasattr(self.manga_integration, '_translation_data') and \
-                           isinstance(self.manga_integration._translation_data, dict) and \
-                           region_idx in self.manga_integration._translation_data:
-                            trans_text = self.manga_integration._translation_data[region_idx].get('translation', '')
-                        elif hasattr(self.manga_integration, '_translated_texts') and self.manga_integration._translated_texts:
-                            # Fallback: find by region_index in translated_texts
-                            for t in self.manga_integration._translated_texts:
-                                if t.get('original', {}).get('region_index') == region_idx:
-                                    trans_text = t.get('translation', '')
-                                    break
-                    except Exception:
-                        trans_text = None
-                    
-                    if trans_text is not None:
+
+            moved_indices = []
+            try:
+                # Determine which rectangles moved compared to last_render_positions
+                if hasattr(self, 'manga_integration') and self.manga_integration and \
+                   hasattr(self.manga_integration, 'image_state_manager') and self.manga_integration.image_state_manager and \
+                   self.current_image_path:
+                    st = self.manga_integration.image_state_manager.get_state(self.current_image_path) or {}
+                    last_pos = st.get('last_render_positions') or {}
+                    rects = getattr(self.viewer, 'rectangles', []) or []
+                    for i, r in enumerate(rects):
+                        br = r.sceneBoundingRect()
+                        cur = [int(br.x()), int(br.y()), int(br.width()), int(br.height())]
+                        lp = last_pos.get(str(int(i)))
+                        if lp is None:
+                            # No baseline — skip to avoid touching unrelated regions
+                            continue
                         try:
-                            self.manga_integration._update_single_text_overlay(int(region_idx), trans_text)
-                            do_full = False
+                            lp_i = list(map(int, lp)) if isinstance(lp, (list, tuple)) else None
                         except Exception:
-                            do_full = True
-                
-                # Fallback to full re-render if we couldn't update a single region
-                if do_full and hasattr(self.manga_integration, 'save_positions_and_rerender'):
-                    self.manga_integration.save_positions_and_rerender()
-            print("[DEBUG] Positions saved and overlay updated")
+                            lp_i = None
+                        if not lp_i or len(lp_i) < 4:
+                            continue
+                        if cur != lp_i:
+                            moved_indices.append(i)
+            except Exception:
+                moved_indices = []
+
+            # If nothing detected as moved, optionally update selected region only
+            if not moved_indices and getattr(self.viewer, 'selected_rect', None) is not None:
+                try:
+                    sel_idx = self.viewer.rectangles.index(self.viewer.selected_rect)
+                    moved_indices = [sel_idx]
+                except Exception:
+                    pass
+
+            # Update only moved regions using per-region renderer
+            if hasattr(self, 'manga_integration') and self.manga_integration and hasattr(self.manga_integration, '_update_single_text_overlay'):
+                # Build a quick lookup for translations
+                trans_lookup = {}
+                try:
+                    if hasattr(self.manga_integration, '_translation_data') and isinstance(self.manga_integration._translation_data, dict):
+                        for k, v in self.manga_integration._translation_data.items():
+                            trans_lookup[int(k)] = v.get('translation', '')
+                    if not trans_lookup and hasattr(self.manga_integration, '_translated_texts') and self.manga_integration._translated_texts:
+                        for t in self.manga_integration._translated_texts:
+                            idx = t.get('original', {}).get('region_index')
+                            if idx is not None:
+                                trans_lookup[int(idx)] = t.get('translation', '')
+                except Exception:
+                    pass
+
+                for idx in moved_indices:
+                    trans_text = trans_lookup.get(int(idx))
+                    if trans_text is None:
+                        continue
+                    try:
+                        self.manga_integration._update_single_text_overlay(int(idx), trans_text)
+                    except Exception as one_err:
+                        print(f"[DEBUG] Single-region update failed for idx={idx}: {one_err}")
+
+            print(f"[DEBUG] Save Positions: updated {len(moved_indices)} region(s)")
         except Exception as e:
             print(f"[DEBUG] Failed to save positions: {e}")
         finally:
-            # Remove overlay and restore button
             try:
                 if hasattr(self, 'manga_integration') and self.manga_integration:
                     self.manga_integration._remove_processing_overlay()
