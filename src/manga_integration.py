@@ -10744,26 +10744,26 @@ class MangaTranslationTab:
                 
                 if regions:
                     print(f"[DEBUG] ✅ Built {len(regions)} regions, selecting base image for renderer...")
-                    # Prefer cleaned image as base if available; fallback to original source
+                    # Choose base image for in-place region update (prefer existing rendered output)
                     base_image = None
                     try:
-                        # 1) State manager entry (authoritative)
                         if hasattr(self, 'image_state_manager') and self.image_state_manager:
                             st = self.image_state_manager.get_state(current_image) or {}
-                            cand = st.get('cleaned_image_path')
+                            cand = st.get('rendered_image_path')
                             if cand and os.path.exists(cand):
                                 base_image = cand
                     except Exception:
                         pass
-                    # 2) Session vars
+                    # 2) Session mapping cache
                     if base_image is None:
                         try:
-                            cand = getattr(self, '_cleaned_image_path', None)
-                            if cand and os.path.exists(cand):
-                                base_image = cand
+                            if hasattr(self, '_rendered_images_map') and current_image in self._rendered_images_map:
+                                cand = self._rendered_images_map[current_image]
+                                if cand and os.path.exists(cand):
+                                    base_image = cand
                         except Exception:
                             pass
-                    # 3) If an existing translated image is loaded, prefer its base dimensions
+                    # 3) Currently displayed translated image
                     if base_image is None:
                         try:
                             cand = getattr(self.image_preview_widget, 'current_translated_path', None)
@@ -10771,7 +10771,20 @@ class MangaTranslationTab:
                                 base_image = cand
                         except Exception:
                             pass
-                    # Final fallback: the original current image
+                    # 4) Cleaned image (if no translated yet)
+                    if base_image is None:
+                        try:
+                            cand = None
+                            if hasattr(self, 'image_state_manager') and self.image_state_manager:
+                                st = self.image_state_manager.get_state(current_image) or {}
+                                cand = st.get('cleaned_image_path')
+                            if not cand:
+                                cand = getattr(self, '_cleaned_image_path', None)
+                            if cand and os.path.exists(cand):
+                                base_image = cand
+                        except Exception:
+                            pass
+                    # Final fallback: original source
                     if base_image is None:
                         base_image = current_image
                     
@@ -10801,7 +10814,9 @@ class MangaTranslationTab:
                         print(f"[DEBUG] Region scaling skipped due to error: {scale_err}")
                     
                     print(f"[DEBUG] Rendering base image: {os.path.basename(base_image)} (original: {os.path.basename(current_image)})")
-                    self._render_with_manga_translator(base_image, regions, original_image_path=current_image, switch_tab=True)
+                    # In-place update: write back to the same translated file if we have one
+                    output_path = base_image if (base_image and base_image != current_image) else None
+                    self._render_with_manga_translator(base_image, regions, output_path=output_path, original_image_path=current_image, switch_tab=True)
                 else:
                     print(f"[DEBUG] ❌ No regions to render")
                     self._log("⚠️ No regions to render", "warning")
