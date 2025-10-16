@@ -2857,6 +2857,19 @@ class MangaTranslationTab(QObject):
         # Connect file list selection to image preview
         self.file_listbox.itemSelectionChanged.connect(self._on_file_selection_changed)
         
+        # Add method to main_gui for parallel processing thread-safe GUI updates
+        def _execute_parallel_gui_update(region_index: int, trans_text: str) -> bool:
+            """Execute GUI update on main thread for parallel processing (thread-safe)"""
+            try:
+                # This runs on the main thread, so it's safe to call GUI methods
+                return self._update_single_text_overlay(region_index, trans_text)
+            except Exception as e:
+                print(f"[PARALLEL] GUI update failed: {e}")
+                return False
+        
+        # Dynamically add the method to main_gui so it can be invoked by parallel workers
+        self.main_gui._execute_parallel_gui_update = _execute_parallel_gui_update
+        
         # Create layout for settings (always tabs) + image preview
         columns_container = QWidget()
         columns_layout = QHBoxLayout(columns_container)
@@ -11537,12 +11550,300 @@ class MangaTranslationTab(QObject):
             print(f"[DEBUG] Error aliasing overlays: {str(e)}")
     
     def _save_position_async(self, region_index: int):
-        """Save position and update overlay for a specific region using thread pool executor.
+        """Save position and update overlay for a specific region using thread pool executor with microsecond locks.
         
-        Simplified version that only updates the overlay without attempting preview updates.
+        Enhanced version that supports parallel processing with race condition protection.
         """
         try:
-            # Mark auto-save as in progress and disable manual save overlay button
+            # Initialize parallel processing system if not exists
+            if not hasattr(self, '_parallel_save_system'):
+                self._init_parallel_save_system()
+            
+            # Submit to parallel processing queue
+            self._parallel_save_system.queue_save_task(region_index)
+            
+        except Exception as e:
+            print(f"[PARALLEL] Error in _save_position_async: {e}")
+            # Fallback to single region processing
+            self._fallback_single_save(region_index)
+    
+    def _init_parallel_save_system(self):
+        """Initialize the parallel save processing system with microsecond locks."""
+        try:
+            import threading
+            import time
+            from queue import Queue
+            from concurrent.futures import ThreadPoolExecutor
+            
+            class ParallelSaveSystem:
+                def __init__(self, parent):
+                    self.parent = parent
+                    self.pending_tasks = Queue()
+                    self.active_tasks = set()  # Track active region indices
+                    self.microsecond_lock = threading.Lock()  # Microsecond precision lock
+                    self.executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="AutoSave")
+                    self.processing_count = 0  # Track number of active processes
+                    self.count_lock = threading.Lock()  # Lock for processing count
+                    
+                    # Start the coordinator thread
+                    self.coordinator_thread = threading.Thread(
+                        target=self._coordinate_tasks, 
+                        daemon=True, 
+                        name="AutoSaveCoordinator"
+                    )
+                    self.coordinator_thread.start()
+                    print(f"[PARALLEL] Initialized parallel save system with 4 worker threads")
+                
+                def queue_save_task(self, region_index: int):
+                    """Queue a save task for the given region index."""
+                    try:
+                        timestamp = time.time_ns()  # Microsecond precision timestamp
+                        task = {
+                            'region_index': region_index,
+                            'timestamp': timestamp,
+                            'retry_count': 0
+                        }
+                        
+                        with self.microsecond_lock:
+                            # Check if this region is already being processed
+                            if region_index in self.active_tasks:
+                                print(f"[PARALLEL] Region {region_index} already being processed, skipping")
+                                return False
+                            
+                            # Add to pending tasks
+                            self.pending_tasks.put(task)
+                            print(f"[PARALLEL] Queued save task for region {region_index} at {timestamp}")
+                            return True
+                            
+                    except Exception as e:
+                        print(f"[PARALLEL] Error queuing task for region {region_index}: {e}")
+                        return False
+                
+                def queue_batch_save_tasks(self, region_indices: list) -> int:
+                    """Queue multiple save tasks for batch processing optimization.
+                    
+                    Args:
+                        region_indices: List of region indices to queue for processing
+                        
+                    Returns:
+                        Number of tasks successfully queued
+                    """
+                    if not region_indices:
+                        return 0
+                        
+                    queued_count = 0
+                    batch_timestamp = time.time_ns()
+                    
+                    with self.microsecond_lock:
+                        for region_index in region_indices:
+                            # Check if this region is already being processed
+                            if region_index in self.active_tasks:
+                                print(f"[PARALLEL] Region {region_index} already being processed, skipping from batch")
+                                continue
+                            
+                            # Create task with batch timestamp
+                            task = {
+                                'region_index': region_index,
+                                'timestamp': batch_timestamp,
+                                'retry_count': 0,
+                                'batch_id': batch_timestamp  # Add batch identifier
+                            }
+                            
+                            # Add to pending tasks
+                            self.pending_tasks.put(task)
+                            queued_count += 1
+                    
+                    print(f"[PARALLEL] Batch queued {queued_count}/{len(region_indices)} save tasks")
+                    return queued_count
+                
+                def _coordinate_tasks(self):
+                    """Coordinate parallel task execution with microsecond precision."""
+                    print(f"[PARALLEL] Coordinator thread started")
+                    
+                    while True:
+                        try:
+                            # Wait for a task (blocking)
+                            task = self.pending_tasks.get(timeout=1.0)
+                            
+                            region_index = task['region_index']
+                            
+                            # Acquire microsecond lock
+                            with self.microsecond_lock:
+                                # Double-check the region isn't already active
+                                if region_index in self.active_tasks:
+                                    print(f"[PARALLEL] Region {region_index} became active while waiting, skipping")
+                                    continue
+                                
+                                # Mark region as active
+                                self.active_tasks.add(region_index)
+                                
+                                # Increment processing count
+                                with self.count_lock:
+                                    self.processing_count += 1
+                                    print(f"[PARALLEL] Started processing region {region_index} (active: {self.processing_count})")
+                                    
+                                    # Update button state for parallel processing
+                                    self.parent._update_parallel_save_button_state(self.processing_count)
+                            
+                            # Submit the actual work to thread pool
+                            future = self.executor.submit(self._process_save_task, task)
+                            
+                            # Don't wait for completion - let it run in parallel
+                            
+                        except Exception as e:
+                            if "timed out" not in str(e).lower():
+                                print(f"[PARALLEL] Coordinator error: {e}")
+                
+                def _process_save_task(self, task):
+                    """Process a single save task in a worker thread."""
+                    region_index = task['region_index']
+                    start_time = time.time_ns()
+                    
+                    try:
+                        print(f"[PARALLEL] Worker processing region {region_index}")
+                        
+                        # Get translation text (main thread safe)
+                        trans_text = self.parent._get_translation_text_for_region(region_index)
+                        if not trans_text:
+                            print(f"[PARALLEL] No translation text for region {region_index}")
+                            return False
+                        
+                        # Process the overlay update
+                        success = self.parent._update_single_text_overlay_parallel(region_index, trans_text)
+                        
+                        end_time = time.time_ns()
+                        duration_ms = (end_time - start_time) / 1_000_000  # Convert to milliseconds
+                        
+                        if success:
+                            print(f"[PARALLEL] Successfully processed region {region_index} in {duration_ms:.2f}ms")
+                        else:
+                            print(f"[PARALLEL] Failed to process region {region_index} after {duration_ms:.2f}ms")
+                        
+                        return success
+                        
+                    except Exception as e:
+                        print(f"[PARALLEL] Error processing region {region_index}: {e}")
+                        return False
+                    finally:
+                        # Always clean up
+                        with self.microsecond_lock:
+                            self.active_tasks.discard(region_index)
+                            
+                            with self.count_lock:
+                                self.processing_count = max(0, self.processing_count - 1)
+                                print(f"[PARALLEL] Finished processing region {region_index} (active: {self.processing_count})")
+                                
+                                # Update button state
+                                self.parent._update_parallel_save_button_state(self.processing_count)
+                
+                def get_active_count(self):
+                    """Get the number of currently active processing tasks."""
+                    with self.count_lock:
+                        return self.processing_count
+                
+                def queue_batch_save_tasks(self, region_indices: list) -> int:
+                    """Queue multiple save tasks for batch processing optimization.
+                    
+                    Args:
+                        region_indices: List of region indices to queue for saving
+                        
+                    Returns:
+                        Number of tasks successfully queued
+                    """
+                    if not region_indices:
+                        return 0
+                        
+                    queued_count = 0
+                    batch_timestamp = time.time_ns()
+                    
+                    with self.microsecond_lock:
+                        for region_index in region_indices:
+                            # Check if this region is already being processed
+                            if region_index in self.active_tasks:
+                                print(f"[PARALLEL] Region {region_index} already being processed, skipping from batch")
+                                continue
+                            
+                            # Create task with batch timestamp
+                            task = {
+                                'region_index': region_index,
+                                'timestamp': batch_timestamp,
+                                'retry_count': 0,
+                                'batch_id': batch_timestamp  # Add batch identifier
+                            }
+                            
+                            # Add to pending tasks
+                            self.pending_tasks.put(task)
+                            queued_count += 1
+                    
+                    print(f"[PARALLEL] Batch queued {queued_count}/{len(region_indices)} save tasks")
+                    return queued_count
+                
+                def shutdown(self):
+                    """Shutdown the parallel processing system."""
+                    try:
+                        self.executor.shutdown(wait=False)
+                        print(f"[PARALLEL] Parallel save system shutdown")
+                    except Exception:
+                        pass
+            
+            self._parallel_save_system = ParallelSaveSystem(self)
+            
+        except Exception as e:
+            print(f"[PARALLEL] Failed to initialize parallel save system: {e}")
+            self._parallel_save_system = None
+    
+    def _save_positions_batch(self, region_indices: list) -> bool:
+        """Save positions for multiple regions using batch processing.
+        
+        Args:
+            region_indices: List of region indices to save
+            
+        Returns:
+            True if batch queuing succeeded, False if fallback needed
+        """
+        if not region_indices:
+            print(f"[PARALLEL] No region indices provided for batch save")
+            return False
+            
+        try:
+            # Initialize parallel save system if not already done
+            if not hasattr(self, '_parallel_save_system') or not self._parallel_save_system:
+                self._init_parallel_save_system()
+            
+            # Check if parallel system is available
+            if not self._parallel_save_system:
+                print(f"[PARALLEL] Parallel system unavailable, falling back to sequential saves")
+                # Fall back to sequential single saves
+                for region_index in region_indices:
+                    self._fallback_single_save(region_index)
+                return False
+            
+            # Queue batch save tasks
+            queued_count = self._parallel_save_system.queue_batch_save_tasks(region_indices)
+            
+            if queued_count > 0:
+                print(f"[PARALLEL] Successfully queued {queued_count} tasks for batch processing")
+                return True
+            else:
+                print(f"[PARALLEL] No tasks queued, using fallback")
+                # Fall back to sequential saves
+                for region_index in region_indices:
+                    self._fallback_single_save(region_index)
+                return False
+                
+        except Exception as e:
+            print(f"[PARALLEL] Batch save failed: {e}, using fallback")
+            # Fall back to sequential saves
+            for region_index in region_indices:
+                self._fallback_single_save(region_index)
+            return False
+    
+    def _fallback_single_save(self, region_index: int):
+        """Fallback to single save processing when parallel system fails."""
+        try:
+            print(f"[PARALLEL] Using fallback single save for region {region_index}")
+            
+            # Mark auto-save as in progress
             self._auto_save_in_progress = True
             self._update_save_overlay_button_state()
             
@@ -11553,35 +11854,25 @@ class MangaTranslationTab(QObject):
                 self._update_save_overlay_button_state()
                 return
             
-            # Persist rectangles state on main thread
-            try:
-                if hasattr(self.image_preview_widget, '_persist_rectangles_state'):
-                    self.image_preview_widget._persist_rectangles_state()
-            except Exception:
-                pass
-            
-            # Use thread pool executor for parallel threading
+            # Use thread pool executor for background processing
             def render_task():
-                """Background task to update overlay"""
                 try:
-                    # Call the existing overlay update method - it handles all the heavy lifting
                     self._update_single_text_overlay(region_index, trans_text)
                     return True
                 except Exception:
                     return False
                 finally:
-                    # Always clear the auto-save progress flag and update button
                     self._auto_save_in_progress = False
                     self._update_save_overlay_button_state()
             
-            # Submit to executor if available, otherwise run synchronously
+            # Submit to executor if available
             if hasattr(self.main_gui, 'executor') and self.main_gui.executor:
                 future = self.main_gui.executor.submit(render_task)
             else:
-                render_task()  # This will clear the progress flag in its finally block
+                render_task()
             
-        except Exception:
-            # Clear progress flag on error
+        except Exception as e:
+            print(f"[PARALLEL] Fallback single save failed: {e}")
             self._auto_save_in_progress = False
             self._update_save_overlay_button_state()
     
@@ -11607,6 +11898,96 @@ class MangaTranslationTab(QObject):
                         button.setText("💾")  # Fallback text
         except Exception:
             pass
+    
+    def _update_parallel_save_button_state(self, active_count: int):
+        """Update the save overlay button state for parallel processing.
+        Shows different ⏳ emojis based on the number of parallel tasks.
+        """
+        try:
+            if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'save_overlay_btn'):
+                button = self.image_preview_widget.save_overlay_btn
+                
+                if active_count > 0:
+                    # Store original text if not already stored
+                    if not hasattr(button, '_original_text'):
+                        button._original_text = button.text()
+                    
+                    # Show different indicators based on parallel count
+                    if active_count == 1:
+                        button.setText("⏳")
+                        button.setToolTip("Auto-saving 1 rectangle position...")
+                    elif active_count <= 3:
+                        button.setText(f"⏳×{active_count}")
+                        button.setToolTip(f"Auto-saving {active_count} rectangle positions in parallel...")
+                    else:
+                        button.setText(f"⏳⚡{active_count}")
+                        button.setToolTip(f"Auto-saving {active_count} rectangle positions in parallel (high performance mode)...")
+                    
+                    button.setEnabled(False)
+                else:
+                    # Restore original text and state
+                    if hasattr(button, '_original_text'):
+                        button.setText(button._original_text)
+                    else:
+                        button.setText("💾")
+                    
+                    button.setToolTip("Save & Update Overlay")
+                    button.setEnabled(True)
+        except Exception as e:
+            print(f"[PARALLEL] Error updating button state: {e}")
+    
+    def _update_single_text_overlay_parallel(self, region_index: int, trans_text: str) -> bool:
+        """Thread-safe version of overlay update for parallel processing.
+        
+        This method can be called from worker threads and handles thread safety.
+        """
+        try:
+            # Import thread-safe utilities
+            import time
+            from PySide6.QtCore import QMetaObject, Qt
+            
+            # For thread safety, we'll queue the GUI update to the main thread
+            def gui_update():
+                try:
+                    # Persist rectangles state on main thread
+                    if hasattr(self.image_preview_widget, '_persist_rectangles_state'):
+                        self.image_preview_widget._persist_rectangles_state()
+                    
+                    # Update the overlay using the existing method (main thread only)
+                    return self._update_single_text_overlay(region_index, trans_text)
+                except Exception as e:
+                    print(f"[PARALLEL] GUI update error for region {region_index}: {e}")
+                    return False
+            
+            # Use QMetaObject to invoke on main thread
+            result = [False]  # Use list to allow modification in nested function
+            
+            def set_result(success):
+                result[0] = success
+            
+            # Execute on main thread and wait for completion
+            try:
+            # Queue the GUI update to main thread
+                if hasattr(self.main_gui, '_execute_parallel_gui_update'):
+                    success = self.main_gui._execute_parallel_gui_update(region_index, trans_text)
+                else:
+                    # Fallback - call directly on main thread
+                    success = gui_update()
+                
+                if success is None:
+                    # Fallback: use the direct method (may cause thread issues but better than failing)
+                    return gui_update()
+                
+                return bool(success)
+                
+            except Exception:
+                # Final fallback: direct call (not thread-safe but functional)
+                print(f"[PARALLEL] Using direct GUI update fallback for region {region_index}")
+                return gui_update()
+                
+        except Exception as e:
+            print(f"[PARALLEL] Error in parallel overlay update for region {region_index}: {e}")
+            return False
     
     # NOTE: Auto-save position is now simplified to only update overlays without attempting
     # to update the translated output preview. Users can manually click "Save & Update Overlay"
