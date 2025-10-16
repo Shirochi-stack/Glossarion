@@ -11348,9 +11348,14 @@ class MangaTranslationTab(QObject):
                 print(f"[DEBUG] Submitting save position task to thread pool executor")
                 future = self.main_gui.executor.submit(render_task)
                 # Don't wait for completion - fire and forget for responsiveness
+                # Start periodic check for output update
+                self._start_output_refresh_check()
             else:
                 print(f"[DEBUG] No executor available, running save position synchronously")
                 render_task()
+                # Immediately refresh output since it was synchronous
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(500, self._refresh_output_tab)
             
         except Exception as err:
             print(f"[DEBUG] Save Position failed for region {region_index}: {err}")
@@ -11618,11 +11623,124 @@ class MangaTranslationTab(QObject):
                 future = self.main_gui.executor.submit(_save_overlay_task)
                 print(f"[DEBUG] Task submitted to executor (fire-and-forget for responsiveness)")
                 # Don't wait for completion - fire and forget for responsiveness
+                # Start periodic check for output update
+                self._start_output_refresh_check()
             else:
                 print(f"[DEBUG] No executor available, running save overlay synchronously")
                 _save_overlay_task()
+                # Immediately refresh output since it was synchronous
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(500, self._refresh_output_tab)
             
             print(f"[DEBUG] _save_overlay_async: METHOD COMPLETION")
+            
+        except Exception as err:
+            print(f"[DEBUG] Save & Update Overlay failed to start for region {region_index}: {err}")
+            import traceback
+            print(f"[DEBUG] Method error traceback: {traceback.format_exc()}")
+        finally:
+            # Always remove the processing overlay
+            try:
+                print(f"[DEBUG] Removing processing overlay...")
+                self._remove_processing_overlay()
+                print(f"[DEBUG] Processing overlay removed successfully")
+            except Exception as e:
+                print(f"[DEBUG] Failed to remove processing overlay: {e}")
+
+    def _start_output_refresh_check(self):
+        """Start periodic checking for output image updates"""
+        try:
+            from PySide6.QtCore import QTimer
+            # Check every 1 second for up to 10 seconds
+            if not hasattr(self, '_output_refresh_timer'):
+                self._output_refresh_timer = QTimer()
+                self._output_refresh_timer.setSingleShot(False)
+                self._output_refresh_timer.timeout.connect(self._check_and_refresh_output)
+            
+            # Store the check start time and count
+            import time
+            self._output_refresh_start_time = time.time()
+            self._output_refresh_count = 0
+            
+            self._output_refresh_timer.start(1000)  # Check every 1 second
+            print(f"[DEBUG] Started output refresh checking timer")
+        except Exception as e:
+            print(f"[DEBUG] Error starting output refresh check: {e}")
+    
+    def _check_and_refresh_output(self):
+        """Periodic check for output image updates"""
+        try:
+            import time
+            current_time = time.time()
+            elapsed = current_time - getattr(self, '_output_refresh_start_time', current_time)
+            self._output_refresh_count = getattr(self, '_output_refresh_count', 0) + 1
+            
+            # Stop checking after 10 seconds or 10 attempts
+            if elapsed > 10.0 or self._output_refresh_count > 10:
+                if hasattr(self, '_output_refresh_timer'):
+                    self._output_refresh_timer.stop()
+                print(f"[DEBUG] Stopped output refresh checking after {elapsed:.1f}s and {self._output_refresh_count} attempts")
+                return
+            
+            # Try to refresh the output
+            if self._refresh_output_tab():
+                # Success - stop checking
+                if hasattr(self, '_output_refresh_timer'):
+                    self._output_refresh_timer.stop()
+                print(f"[DEBUG] Output refreshed successfully, stopped checking")
+                
+        except Exception as e:
+            print(f"[DEBUG] Error in output refresh check: {e}")
+    
+    def _refresh_output_tab(self) -> bool:
+        """Refresh the output tab with the latest rendered image"""
+        try:
+            current_image_path = getattr(self.image_preview_widget, 'current_image_path', None)
+            if not current_image_path:
+                return False
+            
+            # Look for rendered image in the expected location
+            source_dir = os.path.dirname(current_image_path)
+            source_filename = os.path.basename(current_image_path)
+            
+            # Check various possible locations for translated images
+            possible_paths = [
+                # 3_translated folder
+                os.path.join(source_dir, "3_translated", source_filename),
+                # isolated folder
+                os.path.join(source_dir, f"{os.path.splitext(source_filename)[0]}_translated", source_filename),
+                # same directory with _translated suffix
+                os.path.join(source_dir, f"{os.path.splitext(source_filename)[0]}_translated{os.path.splitext(source_filename)[1]}")
+            ]
+            
+            for path in possible_paths:
+                if os.path.exists(path):
+                    # Check if this file is newer than what we currently have loaded
+                    current_translated = getattr(self.image_preview_widget, 'current_translated_path', None)
+                    if current_translated != path or self._is_file_newer(path, current_translated):
+                        print(f"[DEBUG] Refreshing output tab with: {os.path.basename(path)}")
+                        self.image_preview_widget.output_viewer.load_image(path)
+                        self.image_preview_widget.current_translated_path = path
+                        return True
+            
+            return False
+            
+        except Exception as e:
+            print(f"[DEBUG] Error refreshing output tab: {e}")
+            return False
+    
+    def _is_file_newer(self, file_path: str, reference_path: str) -> bool:
+        """Check if file_path is newer than reference_path"""
+        try:
+            if not reference_path or not os.path.exists(reference_path):
+                return True  # New file is always "newer" than non-existent reference
+            
+            import os
+            file_mtime = os.path.getmtime(file_path)
+            ref_mtime = os.path.getmtime(reference_path)
+            return file_mtime > ref_mtime
+        except Exception:
+            return True  # Assume newer on error
             
         except Exception as err:
             print(f"[DEBUG] Save & Update Overlay failed to start for region {region_index}: {err}")
