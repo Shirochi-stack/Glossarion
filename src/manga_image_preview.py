@@ -872,10 +872,33 @@ class MangaImagePreviewWidget(QWidget):
         tools_layout.addWidget(self.zoom_out_btn)
         
         # Cleaned image toggle button
-        self.cleaned_toggle_btn = self._create_tool_button("✨", "Show cleaned images when available")
+        self.cleaned_toggle_btn = self._create_tool_button("🧽", "Show cleaned images when available")
         self.cleaned_toggle_btn.setCheckable(True)
         self.cleaned_toggle_btn.setChecked(True)  # Enabled by default
         self.cleaned_toggle_btn.clicked.connect(self._toggle_cleaned_image_mode)
+        # Make this button slightly larger for better emoji display
+        self.cleaned_toggle_btn.setStyleSheet("""
+            QToolButton {
+                background-color: #2d2d2d;
+                color: white;
+                border: 1px solid #3a3a3a;
+                border-radius: 3px;
+                padding: 3px;
+                font-size: 12pt;
+                min-width: 32px;
+                min-height: 32px;
+                max-width: 36px;
+                max-height: 36px;
+            }
+            QToolButton:hover {
+                background-color: #3a3a3a;
+                border-color: #5a5a5a;
+            }
+            QToolButton:checked {
+                background-color: #5a9fd4;
+                border-color: #7bb3e0;
+            }
+        """)
         tools_layout.addWidget(self.cleaned_toggle_btn)
         
         # Add a stretch spacer after zoom and toggle controls
@@ -1750,24 +1773,40 @@ class MangaImagePreviewWidget(QWidget):
             
             # Update button appearance and tooltip
             if self.cleaned_images_enabled:
-                self.cleaned_toggle_btn.setText("✨")  # Sparkles for enabled
+                self.cleaned_toggle_btn.setText("🧽")  # Sponge for enabled (cleaning)
                 self.cleaned_toggle_btn.setToolTip("Show cleaned images when available (enabled)")
                 self.cleaned_toggle_btn.setStyleSheet("""
                     QToolButton {
                         background-color: #4a7ba7;
                         border: 2px solid #5a9fd4;
+                        font-size: 12pt;
+                        min-width: 32px;
+                        min-height: 32px;
+                        max-width: 36px;
+                        max-height: 36px;
+                        padding: 3px;
+                        border-radius: 3px;
+                        color: white;
                     }
                     QToolButton:hover {
                         background-color: #5a9fd4;
                     }
                 """)
             else:
-                self.cleaned_toggle_btn.setText("🪶")  # Feather for disabled
+                self.cleaned_toggle_btn.setText("📄")  # Document for disabled (original)
                 self.cleaned_toggle_btn.setToolTip("Show original images only (cleaned images disabled)")
                 self.cleaned_toggle_btn.setStyleSheet("""
                     QToolButton {
                         background-color: #6c757d;
                         border: 2px solid #777777;
+                        font-size: 12pt;
+                        min-width: 32px;
+                        min-height: 32px;
+                        max-width: 36px;
+                        max-height: 36px;
+                        padding: 3px;
+                        border-radius: 3px;
+                        color: white;
                     }
                     QToolButton:hover {
                         background-color: #777777;
