@@ -8104,6 +8104,44 @@ class MangaTranslationTab(QObject):
             
             print(f"[STATE] State restoration complete for {os.path.basename(image_path)}")
             
+            # CRITICAL: Comprehensive graphics scene and overlay synchronization
+            # This fixes the cosmetic issue where overlays appear disconnected until user interaction
+            try:
+                from PySide6.QtCore import QTimer
+                viewer = self.image_preview_widget.viewer
+                
+                def comprehensive_refresh():
+                    try:
+                        # 1. Force complete scene update
+                        viewer._scene.update()
+                        viewer.update()
+                        viewer.repaint()
+                        
+                        # 2. Ensure text overlays are visible and properly positioned
+                        if hasattr(self, 'show_text_overlays_for_image'):
+                            self.show_text_overlays_for_image(image_path)
+                        
+                        # 3. Force overlay position synchronization with rectangles
+                        try:
+                            self._synchronize_overlay_positions_with_rectangles(image_path)
+                        except Exception:
+                            pass
+                        
+                        # 4. Final scene update to reflect changes
+                        viewer._scene.update()
+                        viewer.viewport().update()
+                        
+                        print(f"[STATE] Comprehensive refresh completed for {os.path.basename(image_path)}")
+                    except Exception as e:
+                        print(f"[STATE] Comprehensive refresh failed: {e}")
+                
+                # Schedule multiple refreshes with increasing delays for maximum reliability
+                QTimer.singleShot(10, comprehensive_refresh)
+                QTimer.singleShot(100, comprehensive_refresh)
+                QTimer.singleShot(250, comprehensive_refresh)
+            except Exception:
+                pass
+            
         except Exception as e:
             print(f"[STATE] Failed to restore state: {e}")
             import traceback
@@ -8333,6 +8371,56 @@ class MangaTranslationTab(QObject):
                 print(f"[STATE] Failed to restore text overlays: {e2}")
             
             print(f"[STATE] Overlay restoration complete for {os.path.basename(image_path)}")
+            
+            # CRITICAL: Comprehensive graphics scene and overlay synchronization for overlays-only mode
+            # This fixes the cosmetic issue where overlays appear disconnected until user interaction
+            try:
+                from PySide6.QtCore import QTimer
+                viewer = self.image_preview_widget.viewer
+                
+                def comprehensive_overlay_refresh():
+                    try:
+                        # 1. Force complete scene update
+                        viewer._scene.update()
+                        viewer.update()
+                        viewer.repaint()
+                        
+                        # 2. Ensure text overlays are visible and properly positioned
+                        if hasattr(self, 'show_text_overlays_for_image'):
+                            self.show_text_overlays_for_image(image_path)
+                        
+                        # 3. Force overlay position synchronization with rectangles
+                        try:
+                            self._synchronize_overlay_positions_with_rectangles(image_path)
+                        except Exception:
+                            pass
+                        
+                        # 4. Re-attach move sync handlers to ensure interactivity
+                        try:
+                            rectangles = getattr(viewer, 'rectangles', []) or []
+                            for idx, rect_item in enumerate(rectangles):
+                                if hasattr(rect_item, 'region_index'):
+                                    self._attach_move_sync_to_rectangle(rect_item, rect_item.region_index)
+                                else:
+                                    self._attach_move_sync_to_rectangle(rect_item, idx)
+                        except Exception:
+                            pass
+                        
+                        # 5. Final comprehensive scene update
+                        viewer._scene.update()
+                        viewer.viewport().update()
+                        viewer.repaint()
+                        
+                        print(f"[STATE] Comprehensive overlay refresh completed for {os.path.basename(image_path)}")
+                    except Exception as e:
+                        print(f"[STATE] Comprehensive overlay refresh failed: {e}")
+                
+                # Schedule multiple refreshes with increasing delays for maximum reliability
+                QTimer.singleShot(15, comprehensive_overlay_refresh)
+                QTimer.singleShot(100, comprehensive_overlay_refresh)
+                QTimer.singleShot(300, comprehensive_overlay_refresh)
+            except Exception:
+                pass
             
         except Exception as e:
             print(f"[STATE] Failed to restore overlays: {e}")
@@ -10879,6 +10967,141 @@ class MangaTranslationTab(QObject):
                 print(f"[STATE] Persisted single overlay offset for idx={rect_index}: ({dx},{dy})")
         except Exception as e:
             print(f"[STATE] Failed to persist single overlay offset: {e}")
+    
+    def _synchronize_overlay_positions_with_rectangles(self, image_path: str):
+        """Force synchronization of text overlay positions with their corresponding rectangles.
+        This ensures overlays appear properly positioned after state restoration.
+        """
+        try:
+            if not image_path:
+                return
+            
+            viewer = self.image_preview_widget.viewer
+            rectangles = getattr(viewer, 'rectangles', []) or []
+            
+            # Get overlay groups for this image
+            overlays_map = getattr(self, '_text_overlays_by_image', {}) or {}
+            groups = overlays_map.get(image_path, [])
+            
+            if not groups or not rectangles:
+                return
+            
+            # Load saved overlay offsets
+            saved_offsets = {}
+            try:
+                if hasattr(self, 'image_state_manager'):
+                    state = self.image_state_manager.get_state(image_path) or {}
+                    saved_offsets = state.get('overlay_offsets', {})
+            except Exception:
+                saved_offsets = {}
+            
+            print(f"[SYNC] Synchronizing {len(groups)} overlay groups with {len(rectangles)} rectangles")
+            
+            # For each overlay group, find its matching rectangle and sync position
+            for group in groups:
+                try:
+                    # Try to get the region index stored on the overlay group
+                    region_index = getattr(group, '_overlay_region_index', None)
+                    target_rect = None
+                    
+                    # First try direct index match
+                    if region_index is not None and 0 <= region_index < len(rectangles):
+                        target_rect = rectangles[region_index]
+                    else:
+                        # Fall back to IoU-based matching
+                        best_iou = 0.0
+                        group_rect = group.sceneBoundingRect()
+                        gx, gy, gw, gh = int(group_rect.x()), int(group_rect.y()), int(group_rect.width()), int(group_rect.height())
+                        
+                        for idx, rect in enumerate(rectangles):
+                            rect_bounds = rect.sceneBoundingRect()
+                            rx, ry, rw, rh = int(rect_bounds.x()), int(rect_bounds.y()), int(rect_bounds.width()), int(rect_bounds.height())
+                            
+                            # Calculate IoU
+                            iou = self._calculate_iou([gx, gy, gw, gh], [rx, ry, rw, rh])
+                            if iou > best_iou:
+                                best_iou = iou
+                                target_rect = rect
+                                region_index = idx
+                    
+                    if target_rect is not None and region_index is not None:
+                        # Get saved offset for this region
+                        offset_key = str(region_index)
+                        saved_offset = saved_offsets.get(offset_key, [0, 0])
+                        if isinstance(saved_offset, (list, tuple)) and len(saved_offset) >= 2:
+                            off_x, off_y = int(saved_offset[0]), int(saved_offset[1])
+                        else:
+                            off_x, off_y = 0, 0
+                        
+                        # Calculate desired position
+                        rect_bounds = target_rect.sceneBoundingRect()
+                        desired_x = int(rect_bounds.x()) + off_x
+                        desired_y = int(rect_bounds.y()) + off_y
+                        
+                        # Get current position
+                        group_bounds = group.sceneBoundingRect()
+                        current_x = int(group_bounds.x())
+                        current_y = int(group_bounds.y())
+                        
+                        # Calculate movement needed
+                        dx = desired_x - current_x
+                        dy = desired_y - current_y
+                        
+                        # Apply movement if needed
+                        if abs(dx) > 1 or abs(dy) > 1:  # Only move if significant difference
+                            try:
+                                group.moveBy(dx, dy)
+                                print(f"[SYNC] Moved overlay for region {region_index} by ({dx}, {dy})")
+                            except Exception:
+                                try:
+                                    from PySide6.QtCore import QPointF
+                                    group.setPos(group.pos() + QPointF(dx, dy))
+                                    print(f"[SYNC] Set overlay position for region {region_index} with offset ({dx}, {dy})")
+                                except Exception as e:
+                                    print(f"[SYNC] Failed to move overlay for region {region_index}: {e}")
+                        
+                        # Ensure group is visible
+                        if hasattr(group, 'setVisible'):
+                            group.setVisible(True)
+                        
+                        # Update the region index on the group if not set
+                        if not hasattr(group, '_overlay_region_index'):
+                            group._overlay_region_index = region_index
+                    
+                except Exception as e:
+                    print(f"[SYNC] Failed to sync overlay group: {e}")
+            
+            # Force scene update after all synchronization
+            try:
+                viewer._scene.update()
+                print(f"[SYNC] Overlay synchronization completed for {os.path.basename(image_path)}")
+            except Exception:
+                pass
+                
+        except Exception as e:
+            print(f"[SYNC] Overlay synchronization failed: {e}")
+    
+    def _calculate_iou(self, box1, box2):
+        """Calculate Intersection over Union for two bounding boxes [x, y, w, h]"""
+        try:
+            x1, y1, w1, h1 = box1
+            x2, y2, w2, h2 = box2
+            
+            # Calculate intersection
+            left = max(x1, x2)
+            top = max(y1, y2)
+            right = min(x1 + w1, x2 + w2)
+            bottom = min(y1 + h1, y2 + h2)
+            
+            if left >= right or top >= bottom:
+                return 0.0
+            
+            intersection = (right - left) * (bottom - top)
+            union = w1 * h1 + w2 * h2 - intersection
+            
+            return intersection / union if union > 0 else 0.0
+        except Exception:
+            return 0.0
     
     def _show_ocr_popup(self, ocr_text: str, region_index: int = None):
         """Show OCR text in a popup dialog with edit capability"""
