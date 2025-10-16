@@ -578,6 +578,9 @@ class MangaTranslationTab(QObject):
         self.worker_thread = None
         self.save_worker = None
         
+        # Initialize auto-save progress tracking
+        self._auto_save_in_progress = False
+        
         
         # Record main GUI thread native id for selective demotion of background threads (Windows)
         try:
@@ -11316,54 +11319,76 @@ class MangaTranslationTab(QObject):
         Simplified version that only updates the overlay without attempting preview updates.
         """
         try:
-            print(f"[DEBUG] Save Position triggered for region {region_index}")
-            
-            # NO blue pulse effect - skip processing overlay
-            # self._add_processing_overlay()
+            # Mark auto-save as in progress and disable manual save overlay button
+            self._auto_save_in_progress = True
+            self._update_save_overlay_button_state()
             
             # Get translation text first
             trans_text = self._get_translation_text_for_region(region_index)
             if not trans_text:
-                print(f"[DEBUG] No translation text found for region {region_index}")
+                self._auto_save_in_progress = False
+                self._update_save_overlay_button_state()
                 return
             
             # Persist rectangles state on main thread
             try:
                 if hasattr(self.image_preview_widget, '_persist_rectangles_state'):
                     self.image_preview_widget._persist_rectangles_state()
-            except Exception as e:
-                print(f"[DEBUG] Failed to persist rectangles state: {e}")
+            except Exception:
+                pass
             
             # Use thread pool executor for parallel threading
             def render_task():
                 """Background task to update overlay"""
                 try:
-                    print(f"[DEBUG] Background render task started for region {region_index}")
                     # Call the existing overlay update method - it handles all the heavy lifting
                     self._update_single_text_overlay(region_index, trans_text)
                     return True
-                except Exception as e:
-                    print(f"[DEBUG] Background render task failed: {e}")
+                except Exception:
                     return False
+                finally:
+                    # Always clear the auto-save progress flag and update button
+                    self._auto_save_in_progress = False
+                    self._update_save_overlay_button_state()
             
             # Submit to executor if available, otherwise run synchronously
             if hasattr(self.main_gui, 'executor') and self.main_gui.executor:
-                print(f"[DEBUG] Submitting save position task to thread pool executor")
                 future = self.main_gui.executor.submit(render_task)
-                # Don't wait for completion - fire and forget for responsiveness
-                print(f"[DEBUG] Save position task submitted (no preview update)")
             else:
-                print(f"[DEBUG] No executor available, running save position synchronously")
-                render_task()
-                print(f"[DEBUG] Save position task completed synchronously (no preview update)")
+                render_task()  # This will clear the progress flag in its finally block
             
-        except Exception as err:
-            print(f"[DEBUG] Save Position failed for region {region_index}: {err}")
-            import traceback
-            print(f"[DEBUG] Method error traceback: {traceback.format_exc()}")
+        except Exception:
+            # Clear progress flag on error
+            self._auto_save_in_progress = False
+            self._update_save_overlay_button_state()
+    
+    def _update_save_overlay_button_state(self):
+        """Update the save overlay button enabled/disabled state based on auto-save progress"""
+        try:
+            # Check if we have access to the button
+            if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'save_overlay_btn'):
+                in_progress = getattr(self, '_auto_save_in_progress', False)
+                button = self.image_preview_widget.save_overlay_btn
+                button.setEnabled(not in_progress)
+                
+                if in_progress:
+                    # Store original text if not already stored
+                    if not hasattr(button, '_original_text'):
+                        button._original_text = button.text()
+                    button.setText("⏳")
+                else:
+                    # Restore original text
+                    if hasattr(button, '_original_text'):
+                        button.setText(button._original_text)
+                    else:
+                        button.setText("💾")  # Fallback text
+        except Exception:
+            pass
+    
     # NOTE: Auto-save position is now simplified to only update overlays without attempting
     # to update the translated output preview. Users can manually click "Save & Update Overlay"
     # if they want to see the updated preview in the output tab.
+    # The Save & Update Overlay button is disabled during auto-save to prevent conflicts.
     
     def _get_translation_text_for_region(self, region_index: int) -> str:
         """Get translation text for a region (main thread safe)"""
