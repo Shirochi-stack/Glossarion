@@ -603,6 +603,7 @@ class MangaImagePreviewWidget(QWidget):
         self.main_gui = main_gui  # Store reference to main GUI for config persistence
         self.manual_editing_enabled = False  # Manual editing is disabled by default (preview mode)
         self.translated_folder_path = None  # Path to translated images folder
+        self.cleaned_images_enabled = True  # Show cleaned images when available (enabled by default)
         self._build_ui()
     
     def _build_ui(self):
@@ -870,7 +871,14 @@ class MangaImagePreviewWidget(QWidget):
         self.zoom_out_btn.clicked.connect(self._zoom_out)
         tools_layout.addWidget(self.zoom_out_btn)
         
-        # Add a stretch spacer after zoom controls
+        # Cleaned image toggle button
+        self.cleaned_toggle_btn = self._create_tool_button("✨", "Show cleaned images when available")
+        self.cleaned_toggle_btn.setCheckable(True)
+        self.cleaned_toggle_btn.setChecked(True)  # Enabled by default
+        self.cleaned_toggle_btn.clicked.connect(self._toggle_cleaned_image_mode)
+        tools_layout.addWidget(self.cleaned_toggle_btn)
+        
+        # Add a stretch spacer after zoom and toggle controls
         tools_layout.addStretch()
         
         # MANUAL EDITING TOOLS (hidden when manual editing is off)
@@ -1288,9 +1296,12 @@ class MangaImagePreviewWidget(QWidget):
         self._preserve_rectangles_on_load = preserve_rectangles
         self._preserve_text_overlays_on_load = preserve_text_overlays
         
+        # Check for cleaned image and use it instead of original in src tab if available
+        src_image_path = self._check_for_cleaned_image(image_path)
+        
         # Start loading (happens in background)
-        self.viewer.load_image(image_path)
-        self.current_image_path = image_path
+        self.viewer.load_image(src_image_path)
+        self.current_image_path = image_path  # Still track original path for state management
         
         # Check for translated output and load if available
         self._check_and_load_translated_output(image_path)
@@ -1731,6 +1742,46 @@ class MangaImagePreviewWidget(QWidget):
         except Exception:
             pass
     
+    def _toggle_cleaned_image_mode(self):
+        """Toggle between showing cleaned images vs original images"""
+        try:
+            # Update the state
+            self.cleaned_images_enabled = self.cleaned_toggle_btn.isChecked()
+            
+            # Update button appearance and tooltip
+            if self.cleaned_images_enabled:
+                self.cleaned_toggle_btn.setText("✨")  # Sparkles for enabled
+                self.cleaned_toggle_btn.setToolTip("Show cleaned images when available (enabled)")
+                self.cleaned_toggle_btn.setStyleSheet("""
+                    QToolButton {
+                        background-color: #4a7ba7;
+                        border: 2px solid #5a9fd4;
+                    }
+                    QToolButton:hover {
+                        background-color: #5a9fd4;
+                    }
+                """)
+            else:
+                self.cleaned_toggle_btn.setText("🪶")  # Feather for disabled
+                self.cleaned_toggle_btn.setToolTip("Show original images only (cleaned images disabled)")
+                self.cleaned_toggle_btn.setStyleSheet("""
+                    QToolButton {
+                        background-color: #6c757d;
+                        border: 2px solid #777777;
+                    }
+                    QToolButton:hover {
+                        background-color: #777777;
+                    }
+                """)
+            
+            # If we have a current image, reload it to apply the toggle
+            if self.current_image_path and os.path.exists(self.current_image_path):
+                print(f"[CLEANED_TOGGLE] Reloading image with cleaned mode: {self.cleaned_images_enabled}")
+                self.load_image(self.current_image_path, preserve_rectangles=True, preserve_text_overlays=True)
+            
+        except Exception as e:
+            print(f"[ERROR] Failed to toggle cleaned image mode: {e}")
+    
     def _on_download_images_clicked(self):
         """Handle download images button - consolidate isolated images into structured folder"""
         try:
@@ -1948,3 +1999,70 @@ class MangaImagePreviewWidget(QWidget):
 
         except Exception:
             pass
+    
+    def _check_for_cleaned_image(self, source_image_path: str) -> str:
+        """Check for cleaned version of source image and return it if available, otherwise return original.
+        
+        Args:
+            source_image_path: Path to the original source image
+            
+        Returns:
+            Path to cleaned image if available (and toggle enabled), otherwise original source path
+        """
+        try:
+            # Check if cleaned images are enabled via toggle
+            if not getattr(self, 'cleaned_images_enabled', True):
+                print(f"[SRC] Cleaned images disabled by toggle, using original: {os.path.basename(source_image_path)}")
+                return source_image_path
+            
+            # Build paths to check for cleaned images
+            source_dir = os.path.dirname(source_image_path)
+            source_filename = os.path.basename(source_image_path)
+            source_name_no_ext = os.path.splitext(source_filename)[0]
+            source_ext = os.path.splitext(source_filename)[1]
+            
+            # Look for cleaned image in isolated folder first
+            translated_folder = os.path.join(source_dir, f"{source_name_no_ext}_translated")
+            
+            # 1) Check state manager for saved cleaned image path
+            cleaned_path = None
+            try:
+                if hasattr(self, 'manga_integration') and self.manga_integration and \
+                   hasattr(self.manga_integration, 'image_state_manager') and self.manga_integration.image_state_manager:
+                    state = self.manga_integration.image_state_manager.get_state(source_image_path) or {}
+                    cand = state.get('cleaned_image_path')
+                    if cand and os.path.exists(cand):
+                        cleaned_path = cand
+                        print(f"[SRC] Found cleaned image from state: {os.path.basename(cleaned_path)}")
+            except Exception:
+                pass
+            
+            # 2) Check isolated folder for *_cleaned.* files
+            if not cleaned_path and os.path.exists(translated_folder):
+                image_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
+                for filename in os.listdir(translated_folder):
+                    name_lower = filename.lower()
+                    if (name_lower.startswith(f"{source_name_no_ext.lower()}_cleaned") and 
+                        name_lower.endswith(image_extensions)):
+                        cleaned_path = os.path.join(translated_folder, filename)
+                        print(f"[SRC] Found cleaned image in isolated folder: {os.path.basename(cleaned_path)}")
+                        break
+            
+            # 3) Check same directory with _cleaned suffix
+            if not cleaned_path:
+                cleaned_candidate = os.path.join(source_dir, f"{source_name_no_ext}_cleaned{source_ext}")
+                if os.path.exists(cleaned_candidate):
+                    cleaned_path = cleaned_candidate
+                    print(f"[SRC] Found cleaned image in same directory: {os.path.basename(cleaned_path)}")
+            
+            # Return cleaned image if found, otherwise original
+            if cleaned_path and os.path.exists(cleaned_path):
+                print(f"[SRC] Using cleaned image for src tab: {os.path.basename(cleaned_path)}")
+                return cleaned_path
+            else:
+                print(f"[SRC] No cleaned image found, using original: {os.path.basename(source_image_path)}")
+                return source_image_path
+                
+        except Exception as e:
+            print(f"[SRC] Error checking for cleaned image: {e}")
+            return source_image_path

@@ -13458,19 +13458,50 @@ class MangaTranslationTab(QObject):
             # Create text item
             text_item = QGraphicsTextItem()
             
+            # Set font properties
+            font.setBold(False)
+            font.setKerning(True)
+            
             # Wrap text to fit width
             wrapped_text = self._wrap_text_for_bubble(text, available_width, font, settings)
             text_item.setPlainText(wrapped_text)
             text_item.setFont(font)
             
             # Set text color
-            text_color = QColor(*settings.get('text_color', [0, 0, 0]))
+            text_color_rgb = settings.get('text_color', [0, 0, 0])
+            text_color = QColor(*text_color_rgb)
             text_item.setDefaultTextColor(text_color)
             
-            # Apply shadow if enabled
+            # Apply shadow effect if enabled
             if settings.get('shadow_enabled', False):
-                # Note: QGraphicsTextItem doesn't have built-in shadow, would need QGraphicsDropShadowEffect
-                pass
+                try:
+                    from PySide6.QtWidgets import QGraphicsDropShadowEffect
+                    from PySide6.QtCore import QPointF
+                    
+                    shadow_effect = QGraphicsDropShadowEffect()
+                    shadow_color = QColor(*settings.get('shadow_color', [128, 128, 128]))
+                    shadow_effect.setColor(shadow_color)
+                    shadow_effect.setOffset(
+                        QPointF(settings.get('shadow_offset_x', 1), settings.get('shadow_offset_y', 1))
+                    )
+                    shadow_effect.setBlurRadius(settings.get('shadow_blur', 2))
+                    text_item.setGraphicsEffect(shadow_effect)
+                    print(f"[DEBUG] Applied shadow effect: color={shadow_color.name()}, offset=({settings.get('shadow_offset_x', 1)},{settings.get('shadow_offset_y', 1)}), blur={settings.get('shadow_blur', 2)}")
+                except Exception as shadow_err:
+                    print(f"[DEBUG] Error applying shadow: {shadow_err}")
+            
+            # Improve text layout and alignment
+            text_doc = text_item.document()
+            if text_doc:
+                # Set text alignment to center for better appearance
+                from PySide6.QtGui import QTextOption
+                text_option = QTextOption()
+                text_option.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                text_option.setWrapMode(QTextOption.WrapMode.WordWrap)
+                text_doc.setDefaultTextOption(text_option)
+                
+                # Set document margins for better spacing
+                text_doc.setDocumentMargin(2)
             
             # Calculate vertical centering
             # Get actual text bounding rect to determine height
@@ -13482,14 +13513,18 @@ class MangaTranslationTab(QObject):
             # Ensure text doesn't overflow
             vertical_offset = max(0, vertical_offset)
             
-            # Position text centered vertically with padding
-            text_x = x + padding
+            # Position text centered horizontally and vertically within bubble
+            text_x = x + (w - text_bounding.width()) / 2  # Center horizontally
             text_y = y + padding + vertical_offset
             
-            print(f"[DEBUG] Text positioning: bbox=({x},{y},{w},{h}), text_h={text_height:.0f}, offset={vertical_offset:.0f}, final_pos=({text_x},{text_y})")
+            print(f"[DEBUG] Enhanced text positioning: bbox=({x},{y},{w},{h}), text_size=({text_bounding.width():.0f}x{text_height:.0f}), centered_pos=({text_x:.0f},{text_y:.0f})")
             
             text_item.setPos(text_x, text_y)
             text_item.setZValue(11)  # Above background
+            
+            # Apply force caps if enabled
+            if settings.get('force_caps', False) and wrapped_text:
+                text_item.setPlainText(wrapped_text.upper())
             
             return text_item, font_size
             
@@ -13831,10 +13866,10 @@ class MangaTranslationTab(QObject):
             return text
     
     def _create_background_shape(self, x: int, y: int, w: int, h: int, settings: dict):
-        """Create background shape according to GUI settings"""
+        """Create background shape according to GUI settings with enhanced styling"""
         try:
-            from PySide6.QtWidgets import QGraphicsRectItem, QGraphicsEllipseItem
-            from PySide6.QtGui import QColor, QBrush, QPen
+            from PySide6.QtWidgets import QGraphicsRectItem, QGraphicsEllipseItem, QGraphicsPathItem
+            from PySide6.QtGui import QColor, QBrush, QPen, QPainterPath
             from PySide6.QtCore import QRectF
             
             # Get background settings
@@ -13843,6 +13878,7 @@ class MangaTranslationTab(QObject):
             bg_reduction = settings.get('bg_reduction', 1.0)
             
             # Apply size reduction
+            original_w, original_h = w, h
             if bg_reduction != 1.0:
                 reduction_factor = (1.0 - bg_reduction) / 2.0
                 x_offset = w * reduction_factor
@@ -13852,23 +13888,51 @@ class MangaTranslationTab(QObject):
                 w *= bg_reduction
                 h *= bg_reduction
             
-            # Create background color
+            # Create background color with better opacity handling
             bg_color = QColor(255, 255, 255)  # White background for text readability
-            bg_color.setAlpha(bg_opacity)
+            bg_color.setAlpha(min(255, max(50, int(bg_opacity))))
             
-            # Create shape based on style
+            # Add subtle border for definition
+            border_color = QColor(200, 200, 200, 80)  # Light gray border
+            border_pen = QPen(border_color)
+            border_pen.setWidth(1)
+            
+            # Create shape based on style with enhanced appearance
             if bg_style == 'circle':
-                # Create ellipse
-                bg_shape = QGraphicsEllipseItem(x, y, w, h)
+                # Create ellipse - use full bubble dimensions for more natural oval
+                padding = 2  # Small padding for better visual separation
+                bg_shape = QGraphicsEllipseItem(x - padding, y - padding, w + (2 * padding), h + (2 * padding))
+                bg_shape.setPen(border_pen)
+                print(f"[DEBUG] Created ellipse background: ({x-padding},{y-padding}) size=({w + 2*padding}x{h + 2*padding})")
             elif bg_style == 'box':
-                # Create rounded rectangle
-                bg_shape = QGraphicsRectItem(x, y, w, h)
-            else:  # wrap - per-line backgrounds (simplified to box for overlay)
-                bg_shape = QGraphicsRectItem(x, y, w, h)
+                # Create rounded rectangle with dynamic corner radius
+                corner_radius = min(w, h) * 0.15  # 15% of smaller dimension
+                corner_radius = max(4, min(corner_radius, 12))  # Clamp between 4-12px
+                
+                path = QPainterPath()
+                padding = 2
+                rect = QRectF(x - padding, y - padding, w + (2 * padding), h + (2 * padding))
+                path.addRoundedRect(rect, corner_radius, corner_radius)
+                
+                bg_shape = QGraphicsPathItem(path)
+                bg_shape.setPen(border_pen)
+                print(f"[DEBUG] Created rounded rect background: radius={corner_radius:.1f}px, size=({w + 2*padding}x{h + 2*padding})")
+            else:  # wrap - per-line backgrounds
+                # For wrap mode, create a more organic rounded shape
+                corner_radius = min(w, h) * 0.2  # More rounded for wrap style
+                corner_radius = max(6, min(corner_radius, 15))
+                
+                path = QPainterPath()
+                padding = 1
+                rect = QRectF(x - padding, y - padding, w + (2 * padding), h + (2 * padding))
+                path.addRoundedRect(rect, corner_radius, corner_radius)
+                
+                bg_shape = QGraphicsPathItem(path)
+                bg_shape.setPen(border_pen)
+                print(f"[DEBUG] Created wrap background: radius={corner_radius:.1f}px")
             
-            # Apply styling
+            # Apply enhanced styling
             bg_shape.setBrush(QBrush(bg_color))
-            bg_shape.setPen(QPen(QColor(0, 0, 0, 0)))  # No border
             
             return bg_shape
             
