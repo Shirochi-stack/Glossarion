@@ -385,7 +385,21 @@ class CompactImageViewer(QGraphicsView):
         """Select a rectangle and update visual feedback"""
         # Deselect previous selection
         if self.selected_rect:
-            self.selected_rect.setPen(QPen(QColor(0, 255, 0), 2))  # Green for normal
+            # Check if this was a blue rectangle (has recognized text) and restore blue color
+            pen = self.selected_rect.pen()
+            current_color = pen.color()
+            
+            # If it's currently yellow (selected), determine what color it should be when deselected
+            if current_color == QColor(255, 255, 0):  # Currently yellow (selected)
+                # Check if this rectangle has recognized text (blue) by checking if it has region_index
+                if hasattr(self.selected_rect, 'region_index') or current_color == QColor(0, 150, 255):
+                    # Restore blue color for rectangles with recognized text
+                    self.selected_rect.setPen(QPen(QColor(0, 150, 255), 2))  # Blue for recognized text
+                    self.selected_rect.setBrush(QBrush(QColor(0, 150, 255, 50)))  # Semi-transparent blue fill
+                else:
+                    # Restore green for normal detection rectangles
+                    self.selected_rect.setPen(QPen(QColor(0, 255, 0), 2))  # Green for normal
+                    self.selected_rect.setBrush(QBrush(QColor(0, 255, 0, 50)))  # Semi-transparent green fill
         
         # Select new rectangle
         self.selected_rect = rect_item
@@ -478,11 +492,33 @@ class CompactImageViewer(QGraphicsView):
             print(f"Error overlaying image: {e}")
     
     def delete_selected_rectangle(self):
-        """Delete currently selected rectangle"""
+        """Delete currently selected rectangle and associated text overlays"""
         if self.selected_rect:
+            # Get region index for blue rectangles (ones with recognized text)
+            region_index = None
+            if hasattr(self.selected_rect, 'region_index'):
+                region_index = self.selected_rect.region_index
+            else:
+                # Try to find index by position in rectangles list
+                try:
+                    region_index = self.rectangles.index(self.selected_rect)
+                except ValueError:
+                    region_index = None
+            
+            # Remove from scene and list
             self._scene.removeItem(self.selected_rect)
             self.rectangles.remove(self.selected_rect)
+            
+            # Notify parent widget about deletion (including region index for overlay cleanup)
             self.rectangle_deleted.emit(self.selected_rect.rect())
+            
+            # If this widget has a manga_integration parent, clean up blue rectangle overlays
+            if region_index is not None and hasattr(self, 'manga_integration') and self.manga_integration:
+                try:
+                    self.manga_integration._clean_up_deleted_rectangle_overlays(region_index)
+                except Exception:
+                    pass
+            
             self.selected_rect = None
     
     def clear_scene(self):

@@ -2775,6 +2775,7 @@ class MangaTranslationTab:
         
         # Store reference to manga_integration for clearing overlays
         self.image_preview_widget.manga_integration = self
+        self.image_preview_widget.viewer.manga_integration = self
         
         # Connect image preview workflow signals to translation methods
         self.image_preview_widget.detect_text_clicked.connect(self._on_detect_text_clicked)
@@ -10728,6 +10729,74 @@ class MangaTranslationTab:
         except Exception as e:
             print(f"[DEBUG] Error showing translation popup: {str(e)}")
     
+    def _clean_up_deleted_rectangle_overlays(self, region_index: int):
+        """Clean up text overlays and data associated with a deleted rectangle"""
+        try:
+            current_image = getattr(self.image_preview_widget, 'current_image_path', None)
+            if not current_image:
+                return
+            
+            # Remove from recognition data
+            if hasattr(self, '_recognition_data') and region_index in self._recognition_data:
+                del self._recognition_data[region_index]
+                print(f"[DELETE] Removed recognition data for region {region_index}")
+            
+            # Remove from translation data
+            if hasattr(self, '_translation_data') and region_index in self._translation_data:
+                del self._translation_data[region_index]
+                print(f"[DELETE] Removed translation data for region {region_index}")
+            
+            # Remove associated text overlays from the scene
+            overlays_map = getattr(self, '_text_overlays_by_image', {}) or {}
+            current_overlays = overlays_map.get(current_image, [])
+            
+            # Find and remove overlay groups that match this region index
+            overlays_to_remove = []
+            for overlay_group in current_overlays:
+                if getattr(overlay_group, '_overlay_region_index', None) == region_index:
+                    overlays_to_remove.append(overlay_group)
+            
+            # Remove overlays from scene and tracking
+            for overlay_group in overlays_to_remove:
+                try:
+                    self.image_preview_widget.viewer._scene.removeItem(overlay_group)
+                    current_overlays.remove(overlay_group)
+                    print(f"[DELETE] Removed text overlay for region {region_index}")
+                except Exception as e:
+                    print(f"[DELETE] Error removing overlay: {e}")
+            
+            # Update the overlay map
+            overlays_map[current_image] = current_overlays
+            
+            # Clear state data for this region from persistence
+            if hasattr(self, 'image_state_manager') and self.image_state_manager:
+                try:
+                    state = self.image_state_manager.get_state(current_image) or {}
+                    
+                    # Remove overlay offsets for this region
+                    overlay_offsets = state.get('overlay_offsets', {})
+                    overlay_offsets.pop(str(region_index), None)
+                    overlay_offsets.pop(region_index, None)
+                    
+                    # Remove from recognized texts if present
+                    recognized_texts = state.get('recognized_texts', [])
+                    if recognized_texts and region_index < len(recognized_texts):
+                        # Mark as deleted rather than removing to preserve indices
+                        if region_index < len(recognized_texts):
+                            recognized_texts[region_index] = {'deleted': True}
+                    
+                    # Update state
+                    state['overlay_offsets'] = overlay_offsets
+                    state['recognized_texts'] = recognized_texts
+                    
+                    self.image_state_manager.set_state(current_image, state, save=True)
+                    print(f"[DELETE] Cleaned up persisted state for region {region_index}")
+                except Exception as e:
+                    print(f"[DELETE] Error cleaning persisted state: {e}")
+            
+        except Exception as e:
+            print(f"[DELETE] Error cleaning up deleted rectangle overlays: {e}")
+    
     def clear_text_overlays_for_image(self, image_path: str = None):
         """Clear text overlays for a specific image (or all if no path given)"""
         try:
@@ -10752,7 +10821,7 @@ class MangaTranslationTab:
                     del self._text_overlays_by_image[image_path]
                     print(f"[DEBUG] Cleared text overlays for image: {os.path.basename(image_path)}")
         except Exception as e:
-            print(f"[DEBUG] Error clearing text overlays: {str(e)}")
+            print(f"[DEBUG] Error clearing text overlays: {e}")
     
     def show_text_overlays_for_image(self, image_path: str):
         """Show text overlays for a specific image (restore from memory)"""
