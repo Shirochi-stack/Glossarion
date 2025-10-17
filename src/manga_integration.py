@@ -8192,10 +8192,9 @@ class MangaTranslationTab(QObject):
                         pass
                     viewer._scene.addItem(rect_item)
                     viewer.rectangles.append(rect_item)
-                    # Attach region index and move-sync handler
+                    # Mark as detection-only (no recognized text yet)
                     try:
-                        rect_item.region_index = idx
-                        self._attach_move_sync_to_rectangle(rect_item, idx)
+                        rect_item.is_recognized = False
                     except Exception:
                         pass
                 
@@ -8398,22 +8397,20 @@ class MangaTranslationTab(QObject):
                     
                     pen.setCosmetic(True)
                     rect_item = MoveableRectItem(rect, pen=pen, brush=brush)
-                    # Attach viewer reference so moved emits
+                    # Attach viewer for move signal
                     try:
                         rect_item._viewer = viewer
                     except Exception:
                         pass
                     viewer._scene.addItem(rect_item)
                     viewer.rectangles.append(rect_item)
-                    # Attach region index and move-sync handler for blue rectangles (ones with text)
+                    # Attach flags and menu; mark recognized if we had text
                     try:
+                        rect_item.region_index = idx
+                        rect_item.is_recognized = bool(has_text_for_this_rect)
+                        self._add_context_menu_to_rectangle(rect_item, idx)
                         if has_text_for_this_rect:
-                            rect_item.region_index = idx
                             self._attach_move_sync_to_rectangle(rect_item, idx)
-                        else:
-                            # Remove any region_index from green rectangles that don't have text
-                            if hasattr(rect_item, 'region_index'):
-                                delattr(rect_item, 'region_index')
                     except Exception:
                         pass
                 
@@ -8573,7 +8570,7 @@ class MangaTranslationTab(QObject):
             print(f"[DRAW_BOXES] Drawing {len(self._current_regions)} regions")
             print(f"[DRAW_BOXES] Current rectangles count before drawing: {len(viewer.rectangles)}")
             
-            # Draw boxes for each region
+                    # Draw boxes for each region
             for i, region in enumerate(self._current_regions):
                 bbox = region.get('bbox', [])
                 if len(bbox) >= 4:
@@ -8590,6 +8587,12 @@ class MangaTranslationTab(QObject):
                     
                     # Create rectangle item with colors set from the start (avoids double rendering)
                     rect_item = MoveableRectItem(rect, pen=pen, brush=brush)
+                    # Mark detection-only
+                    try:
+                        rect_item.is_recognized = False
+                        rect_item.region_index = i
+                    except Exception:
+                        pass
                     
                     # Explicitly disable antialiasing on this item to prevent blur artifacts
                     from PySide6.QtWidgets import QGraphicsItem
@@ -8605,9 +8608,11 @@ class MangaTranslationTab(QObject):
                     viewer._scene.addItem(rect_item)
                     viewer.rectangles.append(rect_item)
                     
-                    # Track region index on the rectangle and attach move-sync handler
+                    # Track region index, attach menu, and move-sync handler
                     try:
                         rect_item.region_index = i
+                        rect_item.is_recognized = False
+                        self._add_context_menu_to_rectangle(rect_item, i)
                         self._attach_move_sync_to_rectangle(rect_item, i)
                     except Exception:
                         pass
@@ -10604,6 +10609,10 @@ class MangaTranslationTab(QObject):
                     from PySide6.QtGui import QPen, QBrush, QColor
                     rect_item.setPen(QPen(QColor(0, 150, 255), 2))  # Blue border
                     rect_item.setBrush(QBrush(QColor(0, 150, 255, 50)))  # Semi-transparent blue fill
+                    try:
+                        rect_item.is_recognized = True
+                    except Exception:
+                        pass
                     
                     # Add context menu support to rectangle
                     self._add_context_menu_to_rectangle(rect_item, region_index)
@@ -10799,8 +10808,15 @@ class MangaTranslationTab(QObject):
                         menu = QMenu()
                         
                         # Get recognition data (fresh lookup for up-to-date text)
-                        # Use rect_item.region_index to get the actual stored index for this specific rectangle
-                        actual_index = rect_item.region_index
+                        # Resolve actual index robustly
+                        actual_index = getattr(rect_item, 'region_index', None)
+                        if actual_index is None:
+                            # Fallback: find by identity in viewer list
+                            try:
+                                rects_list = getattr(self.image_preview_widget.viewer, 'rectangles', []) or []
+                                actual_index = rects_list.index(rect_item)
+                            except Exception:
+                                actual_index = 0
                         if hasattr(self, '_recognition_data') and actual_index in self._recognition_data:
                             recognition_text = self._recognition_data[actual_index]['text']
                             # Add action to show OCR text (with better preview formatting)
@@ -10846,17 +10862,18 @@ class MangaTranslationTab(QObject):
                             translate_action.triggered.connect(make_translate_handler(actual_index, actual_prompt))
                             menu.addAction(translate_action)
                         
-                        # Add "OCR This Text" option for any rectangle (red/green/blue)
+                        # Add "OCR This Text" option ONLY for detection/red rectangles (not blue)
                         try:
-                            if not menu.isEmpty():
-                                menu.addSeparator()
+                            if not getattr(rect_item, 'is_recognized', False):
+                                if not menu.isEmpty():
+                                    menu.addSeparator()
+                                ocr_action = QAction("🔎 OCR This Text", menu)
+                                def make_ocr_handler(idx):
+                                    return lambda: self._handle_ocr_this_text(idx)
+                                ocr_action.triggered.connect(make_ocr_handler(actual_index))
+                                menu.addAction(ocr_action)
                         except Exception:
                             pass
-                        ocr_action = QAction("🔎 OCR This Text", menu)
-                        def make_ocr_handler(idx):
-                            return lambda: self._handle_ocr_this_text(idx)
-                        ocr_action.triggered.connect(make_ocr_handler(actual_index))
-                        menu.addAction(ocr_action)
                         
                         if not menu.isEmpty():
                             # Set menu properties for better display
@@ -16225,6 +16242,10 @@ class MangaTranslationTab(QObject):
                                 rects[region_index].setPen(QPen(QColor(0,150,255), 2))
                                 rects[region_index].setBrush(QBrush(QColor(0,150,255,50)))
                                 rects[region_index].region_index = region_index
+                                try:
+                                    rects[region_index].is_recognized = True
+                                except Exception:
+                                    pass
                                 self._add_context_menu_to_rectangle(rects[region_index], region_index)
                                 try:
                                     self._attach_move_sync_to_rectangle(rects[region_index], region_index)

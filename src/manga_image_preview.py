@@ -403,21 +403,21 @@ class CompactImageViewer(QGraphicsView):
         # Deselect previous selection
         if self.selected_rect:
             print(f"[SELECTION] Deselecting previous rectangle")
-            # Check if this was a blue rectangle (has recognized text) and restore blue color
+            # Determine base color from recognition flag, not by presence of region_index
+            was_recognized = getattr(self.selected_rect, 'is_recognized', False)
             pen = self.selected_rect.pen()
             current_color = pen.color()
             
-            # If it's currently yellow (selected), determine what color it should be when deselected
+            # If it's currently yellow (selected), restore to proper base color
             if current_color == QColor(255, 255, 0):  # Currently yellow (selected)
-                # Check if this rectangle has recognized text (blue) by checking if it has region_index
-                if hasattr(self.selected_rect, 'region_index') or current_color == QColor(0, 150, 255):
+                if was_recognized:
                     # Restore blue color for rectangles with recognized text
                     self.selected_rect.setPen(QPen(QColor(0, 150, 255), 2))  # Blue for recognized text
                     self.selected_rect.setBrush(QBrush(QColor(0, 150, 255, 50)))  # Semi-transparent blue fill
                 else:
-                    # Restore green for normal detection rectangles
-                    self.selected_rect.setPen(QPen(QColor(0, 255, 0), 2))  # Green for normal
-                    self.selected_rect.setBrush(QBrush(QColor(0, 255, 0, 50)))  # Semi-transparent green fill
+                    # Restore green for detection-only rectangles
+                    self.selected_rect.setPen(QPen(QColor(0, 255, 0), 2))
+                    self.selected_rect.setBrush(QBrush(QColor(0, 255, 0, 50)))
         
         # Select new rectangle
         self.selected_rect = rect_item
@@ -974,6 +974,8 @@ class MangaImagePreviewWidget(QWidget):
         self.viewer.rectangle_created.connect(lambda _: self._persist_rectangles_state())
         self.viewer.rectangle_deleted.connect(lambda _: self._persist_rectangles_state())
         self.viewer.rectangle_moved.connect(lambda _: self._persist_rectangles_state())
+        # Attach context menu to newly created rectangles (red)
+        self.viewer.rectangle_created.connect(self._on_rectangle_created)
         # Auto-apply save position on rectangle movement
         self.viewer.rectangle_moved.connect(self._on_rectangle_moved)
         
@@ -1539,6 +1541,29 @@ class MangaImagePreviewWidget(QWidget):
             if item_path == image_path:
                 self.output_thumbnail_list.setCurrentItem(item)
                 break
+    
+    def _on_rectangle_created(self, _rect: QRectF):
+        """Assign index/flags and attach context menu to the newest rectangle."""
+        try:
+            # Get latest rectangle item
+            if not hasattr(self.viewer, 'rectangles') or not self.viewer.rectangles:
+                return
+            rect_item = self.viewer.rectangles[-1]
+            idx = len(self.viewer.rectangles) - 1
+            # Mark as detection/red (no OCR yet)
+            try:
+                rect_item.region_index = idx
+                rect_item.is_recognized = False
+            except Exception:
+                pass
+            # Attach context menu via integration if available
+            try:
+                if hasattr(self, 'manga_integration') and self.manga_integration:
+                    self.manga_integration._add_context_menu_to_rectangle(rect_item, idx)
+            except Exception:
+                pass
+        except Exception:
+            pass
     
     def _on_thumbnail_clicked(self, item):
         """Handle thumbnail click - load the corresponding image"""
