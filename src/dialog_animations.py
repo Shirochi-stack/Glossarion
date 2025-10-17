@@ -35,7 +35,8 @@ def add_fade_in_animation(dialog, duration=250, on_complete=None):
         # Remove effect when animation finishes to prevent performance issues
         def _cleanup():
             try:
-                dialog.setGraphicsEffect(None)
+                if dialog and not dialog.isHidden():
+                    dialog.setGraphicsEffect(None)
                 if on_complete:
                     on_complete()
             except:
@@ -43,6 +44,16 @@ def add_fade_in_animation(dialog, duration=250, on_complete=None):
         
         animation.finished.connect(_cleanup)
         
+        # Add error handling for the animation property
+        try:
+            # Verify the effect is still valid before starting
+            if effect.parent() is None:
+                dialog.setGraphicsEffect(None)
+                return None
+        except:
+            dialog.setGraphicsEffect(None)
+            return None
+            
         # Start animation
         animation.start()
         
@@ -50,6 +61,19 @@ def add_fade_in_animation(dialog, duration=250, on_complete=None):
         if not hasattr(dialog, '_fade_animations'):
             dialog._fade_animations = []
         dialog._fade_animations.append(animation)
+        
+        # Add cleanup when dialog is destroyed
+        def _stop_animation_on_destroy():
+            try:
+                if animation and animation.state() == animation.Running:
+                    animation.stop()
+            except:
+                pass
+        
+        try:
+            dialog.destroyed.connect(_stop_animation_on_destroy)
+        except:
+            pass
         
         return animation
         
@@ -93,12 +117,27 @@ def add_fade_out_animation(dialog, duration=200, on_complete=None):
             try:
                 if on_complete:
                     on_complete()
-                dialog.setGraphicsEffect(None)
+                if dialog and not dialog.isHidden():
+                    dialog.setGraphicsEffect(None)
             except:
                 pass
         
         animation.finished.connect(_cleanup)
         
+        # Add error handling for the animation property
+        try:
+            # Verify the effect is still valid before starting
+            if effect.parent() is None:
+                dialog.setGraphicsEffect(None)
+                if on_complete:
+                    on_complete()
+                return None
+        except:
+            dialog.setGraphicsEffect(None)
+            if on_complete:
+                on_complete()
+            return None
+            
         # Start animation
         animation.start()
         
@@ -106,6 +145,19 @@ def add_fade_out_animation(dialog, duration=200, on_complete=None):
         if not hasattr(dialog, '_fade_animations'):
             dialog._fade_animations = []
         dialog._fade_animations.append(animation)
+        
+        # Add cleanup when dialog is destroyed
+        def _stop_animation_on_destroy():
+            try:
+                if animation and animation.state() == animation.Running:
+                    animation.stop()
+            except:
+                pass
+        
+        try:
+            dialog.destroyed.connect(_stop_animation_on_destroy)
+        except:
+            pass
         
         return animation
         

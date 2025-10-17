@@ -7695,10 +7695,15 @@ class MangaTranslationTab(QObject):
         """Clear all files from the list"""
         self.file_listbox.clear()
         self.selected_files.clear()
-        # Clear image preview when list is cleared
+        # Clear image preview but preserve blue rectangles
         if hasattr(self, 'image_preview_widget'):
-            self.image_preview_widget.clear()
+            # Only reset file list - don't call clear() which removes blue rectangles
             self.image_preview_widget.set_image_list([])
+            self.image_preview_widget.current_image_path = None
+            self.image_preview_widget.file_label.setText("No image loaded")
+            # Show placeholder without clearing detection state
+            self.image_preview_widget._show_placeholder_icon()
+            self.image_preview_widget._show_output_placeholder()
     
     def _on_file_selection_changed(self):
         """Handle file list selection changes to update image preview"""
