@@ -1970,14 +1970,11 @@ class MangaImagePreviewWidget(QWidget):
                     return True
                 return False
 
-            # 1) Prefer any translated image inside the isolated folder
+            # 1) Prefer the translated image that matches the source filename in the isolated folder
             if os.path.exists(translated_folder) and os.path.isdir(translated_folder):
-                image_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
-                for filename in os.listdir(translated_folder):
-                    if filename.lower().endswith(image_extensions):
-                        translated_path = os.path.join(translated_folder, filename)
-                        if _load_output(translated_path):
-                            return
+                expected_translated = os.path.join(translated_folder, source_filename)
+                if _load_output(expected_translated):
+                    return
 
             # 2) No translated image found — try cleaned image from state or naming convention
             cleaned_path = None
@@ -2063,7 +2060,7 @@ class MangaImagePreviewWidget(QWidget):
             # Look for cleaned image in isolated folder first
             translated_folder = os.path.join(source_dir, f"{source_name_no_ext}_translated")
             
-            # 1) Check state manager for saved cleaned image path
+            # 1) Check state manager for saved cleaned image path (but only if it lives alongside this source)
             cleaned_path = None
             try:
                 if hasattr(self, 'manga_integration') and self.manga_integration and \
@@ -2071,8 +2068,24 @@ class MangaImagePreviewWidget(QWidget):
                     state = self.manga_integration.image_state_manager.get_state(source_image_path) or {}
                     cand = state.get('cleaned_image_path')
                     if cand and os.path.exists(cand):
-                        cleaned_path = cand
-                        print(f"[SRC] Found cleaned image from state: {os.path.basename(cleaned_path)}")
+                        # Accept only if the path is inside the expected translated folder or the same directory
+                        try:
+                            cand_abs = os.path.abspath(cand)
+                            tdir_abs = os.path.abspath(translated_folder)
+                            sdir_abs = os.path.abspath(source_dir)
+                            def _under(p, base):
+                                try:
+                                    return os.path.commonpath([os.path.normcase(p), os.path.normcase(base)]) == os.path.normcase(base)
+                                except Exception:
+                                    return False
+                            if _under(cand_abs, tdir_abs) or _under(cand_abs, sdir_abs):
+                                cleaned_path = cand_abs
+                                print(f"[SRC] Found cleaned image from state: {os.path.basename(cleaned_path)}")
+                            else:
+                                # Ignore stale path from another folder/session
+                                cleaned_path = None
+                        except Exception:
+                            cleaned_path = None
             except Exception:
                 pass
             

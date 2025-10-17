@@ -7734,6 +7734,13 @@ class MangaTranslationTab(QObject):
                 # Load the image into the preview (always visible) - ALWAYS USE SOURCE
                 if hasattr(self, 'image_preview_widget'):
                     if os.path.exists(image_path):
+                        # Proactively clear the output viewer to avoid showing a previous session's image
+                        try:
+                            if hasattr(self.image_preview_widget, 'output_viewer') and self.image_preview_widget.output_viewer:
+                                self.image_preview_widget.output_viewer.clear_scene()
+                                self.image_preview_widget.current_translated_path = None
+                        except Exception:
+                            pass
                         # Just load the source image - tabbed view will handle translated output
                         self.image_preview_widget.load_image(image_path)
                         # After loading, restore any saved rectangles/overlays for this image
@@ -11597,6 +11604,40 @@ class MangaTranslationTab(QObject):
                     # Refresh the text overlay for this region
                     if changed:
                         try:
+                            # Persist updated translated_texts to state so overlays restore across sessions
+                            try:
+                                current_image = getattr(self.image_preview_widget, 'current_image_path', None)
+                                if current_image and hasattr(self, 'image_state_manager') and self.image_state_manager:
+                                    state = self.image_state_manager.get_state(current_image) or {}
+                                    tlist = state.get('translated_texts') or []
+                                    # Ensure list size
+                                    if len(tlist) <= int(region_index):
+                                        tlist = list(tlist) + [{} for _ in range(int(region_index) + 1 - len(tlist))]
+                                    # Determine bbox for this region
+                                    bbox = None
+                                    try:
+                                        if hasattr(self, '_recognition_data') and int(region_index) in self._recognition_data:
+                                            bbox = self._recognition_data[int(region_index)].get('bbox')
+                                    except Exception:
+                                        bbox = None
+                                    if not bbox:
+                                        try:
+                                            rects = getattr(self.image_preview_widget.viewer, 'rectangles', []) or []
+                                            if 0 <= int(region_index) < len(rects):
+                                                br = rects[int(region_index)].sceneBoundingRect()
+                                                bbox = [int(br.x()), int(br.y()), int(br.width()), int(br.height())]
+                                        except Exception:
+                                            bbox = [0, 0, 100, 100]
+                                    tlist[int(region_index)] = {
+                                        'original': {'text': new_original, 'region_index': int(region_index)},
+                                        'translation': new_translation,
+                                        'bbox': bbox or [0, 0, 100, 100]
+                                    }
+                                    state['translated_texts'] = tlist
+                                    self.image_state_manager.set_state(current_image, state, save=True)
+                            except Exception as persist_err:
+                                self._log(f"⚠️ Failed to persist translation change: {persist_err}", "warning")
+                            
                             # Animate button during async operation
                             old_text = save_btn.text()
                             save_btn.setEnabled(False)
@@ -16101,6 +16142,25 @@ class MangaTranslationTab(QObject):
                                 image_path = data
                                 preserve_rectangles = False
                                 preserve_overlays = False
+                            
+                            # Gate: only allow loading into the preview if this path matches the current selection
+                            try:
+                                current_selected = None
+                                if hasattr(self, 'file_listbox') and self.file_listbox and self.file_listbox.currentRow() >= 0:
+                                    idx = self.file_listbox.currentRow()
+                                    if 0 <= idx < len(self.selected_files):
+                                        current_selected = self.selected_files[idx]
+                                current_loaded = getattr(self.image_preview_widget, 'current_image_path', None)
+                                if image_path and current_selected and os.path.normcase(os.path.normpath(image_path)) != os.path.normcase(os.path.normpath(current_selected)):
+                                    # Ignore background updates for non-current images
+                                    print(f"[LOAD_IMAGE] Skipping non-current image update: {os.path.basename(image_path)}")
+                                    return
+                                # Also ignore if we're trying to replace a different image than currently loaded
+                                if image_path and current_loaded and os.path.normcase(os.path.normpath(image_path)) != os.path.normcase(os.path.normpath(current_loaded)):
+                                    print(f"[LOAD_IMAGE] Skipping update that doesn't match current loaded image")
+                                    return
+                            except Exception:
+                                pass
                             
                             # Store original path for state restoration
                             original_image_path = image_path
