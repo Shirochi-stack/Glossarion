@@ -3798,7 +3798,7 @@ class MangaTranslationTab(QObject):
             icon_label = QLabel()
             icon_pixmap = QPixmap(icon_path)
             # Scale to a reasonable size
-            scaled_pixmap = icon_pixmap.scaled(120, 120, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            scaled_pixmap = icon_pixmap.scaled(150, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             icon_label.setPixmap(scaled_pixmap)
             icon_label.setAlignment(Qt.AlignCenter)
             icon_layout.addWidget(icon_label)
