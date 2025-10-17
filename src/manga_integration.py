@@ -4205,6 +4205,35 @@ class MangaTranslationTab(QObject):
         self.bubble_size_factor_checkbox.stateChanged.connect(lambda: (setattr(self, 'bubble_size_factor_value', self.bubble_size_factor_checkbox.isChecked()), self._save_rendering_settings(), self._apply_rendering_settings()))
         sizing_group_layout.addWidget(self.bubble_size_factor_checkbox)
 
+        # Safe area toggle
+        self.safe_area_enabled_checkbox = self._create_styled_checkbox("Use safe area (mask/polygon)")
+        self.safe_area_enabled_checkbox.setChecked(getattr(self, 'safe_area_enabled_value', True))
+        self.safe_area_enabled_checkbox.stateChanged.connect(lambda: (setattr(self, 'safe_area_enabled_value', self.safe_area_enabled_checkbox.isChecked()), self._save_rendering_settings(), self._apply_rendering_settings()))
+        sizing_group_layout.addWidget(self.safe_area_enabled_checkbox)
+
+        # Safe area scale row
+        row_sa = QWidget()
+        sa_layout = QHBoxLayout(row_sa)
+        sa_layout.setContentsMargins(20, 2, 0, 4)
+        sa_layout.setSpacing(10)
+        sa_label = QLabel("Safe Area Scale:")
+        sa_label.setMinimumWidth(150)
+        sa_layout.addWidget(sa_label)
+        self.safe_area_scale_spinbox = QDoubleSpinBox()
+        self.safe_area_scale_spinbox.setMinimum(0.70)
+        self.safe_area_scale_spinbox.setMaximum(1.10)
+        self.safe_area_scale_spinbox.setSingleStep(0.01)
+        self.safe_area_scale_spinbox.setValue(getattr(self, 'safe_area_scale_value', 1.0))
+        self.safe_area_scale_spinbox.setMinimumWidth(100)
+        self.safe_area_scale_spinbox.valueChanged.connect(lambda value: (self._on_safe_area_scale_changed(value), self._save_rendering_settings(), self._apply_rendering_settings()))
+        self._disable_spinbox_mousewheel(self.safe_area_scale_spinbox)
+        sa_layout.addWidget(self.safe_area_scale_spinbox)
+        self.safe_area_scale_value_label = QLabel(f"{getattr(self, 'safe_area_scale_value', 1.0):.2f}")
+        self.safe_area_scale_value_label.setMinimumWidth(50)
+        sa_layout.addWidget(self.safe_area_scale_value_label)
+        sa_layout.addStretch()
+        sizing_group_layout.addWidget(row_sa)
+
         # Line Spacing row with live value label
         row_ls = QWidget()
         ls_layout = QHBoxLayout(row_ls)
@@ -5050,6 +5079,15 @@ class MangaTranslationTab(QObject):
     
     def _on_ft_only_bg_opacity_changed(self):
         """Handle free text only background opacity checkbox change (PySide6)"""
+
+    def _on_safe_area_scale_changed(self, value: float):
+        """Handle safe area scale change (PySide6)"""
+        try:
+            self.safe_area_scale_value = float(value)
+            if hasattr(self, 'safe_area_scale_value_label'):
+                self.safe_area_scale_value_label.setText(f"{float(value):.2f}")
+        except Exception:
+            pass
         # Update the value from checkbox state
         self.free_text_only_bg_opacity_value = self.ft_only_checkbox.isChecked()
     
@@ -5315,6 +5353,13 @@ class MangaTranslationTab(QObject):
         
         self.strict_text_wrapping_value = config.get('manga_strict_text_wrapping', True)
         
+        # Safe area controls
+        self.safe_area_enabled_value = bool(config.get('manga_safe_area_enabled', True))
+        try:
+            self.safe_area_scale_value = float(config.get('manga_safe_area_scale', 1.0))
+        except Exception:
+            self.safe_area_scale_value = 1.0
+        
         # Font color settings
         manga_text_color = config.get('manga_text_color', [102, 0, 0])
         self.text_color_r_value = manga_text_color[0]
@@ -5461,6 +5506,15 @@ class MangaTranslationTab(QObject):
                 self.main_gui.config['manga_bg_style'] = self.bg_style_value
             if hasattr(self, 'bg_reduction_value'):
                 self.main_gui.config['manga_bg_reduction'] = self.bg_reduction_value
+            
+            # Save safe area settings
+            if hasattr(self, 'safe_area_enabled_value'):
+                self.main_gui.config['manga_safe_area_enabled'] = bool(self.safe_area_enabled_value)
+            if hasattr(self, 'safe_area_scale_value'):
+                try:
+                    self.main_gui.config['manga_safe_area_scale'] = float(self.safe_area_scale_value)
+                except Exception:
+                    pass
             
             # Save free-text-only background opacity toggle
             if hasattr(self, 'free_text_only_bg_opacity_value'):
@@ -16812,6 +16866,12 @@ class MangaTranslationTab(QObject):
             pass
         
         # Push rendering settings to translator
+        # Also propagate safe area controls
+        try:
+            self.translator.safe_area_enabled = bool(getattr(self, 'safe_area_enabled_value', True))
+            self.translator.safe_area_scale = float(getattr(self, 'safe_area_scale_value', 1.0))
+        except Exception:
+            pass
         self.translator.update_text_rendering_settings(
             bg_opacity=self.bg_opacity_value,
             bg_style=self.bg_style_value,
@@ -16906,6 +16966,10 @@ class MangaTranslationTab(QObject):
         self._log(f"  Shadow: {'Enabled' if self.shadow_enabled_value else 'Disabled'}", "info")
         try:
             self._log(f"  Free-text-only BG opacity: {'Enabled' if getattr(self, 'free_text_only_bg_opacity_value', False) else 'Disabled'}", "info")
+        except Exception:
+            pass
+        try:
+            self._log(f"  Safe area: {'Enabled' if bool(getattr(self, 'safe_area_enabled_value', True)) else 'Disabled'} (scale {float(getattr(self, 'safe_area_scale_value', 1.0)):.2f})", "info")
         except Exception:
             pass
         self._log(f"  Full Page Context: {'Enabled' if self.full_page_context_value else 'Disabled'}", "info")

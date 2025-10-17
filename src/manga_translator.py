@@ -1186,7 +1186,8 @@ class MangaTranslator:
         manga_text_color = config.get('manga_text_color', [0, 0, 0])
         self.text_color = tuple(manga_text_color)  # Convert list to tuple
         
-        self.outline_color = (255, 255, 255)  # White outline
+        # Outline color defaults to white, but when shadow is enabled we tint outline to the shadow color
+        self.outline_color = (255, 255, 255)
         self.outline_width_factor = 15  # Divider for font_size to get outline width
         self.selected_font_style = config.get('manga_font_path', None)  # Will store selected font path
         self.custom_font_size = config.get('manga_font_size', None) if config.get('manga_font_size', 0) > 0 else None
@@ -1195,11 +1196,24 @@ class MangaTranslator:
         self.shadow_enabled = config.get('manga_shadow_enabled', False)
         manga_shadow_color = config.get('manga_shadow_color', [128, 128, 128])
         self.shadow_color = tuple(manga_shadow_color)  # Convert list to tuple
+        # If shadow is enabled, use its color for outline as well (prevents "white shadow" look)
+        if self.shadow_enabled and isinstance(self.shadow_color, tuple) and len(self.shadow_color) == 3:
+            self.outline_color = self.shadow_color
         self.shadow_offset_x = config.get('manga_shadow_offset_x', 2)
         self.shadow_offset_y = config.get('manga_shadow_offset_y', 2)
         self.shadow_blur = config.get('manga_shadow_blur', 0)  # 0 = sharp shadow, higher = more blur
         self.force_caps_lock = config.get('manga_force_caps_lock', False)
         self.skip_inpainting = config.get('manga_skip_inpainting', False)  # Default: perform inpainting
+
+        # Safe area controls
+        self.safe_area_enabled = bool(config.get('manga_safe_area_enabled', True))
+        try:
+            self.safe_area_scale = float(config.get('manga_safe_area_scale', 1.0))
+        except Exception:
+            self.safe_area_scale = 1.0
+        # Clamp scale
+        if self.safe_area_scale <= 0:
+            self.safe_area_scale = 1.0
 
         # Font size multiplier mode - Load from config
         self.font_size_mode = config.get('manga_font_size_mode', 'fixed')  # 'fixed' or 'multiplier'
@@ -2634,6 +2648,14 @@ class MangaTranslator:
         if shadow_color is not None:
             self.shadow_color = shadow_color
             self._log(f"  Shadow color: RGB{shadow_color}", "info")
+        # Keep outline color in sync so users don't see a white "shadow" from the outline
+        try:
+            if self.shadow_enabled and self.shadow_color is not None:
+                self.outline_color = self.shadow_color
+            else:
+                self.outline_color = (255, 255, 255)
+        except Exception:
+            pass
         if shadow_offset_x is not None:
             self.shadow_offset_x = shadow_offset_x
         if shadow_offset_y is not None:
@@ -9828,7 +9850,10 @@ class MangaTranslator:
                 # CRITICAL: Always prefer mask bounds when available (most accurate)
                 # Mask bounds are especially important for Azure/Google without RT-DETR,
                 # where OCR polygons are unreliable.
-                if use_mask_for_rendering and text_mask is not None:
+                if hasattr(self, 'safe_area_enabled') and not self.safe_area_enabled:
+                    # Bypass safe area completely
+                    render_x, render_y, render_w, render_h = region.bounding_box
+                elif use_mask_for_rendering and text_mask is not None:
                     # Use mask bounds directly - most accurate method
                     safe_x, safe_y, safe_w, safe_h = self.get_safe_text_area(
                         region, 
@@ -9836,10 +9861,14 @@ class MangaTranslator:
                         full_mask=text_mask
                     )
                     render_x, render_y, render_w, render_h = safe_x, safe_y, safe_w, safe_h
-                elif hasattr(region, 'vertices') and region.vertices:
-                    # Fallback: use polygon-based safe area (for RT-DETR regions)
-                    safe_x, safe_y, safe_w, safe_h = self.get_safe_text_area(region, use_mask_bounds=False)
                     render_x, render_y, render_w, render_h = safe_x, safe_y, safe_w, safe_h
+                elif hasattr(region, 'vertices') and region.vertices:
+                    if hasattr(self, 'safe_area_enabled') and not self.safe_area_enabled:
+                        render_x, render_y, render_w, render_h = region.bounding_box
+                    else:
+                        # Fallback: use polygon-based safe area (for RT-DETR regions)
+                        safe_x, safe_y, safe_w, safe_h = self.get_safe_text_area(region, use_mask_bounds=False)
+                        render_x, render_y, render_w, render_h = safe_x, safe_y, safe_w, safe_h
                 else:
                     # Last resort: use simple bounding box
                     render_x, render_y, render_w, render_h = x, y, w, h
@@ -9979,7 +10008,10 @@ class MangaTranslator:
                 # CRITICAL: Always prefer mask bounds when available (most accurate)
                 # Mask bounds are especially important for Azure/Google without RT-DETR,
                 # where OCR polygons are unreliable.
-                if use_mask_for_rendering and text_mask is not None:
+                if hasattr(self, 'safe_area_enabled') and not self.safe_area_enabled:
+                    # Bypass safe area completely
+                    render_x, render_y, render_w, render_h = x, y, w, h
+                elif use_mask_for_rendering and text_mask is not None:
                     # Use mask bounds directly - most accurate method
                     safe_x, safe_y, safe_w, safe_h = self.get_safe_text_area(
                         region,
@@ -9988,9 +10020,12 @@ class MangaTranslator:
                     )
                     render_x, render_y, render_w, render_h = safe_x, safe_y, safe_w, safe_h
                 elif hasattr(region, 'vertices') and region.vertices:
-                    # Fallback: use polygon-based safe area (for RT-DETR regions)
-                    safe_x, safe_y, safe_w, safe_h = self.get_safe_text_area(region, use_mask_bounds=False)
-                    render_x, render_y, render_w, render_h = safe_x, safe_y, safe_w, safe_h
+                    if hasattr(self, 'safe_area_enabled') and not self.safe_area_enabled:
+                        render_x, render_y, render_w, render_h = x, y, w, h
+                    else:
+                        # Fallback: use polygon-based safe area (for RT-DETR regions)
+                        safe_x, safe_y, safe_w, safe_h = self.get_safe_text_area(region, use_mask_bounds=False)
+                        render_x, render_y, render_w, render_h = safe_x, safe_y, safe_w, safe_h
                 else:
                     # Last resort: use simple bounding box
                     render_x, render_y, render_w, render_h = x, y, w, h
@@ -10468,17 +10503,33 @@ class MangaTranslator:
             base_margin = min(0.98, base_margin + 0.08)
             self._log(f"  🎯 Azure/Google non-RT-DETR mode: Using aggressive {int(base_margin*100)}% margin", "debug")
         
+        # DISABLE SAFE AREA entirely if requested
+        try:
+            if hasattr(self, 'safe_area_enabled') and not self.safe_area_enabled:
+                x, y, w, h = region.bounding_box
+                return int(x), int(y), int(w), int(h)
+        except Exception:
+            pass
+
         # OPTION 1: Use mask boundaries directly (most accurate)
         if use_mask_bounds and full_mask is not None:
             mask_x, mask_y, mask_w, mask_h = self.get_mask_bounds(region, full_mask)
-            # Use the FULL mask bounds directly - the mask already represents the accurate
-            # inpainted area from the inpainting process. The inpainting itself already includes
-            # padding/margins, so we don't need to shrink further. Using 100% maximizes text
-            # utilization and prevents the "text too small" issue.
-            
-            # CRITICAL: Use 100% of mask area for maximum text utilization
-            # The inpainting mask already has built-in margins from the mask generation process
+            # Start from mask bounds
             safe_x, safe_y, safe_w, safe_h = mask_x, mask_y, mask_w, mask_h
+            # Apply adjustable scale around center if requested
+            try:
+                scale = float(getattr(self, 'safe_area_scale', 1.0))
+                if scale != 1.0:
+                    cx = safe_x + safe_w / 2.0
+                    cy = safe_y + safe_h / 2.0
+                    new_w = max(1, int(round(safe_w * scale)))
+                    new_h = max(1, int(round(safe_h * scale)))
+                    safe_x = int(round(cx - new_w / 2.0))
+                    safe_y = int(round(cy - new_h / 2.0))
+                    safe_w = new_w
+                    safe_h = new_h
+            except Exception:
+                pass
             
             if not getattr(self, 'concise_logs', False):
                 self._log(f"  📐 Using FULL mask bounds: {mask_w}×{mask_h} (100% utilization)", "debug")
@@ -10534,6 +10585,13 @@ class MangaTranslator:
             except Exception:
                 margin_factor = base_margin
         
+        # Apply user scale to margin factor
+        try:
+            user_scale = float(getattr(self, 'safe_area_scale', 1.0))
+            margin_factor = max(0.5, min(1.0, margin_factor * user_scale))
+        except Exception:
+            pass
+
         # Convert vertices to numpy array for boundingRect
         vertices_np = np.array(region.vertices, dtype=np.int32)
         x, y, w, h = cv2.boundingRect(vertices_np)
