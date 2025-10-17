@@ -10794,6 +10794,97 @@ class MangaTranslationTab(QObject):
         except Exception as e:
             print(f"[DEBUG] Error adding context menu: {str(e)}")
     
+    def _relayout_overlay_for_region(self, region_index: int):
+        """Re-layout the overlay text to fit the current blue rectangle (auto-resize like pipeline)."""
+        try:
+            current_image = getattr(self.image_preview_widget, 'current_image_path', None)
+            if not current_image:
+                return
+            overlays_map = getattr(self, '_text_overlays_by_image', {}) or {}
+            groups = overlays_map.get(current_image, [])
+            target = None
+            for g in groups:
+                if getattr(g, '_overlay_region_index', None) == region_index:
+                    target = g
+                    break
+            if target is None:
+                return
+            # Get rectangle bounds
+            rects = getattr(self.image_preview_widget.viewer, 'rectangles', []) or []
+            if not (0 <= int(region_index) < len(rects)):
+                return
+            br = rects[int(region_index)].sceneBoundingRect()
+            x, y, w, h = int(br.x()), int(br.y()), int(br.width()), int(br.height())
+            if w <= 0 or h <= 0:
+                return
+            # Get text
+            text = None
+            try:
+                if hasattr(self, '_translation_data') and isinstance(self._translation_data, dict):
+                    td = self._translation_data.get(int(region_index))
+                    if td:
+                        text = td.get('translation')
+            except Exception:
+                pass
+            if not text:
+                text = getattr(target, '_overlay_original_text', '')
+            if text is None:
+                text = ''
+            # Settings with background forced off for source tab
+            settings = self._get_manga_rendering_settings()
+            try:
+                settings['show_background'] = False
+                settings['bg_opacity'] = 0
+            except Exception:
+                pass
+            # Create new text item sized to current rectangle
+            new_text_item, _ = self._create_manga_text_item(text, x, y, w, h, settings)
+            if new_text_item is None:
+                return
+            viewer = self.image_preview_widget.viewer
+            # Replace text item in group
+            try:
+                old_text = getattr(target, '_overlay_text_item', None)
+                if old_text is not None:
+                    try:
+                        target.removeFromGroup(old_text)
+                    except Exception:
+                        pass
+                    try:
+                        viewer._scene.removeItem(old_text)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            # Add new text to scene and group
+            viewer._scene.addItem(new_text_item)
+            try:
+                target.addToGroup(new_text_item)
+            except Exception:
+                pass
+            try:
+                target._overlay_text_item = new_text_item
+                target._overlay_bbox_size = (w, h)
+            except Exception:
+                pass
+            # Update transparent overlay rect to new size if present
+            try:
+                for child in target.childItems():
+                    if hasattr(child, 'region_index') and getattr(child, 'region_index') == region_index:
+                        # This is the transparent overlay rect
+                        child.setRect(x, y, w, h)
+                        break
+            except Exception:
+                pass
+            # Force scene update
+            try:
+                viewer._scene.update()
+                viewer.viewport().update()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     def _attach_move_sync_to_rectangle(self, rect_item, region_index: int):
         """Attach a move handler so that when the blue rectangle is moved,
         the corresponding text overlay group moves with it and state is persisted.
@@ -10887,6 +10978,12 @@ class MangaTranslationTab(QObject):
                         # Persist only this region's overlay offset to avoid touching others
                         try:
                             self._persist_single_overlay_offset(current_image, idx, target)
+                        except Exception:
+                            pass
+
+                        # Re-layout overlay to fit the new rectangle size (auto-resize like pipeline)
+                        try:
+                            self._relayout_overlay_for_region(idx)
                         except Exception:
                             pass
                     
@@ -13119,8 +13216,19 @@ class MangaTranslationTab(QObject):
                     translation = result.get('translation', '')
                     region_index = (result.get('original', {}) or {}).get('region_index', i)
                     
-                    if bbox and len(bbox) >= 4:
-                        x, y, w, h = bbox
+                    # Prefer current BLUE rectangle geometry if available; fallback to bbox
+                    x = y = w = h = None
+                    try:
+                        rects = getattr(self.image_preview_widget.viewer, 'rectangles', []) or []
+                        if 0 <= int(region_index) < len(rects):
+                            br = rects[int(region_index)].sceneBoundingRect()
+                            x, y, w, h = int(br.x()), int(br.y()), int(br.width()), int(br.height())
+                    except Exception:
+                        pass
+                    if (x is None or y is None or w is None or h is None) and bbox and len(bbox) >= 4:
+                        x, y, w, h = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+                    
+                    if x is not None and w is not None and h is not None and w > 0 and h > 0:
                         
                         # Create background rectangle if enabled in settings
                         bg_rect = None
@@ -13162,6 +13270,11 @@ class MangaTranslationTab(QObject):
                         
                         # Create a transparent rectangle overlay that covers the text and forwards clicks
                         overlay_rect = QGraphicsRectItem(x, y, w, h)
+                        # Keep overlay rect in sync with rectangle moves by storing size
+                        try:
+                            overlay_rect._overlay_bbox_size = (w, h)
+                        except Exception:
+                            pass
                         overlay_rect.setBrush(QBrush(QColor(0, 0, 0, 0)))  # Completely transparent
                         overlay_rect.setPen(QPen(QColor(0, 0, 0, 0)))  # No border
                         overlay_rect.setZValue(20)  # Above everything else to capture clicks
@@ -13199,6 +13312,13 @@ class MangaTranslationTab(QObject):
                         
                         group = viewer._scene.createItemGroup(group_items)
                         group.setZValue(12)
+                        # Store references for later reflowing/resizing
+                        try:
+                            group._overlay_text_item = text_item
+                            group._overlay_bg_item = bg_rect
+                            group._overlay_original_text = translation
+                        except Exception:
+                            pass
                         from PySide6.QtWidgets import QGraphicsItem
                         # Disable user interaction on overlays; movement controlled by rectangles only
                         # But allow child items (like text) to handle mouse events
@@ -13418,6 +13538,9 @@ class MangaTranslationTab(QObject):
             font_family = settings.get('font_family', 'Arial')
             algorithm = settings.get('font_algorithm', 'smart')
             
+            # Base text respecting force_caps for all sizing/wrapping steps
+            src_text = text.upper() if settings.get('force_caps', False) else text
+            
             # If a custom font file is provided, load it and use its family
             try:
                 font_path = settings.get('font_path') or getattr(self, 'selected_font_path', None)
@@ -13465,7 +13588,7 @@ class MangaTranslationTab(QObject):
                 text_item = QGraphicsTextItem()
                 font.setBold(False)
                 font.setKerning(True)
-                wrapped_text = self._wrap_text_for_bubble(text, available_width, font, settings)
+                wrapped_text = self._wrap_text_for_bubble(src_text, available_width, font, settings)
                 text_item.setPlainText(wrapped_text)
                 text_item.setFont(font)
             else:
@@ -13521,7 +13644,7 @@ class MangaTranslationTab(QObject):
                         tr.selected_font_style = fp
                     
                     # Uppercase for measurement if needed
-                    measure_text = text.upper() if settings.get('force_caps', False) else text
+                    measure_text = src_text
                     
                     # Build dummy draw for metrics
                     dummy_img = _PILImage.new('RGB', (max(32, int(w)), max(32, int(h))), (0, 0, 0))
@@ -13550,7 +13673,7 @@ class MangaTranslationTab(QObject):
                     used_translator_algo = True
                 except Exception:
                     # Fallback to previous local auto-sizing
-                    font_size = self._calculate_auto_font_size(text, available_width, available_height, settings)
+                    font_size = self._calculate_auto_font_size(src_text, available_width, available_height, settings)
                     min_size = settings.get('auto_min_size', 10)
                     max_size = settings.get('max_font_size', 48)
                     font_size = max(min_size, min(font_size, max_size))
@@ -13559,7 +13682,7 @@ class MangaTranslationTab(QObject):
                     text_item = QGraphicsTextItem()
                     font.setBold(False)
                     font.setKerning(True)
-                    wrapped_text = self._wrap_text_for_bubble(text, available_width, font, settings)
+                    wrapped_text = self._wrap_text_for_bubble(src_text, available_width, font, settings)
                     text_item.setPlainText(wrapped_text)
                     text_item.setFont(font)
             
@@ -13670,7 +13793,35 @@ class MangaTranslationTab(QObject):
             except Exception:
                 pass
             
-            # Get actual text bounding rect to determine size
+            # Hard clamp: continuously shrink and rewrap until text fits safe bounds (Qt metrics)
+            try:
+                if bool(settings.get('constrain_to_bubble', True)):
+                    min_size = int(settings.get('auto_min_size', 10))
+                    current_size = int(font.pointSize()) if hasattr(font, 'pointSize') else int(max(8, font_size))
+                    attempts = 0
+                    while attempts < 80:
+                        # Measure current layout
+                        tb = text_item.boundingRect()
+                        if tb.width() <= safe_w and tb.height() <= safe_h:
+                            break
+                        next_size = max(min_size, current_size - 1)
+                        if next_size == current_size:
+                            break
+                        current_size = next_size
+                        test_font = QFont(font.family())
+                        test_font.setPointSize(current_size)
+                        # Rewrap with Qt metrics at this size
+                        test_wrapped = self._wrap_text_for_bubble(src_text, safe_w, test_font, settings)
+                        text_item.setFont(test_font)
+                        text_item.setPlainText(test_wrapped)
+                        wrapped_text = test_wrapped
+                        font = test_font
+                        font_size = current_size
+                        attempts += 1
+            except Exception:
+                pass
+            
+            # Get actual text bounding rect to determine size after clamp
             text_bounding = text_item.boundingRect()
             text_w = text_bounding.width()
             text_h = text_bounding.height()
