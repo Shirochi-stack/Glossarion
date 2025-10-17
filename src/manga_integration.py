@@ -16063,6 +16063,25 @@ class MangaTranslationTab(QObject):
                             self._log(f"✅ Added text overlay for region {region_index}", "success")
                         except Exception as overlay_err:
                             self._log(f"⚠️ Failed to add overlay: {overlay_err}", "warning")
+                        
+                        # Persist translated_texts entry for this image so overlays restore next session
+                        try:
+                            current_image = getattr(self.image_preview_widget, 'current_image_path', None)
+                            if current_image and hasattr(self, 'image_state_manager') and self.image_state_manager:
+                                state = self.image_state_manager.get_state(current_image) or {}
+                                tlist = state.get('translated_texts') or []
+                                # Ensure list is large enough
+                                if len(tlist) <= region_index:
+                                    tlist = list(tlist) + [{} for _ in range(region_index + 1 - len(tlist))]
+                                tlist[region_index] = {
+                                    'original': {'text': original_text, 'region_index': region_index},
+                                    'translation': translation_result,
+                                    'bbox': bbox or [0, 0, 100, 100]
+                                }
+                                state['translated_texts'] = tlist
+                                self.image_state_manager.set_state(current_image, state, save=True)
+                        except Exception as persist_err:
+                            self._log(f"⚠️ Failed to persist overlay text: {persist_err}", "warning")
                     except Exception as e:
                         import traceback
                         self._log(f"❌ Error handling translate result: {e}", "error")
