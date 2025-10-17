@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (QWidget, QLabel, QFrame, QPushButton, QVBoxLayout
 from PySide6.QtCore import Qt, QTimer, Signal, QObject, Slot, QEvent, QPropertyAnimation, QEasingCurve, Property, QThread
 from PySide6.QtGui import QFont, QColor, QTextCharFormat, QIcon, QKeyEvent, QPixmap, QTransform
 from typing import List, Dict, Optional, Any
-from queue import Queue, Empty
+from queue import Queue
 import logging
 from manga_translator import MangaTranslator, GOOGLE_CLOUD_VISION_AVAILABLE
 from manga_settings_dialog import MangaSettingsDialog
@@ -2859,8 +2859,7 @@ class MangaTranslationTab(QObject):
         
         # Add method to main_gui for parallel processing thread-safe GUI updates
         def _execute_parallel_gui_update(region_index: int, trans_text: str) -> bool:
-            """Execute GUI update on main thread for parallel processing (thread-safe).
-            Always returns a boolean success flag."""
+            """Execute GUI update on main thread for parallel processing (thread-safe)"""
             try:
                 # This runs on the main thread, so it's safe to call GUI methods
                 return self._update_single_text_overlay(region_index, trans_text)
@@ -11767,7 +11766,7 @@ class MangaTranslationTab(QObject):
         try:
             import threading
             import time
-            from queue import Queue, Empty
+            from queue import Queue
             from concurrent.futures import ThreadPoolExecutor
             
             class ParallelSaveSystem:
@@ -11776,20 +11775,16 @@ class MangaTranslationTab(QObject):
                     self.pending_tasks = Queue()
                     self.active_tasks = set()  # Track active region indices
                     self.microsecond_lock = threading.Lock()  # Microsecond precision lock
-
-                    # Coalescing and debouncing state
-                    self.latest_ts_by_region = {}   # region_index -> latest requested timestamp
-                    self.last_queued_ts = {}        # region_index -> last time we actually enqueued a task
-                    self.queued_regions = set()     # regions that currently have a pending task in the queue
-                    # Debounce interval (configurable)
-                    min_interval_ms = 60
-                    try:
-                        if hasattr(parent, 'main_gui') and hasattr(parent.main_gui, 'config'):
-                            adv = parent.main_gui.config.get('manga_settings', {}).get('advanced', {})
-                            min_interval_ms = int(adv.get('min_save_interval_ms', 60))
-                    except Exception:
-                        pass
-                    self.min_interval_ns = max(0, int(min_interval_ms)) * 1_000_000
+                    # Track additional queued movements per region (beyond a single queued task)
+                    self.pending_counts = {}
+                    # Track regions that currently have a queued task in the queue
+                    self.queued_regions = set()
+                    # Fast, lock-free event queue for enqueue/inc requests when micro-lock isn't available
+                    self.event_queue = Queue()
+                    # Total outstanding movements snapshot for UI fallback
+                    self.outstanding_total = 0
+                    self._last_outstanding_snapshot = 0
+                    self._last_total_snapshot = 0
                     
                     # Get max_workers from manga settings
                     max_workers = 4  # Default fallback
@@ -11818,58 +11813,66 @@ class MangaTranslationTab(QObject):
                     print(f"[PARALLEL] Initialized parallel save system with {max_workers} worker threads")
                 
                 def queue_save_task(self, region_index: int):
-                    """Queue a save task for the given region index with coalescing/debounce."""
+                    """Queue a save task for the given region index.
+                    Allows multiple movements on the same region by accumulating pending counts.
+                    Uses microsecond, non-blocking lock attempts and falls back to an event queue.
+                    Also increments a total outstanding counter for precise UI.
+                    """
                     try:
-                        timestamp = time.time_ns()
-                        with self.microsecond_lock:
-                            # Record the latest requested timestamp for this region
-                            self.latest_ts_by_region[region_index] = timestamp
-                            last_q = self.last_queued_ts.get(region_index, 0)
-                            dt = timestamp - last_q
-
-                            # If already active or already queued, only update latest ts; optionally debounce
-                            if region_index in self.active_tasks or region_index in self.queued_regions:
-                                if dt < self.min_interval_ns:
-                                    print(f"[PARALLEL] Debounced region {region_index} (dt={dt/1_000_000:.1f}ms)")
-                                    return False
-                                # If active and not already queued, allow one trailing queued task
-                                if region_index in self.active_tasks and region_index not in self.queued_regions:
-                                    task = {
-                                        'region_index': region_index,
-                                        'timestamp': timestamp,
-                                        'retry_count': 0
-                                    }
+                        timestamp = time.time_ns()  # Microsecond precision timestamp
+                        task = {
+                            'region_index': region_index,
+                            'timestamp': timestamp,
+                            'retry_count': 0
+                        }
+                        do_update = False
+                        
+                        acquired = self.microsecond_lock.acquire(False)
+                        if acquired:
+                            try:
+                                # Always count this movement request
+                                self.outstanding_total = max(0, int(self.outstanding_total) + 1)
+                                self._last_outstanding_snapshot = self.outstanding_total
+                                
+                                if region_index in self.active_tasks or region_index in self.queued_regions:
+                                    # Region is already active or has a queued task: accumulate an extra pending movement
+                                    self.pending_counts[region_index] = self.pending_counts.get(region_index, 0) + 1
+                                    print(f"[PARALLEL] Region {region_index} pending movements: {self.pending_counts[region_index]}")
+                                else:
+                                    # No active/queued task for this region: enqueue one and mark as queued
                                     self.pending_tasks.put(task)
                                     self.queued_regions.add(region_index)
-                                    self.last_queued_ts[region_index] = timestamp
-                                    print(f"[PARALLEL] Queued trailing task for active region {region_index} at {timestamp}")
-                                    return True
-                                # Already queued: nothing else to do
-                                return False
-
-                            # Not active and not queued: enqueue a fresh task
-                            task = {
-                                'region_index': region_index,
-                                'timestamp': timestamp,
-                                'retry_count': 0
-                            }
-                            self.pending_tasks.put(task)
-                            self.queued_regions.add(region_index)
-                            self.last_queued_ts[region_index] = timestamp
-                            print(f"[PARALLEL] Queued save task for region {region_index} at {timestamp}")
-                            return True
+                                    print(f"[PARALLEL] Queued save task for region {region_index} at {timestamp}")
+                                do_update = True
+                            finally:
+                                self.microsecond_lock.release()
+                        else:
+                            # Could not acquire micro-lock instantly; push lightweight events for coordinator
+                            try:
+                                self.event_queue.put(('inc_total', 1))
+                                self.event_queue.put(('enqueue', region_index, timestamp))
+                            except Exception:
+                                # As a last resort, try direct enqueue
+                                self.pending_tasks.put(task)
+                                self.queued_regions.add(region_index)
+                            do_update = True
+                        
+                        # Update button to reflect active + queued movements (outside lock)
+                        if do_update:
+                            try:
+                                if hasattr(self.parent, '_update_parallel_save_button_state'):
+                                    self.parent._update_parallel_save_button_state(self.get_active_count())
+                            except Exception:
+                                pass
+                        return True
+                            
                     except Exception as e:
                         print(f"[PARALLEL] Error queuing task for region {region_index}: {e}")
                         return False
                 
                 def queue_batch_save_tasks(self, region_indices: list) -> int:
                     """Queue multiple save tasks for batch processing optimization.
-                    
-                    Args:
-                        region_indices: List of region indices to queue for processing
-                        
-                    Returns:
-                        Number of tasks successfully queued
+                    Accumulates extra movements per region instead of dropping them.
                     """
                     if not region_indices:
                         return 0
@@ -11877,89 +11880,98 @@ class MangaTranslationTab(QObject):
                     queued_count = 0
                     batch_timestamp = time.time_ns()
                     
+                    do_update = False
                     with self.microsecond_lock:
                         for region_index in region_indices:
-                            # Check if this region is already being processed
-                            if region_index in self.active_tasks:
-                                print(f"[PARALLEL] Region {region_index} already being processed, skipping from batch")
-                                continue
-                            
-                            # Create task with batch timestamp
-                            task = {
-                                'region_index': region_index,
-                                'timestamp': batch_timestamp,
-                                'retry_count': 0,
-                                'batch_id': batch_timestamp  # Add batch identifier
-                            }
-                            
-                            # Add to pending tasks
-                            self.pending_tasks.put(task)
-                            queued_count += 1
+                            if region_index in self.active_tasks or region_index in self.queued_regions:
+                                # Already active/queued: accumulate pending movement
+                                self.pending_counts[region_index] = self.pending_counts.get(region_index, 0) + 1
+                                print(f"[PARALLEL] Region {region_index} pending movements (batch): {self.pending_counts[region_index]}")
+                            else:
+                                # Queue a single task for this region and mark as queued
+                                task = {
+                                    'region_index': region_index,
+                                    'timestamp': batch_timestamp,
+                                    'retry_count': 0,
+                                    'batch_id': batch_timestamp
+                                }
+                                self.pending_tasks.put(task)
+                                self.queued_regions.add(region_index)
+                                queued_count += 1
+                            do_update = True
                     
                     print(f"[PARALLEL] Batch queued {queued_count}/{len(region_indices)} save tasks")
+                    # Update button to reflect queued movements (outside lock)
+                    if do_update:
+                        try:
+                            if hasattr(self.parent, '_update_parallel_save_button_state'):
+                                self.parent._update_parallel_save_button_state(self.get_active_count())
+                        except Exception:
+                            pass
                     return queued_count
                 
                 def _coordinate_tasks(self):
-                    """Coordinate parallel task execution with coalescing and microsecond precision."""
+                    """Coordinate parallel task execution with microsecond precision."""
                     print(f"[PARALLEL] Coordinator thread started")
+                    
+                    import queue as _q
                     
                     while True:
                         try:
-                            # Wait for a task (blocking)
-                            task = self.pending_tasks.get(timeout=1.0)
+                            # Drain fast events first (very cheap, micro-locked per event)
+                            self._drain_events()
+                            
+                            # Wait briefly for a task (short timeout for responsiveness)
+                            task = self.pending_tasks.get(timeout=0.05)
+                            
                             region_index = task['region_index']
-                            ts = task.get('timestamp', 0)
                             
+                            # Acquire microsecond lock
+                            do_update = False
                             with self.microsecond_lock:
-                                # If this task is stale, replace with the latest request and skip
-                                latest = self.latest_ts_by_region.get(region_index, ts)
-                                if latest > ts:
-                                    # Ensure a single up-to-date task exists in queue
-                                    if region_index not in self.queued_regions:
-                                        self.queued_regions.add(region_index)
-                                    # Enqueue the latest task to replace stale one
-                                    self.pending_tasks.put({'region_index': region_index, 'timestamp': latest, 'retry_count': 0})
-                                    print(f"[PARALLEL] Dropped stale task for region {region_index} (ts={ts}), queued latest ts={latest}")
-                                    continue
-
-                                # If region is currently active, requeue and try later
+                                # This task is leaving the queue, so it's no longer considered 'queued'
+                                if region_index in self.queued_regions:
+                                    self.queued_regions.discard(region_index)
+                                
+                                # If the region is already active, accumulate as pending instead of dropping
                                 if region_index in self.active_tasks:
-                                    self.pending_tasks.put(task)
-                                    # Small yield to avoid busy looping on the same region
-                                    pass
-                                else:
-                                    # Ready to start: consume the queued slot and mark active
-                                    if region_index in self.queued_regions:
-                                        self.queued_regions.discard(region_index)
-                                    self.active_tasks.add(region_index)
-                                    with self.count_lock:
-                                        self.processing_count += 1
-                                        print(f"[PARALLEL] Started processing region {region_index} (active: {self.processing_count})")
-                                        self.parent._update_parallel_save_button_state(self.processing_count)
-                                    
-                                    # Submit the actual work to thread pool
-                                    self.executor.submit(self._process_save_task, task)
+                                    self.pending_counts[region_index] = self.pending_counts.get(region_index, 0) + 1
+                                    print(f"[PARALLEL] Region {region_index} active; incremented pending to {self.pending_counts[region_index]}")
+                                    do_update = True
+                                    continue
+                                
+                                # Mark region as active
+                                self.active_tasks.add(region_index)
+                                do_update = True
+                                
+                                # Increment processing count
+                                with self.count_lock:
+                                    self.processing_count += 1
+                                    print(f"[PARALLEL] Started processing region {region_index} (active: {self.processing_count})")
                             
-                        except Empty:
+                            # Update button state for parallel processing (outside locks)
+                            if do_update:
+                                try:
+                                    self.parent._update_parallel_save_button_state(self.get_active_count())
+                                except Exception:
+                                    pass
+                            
+                            # Submit the actual work to thread pool
+                            self.executor.submit(self._process_save_task, task)
+                            
+                            # Don't wait for completion - let it run in parallel
+                            
+                        except _q.Empty:
                             continue
                         except Exception as e:
                             print(f"[PARALLEL] Coordinator error: {e}")
                 
                 def _process_save_task(self, task):
-                    """Process a single save task in a worker thread (skips stale tasks)."""
+                    """Process a single save task in a worker thread."""
                     region_index = task['region_index']
-                    task_ts = task.get('timestamp', 0)
                     start_time = time.time_ns()
-                    skipped = False
                     
                     try:
-                        # Skip if this worker picked up a task that became stale
-                        with self.microsecond_lock:
-                            latest = self.latest_ts_by_region.get(region_index, task_ts)
-                            if latest > task_ts:
-                                skipped = True
-                                return False
-                        
                         print(f"[PARALLEL] Worker processing region {region_index}")
                         
                         # Get translation text (main thread safe)
@@ -11977,10 +11989,7 @@ class MangaTranslationTab(QObject):
                         if success:
                             print(f"[PARALLEL] Successfully processed region {region_index} in {duration_ms:.2f}ms")
                         else:
-                            if skipped:
-                                print(f"[PARALLEL] Skipped stale task for region {region_index} after {duration_ms:.2f}ms")
-                            else:
-                                print(f"[PARALLEL] Failed to process region {region_index} after {duration_ms:.2f}ms")
+                            print(f"[PARALLEL] Failed to process region {region_index} after {duration_ms:.2f}ms")
                         
                         return success
                         
@@ -11989,29 +11998,127 @@ class MangaTranslationTab(QObject):
                         return False
                     finally:
                         # Always clean up
+                        need_update = False
                         with self.microsecond_lock:
+                            # Region no longer active
                             self.active_tasks.discard(region_index)
+                            need_update = True
                             
                             with self.count_lock:
                                 self.processing_count = max(0, self.processing_count - 1)
                                 print(f"[PARALLEL] Finished processing region {region_index} (active: {self.processing_count})")
-                                
-                                # Update button state
-                                self.parent._update_parallel_save_button_state(self.processing_count)
+                            
+                            # If there are extra pending movements for this region, enqueue one more task
+                            try:
+                                extras = int(self.pending_counts.get(region_index, 0) or 0)
+                                if extras > 0:
+                                    self.pending_counts[region_index] = extras - 1
+                                    # Fast path: push to event queue instead of blocking put under lock
+                                    try:
+                                        self.event_queue.put(('enqueue', region_index, time.time_ns()))
+                                    except Exception:
+                                        # Fallback to direct put if needed
+                                        self.pending_tasks.put({'region_index': region_index, 'timestamp': time.time_ns(), 'retry_count': 0})
+                                    print(f"[PARALLEL] Re-queued region {region_index} for pending movement (remaining: {self.pending_counts.get(region_index, 0)})")
+                            except Exception as _requeue_err:
+                                print(f"[PARALLEL] Failed to re-queue pending movement for region {region_index}: {_requeue_err}")
+                            
+                            # Decrement total outstanding for the movement just completed
+                            try:
+                                self.outstanding_total = max(0, int(self.outstanding_total) - 1)
+                                self._last_outstanding_snapshot = self.outstanding_total
+                            except Exception:
+                                pass
+                        
+                        # Reflect updated pending/active in UI (outside locks)
+                        if need_update:
+                            try:
+                                self.parent._update_parallel_save_button_state(self.get_active_count())
+                            except Exception:
+                                pass
                 
                 def get_active_count(self):
                     """Get the number of currently active processing tasks."""
                     with self.count_lock:
                         return self.processing_count
                 
+                def _drain_events(self):
+                    """Process pending enqueue/inc events quickly with micro locks."""
+                    import queue as _q
+                    processed = 0
+                    while True:
+                        try:
+                            ev = self.event_queue.get_nowait()
+                        except _q.Empty:
+                            break
+                        try:
+                            etype, idx, ts = ev
+                        except Exception:
+                            continue
+                        # Micro-critical update
+                        if self.microsecond_lock.acquire(False):
+                            try:
+                                if etype == 'enqueue':
+                                    if idx in self.active_tasks or idx in self.queued_regions:
+                                        self.pending_counts[idx] = self.pending_counts.get(idx, 0) + 1
+                                    else:
+                                        self.pending_tasks.put({'region_index': idx, 'timestamp': ts, 'retry_count': 0})
+                                        self.queued_regions.add(idx)
+                                elif etype == 'inc':
+                                    self.pending_counts[idx] = self.pending_counts.get(idx, 0) + 1
+                                elif etype == 'inc_total':
+                                    self.outstanding_total = max(0, int(self.outstanding_total) + int(idx or 1))
+                                    self._last_outstanding_snapshot = self.outstanding_total
+                            finally:
+                                self.microsecond_lock.release()
+                        else:
+                            # If contended, requeue to try later (avoid drops)
+                            try:
+                                self.event_queue.put(ev)
+                            except Exception:
+                                pass
+                            break
+                        processed += 1
+                    return processed
+                
+                def get_pending_counts(self) -> dict:
+                    """Return a dict mapping region_index -> pending movements count (queued + extra).
+                    Attempts non-blocking micro-lock; on contention returns a minimal snapshot.
+                    """
+                    try:
+                        if self.microsecond_lock.acquire(False):
+                            try:
+                                counts = dict(self.pending_counts)
+                                for idx in self.queued_regions:
+                                    counts[idx] = counts.get(idx, 0) + 1
+                                return counts
+                            finally:
+                                self.microsecond_lock.release()
+                        else:
+                            # Contended: return empty (UI will refresh soon)
+                            return {}
+                    except Exception:
+                        return {}
+                
+                def get_total_outstanding(self) -> int:
+                    """Compute total outstanding (active + queued unique + extras) with minimal locking."""
+                    try:
+                        if self.microsecond_lock.acquire(False):
+                            try:
+                                total = len(self.active_tasks) + len(self.queued_regions) + sum(self.pending_counts.values())
+                                self._last_total_snapshot = int(total)
+                                return self._last_total_snapshot
+                            finally:
+                                self.microsecond_lock.release()
+                        else:
+                            return int(getattr(self, '_last_total_snapshot', 0))
+                    except Exception:
+                        return int(getattr(self, '_last_total_snapshot', 0))
+                
                 def queue_batch_save_tasks(self, region_indices: list) -> int:
                     """Queue multiple save tasks for batch processing optimization.
-                    
-                    Args:
-                        region_indices: List of region indices to queue for saving
-                        
-                    Returns:
-                        Number of tasks successfully queued
+                    Accumulates extra movements per region instead of dropping them.
+                    Uses microsecond, non-blocking lock attempts and falls back to the event queue.
                     """
                     if not region_indices:
                         return 0
@@ -12019,29 +12126,47 @@ class MangaTranslationTab(QObject):
                     queued_count = 0
                     batch_timestamp = time.time_ns()
                     
-                    with self.microsecond_lock:
+                    acquired = self.microsecond_lock.acquire(False)
+                    if acquired:
+                        try:
+                            for region_index in region_indices:
+                                # Check if this region is already being processed
+                                if region_index in self.active_tasks or region_index in self.queued_regions:
+                                    # Already active/queued: accumulate pending movement
+                                    self.pending_counts[region_index] = self.pending_counts.get(region_index, 0) + 1
+                                    print(f"[PARALLEL] Region {region_index} pending movements (batch): {self.pending_counts[region_index]}")
+                                else:
+                                    # Queue a single task for this region and mark as queued
+                                    task = {
+                                        'region_index': region_index,
+                                        'timestamp': batch_timestamp,
+                                        'retry_count': 0,
+                                        'batch_id': batch_timestamp  # Add batch identifier
+                                    }
+                                    
+                                    # Add to pending tasks
+                                    self.pending_tasks.put(task)
+                                    self.queued_regions.add(region_index)
+                                    queued_count += 1
+                        finally:
+                            self.microsecond_lock.release()
+                    else:
+                        # Fallback: push enqueue events without blocking
                         for region_index in region_indices:
-                            # Check if this region is already being processed
-                            if region_index in self.active_tasks:
-                                print(f"[PARALLEL] Region {region_index} already being processed, skipping from batch")
-                                continue
-                            
-                            # Create task with batch timestamp
-                            task = {
-                                'region_index': region_index,
-                                'timestamp': batch_timestamp,
-                                'retry_count': 0,
-                                'batch_id': batch_timestamp  # Add batch identifier
-                            }
-                            
-                            # Add to pending tasks
-                            self.pending_tasks.put(task)
-                            queued_count += 1
+                            try:
+                                self.event_queue.put(('enqueue', region_index, batch_timestamp))
+                            except Exception:
+                                pass
+                        queued_count = len(region_indices)
                     
                     print(f"[PARALLEL] Batch queued {queued_count}/{len(region_indices)} save tasks")
+                    # Update button to reflect queued movements
+                    try:
+                        if hasattr(self.parent, '_update_parallel_save_button_state'):
+                            self.parent._update_parallel_save_button_state(self.get_active_count())
+                    except Exception:
+                        pass
                     return queued_count
-                
-                def shutdown(self):
                     """Shutdown the parallel processing system."""
                     try:
                         self.executor.shutdown(wait=False)
@@ -12152,76 +12277,121 @@ class MangaTranslationTab(QObject):
                     # Store original text if not already stored
                     if not hasattr(button, '_original_text'):
                         button._original_text = button.text()
-                    button.setText("⏳")
+                    # Emoji + single number (1 active task)
+                    button.setText("⏳1")
                 else:
-                    # Restore original text
-                    if hasattr(button, '_original_text'):
-                        button.setText(button._original_text)
-                    else:
-                        button.setText("💾")  # Fallback text
+                    # Force restore to floppy icon and reset original text
+                    button.setText("💾")
+                    try:
+                        button._original_text = "💾"
+                    except Exception:
+                        pass
         except Exception:
             pass
     
     def _update_parallel_save_button_state(self, active_count: int):
-        """Update the save overlay button state for parallel processing.
-        Shows different ⏳ emojis based on the number of parallel tasks.
+        """Update the save overlay button to reflect active and queued movements per region.
+        Example texts: ⏳1, ⏳2+3 (2 active, 3 queued), ⏳+2 (2 queued, none active)
+        Thread-safe: defers to main thread if called from worker threads.
         """
         try:
+            import threading as _th
+            if _th.current_thread() is not _th.main_thread():
+                try:
+                    QTimer.singleShot(0, lambda: self._update_parallel_save_button_state(active_count))
+                except Exception:
+                    pass
+                return
+            
             if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'save_overlay_btn'):
                 button = self.image_preview_widget.save_overlay_btn
                 
-                if active_count > 0:
+                # Get single source of truth for total outstanding movements
+                if hasattr(self, '_parallel_save_system') and self._parallel_save_system:
+                    try:
+                        total = int(self._parallel_save_system.get_total_outstanding())
+                    except Exception:
+                        total = 0
+                else:
+                    total = 0
+                
+                if total > 0:
                     # Store original text if not already stored
                     if not hasattr(button, '_original_text'):
                         button._original_text = button.text()
                     
-                    # Show different indicators based on parallel count
-                    if active_count == 1:
-                        button.setText("⏳1")
-                        button.setToolTip("Auto-saving 1 rectangle position...")
-                    else:
-                        button.setText(f"⏳{active_count}")
-                        button.setToolTip(f"Auto-saving {active_count} rectangle positions in parallel...")
+                    # Emoji + single number only
+                    button.setText(f"⏳{total}")
                     
+                    # Disable while there is work outstanding
                     button.setEnabled(False)
-                else:
-                    # Restore original text and state
-                    if hasattr(button, '_original_text'):
-                        button.setText(button._original_text)
-                    else:
-                        button.setText("💾")
                     
-                    button.setToolTip("Save & Update Overlay")
+                    # Schedule a short re-check to ensure decrement visibility even if lock was contended
+                    try:
+                        from PySide6.QtCore import QTimer
+                        QTimer.singleShot(80, lambda: self._update_parallel_save_button_state(self._parallel_save_system.get_active_count() if hasattr(self, '_parallel_save_system') and self._parallel_save_system else 0))
+                    except Exception:
+                        pass
+                else:
+                    # Force restore to floppy icon and re-enable
+                    button.setText("💾")
+                    try:
+                        button._original_text = "💾"
+                    except Exception:
+                        pass
                     button.setEnabled(True)
         except Exception as e:
             print(f"[PARALLEL] Error updating button state: {e}")
     
     def _update_single_text_overlay_parallel(self, region_index: int, trans_text: str) -> bool:
         """Thread-safe version of overlay update for parallel processing.
-        Ensures a strict boolean return (True on success, False on failure)."""
+        
+        This method can be called from worker threads and handles thread safety.
+        """
         try:
-            # For thread safety, run GUI work on the main thread via helper
-            def gui_update() -> bool:
+            # Import thread-safe utilities
+            import time
+            from PySide6.QtCore import QMetaObject, Qt
+            
+            # For thread safety, we'll queue the GUI update to the main thread
+            def gui_update():
                 try:
+                    # Persist rectangles state on main thread
                     if hasattr(self.image_preview_widget, '_persist_rectangles_state'):
                         self.image_preview_widget._persist_rectangles_state()
-                    self._update_single_text_overlay(region_index, trans_text)
-                    return True
+                    
+                    # Update the overlay using the existing method (main thread only)
+                    return self._update_single_text_overlay(region_index, trans_text)
                 except Exception as e:
                     print(f"[PARALLEL] GUI update error for region {region_index}: {e}")
                     return False
-
-            # Prefer main_gui helper if present (already main-thread safe)
+            
+            # Use QMetaObject to invoke on main thread
+            result = [False]  # Use list to allow modification in nested function
+            
+            def set_result(success):
+                result[0] = success
+            
+            # Execute on main thread and wait for completion
             try:
+            # Queue the GUI update to main thread
                 if hasattr(self.main_gui, '_execute_parallel_gui_update'):
-                    ok = self.main_gui._execute_parallel_gui_update(region_index, trans_text)
-                    # Treat None as success since _update_single_text_overlay historically returned None
-                    return True if ok is None else bool(ok)
+                    success = self.main_gui._execute_parallel_gui_update(region_index, trans_text)
                 else:
+                    # Fallback - call directly on main thread
+                    success = gui_update()
+                
+                if success is None:
+                    # Fallback: use the direct method (may cause thread issues but better than failing)
                     return gui_update()
+                
+                return bool(success)
+                
             except Exception:
+                # Final fallback: direct call (not thread-safe but functional)
                 print(f"[PARALLEL] Using direct GUI update fallback for region {region_index}")
                 return gui_update()
+                
         except Exception as e:
             print(f"[PARALLEL] Error in parallel overlay update for region {region_index}: {e}")
             return False
