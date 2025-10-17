@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (QWidget, QLabel, QFrame, QPushButton, QVBoxLayout
 from PySide6.QtCore import Qt, QTimer, Signal, QObject, Slot, QEvent, QPropertyAnimation, QEasingCurve, Property, QThread
 from PySide6.QtGui import QFont, QColor, QTextCharFormat, QIcon, QKeyEvent, QPixmap, QTransform
 from typing import List, Dict, Optional, Any
-from queue import Queue
+from queue import Queue, Empty
 import logging
 from manga_translator import MangaTranslator, GOOGLE_CLOUD_VISION_AVAILABLE
 from manga_settings_dialog import MangaSettingsDialog
@@ -11898,9 +11898,10 @@ class MangaTranslationTab(QObject):
                             
                             # Don't wait for completion - let it run in parallel
                             
+                        except Empty:
+                            continue
                         except Exception as e:
-                            if "timed out" not in str(e).lower():
-                                print(f"[PARALLEL] Coordinator error: {e}")
+                            print(f"[PARALLEL] Coordinator error: {e}")
                 
                 def _process_save_task(self, task):
                     """Process a single save task in a worker thread."""
