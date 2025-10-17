@@ -13302,6 +13302,7 @@ class MangaTranslationTab(QObject):
                 
                 # Font settings - use GUI current values
                 'font_family': getattr(self, 'font_style_value', 'Arial'),
+                'font_path': getattr(self, 'selected_font_path', None),  # Use custom font file if provided
                 'font_size_mode': getattr(self, 'font_size_mode_value', 'auto'),
                 'font_size': getattr(self, 'font_size_value', 0),
                 'font_size_multiplier': getattr(self, 'font_size_multiplier_value', 1.0),
@@ -13410,11 +13411,25 @@ class MangaTranslationTab(QObject):
             from PySide6.QtCore import QRectF
             from PySide6.QtGui import QFont, QFontMetrics, QColor, QTextDocument
             import math
+            import os
             
             # Determine font size based on settings
             font_size_mode = settings.get('font_size_mode', 'auto')
             font_family = settings.get('font_family', 'Arial')
             algorithm = settings.get('font_algorithm', 'smart')
+            
+            # If a custom font file is provided, load it and use its family
+            try:
+                font_path = settings.get('font_path') or getattr(self, 'selected_font_path', None)
+                if font_path and os.path.exists(font_path):
+                    from PySide6.QtGui import QFontDatabase
+                    font_id = QFontDatabase.addApplicationFont(font_path)
+                    if font_id != -1:
+                        families = QFontDatabase.applicationFontFamilies(font_id)
+                        if families:
+                            font_family = families[0]
+            except Exception:
+                pass
             
             # Apply safe area margin (like manga_translator does)
             # This ensures text doesn't go right to the edges
@@ -13502,6 +13517,7 @@ class MangaTranslationTab(QObject):
             if text_doc:
                 # Set text alignment to center for better appearance
                 from PySide6.QtGui import QTextOption
+                from PySide6.QtGui import QTextCursor, QTextBlockFormat
                 text_option = QTextOption()
                 text_option.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 text_option.setWrapMode(QTextOption.WrapMode.WordWrap)
@@ -13509,6 +13525,17 @@ class MangaTranslationTab(QObject):
                 
                 # Set document margins for better spacing
                 text_doc.setDocumentMargin(2)
+                
+                # Apply line spacing from settings (ProportionalHeight expects percentage)
+                try:
+                    line_spacing_factor = float(settings.get('line_spacing', 1.3))
+                    cursor = QTextCursor(text_doc)
+                    cursor.select(QTextCursor.SelectionType.Document)
+                    block_format = QTextBlockFormat()
+                    block_format.setLineHeight(int(max(50, min(300, line_spacing_factor * 100))), QTextBlockFormat.LineHeightTypes.ProportionalHeight)
+                    cursor.setBlockFormat(block_format)
+                except Exception:
+                    pass
             
             # Calculate vertical centering
             # Get actual text bounding rect to determine height
