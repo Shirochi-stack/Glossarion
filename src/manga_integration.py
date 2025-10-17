@@ -4427,7 +4427,7 @@ class MangaTranslationTab(QObject):
         # Shadow enabled checkbox
         self.shadow_enabled_checkbox = self._create_styled_checkbox("Enable Shadow")
         self.shadow_enabled_checkbox.setChecked(self.shadow_enabled_value)
-        self.shadow_enabled_checkbox.stateChanged.connect(lambda: (setattr(self, 'shadow_enabled_value', self.shadow_enabled_checkbox.isChecked()), self._toggle_shadow_controls(), self._save_rendering_settings(), self._apply_rendering_settings()))
+        self.shadow_enabled_checkbox.stateChanged.connect(lambda: (setattr(self, 'shadow_enabled_value', self.shadow_enabled_checkbox.isChecked()), self._toggle_shadow_controls(), self._save_rendering_settings(), self._apply_rendering_settings(), self._relayout_all_overlays_for_current_image()))
         shadow_header_layout.addWidget(self.shadow_enabled_checkbox)
         shadow_header_layout.addStretch()
         
@@ -4480,8 +4480,18 @@ class MangaTranslationTab(QObject):
                 # Update display
                 self.shadow_rgb_label.setText(f"RGB({color.red()},{color.green()},{color.blue()})")
                 self._update_shadow_preview(None)
-                # Save settings to config
+                # Save + apply immediately, then reflow overlays and (optionally) rerender output
                 self._save_rendering_settings()
+                self._apply_rendering_settings()
+                try:
+                    self._relayout_all_overlays_for_current_image()
+                except Exception:
+                    pass
+                try:
+                    from PySide6.QtCore import QTimer
+                    QTimer.singleShot(0, self.save_positions_and_rerender)
+                except Exception:
+                    pass
         
         choose_shadow_btn = QPushButton("Choose Color")
         choose_shadow_btn.setMinimumWidth(120)
@@ -5069,11 +5079,22 @@ class MangaTranslationTab(QObject):
             pass
     
     def _on_shadow_blur_changed(self, value):
-        """Update shadow blur value label and value variable"""
-        self.shadow_blur_value = int(float(value))  # UPDATE THE VALUE VARIABLE!
+        """Update shadow blur label, persist, apply, and reflow overlays"""
+        self.shadow_blur_value = int(float(value))
         try:
             if hasattr(self, 'shadow_blur_value_label'):
                 self.shadow_blur_value_label.setText(f"{int(float(value))}")
+        except Exception:
+            pass
+        # Persist and apply live
+        try:
+            self._save_rendering_settings()
+            self._apply_rendering_settings()
+        except Exception:
+            pass
+        # Reflow overlays to reflect new blur
+        try:
+            self._relayout_all_overlays_for_current_image()
         except Exception:
             pass
     
@@ -5104,16 +5125,20 @@ class MangaTranslationTab(QObject):
             self._apply_rendering_settings()
     
     def _update_shadow_preview(self, event=None):
-        """Update the shadow color preview"""
+        """Update the shadow color preview and optionally apply live."""
         r = self.shadow_color_r_value
         g = self.shadow_color_g_value
         b = self.shadow_color_b_value
         if hasattr(self, 'shadow_preview_frame'):
             self.shadow_preview_frame.setStyleSheet(f"background-color: rgb({r},{g},{b}); border: 1px solid #5a9fd4;")
         # Auto-save and apply on change
-        if event is not None:  # Only save on user interaction, not initial load
+        if event is not None:
             self._save_rendering_settings()
             self._apply_rendering_settings()
+            try:
+                self._relayout_all_overlays_for_current_image()
+            except Exception:
+                pass
     
     def _toggle_azure_key_visibility(self, state):
         """Toggle visibility of Azure Computer Vision API key"""
@@ -10936,6 +10961,24 @@ class MangaTranslationTab(QObject):
                 viewer.viewport().update()
             except Exception:
                 pass
+        except Exception:
+            pass
+
+    def _relayout_all_overlays_for_current_image(self):
+        """Re-layout all overlays for the current image using current settings."""
+        try:
+            current_image = getattr(self.image_preview_widget, 'current_image_path', None)
+            if not current_image:
+                return
+            overlays_map = getattr(self, '_text_overlays_by_image', {}) or {}
+            groups = overlays_map.get(current_image, [])
+            for g in groups:
+                idx = getattr(g, '_overlay_region_index', None)
+                if idx is not None:
+                    try:
+                        self._relayout_overlay_for_region(int(idx))
+                    except Exception:
+                        continue
         except Exception:
             pass
 
