@@ -15991,73 +15991,9 @@ class MangaTranslationTab(QObject):
                         print(f"Error updating translate all progress: {str(e)}")
                 
                 elif update[0] == 'translate_this_text_result':
-                    # Show translation result dialog
+                    # Process translation result - just acknowledge it
                     _, data = update
-                    try:
-                        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton, QScrollArea
-                        
-                        original_text = data['original_text']
-                        translation_result = data['translation_result']
-                        region_index = data['region_index']
-                        
-                        dialog = QDialog(self)
-                        dialog.setWindowTitle("🌍 Translation Result")
-                        dialog.resize(600, 400)
-                        
-                        dialog.setStyleSheet("""
-                            QDialog {
-                                background-color: #2d2d2d;
-                                color: white;
-                            }
-                            QLabel {
-                                color: white;
-                                font-weight: bold;
-                            }
-                            QPushButton {
-                                background-color: #5a9fd4;
-                                color: white;
-                                border: none;
-                                padding: 8px 16px;
-                                border-radius: 4px;
-                                font-weight: bold;
-                            }
-                            QPushButton:hover {
-                                background-color: #7bb3e0;
-                            }
-                        """)
-                        
-                        layout = QVBoxLayout(dialog)
-                        layout.setContentsMargins(16, 16, 16, 16)
-                        layout.setSpacing(12)
-                        
-                        orig_label = QLabel("Original Text:")
-                        layout.addWidget(orig_label)
-                        
-                        orig_text = QLabel(original_text)
-                        orig_text.setWordWrap(True)
-                        orig_text.setStyleSheet("background-color: #1e1e1e; padding: 8px; border-radius: 4px;")
-                        layout.addWidget(orig_text)
-                        
-                        sep = QLabel("-" * 60)
-                        layout.addWidget(sep)
-                        
-                        trans_label = QLabel("Translation:")
-                        layout.addWidget(trans_label)
-                        
-                        trans_text = QLabel(translation_result)
-                        trans_text.setWordWrap(True)
-                        trans_text.setStyleSheet("background-color: #1e1e1e; padding: 8px; border-radius: 4px;")
-                        layout.addWidget(trans_text)
-                        
-                        layout.addStretch()
-                        
-                        close_btn = QPushButton("Close")
-                        close_btn.clicked.connect(dialog.close)
-                        layout.addWidget(close_btn)
-                        
-                        dialog.show()
-                    except Exception as e:
-                        self._log(f"❌ Failed to show translation dialog: {str(e)}", "error")
+                    pass
                 
                 elif update[0] == 'load_preview_image':
                     # Load an image in the preview
