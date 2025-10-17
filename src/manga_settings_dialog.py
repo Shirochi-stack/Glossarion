@@ -2156,7 +2156,7 @@ class MangaSettingsDialog(QDialog):
         
         self.manual_translate_prompt = QLineEdit()
         self.manual_translate_prompt.setText(
-            self.settings.get('manual_edit', {}).get('translate_prompt', 'translate this text to {language}')
+            self.settings.get('manual_edit', {}).get('translate_prompt', 'output only the {language} translation of this text:')
         )
         self.manual_translate_prompt.setToolTip(
             "Template for the translate prompt. Use {language} as a placeholder.\n"
