@@ -1372,6 +1372,7 @@ class MangaImagePreviewWidget(QWidget):
         # Start loading (happens in background)
         self.viewer.load_image(src_image_path)
         self.current_image_path = image_path  # Still track original path for state management
+        self.viewer._current_source_path = src_image_path  # Track actual loaded source path
         
         # Check for translated output and load if available
         self._check_and_load_translated_output(image_path)
@@ -1880,60 +1881,22 @@ class MangaImagePreviewWidget(QWidget):
             pass
     
     def _toggle_cleaned_image_mode(self):
-        """Toggle between showing cleaned images vs original images"""
-        try:
-            # Update the state
-            self.cleaned_images_enabled = self.cleaned_toggle_btn.isChecked()
-            
-            # Update button appearance and tooltip
+        """Toggle between showing cleaned images vs original images - INSTANT"""
+        self.cleaned_images_enabled = self.cleaned_toggle_btn.isChecked()
+        
+        if self.current_image_path:
             if self.cleaned_images_enabled:
-                self.cleaned_toggle_btn.setText("🧽")  # Sponge for enabled (cleaning)
-                self.cleaned_toggle_btn.setToolTip("Show cleaned images when available (enabled)")
-                self.cleaned_toggle_btn.setStyleSheet("""
-                    QToolButton {
-                        background-color: #4a7ba7;
-                        border: 2px solid #5a9fd4;
-                        font-size: 12pt;
-                        min-width: 32px;
-                        min-height: 32px;
-                        max-width: 36px;
-                        max-height: 36px;
-                        padding: 3px;
-                        border-radius: 3px;
-                        color: white;
-                    }
-                    QToolButton:hover {
-                        background-color: #5a9fd4;
-                    }
-                """)
+                # Try to find cleaned version
+                cleaned_path = self._find_cleaned_image_path(self.current_image_path)
+                target_path = cleaned_path if cleaned_path else self.current_image_path
             else:
-                self.cleaned_toggle_btn.setText("📄")  # Document for disabled (original)
-                self.cleaned_toggle_btn.setToolTip("Show original images only (cleaned images disabled)")
-                self.cleaned_toggle_btn.setStyleSheet("""
-                    QToolButton {
-                        background-color: #6c757d;
-                        border: 2px solid #777777;
-                        font-size: 12pt;
-                        min-width: 32px;
-                        min-height: 32px;
-                        max-width: 36px;
-                        max-height: 36px;
-                        padding: 3px;
-                        border-radius: 3px;
-                        color: white;
-                    }
-                    QToolButton:hover {
-                        background-color: #777777;
-                    }
-                """)
+                # Use original image
+                target_path = self.current_image_path
             
-            # If we have a current image, reload it to apply the toggle
-            if self.current_image_path and os.path.exists(self.current_image_path):
-                print(f"[CLEANED_TOGGLE] Reloading image with cleaned mode: {self.cleaned_images_enabled}")
-                self.load_image(self.current_image_path, preserve_rectangles=True, preserve_text_overlays=True)
-            
-        except Exception as e:
-            print(f"[ERROR] Failed to toggle cleaned image mode: {e}")
+            # Load directly - bypass background loading for instant response
+            pixmap = QPixmap(target_path)
+            if not pixmap.isNull():
+                self.viewer.setPhoto(pixmap)
     
     def _on_download_images_clicked(self):
         """Handle download images button - consolidate isolated images into structured folder"""
@@ -2219,3 +2182,18 @@ class MangaImagePreviewWidget(QWidget):
         except Exception as e:
             print(f"[SRC] Error checking for cleaned image: {e}")
             return source_image_path
+    
+    def _find_cleaned_image_path(self, source_image_path: str) -> str:
+        """Fast cleaned image path finder - no complex logic"""
+        source_dir = os.path.dirname(source_image_path)
+        source_filename = os.path.basename(source_image_path)
+        source_name_no_ext = os.path.splitext(source_filename)[0]
+        
+        # Quick check in isolated folder
+        translated_folder = os.path.join(source_dir, f"{source_name_no_ext}_translated")
+        if os.path.exists(translated_folder):
+            for filename in os.listdir(translated_folder):
+                if "_cleaned" in filename.lower():
+                    return os.path.join(translated_folder, filename)
+        
+        return None
