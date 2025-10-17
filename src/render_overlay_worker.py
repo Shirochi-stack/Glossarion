@@ -7,6 +7,41 @@ No imports from project modules to avoid side-effects in child processes.
 from typing import List, Tuple, Optional
 
 
+def render_worker_init():
+    """Initializer for process workers to minimize side-effects and logging."""
+    try:
+        import os, logging, sys
+        # Mark as render worker
+        os.environ['GLOSSARION_RENDER_WORKER'] = '1'
+        os.environ['DISABLE_HTTP_LOGGER'] = '1'
+        os.environ['TRANSFORMERS_VERBOSITY'] = 'error'
+        os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
+        os.environ['HF_HUB_DISABLE_PROGRESS_BARS'] = '1'
+        # Silence root logging
+        logging.basicConfig(level=logging.ERROR)
+        logging.getLogger().setLevel(logging.ERROR)
+        # Disable noisy known loggers if present
+        for name in (
+            'bubble_detector', 'transformers', 'httpx', 'urllib3', 'huggingface_hub',
+            '__mp_main__', 'unified_api_client', 'http_logger'
+        ):
+            try:
+                logging.getLogger(name).setLevel(logging.CRITICAL)
+                logging.getLogger(name).disabled = True
+            except Exception:
+                pass
+        # Provide stubs if something tries to import them in workers
+        class _Stub:
+            pass
+        for mod in ('bubble_detector', 'unified_api_client', 'http_logger'):
+            try:
+                sys.modules.setdefault(mod, _Stub())
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def render_overlay_worker(spec: dict):
     try:
         from PIL import Image as _PIL, ImageDraw as _ImageDraw, ImageFont as _ImageFont

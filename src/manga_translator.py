@@ -19,7 +19,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
-from bubble_detector import BubbleDetector
+# Avoid importing heavy detector in render worker children
+import os as _mt_os
+if _mt_os.environ.get('GLOSSARION_RENDER_WORKER') == '1':
+    class BubbleDetector:  # stub for type reference in workers
+        pass
+else:
+    from bubble_detector import BubbleDetector
 from TransateKRtoEN import send_with_interrupt
 
 # ============== PROCESS RENDER WORKER (module-level for pickling) ==============
@@ -10030,7 +10036,7 @@ class MangaTranslator:
                 mode_cfg = str(adv.get('render_parallel_mode', '')).lower()
             except Exception:
                 mode_cfg = ''
-            parallel_mode = mode_env or mode_cfg or 'thread'
+            parallel_mode = mode_env or mode_cfg or 'process'
 
             def _render_one(region, idx):
                 # Build a separate overlay for this region
@@ -10208,44 +10214,67 @@ class MangaTranslator:
                         })
                     from concurrent.futures import ProcessPoolExecutor, as_completed
                     temp = {i: None for i in range(len(adjusted_regions))}
-                    with ProcessPoolExecutor(max_workers=workers) as pex:
-                        # Import the process-safe worker only here so child processes import minimal modules
-                        from render_overlay_worker import render_overlay_worker as _proc_render_worker
-                        futs = {}
-                        for spec in specs:
-                            if spec is None:
-                                continue
-                            fut = pex.submit(_proc_render_worker, spec)
-                            futs[fut] = spec['idx']
-                        for fut in as_completed(futs):
-                            idx = futs[fut]
-                            try:
-                                res = fut.result()
-                                if res is None:
-                                    temp[idx] = None
+                    from multiprocessing import get_context
+                    from render_overlay_worker import render_overlay_worker as _proc_render_worker, render_worker_init as _proc_init
+                    import os as _os
+                    # Set env flags before spawn so imports in child see them
+                    _prev_env = {}
+                    for k, v in {
+                        'GLOSSARION_RENDER_WORKER': '1',
+                        'DISABLE_HTTP_LOGGER': '1',
+                        'TRANSFORMERS_VERBOSITY': 'error',
+                        'HF_HUB_DISABLE_TELEMETRY': '1',
+                        'HF_HUB_DISABLE_PROGRESS_BARS': '1'
+                    }.items():
+                        _prev_env[k] = _os.environ.get(k)
+                        _os.environ[k] = v
+                    try:
+                        with ProcessPoolExecutor(max_workers=workers, mp_context=get_context('spawn'), initializer=_proc_init) as pex:
+                            futs = {}
+                            for spec in specs:
+                                if spec is None:
                                     continue
-                                _, rx, ry, rw, rh, rgba_bytes = res
-                                from PIL import Image as _PIL
-                                tile = _PIL.frombytes('RGBA', (rw, rh), rgba_bytes)
-                                # store tuple for later compositing
-                                temp[idx] = (tile, rx, ry)
-                            except Exception:
-                                temp[idx] = None
-                    # Compose tiles in order (we composite directly; do not populate overlays)
-                    for i in range(len(adjusted_regions)):
-                        item = temp.get(i)
-                        if item is None:
-                            continue
-                        tile, rx, ry = item
-                        try:
-                            # PIL >=9.2 supports offset in alpha_composite; fallback to paste with mask otherwise
+                                fut = pex.submit(_proc_render_worker, spec)
+                                futs[fut] = spec['idx']
+                            for fut in as_completed(futs):
+                                idx = futs[fut]
+                                try:
+                                    res = fut.result()
+                                    if res is None:
+                                        temp[idx] = None
+                                        continue
+                                    _, rx, ry, rw, rh, rgba_bytes = res
+                                    from PIL import Image as _PIL
+                                    tile = _PIL.frombytes('RGBA', (rw, rh), rgba_bytes)
+                                    # store tuple for later compositing
+                                    temp[idx] = (tile, rx, ry)
+                                except Exception:
+                                    temp[idx] = None
+                        # Compose tiles in order (we composite directly; do not populate overlays)
+                        for i in range(len(adjusted_regions)):
+                            item = temp.get(i)
+                            if item is None:
+                                continue
+                            tile, rx, ry = item
                             try:
-                                pil_image = pil_image.alpha_composite(tile, (int(rx), int(ry)))
+                                # PIL >=9.2 supports offset in alpha_composite; fallback to paste with mask otherwise
+                                try:
+                                    pil_image = pil_image.alpha_composite(tile, (int(rx), int(ry)))
+                                except Exception:
+                                    pil_image.paste(tile, (int(rx), int(ry)), tile)
                             except Exception:
-                                pil_image.paste(tile, (int(rx), int(ry)), tile)
-                        except Exception:
-                            pass
-                        region_count += 1
+                                pass
+                            region_count += 1
+                    finally:
+                        # Restore env flags
+                        for k, v in _prev_env.items():
+                            if v is None:
+                                try:
+                                    del _os.environ[k]
+                                except Exception:
+                                    pass
+                            else:
+                                _os.environ[k] = v
                 else:
                     from concurrent.futures import ThreadPoolExecutor, as_completed
                     with ThreadPoolExecutor(max_workers=workers) as ex:

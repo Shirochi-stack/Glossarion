@@ -17,6 +17,13 @@ import time
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+# Silence logs in render worker child processes
+try:
+    import os as _os, logging as _logging
+    if _os.environ.get('GLOSSARION_RENDER_WORKER') == '1':
+        _logging.disable(_logging.CRITICAL)
+except Exception:
+    pass
 
 # Check if we're running in a frozen environment
 IS_FROZEN = getattr(sys, 'frozen', False)
