@@ -1969,9 +1969,8 @@ class AzureComputerVisionProvider(OCRProvider):
                 if not self.load_model(**kwargs):
                     return results
             
-            from azure.ai.vision.imageanalysis import VisualFeatures
+            from azure.ai.vision.imageanalysis.models import VisualFeatures
             import cv2
-            from io import BytesIO
             
             # Convert numpy array to bytes
             _, encoded = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 95])
@@ -1986,15 +1985,15 @@ class AzureComputerVisionProvider(OCRProvider):
             )
             
             # Extract text from result
-            if analysis_result.read:
-                for block in analysis_result.read.blocks:
-                    for line in block.lines:
-                        text = line.text.strip()
+            if analysis_result and getattr(analysis_result, 'read', None):
+                for block in analysis_result.read.blocks or []:
+                    for line in block.lines or []:
+                        text = (getattr(line, 'text', '') or '').strip()
                         if not text:
                             continue
                         
                         # Get bounding polygon points
-                        if line.bounding_polygon:
+                        if getattr(line, 'bounding_polygon', None):
                             vertices = [(int(point.x), int(point.y)) for point in line.bounding_polygon]
                             
                             # Calculate bounding box
@@ -2011,6 +2010,8 @@ class AzureComputerVisionProvider(OCRProvider):
                             ))
                             
                             print(f"[DEBUG] Azure Computer Vision: Found text '{text}' at ({x_min},{y_min})")
+            else:
+                print("[DEBUG] Azure Computer Vision: No 'read' content in analysis_result")
             
             print(f"[DEBUG] Azure Computer Vision: Detected {len(results)} text regions")
             
