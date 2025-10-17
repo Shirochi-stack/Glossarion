@@ -604,6 +604,14 @@ class MangaImagePreviewWidget(QWidget):
         self.manual_editing_enabled = False  # Manual editing is disabled by default (preview mode)
         self.translated_folder_path = None  # Path to translated images folder
         self.cleaned_images_enabled = True  # Show cleaned images when available (enabled by default)
+        
+        # Shared background pool for thumbnail tasks (initialized lazily if import fails here)
+        try:
+            from concurrent.futures import ThreadPoolExecutor
+            self._thumb_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="thumbs")
+        except Exception:
+            self._thumb_executor = None
+        
         self._build_ui()
     
     def _build_ui(self):
@@ -1473,31 +1481,39 @@ class MangaImagePreviewWidget(QWidget):
             output_item.setSizeHint(QSize(110, 110))
             self.output_thumbnail_list.addItem(output_item)
         
-        # Load thumbnails asynchronously
-        def load_all_thumbs():
-            for i, path in enumerate(self.image_paths):
-                result = load_thumb(path, i)
-                if result:
-                    idx, img_path, thumb = result
-                    # Update items on main thread (both lists)
-                    try:
-                        from PySide6.QtCore import QMetaObject, Q_ARG
-                        QMetaObject.invokeMethod(self, "_update_thumbnail_item",
-                                                Qt.ConnectionType.QueuedConnection,
-                                                Q_ARG(int, idx),
-                                                Q_ARG(QPixmap, thumb),
-                                                Q_ARG(str, img_path))
-                        QMetaObject.invokeMethod(self, "_update_output_thumbnail_item",
-                                                Qt.ConnectionType.QueuedConnection,
-                                                Q_ARG(int, idx),
-                                                Q_ARG(QPixmap, thumb),
-                                                Q_ARG(str, img_path))
-                    except:
-                        pass
+        # Load thumbnails asynchronously using a thread pool (one task per image)
+        def submit_single(i, path):
+            res = load_thumb(path, i)
+            if res:
+                idx, img_path, thumb = res
+                try:
+                    from PySide6.QtCore import QMetaObject, Q_ARG
+                    QMetaObject.invokeMethod(self, "_update_thumbnail_item",
+                                            Qt.ConnectionType.QueuedConnection,
+                                            Q_ARG(int, idx),
+                                            Q_ARG(QPixmap, thumb),
+                                            Q_ARG(str, img_path))
+                    QMetaObject.invokeMethod(self, "_update_output_thumbnail_item",
+                                            Qt.ConnectionType.QueuedConnection,
+                                            Q_ARG(int, idx),
+                                            Q_ARG(QPixmap, thumb),
+                                            Q_ARG(str, img_path))
+                except Exception:
+                    pass
         
-        # Start background loading
-        thread = threading.Thread(target=load_all_thumbs, daemon=True)
-        thread.start()
+        try:
+            if not hasattr(self, '_thumb_executor') or self._thumb_executor is None:
+                from concurrent.futures import ThreadPoolExecutor
+                self._thumb_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="thumbs")
+            for i, path in enumerate(self.image_paths):
+                self._thumb_executor.submit(submit_single, i, path)
+        except Exception:
+            # Fallback to single background thread if pool creation fails
+            def load_all_thumbs():
+                for i, path in enumerate(self.image_paths):
+                    submit_single(i, path)
+            thread = threading.Thread(target=load_all_thumbs, daemon=True)
+            thread.start()
     
     @Slot(int, QPixmap, str)
     def _update_thumbnail_item(self, index: int, pixmap: QPixmap, path: str):
@@ -1766,7 +1782,7 @@ class MangaImagePreviewWidget(QWidget):
             pass
     
     def _toggle_cleaned_image_mode(self):
-        """Toggle between showing cleaned images vs original images"""
+        """Toggle between showing cleaned images vs original images (async via pool)"""
         try:
             # Update the state
             self.cleaned_images_enabled = self.cleaned_toggle_btn.isChecked()
@@ -1813,13 +1829,68 @@ class MangaImagePreviewWidget(QWidget):
                     }
                 """)
             
-            # If we have a current image, reload it to apply the toggle
+            # If we have a current image, reload it to apply the toggle using a background pool
             if self.current_image_path and os.path.exists(self.current_image_path):
-                print(f"[CLEANED_TOGGLE] Reloading image with cleaned mode: {self.cleaned_images_enabled}")
-                self.load_image(self.current_image_path, preserve_rectangles=True, preserve_text_overlays=True)
+                print(f"[CLEANED_TOGGLE] Reloading image with cleaned mode (async): {self.cleaned_images_enabled}")
+                try:
+                    # Lazy-init a small executor for toggle tasks
+                    if not hasattr(self, '_toggle_executor') or self._toggle_executor is None:
+                        from concurrent.futures import ThreadPoolExecutor
+                        self._toggle_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="sponge-toggle")
+                except Exception:
+                    self._toggle_executor = None
+                
+                orig_path = self.current_image_path
+                cleaned_enabled = bool(self.cleaned_images_enabled)
+                
+                def _bg_resolve_and_reload():
+                    # Resolve which source image to load under the toggle
+                    try:
+                        src_path = self._check_for_cleaned_image(orig_path) if cleaned_enabled else orig_path
+                    except Exception:
+                        src_path = orig_path
+                    
+                    # Schedule UI-thread reload with preserve flags using QMetaObject (safe across threads)
+                    try:
+                        from PySide6.QtCore import QMetaObject, Qt, Q_ARG
+                        QMetaObject.invokeMethod(
+                            self,
+                            "_reload_preview_after_toggle",
+                            Qt.ConnectionType.QueuedConnection,
+                            Q_ARG(str, src_path),
+                            Q_ARG(str, orig_path)
+                        )
+                    except Exception as _e:
+                        print(f"[CLEANED_TOGGLE] invokeMethod failed: {_e}")
+                
+                try:
+                    if self._toggle_executor:
+                        self._toggle_executor.submit(_bg_resolve_and_reload)
+                    else:
+                        # Fallback: call resolver directly then invoke on UI thread
+                        _bg_resolve_and_reload()
+                except Exception:
+                    _bg_resolve_and_reload()
             
         except Exception as e:
             print(f"[ERROR] Failed to toggle cleaned image mode: {e}")
+
+    @Slot(str, str)
+    def _reload_preview_after_toggle(self, src_path: str, orig_path: str):
+        """UI-thread reload after cleaned/original toggle"""
+        try:
+            self._preserve_rectangles_on_load = True
+            self._preserve_text_overlays_on_load = True
+            # Load source tab image (CompactImageViewer has its own QThread)
+            self.viewer.load_image(src_path)
+            # Keep tracking original path for state
+            self.current_image_path = orig_path
+            # Refresh output tab if available
+            self._check_and_load_translated_output(orig_path)
+            # Update thumbnail selection
+            self._update_thumbnail_selection(orig_path)
+        except Exception as e:
+            print(f"[CLEANED_TOGGLE] UI reload error: {e}")
     
     def _on_download_images_clicked(self):
         """Handle download images button - consolidate isolated images into structured folder"""
