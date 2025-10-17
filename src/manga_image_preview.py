@@ -604,6 +604,8 @@ class MangaImagePreviewWidget(QWidget):
         self.manual_editing_enabled = False  # Manual editing is disabled by default (preview mode)
         self.translated_folder_path = None  # Path to translated images folder
         self.cleaned_images_enabled = True  # Show cleaned images when available (enabled by default)
+        # Light swap mode suppresses heavy overlay refresh when only swapping source image (cleaned/original)
+        self._light_swap_mode = False
         
         # Shared background pool for thumbnail tasks (initialized lazily if import fails here)
         try:
@@ -1570,6 +1572,10 @@ class MangaImagePreviewWidget(QWidget):
         self.file_label.setText(f"⌛ Loading {os.path.basename(image_path)}...")
         self.file_label.setStyleSheet("color: #5a9fd4; font-size: 8pt;")  # Blue while loading
         
+        # If we're in light swap mode (cleaned/original toggle), avoid any heavy scene churn
+        if getattr(self, '_light_swap_mode', False):
+            return
+        
         # Clear previous image data (unless preserve flag is set for workflow continuity)
         preserve_rectangles = getattr(self, '_preserve_rectangles_on_load', False)
         if not preserve_rectangles:
@@ -1610,6 +1616,15 @@ class MangaImagePreviewWidget(QWidget):
         if self.current_image_path:
             self.file_label.setText(f"📄 {os.path.basename(self.current_image_path)}")
             self.file_label.setStyleSheet("color: gray; font-size: 8pt;")  # Back to normal
+        
+        # If this was a light swap (cleaned/original toggle), skip heavy overlay restoration
+        if getattr(self, '_light_swap_mode', False):
+            # Turn off light swap mode now that the image is loaded
+            try:
+                self._light_swap_mode = False
+            except Exception:
+                pass
+            return
         
         # Restore overlays for the newly loaded image (and hide others)
         try:
@@ -1879,16 +1894,15 @@ class MangaImagePreviewWidget(QWidget):
     def _reload_preview_after_toggle(self, src_path: str, orig_path: str):
         """UI-thread reload after cleaned/original toggle"""
         try:
+            # Enable light swap mode to suppress heavy overlay churn in load handlers
+            self._light_swap_mode = True
             self._preserve_rectangles_on_load = True
             self._preserve_text_overlays_on_load = True
             # Load source tab image (CompactImageViewer has its own QThread)
             self.viewer.load_image(src_path)
             # Keep tracking original path for state
             self.current_image_path = orig_path
-            # Refresh output tab if available
-            self._check_and_load_translated_output(orig_path)
-            # Update thumbnail selection
-            self._update_thumbnail_selection(orig_path)
+            # Do not refresh output tab or thumbnails on sponge toggle
         except Exception as e:
             print(f"[CLEANED_TOGGLE] UI reload error: {e}")
     
