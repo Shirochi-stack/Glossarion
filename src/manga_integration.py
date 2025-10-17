@@ -11764,49 +11764,13 @@ class MangaTranslationTab(QObject):
             
             self._log(f"✅ Translation complete for region {region_index}", "success")
             
-            # Add text overlay ONLY for this specific region
-            try:
-                # Get current image path
-                current_image = self.image_preview_widget.current_image_path
-                if not current_image:
-                    self._log("❌ No current image for overlay", "error")
-                else:
-                    # Initialize overlay dictionary if not exists
-                    if not hasattr(self, '_text_overlays_by_image'):
-                        self._text_overlays_by_image = {}
-                    
-                    # Clear any existing overlays for this SPECIFIC region only
-                    if current_image in self._text_overlays_by_image:
-                        overlays_to_remove = []
-                        for overlay in self._text_overlays_by_image[current_image]:
-                            if getattr(overlay, '_overlay_region_index', None) == region_index:
-                                overlays_to_remove.append(overlay)
-                        
-                        for overlay in overlays_to_remove:
-                            try:
-                                self.image_preview_widget.viewer._scene.removeItem(overlay)
-                                self._text_overlays_by_image[current_image].remove(overlay)
-                            except Exception:
-                                pass
-                    
-                    # Now add the single overlay for this region
-                    translated_texts = [{
-                        'original': {'text': original_text, 'region_index': region_index},
-                        'translation': translation_result,
-                        'bbox': bbox
-                    }]
-                    self._add_text_overlay_to_viewer(translated_texts)
-                    self._log(f"✅ Added text overlay for region {region_index}", "success")
-            except Exception as e:
-                self._log(f"⚠️ Error adding text overlay: {e}", "warning")
-                import traceback
-                traceback.print_exc()
-            
-            # Post translation result to main thread via queue
+            # Defer ALL GUI updates to the main thread to avoid Qt timer/thread warnings
+            # Post translation result to main thread via queue where overlay will be added
             self.update_queue.put(('translate_this_text_result', {
                 'original_text': original_text,
                 'translation_result': translation_result,
-                'region_index': region_index
+                'region_index': region_index,
+                'bbox': bbox
             }))
         
         except Exception as e:
@@ -13716,6 +13680,94 @@ class MangaTranslationTab(QObject):
             print(f"[DEBUG] Error adding text overlays: {str(e)}")
             import traceback
             print(f"[DEBUG] Traceback: {traceback.format_exc()}")
+
+    def _add_text_overlay_for_region(self, region_index: int, original_text: str, translation: str, bbox: list = None):
+        """Add or replace a single text overlay for the given region on the main thread.
+        Does NOT clear overlays for other regions.
+        """
+        try:
+            from PySide6.QtWidgets import QGraphicsRectItem
+            from PySide6.QtGui import QColor, QBrush, QPen
+            from PySide6.QtCore import QRectF
+            
+            viewer = self.image_preview_widget.viewer
+            current_image = getattr(self.image_preview_widget, 'current_image_path', None)
+            if not current_image:
+                return
+            
+            # Init tracking map
+            if not hasattr(self, '_text_overlays_by_image'):
+                self._text_overlays_by_image = {}
+            if current_image not in self._text_overlays_by_image:
+                self._text_overlays_by_image[current_image] = []
+            
+            # Remove existing overlay for this region
+            to_remove = []
+            for grp in list(self._text_overlays_by_image[current_image]):
+                if getattr(grp, '_overlay_region_index', None) == int(region_index):
+                    to_remove.append(grp)
+            for grp in to_remove:
+                try:
+                    viewer._scene.removeItem(grp)
+                    self._text_overlays_by_image[current_image].remove(grp)
+                except Exception:
+                    pass
+            
+            # Determine geometry from current rectangle if present
+            x = y = w = h = None
+            try:
+                rects = getattr(viewer, 'rectangles', []) or []
+                if 0 <= int(region_index) < len(rects):
+                    br = rects[int(region_index)].sceneBoundingRect()
+                    x, y, w, h = int(br.x()), int(br.y()), int(br.width()), int(br.height())
+            except Exception:
+                pass
+            if (x is None or y is None or w is None or h is None) and bbox and len(bbox) >= 4:
+                x, y, w, h = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+            if x is None or w is None or h is None or w <= 0 or h <= 0:
+                return
+            
+            # Render text item using existing helper (uses current GUI settings)
+            settings = self._get_manga_rendering_settings() or {}
+            try:
+                settings['show_background'] = False
+                settings['bg_opacity'] = 0
+            except Exception:
+                pass
+            text_item, _ = self._create_manga_text_item(translation, x, y, w, h, settings)
+            if text_item is None:
+                return
+            viewer._scene.addItem(text_item)
+            
+            # Transparent overlay rect for click passthrough/context
+            overlay_rect = QGraphicsRectItem(x, y, w, h)
+            overlay_rect.setBrush(QBrush(QColor(0, 0, 0, 0)))
+            overlay_rect.setPen(QPen(QColor(0, 0, 0, 0)))
+            overlay_rect.setZValue(20)
+            overlay_rect.region_index = int(region_index)
+            viewer._scene.addItem(overlay_rect)
+            
+            # Optional background (disabled for source view)
+            bg_rect = None
+            
+            # Group items and tag metadata
+            group_items = [text_item, overlay_rect]
+            group = viewer._scene.createItemGroup(group_items)
+            group.setZValue(12)
+            try:
+                group._overlay_text_item = text_item
+                group._overlay_bg_item = bg_rect
+                group._overlay_original_text = translation
+                group._overlay_region_index = int(region_index)
+                group._overlay_bbox_size = (w, h)
+                group._overlay_image_path = current_image
+            except Exception:
+                pass
+            
+            self._text_overlays_by_image[current_image].append(group)
+            viewer._scene.update()
+        except Exception:
+            pass
     
     def _get_manga_rendering_settings(self) -> dict:
         """Get manga rendering settings from the GUI's current state"""
@@ -15991,9 +16043,30 @@ class MangaTranslationTab(QObject):
                         print(f"Error updating translate all progress: {str(e)}")
                 
                 elif update[0] == 'translate_this_text_result':
-                    # Process translation result - just acknowledge it
+                    # Process translation result on the GUI thread and add/replace a single overlay
                     _, data = update
-                    pass
+                    try:
+                        region_index = int(data.get('region_index'))
+                        original_text = data.get('original_text', '')
+                        translation_result = data.get('translation_result', '')
+                        bbox = data.get('bbox') or [0, 0, 100, 100]
+                        # Ensure in-memory translation map is updated
+                        if not hasattr(self, '_translation_data'):
+                            self._translation_data = {}
+                        self._translation_data[region_index] = {
+                            'original': original_text,
+                            'translation': translation_result
+                        }
+                        # Add or replace overlay for just this region
+                        try:
+                            self._add_text_overlay_for_region(region_index, original_text, translation_result, bbox)
+                            self._log(f"✅ Added text overlay for region {region_index}", "success")
+                        except Exception as overlay_err:
+                            self._log(f"⚠️ Failed to add overlay: {overlay_err}", "warning")
+                    except Exception as e:
+                        import traceback
+                        self._log(f"❌ Error handling translate result: {e}", "error")
+                        print(traceback.format_exc())
                 
                 elif update[0] == 'load_preview_image':
                     # Load an image in the preview
