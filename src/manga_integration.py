@@ -2859,7 +2859,8 @@ class MangaTranslationTab(QObject):
         
         # Add method to main_gui for parallel processing thread-safe GUI updates
         def _execute_parallel_gui_update(region_index: int, trans_text: str) -> bool:
-            """Execute GUI update on main thread for parallel processing (thread-safe)"""
+            """Execute GUI update on main thread for parallel processing (thread-safe).
+            Always returns a boolean success flag."""
             try:
                 # This runs on the main thread, so it's safe to call GUI methods
                 return self._update_single_text_overlay(region_index, trans_text)
@@ -11766,7 +11767,7 @@ class MangaTranslationTab(QObject):
         try:
             import threading
             import time
-            from queue import Queue
+            from queue import Queue, Empty
             from concurrent.futures import ThreadPoolExecutor
             
             class ParallelSaveSystem:
@@ -11775,6 +11776,20 @@ class MangaTranslationTab(QObject):
                     self.pending_tasks = Queue()
                     self.active_tasks = set()  # Track active region indices
                     self.microsecond_lock = threading.Lock()  # Microsecond precision lock
+
+                    # Coalescing and debouncing state
+                    self.latest_ts_by_region = {}   # region_index -> latest requested timestamp
+                    self.last_queued_ts = {}        # region_index -> last time we actually enqueued a task
+                    self.queued_regions = set()     # regions that currently have a pending task in the queue
+                    # Debounce interval (configurable)
+                    min_interval_ms = 60
+                    try:
+                        if hasattr(parent, 'main_gui') and hasattr(parent.main_gui, 'config'):
+                            adv = parent.main_gui.config.get('manga_settings', {}).get('advanced', {})
+                            min_interval_ms = int(adv.get('min_save_interval_ms', 60))
+                    except Exception:
+                        pass
+                    self.min_interval_ns = max(0, int(min_interval_ms)) * 1_000_000
                     
                     # Get max_workers from manga settings
                     max_workers = 4  # Default fallback
@@ -11803,26 +11818,46 @@ class MangaTranslationTab(QObject):
                     print(f"[PARALLEL] Initialized parallel save system with {max_workers} worker threads")
                 
                 def queue_save_task(self, region_index: int):
-                    """Queue a save task for the given region index."""
+                    """Queue a save task for the given region index with coalescing/debounce."""
                     try:
-                        timestamp = time.time_ns()  # Microsecond precision timestamp
-                        task = {
-                            'region_index': region_index,
-                            'timestamp': timestamp,
-                            'retry_count': 0
-                        }
-                        
+                        timestamp = time.time_ns()
                         with self.microsecond_lock:
-                            # Check if this region is already being processed
-                            if region_index in self.active_tasks:
-                                print(f"[PARALLEL] Region {region_index} already being processed, skipping")
+                            # Record the latest requested timestamp for this region
+                            self.latest_ts_by_region[region_index] = timestamp
+                            last_q = self.last_queued_ts.get(region_index, 0)
+                            dt = timestamp - last_q
+
+                            # If already active or already queued, only update latest ts; optionally debounce
+                            if region_index in self.active_tasks or region_index in self.queued_regions:
+                                if dt < self.min_interval_ns:
+                                    print(f"[PARALLEL] Debounced region {region_index} (dt={dt/1_000_000:.1f}ms)")
+                                    return False
+                                # If active and not already queued, allow one trailing queued task
+                                if region_index in self.active_tasks and region_index not in self.queued_regions:
+                                    task = {
+                                        'region_index': region_index,
+                                        'timestamp': timestamp,
+                                        'retry_count': 0
+                                    }
+                                    self.pending_tasks.put(task)
+                                    self.queued_regions.add(region_index)
+                                    self.last_queued_ts[region_index] = timestamp
+                                    print(f"[PARALLEL] Queued trailing task for active region {region_index} at {timestamp}")
+                                    return True
+                                # Already queued: nothing else to do
                                 return False
-                            
-                            # Add to pending tasks
+
+                            # Not active and not queued: enqueue a fresh task
+                            task = {
+                                'region_index': region_index,
+                                'timestamp': timestamp,
+                                'retry_count': 0
+                            }
                             self.pending_tasks.put(task)
+                            self.queued_regions.add(region_index)
+                            self.last_queued_ts[region_index] = timestamp
                             print(f"[PARALLEL] Queued save task for region {region_index} at {timestamp}")
                             return True
-                            
                     except Exception as e:
                         print(f"[PARALLEL] Error queuing task for region {region_index}: {e}")
                         return False
@@ -11865,38 +11900,45 @@ class MangaTranslationTab(QObject):
                     return queued_count
                 
                 def _coordinate_tasks(self):
-                    """Coordinate parallel task execution with microsecond precision."""
+                    """Coordinate parallel task execution with coalescing and microsecond precision."""
                     print(f"[PARALLEL] Coordinator thread started")
                     
                     while True:
                         try:
                             # Wait for a task (blocking)
                             task = self.pending_tasks.get(timeout=1.0)
-                            
                             region_index = task['region_index']
+                            ts = task.get('timestamp', 0)
                             
-                            # Acquire microsecond lock
                             with self.microsecond_lock:
-                                # Double-check the region isn't already active
-                                if region_index in self.active_tasks:
-                                    print(f"[PARALLEL] Region {region_index} became active while waiting, skipping")
+                                # If this task is stale, replace with the latest request and skip
+                                latest = self.latest_ts_by_region.get(region_index, ts)
+                                if latest > ts:
+                                    # Ensure a single up-to-date task exists in queue
+                                    if region_index not in self.queued_regions:
+                                        self.queued_regions.add(region_index)
+                                    # Enqueue the latest task to replace stale one
+                                    self.pending_tasks.put({'region_index': region_index, 'timestamp': latest, 'retry_count': 0})
+                                    print(f"[PARALLEL] Dropped stale task for region {region_index} (ts={ts}), queued latest ts={latest}")
                                     continue
-                                
-                                # Mark region as active
-                                self.active_tasks.add(region_index)
-                                
-                                # Increment processing count
-                                with self.count_lock:
-                                    self.processing_count += 1
-                                    print(f"[PARALLEL] Started processing region {region_index} (active: {self.processing_count})")
+
+                                # If region is currently active, requeue and try later
+                                if region_index in self.active_tasks:
+                                    self.pending_tasks.put(task)
+                                    # Small yield to avoid busy looping on the same region
+                                    pass
+                                else:
+                                    # Ready to start: consume the queued slot and mark active
+                                    if region_index in self.queued_regions:
+                                        self.queued_regions.discard(region_index)
+                                    self.active_tasks.add(region_index)
+                                    with self.count_lock:
+                                        self.processing_count += 1
+                                        print(f"[PARALLEL] Started processing region {region_index} (active: {self.processing_count})")
+                                        self.parent._update_parallel_save_button_state(self.processing_count)
                                     
-                                    # Update button state for parallel processing
-                                    self.parent._update_parallel_save_button_state(self.processing_count)
-                            
-                            # Submit the actual work to thread pool
-                            future = self.executor.submit(self._process_save_task, task)
-                            
-                            # Don't wait for completion - let it run in parallel
+                                    # Submit the actual work to thread pool
+                                    self.executor.submit(self._process_save_task, task)
                             
                         except Empty:
                             continue
@@ -11904,11 +11946,20 @@ class MangaTranslationTab(QObject):
                             print(f"[PARALLEL] Coordinator error: {e}")
                 
                 def _process_save_task(self, task):
-                    """Process a single save task in a worker thread."""
+                    """Process a single save task in a worker thread (skips stale tasks)."""
                     region_index = task['region_index']
+                    task_ts = task.get('timestamp', 0)
                     start_time = time.time_ns()
+                    skipped = False
                     
                     try:
+                        # Skip if this worker picked up a task that became stale
+                        with self.microsecond_lock:
+                            latest = self.latest_ts_by_region.get(region_index, task_ts)
+                            if latest > task_ts:
+                                skipped = True
+                                return False
+                        
                         print(f"[PARALLEL] Worker processing region {region_index}")
                         
                         # Get translation text (main thread safe)
@@ -11926,7 +11977,10 @@ class MangaTranslationTab(QObject):
                         if success:
                             print(f"[PARALLEL] Successfully processed region {region_index} in {duration_ms:.2f}ms")
                         else:
-                            print(f"[PARALLEL] Failed to process region {region_index} after {duration_ms:.2f}ms")
+                            if skipped:
+                                print(f"[PARALLEL] Skipped stale task for region {region_index} after {duration_ms:.2f}ms")
+                            else:
+                                print(f"[PARALLEL] Failed to process region {region_index} after {duration_ms:.2f}ms")
                         
                         return success
                         
@@ -12144,53 +12198,30 @@ class MangaTranslationTab(QObject):
     
     def _update_single_text_overlay_parallel(self, region_index: int, trans_text: str) -> bool:
         """Thread-safe version of overlay update for parallel processing.
-        
-        This method can be called from worker threads and handles thread safety.
-        """
+        Ensures a strict boolean return (True on success, False on failure)."""
         try:
-            # Import thread-safe utilities
-            import time
-            from PySide6.QtCore import QMetaObject, Qt
-            
-            # For thread safety, we'll queue the GUI update to the main thread
-            def gui_update():
+            # For thread safety, run GUI work on the main thread via helper
+            def gui_update() -> bool:
                 try:
-                    # Persist rectangles state on main thread
                     if hasattr(self.image_preview_widget, '_persist_rectangles_state'):
                         self.image_preview_widget._persist_rectangles_state()
-                    
-                    # Update the overlay using the existing method (main thread only)
-                    return self._update_single_text_overlay(region_index, trans_text)
+                    self._update_single_text_overlay(region_index, trans_text)
+                    return True
                 except Exception as e:
                     print(f"[PARALLEL] GUI update error for region {region_index}: {e}")
                     return False
-            
-            # Use QMetaObject to invoke on main thread
-            result = [False]  # Use list to allow modification in nested function
-            
-            def set_result(success):
-                result[0] = success
-            
-            # Execute on main thread and wait for completion
+
+            # Prefer main_gui helper if present (already main-thread safe)
             try:
-            # Queue the GUI update to main thread
                 if hasattr(self.main_gui, '_execute_parallel_gui_update'):
-                    success = self.main_gui._execute_parallel_gui_update(region_index, trans_text)
+                    ok = self.main_gui._execute_parallel_gui_update(region_index, trans_text)
+                    # Treat None as success since _update_single_text_overlay historically returned None
+                    return True if ok is None else bool(ok)
                 else:
-                    # Fallback - call directly on main thread
-                    success = gui_update()
-                
-                if success is None:
-                    # Fallback: use the direct method (may cause thread issues but better than failing)
                     return gui_update()
-                
-                return bool(success)
-                
             except Exception:
-                # Final fallback: direct call (not thread-safe but functional)
                 print(f"[PARALLEL] Using direct GUI update fallback for region {region_index}")
                 return gui_update()
-                
         except Exception as e:
             print(f"[PARALLEL] Error in parallel overlay update for region {region_index}: {e}")
             return False
