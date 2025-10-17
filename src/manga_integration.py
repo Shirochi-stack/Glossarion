@@ -13680,10 +13680,24 @@ class MangaTranslationTab(QObject):
             if font_size_mode == 'fixed' and int(settings.get('font_size', 0)) > 0:
                 # Use fixed font size
                 font_size = max(8, int(settings.get('font_size', 12)))
-                font = QFont(font_family)
+                # Respect bold if requested by family or font file name
+                fam = font_family or 'Arial'
+                fam_l = fam.lower()
+                path_l = (settings.get('font_path') or getattr(self, 'selected_font_path', '') or '').lower()
+                is_bold = (' bold' in fam_l) or fam_l.endswith('bold') or ('black' in fam_l) or ('heavy' in fam_l) or ('bold' in path_l) or ('black' in path_l) or ('heavy' in path_l)
+                # Strip style keyword from family for proper lookup
+                for token in [' bold', 'bold', ' black', 'black', ' heavy', 'heavy']:
+                    fam = fam.replace(token, '').replace(token.title(), '').strip()
+                font = QFont(fam)
                 font.setPointSize(int(font_size))
+                if is_bold:
+                    try:
+                        from PySide6.QtGui import QFont as _QFont
+                        font.setBold(True)
+                        font.setWeight(_QFont.Weight.Bold)
+                    except Exception:
+                        font.setBold(True)
                 text_item = QGraphicsTextItem()
-                font.setBold(False)
                 font.setKerning(True)
                 wrapped_text = self._wrap_text_for_bubble(src_text, available_width, font, settings)
                 text_item.setPlainText(wrapped_text)
@@ -13760,10 +13774,22 @@ class MangaTranslationTab(QObject):
                     wrapped_text = '\n'.join(lines) if lines else measure_text
                     
                     # Create font and text item for Qt
-                    font = QFont(font_family)
+                    fam = font_family or 'Arial'
+                    fam_l = fam.lower()
+                    path_l = (settings.get('font_path') or getattr(self, 'selected_font_path', '') or '').lower()
+                    is_bold = (' bold' in fam_l) or fam_l.endswith('bold') or ('black' in fam_l) or ('heavy' in fam_l) or ('bold' in path_l) or ('black' in path_l) or ('heavy' in path_l)
+                    for token in [' bold', 'bold', ' black', 'black', ' heavy', 'heavy']:
+                        fam = fam.replace(token, '').replace(token.title(), '').strip()
+                    font = QFont(fam)
                     font.setPointSize(int(max(8, font_size)))
+                    if is_bold:
+                        try:
+                            from PySide6.QtGui import QFont as _QFont
+                            font.setBold(True)
+                            font.setWeight(_QFont.Weight.Bold)
+                        except Exception:
+                            font.setBold(True)
                     text_item = QGraphicsTextItem()
-                    font.setBold(False)
                     font.setKerning(True)
                     text_item.setPlainText(wrapped_text)
                     text_item.setFont(font)
@@ -13774,10 +13800,22 @@ class MangaTranslationTab(QObject):
                     min_size = settings.get('auto_min_size', 10)
                     max_size = settings.get('max_font_size', 48)
                     font_size = max(min_size, min(font_size, max_size))
-                    font = QFont(font_family)
+                    fam = font_family or 'Arial'
+                    fam_l = fam.lower()
+                    path_l = (settings.get('font_path') or getattr(self, 'selected_font_path', '') or '').lower()
+                    is_bold = (' bold' in fam_l) or fam_l.endswith('bold') or ('black' in fam_l) or ('heavy' in fam_l) or ('bold' in path_l) or ('black' in path_l) or ('heavy' in path_l)
+                    for token in [' bold', 'bold', ' black', 'black', ' heavy', 'heavy']:
+                        fam = fam.replace(token, '').replace(token.title(), '').strip()
+                    font = QFont(fam)
                     font.setPointSize(int(font_size))
+                    if is_bold:
+                        try:
+                            from PySide6.QtGui import QFont as _QFont
+                            font.setBold(True)
+                            font.setWeight(_QFont.Weight.Bold)
+                        except Exception:
+                            font.setBold(True)
                     text_item = QGraphicsTextItem()
-                    font.setBold(False)
                     font.setKerning(True)
                     wrapped_text = self._wrap_text_for_bubble(src_text, available_width, font, settings)
                     text_item.setPlainText(wrapped_text)
@@ -13807,6 +13845,12 @@ class MangaTranslationTab(QObject):
                     )
                     shadow_effect.setBlurRadius(settings.get('shadow_blur', 2))
                     text_item.setGraphicsEffect(shadow_effect)
+                    # Improve quality/perf for drop shadow
+                    try:
+                        from PySide6.QtWidgets import QGraphicsItem as _QGI
+                        text_item.setCacheMode(_QGI.CacheMode.DeviceCoordinateCache)
+                    except Exception:
+                        pass
                     print(f"[DEBUG] Applied shadow effect: color={shadow_color.name()}, offset=({settings.get('shadow_offset_x', 1)},{settings.get('shadow_offset_y', 1)}), blur={settings.get('shadow_blur', 2)}")
                 except Exception as shadow_err:
                     print(f"[DEBUG] Error applying shadow: {shadow_err}")
@@ -13838,6 +13882,7 @@ class MangaTranslationTab(QObject):
             
             # Compute safe area (for fitting/centering) before optional bubble scaling
             safe_x, safe_y, safe_w, safe_h = x, y, w, h
+            
             try:
                 if used_translator_algo and region_for_algo is not None:
                     sx, sy, sw, sh = self._manga_translator.get_safe_text_area(region_for_algo)
@@ -13918,13 +13963,19 @@ class MangaTranslationTab(QObject):
             except Exception:
                 pass
             
-            # Get actual text bounding rect to determine size after clamp
+            # Make QTextItem manage horizontal centering by giving it a fixed text width = available_width
+            try:
+                text_item.setTextWidth(max(1.0, float(available_width)))
+            except Exception:
+                pass
+            
+            # Get actual text bounding rect to determine size
             text_bounding = text_item.boundingRect()
             text_w = text_bounding.width()
             text_h = text_bounding.height()
             
-            # Center within safe area
-            text_x = safe_x + max(0, (safe_w - text_w) / 2)
+            # Center within safe area: x = safe_x + padding, let QTextOption center inside that width
+            text_x = safe_x + padding
             text_y = safe_y + max(0, (safe_h - text_h) / 2)
             
             print(f"[DEBUG] Enhanced text positioning: bbox=({x},{y},{w},{h}) safe=({safe_x},{safe_y},{safe_w},{safe_h}) text=({text_w:.0f}x{text_h:.0f}) pos=({text_x:.0f},{text_y:.0f})")
