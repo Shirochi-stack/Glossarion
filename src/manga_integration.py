@@ -13453,41 +13453,120 @@ class MangaTranslationTab(QObject):
             if available_width <= 0 or available_height <= 0:
                 return None, 0
             
-            if font_size_mode == 'fixed':
+            wrapped_text = None
+            region_for_algo = None
+            used_translator_algo = False
+            
+            if font_size_mode == 'fixed' and int(settings.get('font_size', 0)) > 0:
                 # Use fixed font size
-                font_size = max(8, settings.get('font_size', 12))
-            elif font_size_mode == 'multiplier':
-                # Calculate base size from bubble dimensions
-                base_size = min(available_width, available_height) / 8
-                multiplier = settings.get('font_size_multiplier', 1.0)
-                font_size = int(base_size * multiplier)
-                font_size = max(8, min(font_size, settings.get('max_font_size', 48)))
+                font_size = max(8, int(settings.get('font_size', 12)))
+                font = QFont(font_family)
+                font.setPointSize(int(font_size))
+                text_item = QGraphicsTextItem()
+                font.setBold(False)
+                font.setKerning(True)
+                wrapped_text = self._wrap_text_for_bubble(text, available_width, font, settings)
+                text_item.setPlainText(wrapped_text)
+                text_item.setFont(font)
             else:
-                # Auto mode - use smart sizing algorithm
-                font_size = self._calculate_auto_font_size(
-                    text, available_width, available_height, settings
-                )
+                # Use MangaTranslator's auto sizing algorithm for AUTO and MULTIPLIER modes
+                try:
+                    from manga_translator import MangaTranslator, TextRegion
+                    from unified_api_client import UnifiedClient
+                    from PIL import Image as _PILImage
+                    from PIL import ImageDraw as _PILDraw
+                    
+                    # Ensure we have a translator instance (no API use; safe for layout)
+                    if not hasattr(self, '_manga_translator') or self._manga_translator is None:
+                        cfg = self.main_gui.config if hasattr(self, 'main_gui') else {}
+                        api_key = (cfg.get('api_key') or 'dummy')
+                        model = cfg.get('model', 'gpt-4o-mini')
+                        tr_client = UnifiedClient(model=model, api_key=api_key)
+                        self._manga_translator = MangaTranslator(
+                            ocr_config=self._get_ocr_config(),
+                            unified_client=tr_client,
+                            main_gui=self.main_gui,
+                            log_callback=lambda *_: None
+                        )
+                    tr = self._manga_translator
+                    
+                    # Sync critical sizing flags from GUI
+                    try:
+                        tr.min_readable_size = int(settings.get('auto_min_size', 10))
+                    except Exception:
+                        pass
+                    try:
+                        tr.max_font_size_limit = int(settings.get('max_font_size', 48))
+                    except Exception:
+                        pass
+                    tr.strict_text_wrapping = bool(settings.get('strict_wrapping', True))
+                    tr.constrain_to_bubble = bool(settings.get('constrain_to_bubble', True))
+                    
+                    # Font mode
+                    fs_mode = str(settings.get('font_size_mode', 'auto'))
+                    if fs_mode == 'multiplier':
+                        tr.font_size_mode = 'multiplier'
+                        try:
+                            tr.font_size_multiplier = float(settings.get('font_size_multiplier', 1.0))
+                        except Exception:
+                            tr.font_size_multiplier = 1.0
+                        tr.custom_font_size = None
+                    else:
+                        # Auto mode
+                        tr.custom_font_size = None
+                    
+                    # Custom font path if provided
+                    fp = settings.get('font_path') or getattr(self, 'selected_font_path', None)
+                    if fp:
+                        tr.selected_font_style = fp
+                    
+                    # Uppercase for measurement if needed
+                    measure_text = text.upper() if settings.get('force_caps', False) else text
+                    
+                    # Build dummy draw for metrics
+                    dummy_img = _PILImage.new('RGB', (max(32, int(w)), max(32, int(h))), (0, 0, 0))
+                    draw = _PILDraw.Draw(dummy_img)
+                    
+                    # Region with polygon vertices to enable shape-aware safe area
+                    region_for_algo = TextRegion(
+                        text=measure_text,
+                        vertices=[(x, y), (x + w, y), (x + w, y + h), (x, y + h)],
+                        bounding_box=(x, y, w, h),
+                        confidence=1.0,
+                        region_type='text_block'
+                    )
+                    
+                    font_size, lines = tr._fit_text_to_region(measure_text, w, h, draw, region_for_algo, use_as_is=False)
+                    wrapped_text = '\n'.join(lines) if lines else measure_text
+                    
+                    # Create font and text item for Qt
+                    font = QFont(font_family)
+                    font.setPointSize(int(max(8, font_size)))
+                    text_item = QGraphicsTextItem()
+                    font.setBold(False)
+                    font.setKerning(True)
+                    text_item.setPlainText(wrapped_text)
+                    text_item.setFont(font)
+                    used_translator_algo = True
+                except Exception:
+                    # Fallback to previous local auto-sizing
+                    font_size = self._calculate_auto_font_size(text, available_width, available_height, settings)
+                    min_size = settings.get('auto_min_size', 10)
+                    max_size = settings.get('max_font_size', 48)
+                    font_size = max(min_size, min(font_size, max_size))
+                    font = QFont(font_family)
+                    font.setPointSize(int(font_size))
+                    text_item = QGraphicsTextItem()
+                    font.setBold(False)
+                    font.setKerning(True)
+                    wrapped_text = self._wrap_text_for_bubble(text, available_width, font, settings)
+                    text_item.setPlainText(wrapped_text)
+                    text_item.setFont(font)
             
-            # Ensure font size is within bounds
-            min_size = settings.get('auto_min_size', 10)
-            max_size = settings.get('max_font_size', 48)
-            font_size = max(min_size, min(font_size, max_size))
-            
-            # Create font
-            font = QFont(font_family)
-            font.setPointSize(int(font_size))
-            
-            # Create text item
-            text_item = QGraphicsTextItem()
-            
-            # Set font properties
-            font.setBold(False)
-            font.setKerning(True)
-            
-            # Wrap text to fit width
-            wrapped_text = self._wrap_text_for_bubble(text, available_width, font, settings)
-            text_item.setPlainText(wrapped_text)
-            text_item.setFont(font)
+            # Set text color
+            text_color_rgb = settings.get('text_color', [0, 0, 0])
+            text_color = QColor(*text_color_rgb)
+            text_item.setDefaultTextColor(text_color)
             
             # Set text color
             text_color_rgb = settings.get('text_color', [0, 0, 0])
@@ -13537,21 +13616,70 @@ class MangaTranslationTab(QObject):
                 except Exception:
                     pass
             
-            # Calculate vertical centering
-            # Get actual text bounding rect to determine height
+            # Compute safe area (for fitting/centering) before optional bubble scaling
+            safe_x, safe_y, safe_w, safe_h = x, y, w, h
+            try:
+                if used_translator_algo and region_for_algo is not None:
+                    sx, sy, sw, sh = self._manga_translator.get_safe_text_area(region_for_algo)
+                    safe_x, safe_y, safe_w, safe_h = int(sx), int(sy), int(sw), int(sh)
+            except Exception:
+                pass
+            
+            # Respect "Scale with bubble size" toggle by scaling font size relative to page-average bubble
+            try:
+                if bool(settings.get('bubble_size_factor', True)):
+                    # Baseline area = average of current viewer rectangles; fallback to this region
+                    rects = getattr(self.image_preview_widget.viewer, 'rectangles', []) or []
+                    areas = []
+                    for ritem in rects:
+                        br = ritem.sceneBoundingRect()
+                        areas.append(max(1.0, float(br.width() * br.height())))
+                    baseline_area = (sum(areas) / len(areas)) if areas else max(1.0, float(w * h))
+                    region_area = max(1.0, float(w * h))
+                    # Use sqrt(area ratio) to get linear scale
+                    scale_factor = (region_area / baseline_area) ** 0.5
+                    # Honor "Prefer larger text" – if disabled, don't up-scale beyond 1.0
+                    if not bool(settings.get('prefer_larger', True)):
+                        scale_factor = min(1.0, scale_factor)
+                    # Target size and re-wrap with clamp
+                    target_size = int(max(8, min(int(font_size * scale_factor), int(settings.get('max_font_size', 48)))))
+                    min_size = int(settings.get('auto_min_size', 10))
+                    if target_size != int(font_size):
+                        # Re-wrap to ensure it fits within safe area at target size
+                        test_font = QFont(font.family())
+                        test_font.setPointSize(target_size)
+                        # Iteratively shrink if overflow
+                        tries = 0
+                        while tries < 25:
+                            test_wrapped = self._wrap_text_for_bubble(text, safe_w, test_font, settings)
+                            # Measure bounds using a temp item
+                            tmp_item = QGraphicsTextItem()
+                            tmp_item.setFont(test_font)
+                            tmp_item.setPlainText(test_wrapped)
+                            tb = tmp_item.boundingRect()
+                            if tb.width() <= safe_w and tb.height() <= safe_h:
+                                wrapped_text = test_wrapped
+                                font = test_font
+                                font_size = target_size
+                                text_item.setFont(font)
+                                text_item.setPlainText(wrapped_text)
+                                break
+                            target_size = max(min_size, target_size - 1)
+                            test_font.setPointSize(target_size)
+                            tries += 1
+            except Exception:
+                pass
+            
+            # Get actual text bounding rect to determine size
             text_bounding = text_item.boundingRect()
-            text_height = text_bounding.height()
+            text_w = text_bounding.width()
+            text_h = text_bounding.height()
             
-            # Center vertically within the available height
-            vertical_offset = (available_height - text_height) / 2
-            # Ensure text doesn't overflow
-            vertical_offset = max(0, vertical_offset)
+            # Center within safe area
+            text_x = safe_x + max(0, (safe_w - text_w) / 2)
+            text_y = safe_y + max(0, (safe_h - text_h) / 2)
             
-            # Position text centered horizontally and vertically within bubble
-            text_x = x + (w - text_bounding.width()) / 2  # Center horizontally
-            text_y = y + padding + vertical_offset
-            
-            print(f"[DEBUG] Enhanced text positioning: bbox=({x},{y},{w},{h}), text_size=({text_bounding.width():.0f}x{text_height:.0f}), centered_pos=({text_x:.0f},{text_y:.0f})")
+            print(f"[DEBUG] Enhanced text positioning: bbox=({x},{y},{w},{h}) safe=({safe_x},{safe_y},{safe_w},{safe_h}) text=({text_w:.0f}x{text_h:.0f}) pos=({text_x:.0f},{text_y:.0f})")
             
             text_item.setPos(text_x, text_y)
             text_item.setZValue(11)  # Above background
@@ -13560,7 +13688,7 @@ class MangaTranslationTab(QObject):
             if settings.get('force_caps', False) and wrapped_text:
                 text_item.setPlainText(wrapped_text.upper())
             
-            return text_item, font_size
+            return text_item, int(font_size)
             
         except Exception as e:
             print(f"[DEBUG] Error creating manga text item: {str(e)}")
