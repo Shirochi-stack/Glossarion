@@ -11882,6 +11882,7 @@ class MangaTranslationTab(QObject):
             # Get OCR config/provider
             ocr_config = self._get_ocr_config()
             provider = ocr_config.get('provider', 'custom-api')
+            text = ""
             
             # Ensure OCRManager exists
             if not hasattr(self, 'ocr_manager') or not self.ocr_manager:
@@ -11934,16 +11935,65 @@ class MangaTranslationTab(QObject):
                 # Run OCR on cropped region only
                 results = self.ocr_manager.detect_text(cropped, provider, confidence=0.5)
                 text = " "+" ".join([r.text.strip() for r in results if getattr(r, 'text', '').strip()]) if results else ""
-            else:
-                # For non custom-api providers, run detect_text on cropped region
+            elif provider == 'google':
+                # Use Google Cloud Vision on CROPPED region
+                try:
+                    from google.cloud import vision
+                    # Credentials
+                    google_creds = ocr_config.get('google_credentials_path', '')
+                    if not google_creds or not os.path.exists(google_creds):
+                        self._log("❌ Google Cloud Vision credentials not found", "error")
+                        text = ""
+                    else:
+                        os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = google_creds
+                        client = vision.ImageAnnotatorClient()
+                        import cv2
+                        _, encoded = cv2.imencode('.jpg', cropped, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                        image_bytes = encoded.tobytes()
+                        vimage = vision.Image(content=image_bytes)
+                        response = client.text_detection(image=vimage)
+                        if response.error.message:
+                            raise Exception(response.error.message)
+                        texts = response.text_annotations
+                        if texts:
+                            # Combine all but first (which is full block)
+                            parts = [t.description.strip() for t in texts[1:] if t.description.strip()]
+                            if not parts and texts[0].description.strip():
+                                parts = [texts[0].description.strip()]
+                            text = " ".join(parts)
+                        else:
+                            text = ""
+                except Exception as ge:
+                    import traceback
+                    self._log(f"❌ Google OCR failed: {ge}", "error")
+                    print(traceback.format_exc())
+                    text = ""
+            elif provider in ['azure', 'azure-document-intelligence']:
+                # Use Azure providers on the CROPPED region via OCRManager
                 try:
                     prov = self.ocr_manager.get_provider(provider)
                     if prov and not prov.is_loaded:
                         self.ocr_manager.load_provider(provider, **ocr_config)
-                except Exception:
-                    pass
-                results = self.ocr_manager.detect_text(cropped, provider, confidence=0.5)
-                text = " "+" ".join([r.text.strip() for r in results if getattr(r, 'text', '').strip()]) if results else ""
+                    results = self.ocr_manager.detect_text(cropped, provider, confidence=0.5)
+                    text = " ".join([r.text.strip() for r in results if getattr(r, 'text', '').strip()]) if results else ""
+                except Exception as ae:
+                    import traceback
+                    self._log(f"❌ {provider} OCR failed: {ae}", "error")
+                    print(traceback.format_exc())
+                    text = ""
+            else:
+                # All other providers via OCRManager on CROPPED region
+                try:
+                    prov = self.ocr_manager.get_provider(provider)
+                    if prov and not prov.is_loaded:
+                        self.ocr_manager.load_provider(provider, **ocr_config)
+                    results = self.ocr_manager.detect_text(cropped, provider, confidence=0.5)
+                    text = " ".join([r.text.strip() for r in results if getattr(r, 'text', '').strip()]) if results else ""
+                except Exception as oe:
+                    import traceback
+                    self._log(f"❌ {provider} OCR failed: {oe}", "error")
+                    print(traceback.format_exc())
+                    text = ""
             text = text.strip()
             # Post back to GUI thread
             self.update_queue.put(('ocr_this_text_result', {
