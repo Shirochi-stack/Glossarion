@@ -165,7 +165,11 @@ class MangaSettingsDialog(QDialog):
             'cloud_inpaint_prompt': 'clean background, smooth surface',
             'cloud_negative_prompt': 'text, writing, letters',
             'cloud_inference_steps': 20,
-            'cloud_timeout': 60
+            'cloud_timeout': 60,
+            'manual_edit': {
+                'translate_prompt': 'translate this text to {language}',  # Prompt template with {language} placeholder
+                'translate_target_language': 'English'  # Default language
+            }
         }
         
         # Merge with existing config
@@ -841,6 +845,7 @@ class MangaSettingsDialog(QDialog):
         self._create_inpainting_tab()
         self._create_advanced_tab()
         self._create_cloud_api_tab()
+        self._create_manual_edit_tab()
         # NOTE: Font Sizing tab removed; controls are now in Manga Integration UI
         
         # Set content widget in scroll area
@@ -2116,6 +2121,82 @@ class MangaSettingsDialog(QDialog):
             
             # Show/hide SD-specific options based on model
             self._on_cloud_model_change(self.cloud_model_selected)
+    
+    def _create_manual_edit_tab(self):
+        """Create manual edit settings tab for customizing prompts"""
+        tab_widget = QWidget()
+        self.tab_widget.addTab(tab_widget, "Manual Edit")
+        
+        # Create scroll area for content
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setSpacing(10)
+        content_layout.setContentsMargins(20, 20, 20, 20)
+        
+        scroll_area.setWidget(content_widget)
+        
+        # Add scroll area to parent layout
+        parent_layout = QVBoxLayout(tab_widget)
+        parent_layout.setContentsMargins(0, 0, 0, 0)
+        parent_layout.addWidget(scroll_area)
+        
+        # Translate Text Options
+        translate_group = QGroupBox("Translate This Text (Manual Edit)")
+        translate_layout = QVBoxLayout(translate_group)
+        content_layout.addWidget(translate_group)
+        
+        # Prompt template
+        prompt_label = QLabel("Prompt Template:")
+        prompt_label.setToolTip("Use {language} as placeholder for the target language")
+        translate_layout.addWidget(prompt_label)
+        
+        self.manual_translate_prompt = QLineEdit()
+        self.manual_translate_prompt.setText(
+            self.settings.get('manual_edit', {}).get('translate_prompt', 'translate this text to {language}')
+        )
+        self.manual_translate_prompt.setToolTip(
+            "Template for the translate prompt. Use {language} as a placeholder.\n"
+            "Example: 'translate this text to {language}'"
+        )
+        translate_layout.addWidget(self.manual_translate_prompt)
+        
+        prompt_help = QLabel(
+            "💡 Tip: The prompt will replace {language} with the target language below.\n"
+            "Example: 'translate this text to {language}' → 'translate this text to English'"
+        )
+        prompt_help_font = QFont('Arial', 8)
+        prompt_help.setFont(prompt_help_font)
+        prompt_help.setStyleSheet("color: gray;")
+        prompt_help.setWordWrap(True)
+        prompt_help.setContentsMargins(0, 5, 0, 10)
+        translate_layout.addWidget(prompt_help)
+        
+        # Target language
+        lang_label = QLabel("Target Language:")
+        translate_layout.addWidget(lang_label)
+        
+        self.manual_translate_language = QLineEdit()
+        self.manual_translate_language.setText(
+            self.settings.get('manual_edit', {}).get('translate_target_language', 'English')
+        )
+        self.manual_translate_language.setToolTip("The language to translate text into (e.g., 'English', 'Spanish', 'French')")
+        translate_layout.addWidget(self.manual_translate_language)
+        
+        lang_help = QLabel(
+            "💡 Tip: Enter any language name or code. Common examples: English, Spanish, French, German, Chinese, Japanese, Korean"
+        )
+        lang_help_font = QFont('Arial', 8)
+        lang_help.setFont(lang_help_font)
+        lang_help.setStyleSheet("color: gray;")
+        lang_help.setWordWrap(True)
+        translate_layout.addWidget(lang_help)
+        
+        # Add stretch at end
+        content_layout.addStretch()
     
     def _on_cloud_model_change(self, model):
         """Handle cloud model selection change"""
@@ -4785,6 +4866,14 @@ class MangaSettingsDialog(QDialog):
             if hasattr(self, 'ram_gate_floor_spinbox'):
                 ram_gate_floor = int(self.ram_gate_floor_spinbox.value())
                 self.settings['advanced']['ram_min_floor_over_baseline_mb'] = ram_gate_floor
+            
+            # Manual Edit settings
+            if 'manual_edit' not in self.settings:
+                self.settings['manual_edit'] = {}
+            if hasattr(self, 'manual_translate_prompt'):
+                self.settings['manual_edit']['translate_prompt'] = self.manual_translate_prompt.text()
+            if hasattr(self, 'manual_translate_language'):
+                self.settings['manual_edit']['translate_target_language'] = self.manual_translate_language.text()
             
             # Cloud API settings
             if hasattr(self, 'cloud_model_selected'):

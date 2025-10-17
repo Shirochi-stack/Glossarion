@@ -84,13 +84,6 @@ def enable_detailed_http_logging(log_folder="http_requests"):
     """
     global _log_folder, _patched
     
-    # Allow disabling via env (used by render workers)
-    try:
-        if os.environ.get('DISABLE_HTTP_LOGGER', '') == '1' or os.environ.get('GLOSSARION_RENDER_WORKER', '') == '1':
-            return None
-    except Exception:
-        pass
-    
     if _patched:
         return _log_folder
     

@@ -123,9 +123,7 @@ import logging
 # Enable HTTP request/response logging to files
 try:
     from http_logger import enable_detailed_http_logging
-    import os as _os
-    if _os.environ.get('DISABLE_HTTP_LOGGER', '') != '1' and _os.environ.get('GLOSSARION_RENDER_WORKER', '') != '1':
-        enable_detailed_http_logging()
+    enable_detailed_http_logging()
 except Exception as e:
     print(f"Warning: Could not enable HTTP logging: {e}")
 import re
@@ -203,13 +201,8 @@ def setup_http_logging():
         requests_logger.propagate = False
         openai_logger.propagate = False
 
-# Enable HTTP logging on module import (skip in render workers)
-try:
-    import os as _os
-    if _os.environ.get('DISABLE_HTTP_LOGGER', '') != '1' and _os.environ.get('GLOSSARION_RENDER_WORKER', '') != '1':
-        setup_http_logging()
-except Exception:
-    pass
+# Enable HTTP logging on module import
+setup_http_logging()
 
 # Definitive payload capture helpers (request/response)
 # These dump exactly what we are sending via HTTP paths, with headers redacted.

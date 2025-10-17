@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (QWidget, QLabel, QFrame, QPushButton, QVBoxLayout
 from PySide6.QtCore import Qt, QTimer, Signal, QObject, Slot, QEvent, QPropertyAnimation, QEasingCurve, Property, QThread
 from PySide6.QtGui import QFont, QColor, QTextCharFormat, QIcon, QKeyEvent, QPixmap, QTransform
 from typing import List, Dict, Optional, Any
-from queue import Queue
+from queue import Queue, Empty
 import logging
 from manga_translator import MangaTranslator, GOOGLE_CLOUD_VISION_AVAILABLE
 from manga_settings_dialog import MangaSettingsDialog
@@ -10816,8 +10816,35 @@ class MangaTranslationTab(QObject):
                                 return lambda: self._show_translation_popup(self._translation_data[idx], idx)
                             trans_action.triggered.connect(make_trans_handler(actual_index))
                             menu.addAction(trans_action)
+                        
+                        # Add "Translate This Text" option for manual editing
+                        if hasattr(self, '_recognition_data') and actual_index in self._recognition_data:
+                            # Get manual edit settings from config
+                            translate_prompt = 'translate this text to {language}'  # default
+                            target_language = 'English'  # default
                             
-                            # Save Position removed - now done automatically on rectangle movement
+                            try:
+                                if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'config'):
+                                    manga_settings = self.main_gui.config.get('manga_settings', {})
+                                    manual_edit = manga_settings.get('manual_edit', {})
+                                    translate_prompt = manual_edit.get('translate_prompt', translate_prompt)
+                                    target_language = manual_edit.get('translate_target_language', target_language)
+                            except Exception:
+                                pass
+                            
+                            # Create the actual prompt by replacing {language} placeholder
+                            actual_prompt = translate_prompt.replace('{language}', target_language)
+                            
+                            # Add separator if menu is not empty
+                            if not menu.isEmpty():
+                                menu.addSeparator()
+                            
+                            # Add the translate action
+                            translate_action = QAction(f"📞 Translate This Text ({target_language})", menu)
+                            def make_translate_handler(idx, prompt_text):
+                                return lambda: self._handle_translate_this_text(idx, prompt_text)
+                            translate_action.triggered.connect(make_translate_handler(actual_index, actual_prompt))
+                            menu.addAction(translate_action)
                         
                         if not menu.isEmpty():
                             # Set menu properties for better display
@@ -11602,6 +11629,264 @@ class MangaTranslationTab(QObject):
         except Exception as e:
             print(f"[DEBUG] Error showing translation popup: {str(e)}")
     
+    def _handle_translate_this_text(self, region_index: int, prompt: str):
+        """Handle the 'Translate This Text' menu action
+        
+        Gets the recognized text and sends it for translation using the unified API client.
+        """
+        try:
+            # Get the recognized text for this region
+            if not hasattr(self, '_recognition_data') or region_index not in self._recognition_data:
+                self._log(f"❌ No recognition data for region {region_index}", "error")
+                return
+            
+            recognized_text = self._recognition_data[region_index]['text']
+            if not recognized_text.strip():
+                self._log(f"❌ Recognition text is empty for region {region_index}", "error")
+                return
+            
+            # Build the full prompt combining template + recognized text
+            full_message = f"{prompt}\n\n{recognized_text}"
+            
+            self._log(f"🌍 Translating text from region {region_index}...", "info")
+            
+            # Run translation in background thread
+            import threading
+            thread = threading.Thread(
+                target=self._translate_this_text_background,
+                args=(full_message, region_index),
+                daemon=True
+            )
+            thread.start()
+        
+        except Exception as e:
+            self._log(f"❌ Error in translate this text: {e}", "error")
+            print(f"[TRANSLATE] Error traceback: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _translate_this_text_background(self, message: str, region_index: int):
+        """Send text for translation using MangaTranslator in background"""
+        try:
+            # Get API configuration from main GUI
+            api_key = None
+            if hasattr(self.main_gui, 'api_key_entry'):
+                try:
+                    if hasattr(self.main_gui.api_key_entry, 'text'):
+                        api_key_candidate = self.main_gui.api_key_entry.text()
+                    elif hasattr(self.main_gui.api_key_entry, 'get'):
+                        api_key_candidate = self.main_gui.api_key_entry.get()
+                    else:
+                        api_key_candidate = ''
+                    if api_key_candidate and api_key_candidate.strip():
+                        api_key = api_key_candidate.strip()
+                except Exception:
+                    pass
+            if not api_key and hasattr(self.main_gui, 'config') and self.main_gui.config.get('api_key'):
+                api_key = self.main_gui.config.get('api_key')
+            
+            if not api_key:
+                self._log("❌ No API key configured", "error")
+                return
+            
+            # Get model
+            model = 'gpt-4o-mini'  # default
+            if hasattr(self.main_gui, 'model_var'):
+                try:
+                    if hasattr(self.main_gui.model_var, 'get'):
+                        model = self.main_gui.model_var.get()
+                    else:
+                        model = self.main_gui.model_var
+                except Exception:
+                    pass
+            elif hasattr(self.main_gui, 'config') and self.main_gui.config.get('model'):
+                model = self.main_gui.config.get('model')
+            
+            # Apply GUI environment variables like Start Translation does
+            from unified_api_client import UnifiedClient
+            import os, json
+            
+            # Apply temperature
+            if hasattr(self.main_gui, 'trans_temp'):
+                try:
+                    if hasattr(self.main_gui.trans_temp, 'text'):
+                        temp = self.main_gui.trans_temp.text()
+                    elif hasattr(self.main_gui.trans_temp, 'get'):
+                        temp = self.main_gui.trans_temp.get()
+                    else:
+                        temp = '0.3'
+                    os.environ['TRANSLATION_TEMPERATURE'] = str(temp)
+                except Exception:
+                    os.environ['TRANSLATION_TEMPERATURE'] = '0.3'
+            
+            # Apply delay
+            if hasattr(self.main_gui, 'delay_entry'):
+                try:
+                    if hasattr(self.main_gui.delay_entry, 'text'):
+                        delay = self.main_gui.delay_entry.text()
+                    elif hasattr(self.main_gui.delay_entry, 'get'):
+                        delay = self.main_gui.delay_entry.get()
+                    else:
+                        delay = '1.0'
+                    os.environ['SEND_INTERVAL_SECONDS'] = str(delay)
+                except Exception:
+                    os.environ['SEND_INTERVAL_SECONDS'] = '1.0'
+            
+            # Create unified client with main GUI config
+            unified_client = UnifiedClient(model=model, api_key=api_key)
+            
+            self._log(f"📤 Sending to API ({model})...", "info")
+            
+            # Use unified_client.send() method which returns (content, finish_reason)
+            translation_result, finish_reason = unified_client.send(
+                messages=[{"role": "user", "content": message}],
+                temperature=float(os.environ.get('TRANSLATION_TEMPERATURE', 0.3)),
+                max_tokens=2048
+            )
+            
+            # Check if we got a valid translation
+            if not translation_result or not translation_result.strip():
+                self._log(f"❌ Empty response from API for region {region_index}", "error")
+                return
+            
+            # Store the translation result
+            if not hasattr(self, '_translation_data'):
+                self._translation_data = {}
+            
+            # Get original text and bbox from recognition data
+            original_text = self._recognition_data[region_index]['text']
+            bbox = self._recognition_data[region_index].get('bbox', [0, 0, 100, 100])
+            
+            self._translation_data[region_index] = {
+                'original': original_text,
+                'translation': translation_result
+            }
+            
+            self._log(f"✅ Translation complete for region {region_index}", "success")
+            
+            # Add text overlay ONLY for this specific region
+            try:
+                # Get current image path
+                current_image = self.image_preview_widget.current_image_path
+                if not current_image:
+                    self._log("❌ No current image for overlay", "error")
+                else:
+                    # Initialize overlay dictionary if not exists
+                    if not hasattr(self, '_text_overlays_by_image'):
+                        self._text_overlays_by_image = {}
+                    
+                    # Clear any existing overlays for this SPECIFIC region only
+                    if current_image in self._text_overlays_by_image:
+                        overlays_to_remove = []
+                        for overlay in self._text_overlays_by_image[current_image]:
+                            if getattr(overlay, '_overlay_region_index', None) == region_index:
+                                overlays_to_remove.append(overlay)
+                        
+                        for overlay in overlays_to_remove:
+                            try:
+                                self.image_preview_widget.viewer._scene.removeItem(overlay)
+                                self._text_overlays_by_image[current_image].remove(overlay)
+                            except Exception:
+                                pass
+                    
+                    # Now add the single overlay for this region
+                    translated_texts = [{
+                        'original': {'text': original_text, 'region_index': region_index},
+                        'translation': translation_result,
+                        'bbox': bbox
+                    }]
+                    self._add_text_overlay_to_viewer(translated_texts)
+                    self._log(f"✅ Added text overlay for region {region_index}", "success")
+            except Exception as e:
+                self._log(f"⚠️ Error adding text overlay: {e}", "warning")
+                import traceback
+                traceback.print_exc()
+            
+            # Show translation result in a dialog on main thread
+            from PySide6.QtCore import QTimer
+            
+            def show_dialog():
+                from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton, QTextEdit, QHBoxLayout
+                from PySide6.QtCore import Qt
+                
+                dialog = QDialog(self.image_preview_widget)
+                dialog.setWindowTitle("🌍 Translation Result")
+                dialog.resize(600, 400)
+                
+                dialog.setStyleSheet("""
+                    QDialog {
+                        background-color: #2d2d2d;
+                        color: white;
+                    }
+                    QTextEdit {
+                        background-color: #1e1e1e;
+                        color: white;
+                        border: 1px solid #5a9fd4;
+                        border-radius: 4px;
+                        padding: 8px;
+                        font-family: 'Segoe UI', Arial, sans-serif;
+                        font-size: 11pt;
+                    }
+                    QPushButton {
+                        background-color: #5a9fd4;
+                        color: white;
+                        border: none;
+                        padding: 8px 16px;
+                        border-radius: 4px;
+                        font-weight: bold;
+                    }
+                    QPushButton:hover {
+                        background-color: #7bb3e0;
+                    }
+                    QLabel {
+                        color: white;
+                        font-weight: bold;
+                    }
+                """)
+                
+                layout = QVBoxLayout(dialog)
+                layout.setContentsMargins(16, 16, 16, 16)
+                layout.setSpacing(12)
+                
+                # Original text
+                orig_label = QLabel("Original Text:")
+                layout.addWidget(orig_label)
+                
+                orig_text = QTextEdit()
+                orig_text.setPlainText(original_text)
+                orig_text.setReadOnly(True)
+                orig_text.setMaximumHeight(80)
+                layout.addWidget(orig_text)
+                
+                # Separator
+                sep = QLabel("-" * 60)
+                layout.addWidget(sep)
+                
+                # Translation
+                trans_label = QLabel("Translation:")
+                layout.addWidget(trans_label)
+                
+                
+                trans_text = QTextEdit()
+                trans_text.setPlainText(translation_result)
+                trans_text.setReadOnly(True)
+                layout.addWidget(trans_text)
+                
+                # Close button
+                close_btn = QPushButton("Close")
+                close_btn.clicked.connect(dialog.reject)
+                layout.addWidget(close_btn)
+                
+                dialog.exec()
+            
+            # Schedule dialog to run on main thread
+            QTimer.singleShot(0, show_dialog)
+        
+        except Exception as e:
+            self._log(f"❌ API translation failed: {e}", "error")
+            import traceback
+            traceback.print_exc()
+    
     def _clean_up_deleted_rectangle_overlays(self, region_index: int):
         """Clean up text overlays and data associated with a deleted rectangle"""
         try:
@@ -11775,16 +12060,6 @@ class MangaTranslationTab(QObject):
                     self.pending_tasks = Queue()
                     self.active_tasks = set()  # Track active region indices
                     self.microsecond_lock = threading.Lock()  # Microsecond precision lock
-                    # Track additional queued movements per region (beyond a single queued task)
-                    self.pending_counts = {}
-                    # Track regions that currently have a queued task in the queue
-                    self.queued_regions = set()
-                    # Fast, lock-free event queue for enqueue/inc requests when micro-lock isn't available
-                    self.event_queue = Queue()
-                    # Total outstanding movements snapshot for UI fallback
-                    self.outstanding_total = 0
-                    self._last_outstanding_snapshot = 0
-                    self._last_total_snapshot = 0
                     
                     # Get max_workers from manga settings
                     max_workers = 4  # Default fallback
@@ -11813,11 +12088,7 @@ class MangaTranslationTab(QObject):
                     print(f"[PARALLEL] Initialized parallel save system with {max_workers} worker threads")
                 
                 def queue_save_task(self, region_index: int):
-                    """Queue a save task for the given region index.
-                    Allows multiple movements on the same region by accumulating pending counts.
-                    Uses microsecond, non-blocking lock attempts and falls back to an event queue.
-                    Also increments a total outstanding counter for precise UI.
-                    """
+                    """Queue a save task for the given region index."""
                     try:
                         timestamp = time.time_ns()  # Microsecond precision timestamp
                         task = {
@@ -11825,46 +12096,17 @@ class MangaTranslationTab(QObject):
                             'timestamp': timestamp,
                             'retry_count': 0
                         }
-                        do_update = False
                         
-                        acquired = self.microsecond_lock.acquire(False)
-                        if acquired:
-                            try:
-                                # Always count this movement request
-                                self.outstanding_total = max(0, int(self.outstanding_total) + 1)
-                                self._last_outstanding_snapshot = self.outstanding_total
-                                
-                                if region_index in self.active_tasks or region_index in self.queued_regions:
-                                    # Region is already active or has a queued task: accumulate an extra pending movement
-                                    self.pending_counts[region_index] = self.pending_counts.get(region_index, 0) + 1
-                                    print(f"[PARALLEL] Region {region_index} pending movements: {self.pending_counts[region_index]}")
-                                else:
-                                    # No active/queued task for this region: enqueue one and mark as queued
-                                    self.pending_tasks.put(task)
-                                    self.queued_regions.add(region_index)
-                                    print(f"[PARALLEL] Queued save task for region {region_index} at {timestamp}")
-                                do_update = True
-                            finally:
-                                self.microsecond_lock.release()
-                        else:
-                            # Could not acquire micro-lock instantly; push lightweight events for coordinator
-                            try:
-                                self.event_queue.put(('inc_total', 1))
-                                self.event_queue.put(('enqueue', region_index, timestamp))
-                            except Exception:
-                                # As a last resort, try direct enqueue
-                                self.pending_tasks.put(task)
-                                self.queued_regions.add(region_index)
-                            do_update = True
-                        
-                        # Update button to reflect active + queued movements (outside lock)
-                        if do_update:
-                            try:
-                                if hasattr(self.parent, '_update_parallel_save_button_state'):
-                                    self.parent._update_parallel_save_button_state(self.get_active_count())
-                            except Exception:
-                                pass
-                        return True
+                        with self.microsecond_lock:
+                            # Check if this region is already being processed
+                            if region_index in self.active_tasks:
+                                print(f"[PARALLEL] Region {region_index} already being processed, skipping")
+                                return False
+                            
+                            # Add to pending tasks
+                            self.pending_tasks.put(task)
+                            print(f"[PARALLEL] Queued save task for region {region_index} at {timestamp}")
+                            return True
                             
                     except Exception as e:
                         print(f"[PARALLEL] Error queuing task for region {region_index}: {e}")
@@ -11872,7 +12114,12 @@ class MangaTranslationTab(QObject):
                 
                 def queue_batch_save_tasks(self, region_indices: list) -> int:
                     """Queue multiple save tasks for batch processing optimization.
-                    Accumulates extra movements per region instead of dropping them.
+                    
+                    Args:
+                        region_indices: List of region indices to queue for processing
+                        
+                    Returns:
+                        Number of tasks successfully queued
                     """
                     if not region_indices:
                         return 0
@@ -11880,88 +12127,63 @@ class MangaTranslationTab(QObject):
                     queued_count = 0
                     batch_timestamp = time.time_ns()
                     
-                    do_update = False
                     with self.microsecond_lock:
                         for region_index in region_indices:
-                            if region_index in self.active_tasks or region_index in self.queued_regions:
-                                # Already active/queued: accumulate pending movement
-                                self.pending_counts[region_index] = self.pending_counts.get(region_index, 0) + 1
-                                print(f"[PARALLEL] Region {region_index} pending movements (batch): {self.pending_counts[region_index]}")
-                            else:
-                                # Queue a single task for this region and mark as queued
-                                task = {
-                                    'region_index': region_index,
-                                    'timestamp': batch_timestamp,
-                                    'retry_count': 0,
-                                    'batch_id': batch_timestamp
-                                }
-                                self.pending_tasks.put(task)
-                                self.queued_regions.add(region_index)
-                                queued_count += 1
-                            do_update = True
+                            # Check if this region is already being processed
+                            if region_index in self.active_tasks:
+                                print(f"[PARALLEL] Region {region_index} already being processed, skipping from batch")
+                                continue
+                            
+                            # Create task with batch timestamp
+                            task = {
+                                'region_index': region_index,
+                                'timestamp': batch_timestamp,
+                                'retry_count': 0,
+                                'batch_id': batch_timestamp  # Add batch identifier
+                            }
+                            
+                            # Add to pending tasks
+                            self.pending_tasks.put(task)
+                            queued_count += 1
                     
                     print(f"[PARALLEL] Batch queued {queued_count}/{len(region_indices)} save tasks")
-                    # Update button to reflect queued movements (outside lock)
-                    if do_update:
-                        try:
-                            if hasattr(self.parent, '_update_parallel_save_button_state'):
-                                self.parent._update_parallel_save_button_state(self.get_active_count())
-                        except Exception:
-                            pass
                     return queued_count
                 
                 def _coordinate_tasks(self):
                     """Coordinate parallel task execution with microsecond precision."""
                     print(f"[PARALLEL] Coordinator thread started")
                     
-                    import queue as _q
-                    
                     while True:
                         try:
-                            # Drain fast events first (very cheap, micro-locked per event)
-                            self._drain_events()
-                            
-                            # Wait briefly for a task (short timeout for responsiveness)
-                            task = self.pending_tasks.get(timeout=0.05)
+                            # Wait for a task (blocking)
+                            task = self.pending_tasks.get(timeout=1.0)
                             
                             region_index = task['region_index']
                             
                             # Acquire microsecond lock
-                            do_update = False
                             with self.microsecond_lock:
-                                # This task is leaving the queue, so it's no longer considered 'queued'
-                                if region_index in self.queued_regions:
-                                    self.queued_regions.discard(region_index)
-                                
-                                # If the region is already active, accumulate as pending instead of dropping
+                                # Double-check the region isn't already active
                                 if region_index in self.active_tasks:
-                                    self.pending_counts[region_index] = self.pending_counts.get(region_index, 0) + 1
-                                    print(f"[PARALLEL] Region {region_index} active; incremented pending to {self.pending_counts[region_index]}")
-                                    do_update = True
+                                    print(f"[PARALLEL] Region {region_index} became active while waiting, skipping")
                                     continue
                                 
                                 # Mark region as active
                                 self.active_tasks.add(region_index)
-                                do_update = True
                                 
                                 # Increment processing count
                                 with self.count_lock:
                                     self.processing_count += 1
                                     print(f"[PARALLEL] Started processing region {region_index} (active: {self.processing_count})")
-                            
-                            # Update button state for parallel processing (outside locks)
-                            if do_update:
-                                try:
-                                    self.parent._update_parallel_save_button_state(self.get_active_count())
-                                except Exception:
-                                    pass
+                                    
+                                    # Update button state for parallel processing
+                                    self.parent._update_parallel_save_button_state(self.processing_count)
                             
                             # Submit the actual work to thread pool
-                            self.executor.submit(self._process_save_task, task)
+                            future = self.executor.submit(self._process_save_task, task)
                             
                             # Don't wait for completion - let it run in parallel
                             
-                        except _q.Empty:
+                        except Empty:
                             continue
                         except Exception as e:
                             print(f"[PARALLEL] Coordinator error: {e}")
@@ -11998,127 +12220,29 @@ class MangaTranslationTab(QObject):
                         return False
                     finally:
                         # Always clean up
-                        need_update = False
                         with self.microsecond_lock:
-                            # Region no longer active
                             self.active_tasks.discard(region_index)
-                            need_update = True
                             
                             with self.count_lock:
                                 self.processing_count = max(0, self.processing_count - 1)
                                 print(f"[PARALLEL] Finished processing region {region_index} (active: {self.processing_count})")
-                            
-                            # If there are extra pending movements for this region, enqueue one more task
-                            try:
-                                extras = int(self.pending_counts.get(region_index, 0) or 0)
-                                if extras > 0:
-                                    self.pending_counts[region_index] = extras - 1
-                                    # Fast path: push to event queue instead of blocking put under lock
-                                    try:
-                                        self.event_queue.put(('enqueue', region_index, time.time_ns()))
-                                    except Exception:
-                                        # Fallback to direct put if needed
-                                        self.pending_tasks.put({'region_index': region_index, 'timestamp': time.time_ns(), 'retry_count': 0})
-                                    print(f"[PARALLEL] Re-queued region {region_index} for pending movement (remaining: {self.pending_counts.get(region_index, 0)})")
-                            except Exception as _requeue_err:
-                                print(f"[PARALLEL] Failed to re-queue pending movement for region {region_index}: {_requeue_err}")
-                            
-                            # Decrement total outstanding for the movement just completed
-                            try:
-                                self.outstanding_total = max(0, int(self.outstanding_total) - 1)
-                                self._last_outstanding_snapshot = self.outstanding_total
-                            except Exception:
-                                pass
-                        
-                        # Reflect updated pending/active in UI (outside locks)
-                        if need_update:
-                            try:
-                                self.parent._update_parallel_save_button_state(self.get_active_count())
-                            except Exception:
-                                pass
+                                
+                                # Update button state
+                                self.parent._update_parallel_save_button_state(self.processing_count)
                 
                 def get_active_count(self):
                     """Get the number of currently active processing tasks."""
                     with self.count_lock:
                         return self.processing_count
                 
-                def _drain_events(self):
-                    """Process pending enqueue/inc events quickly with micro locks."""
-                    import queue as _q
-                    processed = 0
-                    while True:
-                        try:
-                            ev = self.event_queue.get_nowait()
-                        except _q.Empty:
-                            break
-                        try:
-                            etype, idx, ts = ev
-                        except Exception:
-                            continue
-                        # Micro-critical update
-                        if self.microsecond_lock.acquire(False):
-                            try:
-                                if etype == 'enqueue':
-                                    if idx in self.active_tasks or idx in self.queued_regions:
-                                        self.pending_counts[idx] = self.pending_counts.get(idx, 0) + 1
-                                    else:
-                                        self.pending_tasks.put({'region_index': idx, 'timestamp': ts, 'retry_count': 0})
-                                        self.queued_regions.add(idx)
-                                elif etype == 'inc':
-                                    self.pending_counts[idx] = self.pending_counts.get(idx, 0) + 1
-                                elif etype == 'inc_total':
-                                    self.outstanding_total = max(0, int(self.outstanding_total) + int(idx or 1))
-                                    self._last_outstanding_snapshot = self.outstanding_total
-                            finally:
-                                self.microsecond_lock.release()
-                        else:
-                            # If contended, requeue to try later (avoid drops)
-                            try:
-                                self.event_queue.put(ev)
-                            except Exception:
-                                pass
-                            break
-                        processed += 1
-                    return processed
-                
-                def get_pending_counts(self) -> dict:
-                    """Return a dict mapping region_index -> pending movements count (queued + extra).
-                    Attempts non-blocking micro-lock; on contention returns a minimal snapshot.
-                    """
-                    try:
-                        if self.microsecond_lock.acquire(False):
-                            try:
-                                counts = dict(self.pending_counts)
-                                for idx in self.queued_regions:
-                                    counts[idx] = counts.get(idx, 0) + 1
-                                return counts
-                            finally:
-                                self.microsecond_lock.release()
-                        else:
-                            # Contended: return empty (UI will refresh soon)
-                            return {}
-                    except Exception:
-                        return {}
-                
-                def get_total_outstanding(self) -> int:
-                    """Compute total outstanding (active + queued unique + extras) with minimal locking."""
-                    try:
-                        if self.microsecond_lock.acquire(False):
-                            try:
-                                total = len(self.active_tasks) + len(self.queued_regions) + sum(self.pending_counts.values())
-                                self._last_total_snapshot = int(total)
-                                return self._last_total_snapshot
-                            finally:
-                                self.microsecond_lock.release()
-                        else:
-                            return int(getattr(self, '_last_total_snapshot', 0))
-                    except Exception:
-                        return int(getattr(self, '_last_total_snapshot', 0))
-                
                 def queue_batch_save_tasks(self, region_indices: list) -> int:
                     """Queue multiple save tasks for batch processing optimization.
-                    Accumulates extra movements per region instead of dropping them.
-                    Uses microsecond, non-blocking lock attempts and falls back to the event queue.
+                    
+                    Args:
+                        region_indices: List of region indices to queue for saving
+                        
+                    Returns:
+                        Number of tasks successfully queued
                     """
                     if not region_indices:
                         return 0
@@ -12126,47 +12250,29 @@ class MangaTranslationTab(QObject):
                     queued_count = 0
                     batch_timestamp = time.time_ns()
                     
-                    acquired = self.microsecond_lock.acquire(False)
-                    if acquired:
-                        try:
-                            for region_index in region_indices:
-                                # Check if this region is already being processed
-                                if region_index in self.active_tasks or region_index in self.queued_regions:
-                                    # Already active/queued: accumulate pending movement
-                                    self.pending_counts[region_index] = self.pending_counts.get(region_index, 0) + 1
-                                    print(f"[PARALLEL] Region {region_index} pending movements (batch): {self.pending_counts[region_index]}")
-                                else:
-                                    # Queue a single task for this region and mark as queued
-                                    task = {
-                                        'region_index': region_index,
-                                        'timestamp': batch_timestamp,
-                                        'retry_count': 0,
-                                        'batch_id': batch_timestamp  # Add batch identifier
-                                    }
-                                    
-                                    # Add to pending tasks
-                                    self.pending_tasks.put(task)
-                                    self.queued_regions.add(region_index)
-                                    queued_count += 1
-                        finally:
-                            self.microsecond_lock.release()
-                    else:
-                        # Fallback: push enqueue events without blocking
+                    with self.microsecond_lock:
                         for region_index in region_indices:
-                            try:
-                                self.event_queue.put(('enqueue', region_index, batch_timestamp))
-                            except Exception:
-                                pass
-                        queued_count = len(region_indices)
+                            # Check if this region is already being processed
+                            if region_index in self.active_tasks:
+                                print(f"[PARALLEL] Region {region_index} already being processed, skipping from batch")
+                                continue
+                            
+                            # Create task with batch timestamp
+                            task = {
+                                'region_index': region_index,
+                                'timestamp': batch_timestamp,
+                                'retry_count': 0,
+                                'batch_id': batch_timestamp  # Add batch identifier
+                            }
+                            
+                            # Add to pending tasks
+                            self.pending_tasks.put(task)
+                            queued_count += 1
                     
                     print(f"[PARALLEL] Batch queued {queued_count}/{len(region_indices)} save tasks")
-                    # Update button to reflect queued movements
-                    try:
-                        if hasattr(self.parent, '_update_parallel_save_button_state'):
-                            self.parent._update_parallel_save_button_state(self.get_active_count())
-                    except Exception:
-                        pass
                     return queued_count
+                
+                def shutdown(self):
                     """Shutdown the parallel processing system."""
                     try:
                         self.executor.shutdown(wait=False)
@@ -12277,68 +12383,46 @@ class MangaTranslationTab(QObject):
                     # Store original text if not already stored
                     if not hasattr(button, '_original_text'):
                         button._original_text = button.text()
-                    # Emoji + single number (1 active task)
-                    button.setText("⏳1")
+                    button.setText("⏳")
                 else:
-                    # Force restore to floppy icon and reset original text
-                    button.setText("💾")
-                    try:
-                        button._original_text = "💾"
-                    except Exception:
-                        pass
+                    # Restore original text
+                    if hasattr(button, '_original_text'):
+                        button.setText(button._original_text)
+                    else:
+                        button.setText("💾")  # Fallback text
         except Exception:
             pass
     
     def _update_parallel_save_button_state(self, active_count: int):
-        """Update the save overlay button to reflect active and queued movements per region.
-        Example texts: ⏳1, ⏳2+3 (2 active, 3 queued), ⏳+2 (2 queued, none active)
-        Thread-safe: defers to main thread if called from worker threads.
+        """Update the save overlay button state for parallel processing.
+        Shows different ⏳ emojis based on the number of parallel tasks.
         """
         try:
-            import threading as _th
-            if _th.current_thread() is not _th.main_thread():
-                try:
-                    QTimer.singleShot(0, lambda: self._update_parallel_save_button_state(active_count))
-                except Exception:
-                    pass
-                return
-            
             if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'save_overlay_btn'):
                 button = self.image_preview_widget.save_overlay_btn
                 
-                # Get single source of truth for total outstanding movements
-                if hasattr(self, '_parallel_save_system') and self._parallel_save_system:
-                    try:
-                        total = int(self._parallel_save_system.get_total_outstanding())
-                    except Exception:
-                        total = 0
-                else:
-                    total = 0
-                
-                if total > 0:
+                if active_count > 0:
                     # Store original text if not already stored
                     if not hasattr(button, '_original_text'):
                         button._original_text = button.text()
                     
-                    # Emoji + single number only
-                    button.setText(f"⏳{total}")
+                    # Show different indicators based on parallel count
+                    if active_count == 1:
+                        button.setText("⏳1")
+                        button.setToolTip("Auto-saving 1 rectangle position...")
+                    else:
+                        button.setText(f"⏳{active_count}")
+                        button.setToolTip(f"Auto-saving {active_count} rectangle positions in parallel...")
                     
-                    # Disable while there is work outstanding
                     button.setEnabled(False)
-                    
-                    # Schedule a short re-check to ensure decrement visibility even if lock was contended
-                    try:
-                        from PySide6.QtCore import QTimer
-                        QTimer.singleShot(80, lambda: self._update_parallel_save_button_state(self._parallel_save_system.get_active_count() if hasattr(self, '_parallel_save_system') and self._parallel_save_system else 0))
-                    except Exception:
-                        pass
                 else:
-                    # Force restore to floppy icon and re-enable
-                    button.setText("💾")
-                    try:
-                        button._original_text = "💾"
-                    except Exception:
-                        pass
+                    # Restore original text and state
+                    if hasattr(button, '_original_text'):
+                        button.setText(button._original_text)
+                    else:
+                        button.setText("💾")
+                    
+                    button.setToolTip("Save & Update Overlay")
                     button.setEnabled(True)
         except Exception as e:
             print(f"[PARALLEL] Error updating button state: {e}")
