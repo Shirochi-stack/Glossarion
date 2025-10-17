@@ -593,13 +593,6 @@ class MangaTranslationTab(QObject):
         self.is_running = False
         self.stop_flag = threading.Event()
         self.translation_thread = None
-        
-        # Shared preview loading pool (for scheduling UI-safe image loads)
-        try:
-            from concurrent.futures import ThreadPoolExecutor
-            self._preview_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="preview-load")
-        except Exception:
-            self._preview_executor = None
         self.translation_future = None
         # Shared executor from main GUI if available
         try:
@@ -5026,111 +5019,6 @@ class MangaTranslationTab(QObject):
                     # The translator will pick up new settings on next operation
                 
                 self._log("✅ Advanced settings saved and applied", "success")
-                
-                # Propagate in background to avoid UI lag
-                try:
-                    from concurrent.futures import ThreadPoolExecutor
-                    from PySide6.QtCore import QTimer
-                    
-                    # Ensure a small background pool exists
-                    if not hasattr(self, '_propagate_executor') or self._propagate_executor is None:
-                        try:
-                            self._propagate_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="manga-prop")
-                        except Exception:
-                            self._propagate_executor = None
-                    
-                    # Snapshot values to avoid reading widgets off-thread
-                    min_size = int(self.auto_min_size_value)
-                    max_size = int(self.max_font_size_value)
-                    font_mode = getattr(self, 'font_size_mode_value', 'fixed')
-                    font_mult = float(getattr(self, 'font_size_multiplier_value', 1.0))
-                    font_size_fixed = int(getattr(self, 'font_size_value', 0))
-                    constrain_to_bubble = bool(getattr(self, 'constrain_to_bubble_value', True))
-                    strict_wrap = bool(getattr(self, 'strict_text_wrapping_value', True))
-                    force_caps = bool(getattr(self, 'force_caps_lock_value', True))
-                    
-                    # Style values
-                    bg_opacity = int(getattr(self, 'bg_opacity_value', 130))
-                    bg_style = str(getattr(self, 'bg_style_value', 'circle'))
-                    bg_reduction = float(getattr(self, 'bg_reduction_value', 1.0))
-                    font_style_path = getattr(self, 'selected_font_path', None)
-                    text_color = (
-                        int(getattr(self, 'text_color_r_value', 102)),
-                        int(getattr(self, 'text_color_g_value', 0)),
-                        int(getattr(self, 'text_color_b_value', 0)),
-                    )
-                    shadow_enabled = bool(getattr(self, 'shadow_enabled_value', True))
-                    shadow_color = (
-                        int(getattr(self, 'shadow_color_r_value', 204)),
-                        int(getattr(self, 'shadow_color_g_value', 128)),
-                        int(getattr(self, 'shadow_color_b_value', 128)),
-                    )
-                    shadow_off_x = int(getattr(self, 'shadow_offset_x_value', 2))
-                    shadow_off_y = int(getattr(self, 'shadow_offset_y_value', 2))
-                    shadow_blur = int(getattr(self, 'shadow_blur_value', 0))
-                    
-                    def propagate_async():
-                        try:
-                            # Update active translator instance
-                            tr = getattr(self, 'translator', None)
-                            if tr is not None:
-                                try:
-                                    tr.font_size_mode = font_mode
-                                    tr.font_size_multiplier = font_mult
-                                    tr.min_readable_size = min_size
-                                    tr.max_font_size_limit = max_size
-                                    tr.strict_text_wrapping = strict_wrap
-                                    tr.force_caps_lock = force_caps
-                                    tr.constrain_to_bubble = constrain_to_bubble
-                                    # Avoid GUI reads; push style settings directly
-                                    tr.update_text_rendering_settings(
-                                        bg_opacity=bg_opacity,
-                                        bg_style=bg_style,
-                                        bg_reduction=bg_reduction,
-                                        font_style=font_style_path,
-                                        font_size=(font_size_fixed if font_mode == 'fixed' and font_size_fixed > 0 else None),
-                                        text_color=text_color,
-                                        shadow_enabled=shadow_enabled,
-                                        shadow_color=shadow_color,
-                                        shadow_offset_x=shadow_off_x,
-                                        shadow_offset_y=shadow_off_y,
-                                        shadow_blur=shadow_blur,
-                                        force_caps_lock=force_caps,
-                                    )
-                                except Exception:
-                                    pass
-                            
-                            # Update cached full-page translator if present
-                            mtr = getattr(self, '_manga_translator', None)
-                            if mtr is not None:
-                                try:
-                                    mtr.min_readable_size = min_size
-                                    mtr.max_font_size_limit = max_size
-                                except Exception:
-                                    pass
-                        finally:
-                            # Schedule env var re-init on UI thread (non-blocking)
-                            try:
-                                if hasattr(self.main_gui, 'initialize_environment_variables'):
-                                    QTimer.singleShot(0, self.main_gui.initialize_environment_variables)
-                            except Exception:
-                                pass
-                    
-                    # Submit to pool (fallback to raw thread if pool creation failed)
-                    try:
-                        if getattr(self, '_propagate_executor', None) is not None:
-                            self._propagate_executor.submit(propagate_async)
-                        else:
-                            import threading as _threading
-                            _threading.Thread(target=propagate_async, daemon=True).start()
-                    except Exception:
-                        try:
-                            import threading as _threading
-                            _threading.Thread(target=propagate_async, daemon=True).start()
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
             
             # Open the settings dialog
             # MangaSettingsDialog is PySide6-based, so pass the manga integration dialog as parent
@@ -5460,7 +5348,7 @@ class MangaTranslationTab(QObject):
             font_cfg = (config.get('manga_settings', {}) or {}).get('font_sizing', {})
         except Exception:
             font_cfg = {}
-        auto_min_default = rend_cfg.get('auto_min_size', font_cfg.get('min_size', 8))
+        auto_min_default = rend_cfg.get('auto_min_size', font_cfg.get('min_size', 10))
         self.auto_min_size_value = int(auto_min_default)
         
         self.force_caps_lock_value = config.get('manga_force_caps_lock', True)
@@ -7847,16 +7735,13 @@ class MangaTranslationTab(QObject):
                 if hasattr(self, 'image_preview_widget'):
                     if os.path.exists(image_path):
                         # Just load the source image - tabbed view will handle translated output
+                        self.image_preview_widget.load_image(image_path)
+                        # After loading, restore any saved rectangles/overlays for this image
                         try:
-                            self.image_preview_widget.load_image(image_path)
-                            # After loading, restore any saved rectangles/overlays for this image
-                            try:
-                                self._restore_image_state(image_path)
-                            except Exception:
-                                pass
-                            self._log(f"✅ Preview loaded: {os.path.basename(image_path)}", "debug")
+                            self._restore_image_state(image_path)
                         except Exception:
                             pass
+                        self._log(f"✅ Preview loaded: {os.path.basename(image_path)}", "debug")
                     else:
                         self._log(f"❌ Image file not found: {image_path}", "error")
                 else:

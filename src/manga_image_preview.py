@@ -7,11 +7,12 @@ Based on comic-translate's ImageViewer but simplified for integration into Gloss
 import os
 import threading
 from typing import List, Dict, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGraphicsView, 
                                QGraphicsScene, QGraphicsPixmapItem, QToolButton, 
                                QLabel, QSlider, QFrame, QPushButton, QGraphicsRectItem,
                                QSizePolicy, QListWidget, QListWidgetItem, QTabWidget)
-from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QSize, QThread, QObject, Slot
+from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QSize, QThread, QObject, Slot, QTimer
 from PySide6.QtGui import QPixmap, QImage, QPainter, QColor, QPen, QBrush, QCursor, QIcon
 import numpy as np
 
@@ -77,51 +78,125 @@ class MoveableRectItem(QGraphicsRectItem):
         super().mousePressEvent(event)
 
 
-class ImageLoaderWorker(QObject):
-    """Worker for loading images in background thread"""
+class ImageLoaderManager(QObject):
+    """Enhanced image loader using ThreadPoolExecutor with QTimer-based monitoring"""
     
     finished = Signal(QPixmap, str)  # pixmap, file_path
     error = Signal(str)  # error message
+    progress = Signal(str)  # progress message
     
-    def __init__(self):
+    def __init__(self, main_gui=None):
         super().__init__()
-        self.image_path = None
-        self.cancelled = False
-    
-    @Slot()
-    def load_image(self, image_path: str):
-        """Load image in background thread"""
-        self.image_path = image_path
+        
+        # Get max_workers from manga settings, default to 2
+        max_workers = 2  # Default fallback
+        try:
+            if main_gui and hasattr(main_gui, 'config'):
+                manga_settings = main_gui.config.get('manga_settings', {})
+                advanced_settings = manga_settings.get('advanced', {})
+                max_workers = advanced_settings.get('max_workers', 2)
+                print(f"[ImageLoader] Using max_workers from manga settings: {max_workers}")
+            else:
+                print(f"[ImageLoader] Using default max_workers: {max_workers}")
+        except Exception as e:
+            print(f"[ImageLoader] Error reading max_workers from settings, using default: {e}")
+        
+        # Use ThreadPoolExecutor for better resource management
+        self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="ImageLoader")
+        self.current_future = None
         self.cancelled = False
         
+        # QTimer for monitoring background tasks
+        self.monitor_timer = QTimer()
+        self.monitor_timer.timeout.connect(self._check_task_status)
+        self.monitor_timer.setSingleShot(False)
+        
+        # Store task results
+        self.task_result = None
+    
+    def load_image(self, image_path: str):
+        """Load image using ThreadPoolExecutor"""
+        # Cancel any existing task
+        self.cancel_current_task()
+        
+        self.cancelled = False
+        self.task_result = None
+        
+        # Submit loading task to thread pool
+        self.current_future = self.executor.submit(self._load_image_sync, image_path)
+        
+        # Start monitoring with QTimer
+        self.monitor_timer.start(100)  # Check every 100ms to reduce CPU usage
+        
+        self.progress.emit(f"Loading {os.path.basename(image_path)}...")
+    
+    def _load_image_sync(self, image_path: str):
+        """Synchronous image loading function for thread pool - loads raw image data only"""
         try:
             if not os.path.exists(image_path):
-                self.error.emit(f"File not found: {image_path}")
-                return
+                return {'success': False, 'error': f"File not found: {image_path}", 'path': image_path}
             
             if self.cancelled:
-                return
+                return {'success': False, 'error': 'Cancelled', 'path': image_path}
             
-            # Load pixmap (this can be slow for large images)
-            pixmap = QPixmap(image_path)
+            # Load raw image data (NOT QPixmap - that must be done on main thread)
+            # Use QImage which is safe to create in background threads
+            from PySide6.QtGui import QImage
+            image = QImage(image_path)
             
             if self.cancelled:
-                return
+                return {'success': False, 'error': 'Cancelled', 'path': image_path}
             
-            if pixmap.isNull():
-                self.error.emit(f"Failed to load: {image_path}")
-                return
+            if image.isNull():
+                return {'success': False, 'error': f"Failed to load: {image_path}", 'path': image_path}
             
-            # Emit the loaded pixmap
-            self.finished.emit(pixmap, image_path)
+            # Return QImage data - QPixmap creation will happen on main thread
+            return {'success': True, 'image': image, 'path': image_path}
             
         except Exception as e:
-            if not self.cancelled:
-                self.error.emit(str(e))
+            return {'success': False, 'error': str(e), 'path': image_path}
     
-    def cancel(self):
-        """Cancel the current load operation"""
+    def _check_task_status(self):
+        """Check task status using QTimer (runs on main thread)"""
+        if not self.current_future:
+            self.monitor_timer.stop()
+            return
+        
+        if self.current_future.done():
+            self.monitor_timer.stop()
+            
+            try:
+                result = self.current_future.result(timeout=0.01)  # Very short timeout to avoid blocking
+                self.task_result = result
+                
+                if result['success']:
+                    # Convert QImage to QPixmap on main thread (thread-safe)
+                    pixmap = QPixmap.fromImage(result['image'])
+                    if not pixmap.isNull():
+                        self.finished.emit(pixmap, result['path'])
+                    else:
+                        self.error.emit(f"Failed to create pixmap from image: {result['path']}")
+                else:
+                    self.error.emit(result['error'])
+            
+            except Exception as e:
+                self.error.emit(f"Task error: {str(e)}")
+            
+            finally:
+                self.current_future = None
+    
+    def cancel_current_task(self):
+        """Cancel current loading task"""
         self.cancelled = True
+        if self.current_future and not self.current_future.done():
+            self.current_future.cancel()
+        self.current_future = None
+        self.monitor_timer.stop()
+    
+    def shutdown(self):
+        """Shutdown the executor and cleanup"""
+        self.cancel_current_task()
+        self.executor.shutdown(wait=False)
 
 
 class CompactImageViewer(QGraphicsView):
@@ -134,7 +209,7 @@ class CompactImageViewer(QGraphicsView):
     image_loading = Signal(str)  # emitted when starting to load
     image_loaded = Signal(str)   # emitted when image successfully loaded
     
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, main_gui=None):
         super().__init__(parent)
         
         # Scene setup
@@ -176,9 +251,11 @@ class CompactImageViewer(QGraphicsView):
         self.last_pos = None
         self.brush_strokes = []
         
-        # Background image loading
-        self._loader_thread = None
-        self._loader_worker = None
+        # Enhanced background image loading with main_gui reference
+        self._loader_manager = ImageLoaderManager(main_gui)
+        self._loader_manager.finished.connect(self._on_image_loaded)
+        self._loader_manager.error.connect(self._on_image_error)
+        self._loader_manager.progress.connect(self._on_image_progress)
         self._loading = False
     
     def resizeEvent(self, event):
@@ -191,66 +268,39 @@ class CompactImageViewer(QGraphicsView):
         return not self.empty
     
     def load_image(self, image_path: str) -> bool:
-        """Load an image from file path in background thread"""
+        """Load an image from file path using enhanced background loading"""
         if not os.path.exists(image_path):
             return False
-        
-        # Cancel any existing load operation
-        if self._loader_worker:
-            self._loader_worker.cancel()
-        
-        # Clean up old thread if it exists
-        if self._loader_thread and self._loader_thread.isRunning():
-            self._loader_thread.quit()
-            self._loader_thread.wait(100)  # Wait up to 100ms
         
         # Emit loading signal
         self._loading = True
         self.image_loading.emit(image_path)
         
-        # Create new thread and worker
-        self._loader_thread = QThread()
-        self._loader_worker = ImageLoaderWorker()
-        self._loader_worker.moveToThread(self._loader_thread)
-        
-        # Connect signals
-        self._loader_worker.finished.connect(self._on_image_loaded)
-        self._loader_worker.error.connect(self._on_image_error)
-        self._loader_thread.started.connect(lambda: self._loader_worker.load_image(image_path))
-        
-        # Start the thread
-        self._loader_thread.start()
+        # Use enhanced loader with ThreadPoolExecutor
+        self._loader_manager.load_image(image_path)
         
         return True
     
     @Slot(QPixmap, str)
     def _on_image_loaded(self, pixmap: QPixmap, image_path: str):
-        """Handle image loaded from background thread"""
+        """Handle image loaded from enhanced loader"""
         self._loading = False
         self.setPhoto(pixmap)
         
         # Emit success signal
         self.image_loaded.emit(image_path)
-        
-        # Clean up thread
-        if self._loader_thread:
-            self._loader_thread.quit()
-            self._loader_thread.wait()
-            self._loader_thread = None
-        self._loader_worker = None
     
     @Slot(str)
+    def _on_image_progress(self, message: str):
+        """Handle image loading progress updates"""
+        # Can be used to update UI with progress info
+        # Currently just passes through to the loading signal
+        pass
+    
     def _on_image_error(self, error_msg: str):
-        """Handle image load error"""
+        """Handle image load error from enhanced loader"""
         self._loading = False
         print(f"Image load error: {error_msg}")
-        
-        # Clean up thread
-        if self._loader_thread:
-            self._loader_thread.quit()
-            self._loader_thread.wait()
-            self._loader_thread = None
-        self._loader_worker = None
     
     def setPhoto(self, pixmap: QPixmap = None):
         """Set the photo to display with high quality rendering"""
@@ -570,12 +620,9 @@ class CompactImageViewer(QGraphicsView):
     
     def clear_scene(self):
         """Clear entire scene"""
-        # Cancel any pending load
-        if self._loader_worker:
-            self._loader_worker.cancel()
-        if self._loader_thread and self._loader_thread.isRunning():
-            self._loader_thread.quit()
-            self._loader_thread.wait(100)
+        # Cancel any pending load using enhanced loader
+        if hasattr(self, '_loader_manager'):
+            self._loader_manager.cancel_current_task()
         
         self._scene.clear()
         self.rectangles.clear()
@@ -604,16 +651,6 @@ class MangaImagePreviewWidget(QWidget):
         self.manual_editing_enabled = False  # Manual editing is disabled by default (preview mode)
         self.translated_folder_path = None  # Path to translated images folder
         self.cleaned_images_enabled = True  # Show cleaned images when available (enabled by default)
-        # Light swap mode suppresses heavy overlay refresh when only swapping source image (cleaned/original)
-        self._light_swap_mode = False
-        
-        # Shared background pool for thumbnail tasks (initialized lazily if import fails here)
-        try:
-            from concurrent.futures import ThreadPoolExecutor
-            self._thumb_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="thumbs")
-        except Exception:
-            self._thumb_executor = None
-        
         self._build_ui()
     
     def _build_ui(self):
@@ -762,7 +799,7 @@ class MangaImagePreviewWidget(QWidget):
         viewer_layout.setSpacing(5)
         
         # Source image viewer
-        self.viewer = CompactImageViewer()
+        self.viewer = CompactImageViewer(main_gui=self.main_gui)
         self.viewer.setMinimumHeight(300)
         viewer_layout.addWidget(self.viewer, stretch=1)
         
@@ -776,7 +813,7 @@ class MangaImagePreviewWidget(QWidget):
         output_layout.setSpacing(5)
         
         # Output image viewer
-        self.output_viewer = CompactImageViewer()
+        self.output_viewer = CompactImageViewer(main_gui=self.main_gui)
         self.output_viewer.setMinimumHeight(300)
         output_layout.addWidget(self.output_viewer, stretch=1)
         
@@ -1446,26 +1483,40 @@ class MangaImagePreviewWidget(QWidget):
             self.output_thumbnail_list.setVisible(True)
     
     def _populate_thumbnails(self):
-        """Populate thumbnail list with images"""
+        """Populate thumbnail list with images using enhanced ThreadPoolExecutor"""
         self.thumbnail_list.clear()
         self.output_thumbnail_list.clear()
         
         from PySide6.QtWidgets import QListWidgetItem
         from PySide6.QtCore import Qt, QSize
-        import threading
         
-        # Load thumbnails in background to avoid blocking
-        def load_thumb(path, index):
+        # Initialize thumbnail executor if not already done
+        if not hasattr(self, '_thumb_executor'):
+            self._thumb_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ThumbnailLoader")
+        
+        # Initialize thumbnail monitoring timer
+        if not hasattr(self, '_thumb_monitor_timer'):
+            self._thumb_monitor_timer = QTimer()
+            self._thumb_monitor_timer.timeout.connect(self._check_thumbnail_tasks)
+            self._thumb_monitor_timer.setSingleShot(False)
+        
+        # Track thumbnail loading tasks
+        self._thumb_tasks = []
+        
+        # Load thumbnails function for thread pool
+        def load_thumb_sync(path, index):
             try:
-                pixmap = QPixmap(path)
-                if not pixmap.isNull():
-                    # Scale to thumbnail size
-                    thumb = pixmap.scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatio, 
-                                         Qt.TransformationMode.SmoothTransformation)
-                    return (index, path, thumb)
-            except:
-                pass
-            return None
+                # Use QImage in background thread (thread-safe)
+                from PySide6.QtGui import QImage
+                image = QImage(path)
+                if not image.isNull():
+                    # Scale to thumbnail size using QImage (thread-safe)
+                    thumb_image = image.scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatio, 
+                                              Qt.TransformationMode.SmoothTransformation)
+                    return {'success': True, 'index': index, 'path': path, 'image': thumb_image}
+            except Exception as e:
+                return {'success': False, 'index': index, 'path': path, 'error': str(e)}
+            return {'success': False, 'index': index, 'path': path, 'error': 'Unknown error'}
         
         # Add items with loading placeholders first
         for i, path in enumerate(self.image_paths):
@@ -1482,44 +1533,50 @@ class MangaImagePreviewWidget(QWidget):
             output_item.setText(os.path.basename(path))
             output_item.setSizeHint(QSize(110, 110))
             self.output_thumbnail_list.addItem(output_item)
+            
+            # Submit thumbnail loading task
+            future = self._thumb_executor.submit(load_thumb_sync, path, i)
+            self._thumb_tasks.append(future)
         
-        # Load thumbnails asynchronously using a thread pool (one task per image)
-        def submit_single(i, path):
-            res = load_thumb(path, i)
-            if res:
-                idx, img_path, thumb = res
+        # Start monitoring thumbnail tasks
+        if self._thumb_tasks:
+            self._thumb_monitor_timer.start(100)  # Check every 100ms
+    
+    def _check_thumbnail_tasks(self):
+        """Check thumbnail loading tasks using QTimer (runs on main thread)"""
+        if not hasattr(self, '_thumb_tasks') or not self._thumb_tasks:
+            self._thumb_monitor_timer.stop()
+            return
+        
+        completed_tasks = []
+        for i, task in enumerate(self._thumb_tasks):
+            if task.done():
+                completed_tasks.append(i)
                 try:
-                    from PySide6.QtCore import QMetaObject, Q_ARG
-                    QMetaObject.invokeMethod(self, "_update_thumbnail_item",
-                                            Qt.ConnectionType.QueuedConnection,
-                                            Q_ARG(int, idx),
-                                            Q_ARG(QPixmap, thumb),
-                                            Q_ARG(str, img_path))
-                    QMetaObject.invokeMethod(self, "_update_output_thumbnail_item",
-                                            Qt.ConnectionType.QueuedConnection,
-                                            Q_ARG(int, idx),
-                                            Q_ARG(QPixmap, thumb),
-                                            Q_ARG(str, img_path))
-                except Exception:
-                    pass
+                    result = task.result(timeout=0.01)  # Very short timeout
+                    if result['success']:
+                        # Convert QImage to QPixmap on main thread (thread-safe)
+                        pixmap = QPixmap.fromImage(result['image'])
+                        if not pixmap.isNull():
+                            # Update both thumbnail lists
+                            self._update_thumbnail_item(result['index'], pixmap, result['path'])
+                            self._update_output_thumbnail_item(result['index'], pixmap, result['path'])
+                    else:
+                        print(f"Thumbnail load error for {result['path']}: {result.get('error', 'Unknown')}")
+                except Exception as e:
+                    print(f"Thumbnail task error: {e}")
         
-        try:
-            if not hasattr(self, '_thumb_executor') or self._thumb_executor is None:
-                from concurrent.futures import ThreadPoolExecutor
-                self._thumb_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="thumbs")
-            for i, path in enumerate(self.image_paths):
-                self._thumb_executor.submit(submit_single, i, path)
-        except Exception:
-            # Fallback to single background thread if pool creation fails
-            def load_all_thumbs():
-                for i, path in enumerate(self.image_paths):
-                    submit_single(i, path)
-            thread = threading.Thread(target=load_all_thumbs, daemon=True)
-            thread.start()
+        # Remove completed tasks
+        for i in reversed(completed_tasks):
+            del self._thumb_tasks[i]
+        
+        # Stop monitoring if all tasks complete
+        if not self._thumb_tasks:
+            self._thumb_monitor_timer.stop()
     
     @Slot(int, QPixmap, str)
     def _update_thumbnail_item(self, index: int, pixmap: QPixmap, path: str):
-        """Update thumbnail item with loaded pixmap (called from background thread)"""
+        """Update thumbnail item with loaded pixmap (called from main thread)"""
         try:
             if index < self.thumbnail_list.count():
                 item = self.thumbnail_list.item(index)
@@ -1572,10 +1629,6 @@ class MangaImagePreviewWidget(QWidget):
         self.file_label.setText(f"⌛ Loading {os.path.basename(image_path)}...")
         self.file_label.setStyleSheet("color: #5a9fd4; font-size: 8pt;")  # Blue while loading
         
-        # If we're in light swap mode (cleaned/original toggle), avoid any heavy scene churn
-        if getattr(self, '_light_swap_mode', False):
-            return
-        
         # Clear previous image data (unless preserve flag is set for workflow continuity)
         preserve_rectangles = getattr(self, '_preserve_rectangles_on_load', False)
         if not preserve_rectangles:
@@ -1616,15 +1669,6 @@ class MangaImagePreviewWidget(QWidget):
         if self.current_image_path:
             self.file_label.setText(f"📄 {os.path.basename(self.current_image_path)}")
             self.file_label.setStyleSheet("color: gray; font-size: 8pt;")  # Back to normal
-        
-        # If this was a light swap (cleaned/original toggle), skip heavy overlay restoration
-        if getattr(self, '_light_swap_mode', False):
-            # Turn off light swap mode now that the image is loaded
-            try:
-                self._light_swap_mode = False
-            except Exception:
-                pass
-            return
         
         # Restore overlays for the newly loaded image (and hide others)
         try:
@@ -1681,6 +1725,45 @@ class MangaImagePreviewWidget(QWidget):
                 self.output_viewer.clear_scene()
                 self.current_translated_path = None
                 self._show_output_placeholder()
+        except Exception:
+            pass
+        
+        # Cleanup enhanced loaders
+        self._cleanup_enhanced_loaders()
+    
+    def _cleanup_enhanced_loaders(self):
+        """Clean up ThreadPoolExecutor resources"""
+        try:
+            # Stop thumbnail monitoring
+            if hasattr(self, '_thumb_monitor_timer'):
+                self._thumb_monitor_timer.stop()
+            
+            # Cancel pending thumbnail tasks
+            if hasattr(self, '_thumb_tasks'):
+                for task in self._thumb_tasks:
+                    if not task.done():
+                        task.cancel()
+                self._thumb_tasks.clear()
+            
+            # Shutdown thumbnail executor
+            if hasattr(self, '_thumb_executor'):
+                self._thumb_executor.shutdown(wait=False)
+                delattr(self, '_thumb_executor')
+            
+            # Shutdown main image loader
+            if hasattr(self.viewer, '_loader_manager'):
+                self.viewer._loader_manager.shutdown()
+            
+            if hasattr(self.output_viewer, '_loader_manager'):
+                self.output_viewer._loader_manager.shutdown()
+                
+        except Exception as e:
+            print(f"Error during enhanced loader cleanup: {e}")
+    
+    def __del__(self):
+        """Cleanup when widget is destroyed"""
+        try:
+            self._cleanup_enhanced_loaders()
         except Exception:
             pass
     
@@ -1797,7 +1880,7 @@ class MangaImagePreviewWidget(QWidget):
             pass
     
     def _toggle_cleaned_image_mode(self):
-        """Toggle between showing cleaned images vs original images (async via pool)"""
+        """Toggle between showing cleaned images vs original images"""
         try:
             # Update the state
             self.cleaned_images_enabled = self.cleaned_toggle_btn.isChecked()
@@ -1844,67 +1927,13 @@ class MangaImagePreviewWidget(QWidget):
                     }
                 """)
             
-            # If we have a current image, reload it to apply the toggle using a background pool
+            # If we have a current image, reload it to apply the toggle
             if self.current_image_path and os.path.exists(self.current_image_path):
-                print(f"[CLEANED_TOGGLE] Reloading image with cleaned mode (async): {self.cleaned_images_enabled}")
-                try:
-                    # Lazy-init a small executor for toggle tasks
-                    if not hasattr(self, '_toggle_executor') or self._toggle_executor is None:
-                        from concurrent.futures import ThreadPoolExecutor
-                        self._toggle_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="sponge-toggle")
-                except Exception:
-                    self._toggle_executor = None
-                
-                orig_path = self.current_image_path
-                cleaned_enabled = bool(self.cleaned_images_enabled)
-                
-                def _bg_resolve_and_reload():
-                    # Resolve which source image to load under the toggle
-                    try:
-                        src_path = self._check_for_cleaned_image(orig_path) if cleaned_enabled else orig_path
-                    except Exception:
-                        src_path = orig_path
-                    
-                    # Schedule UI-thread reload with preserve flags using QMetaObject (safe across threads)
-                    try:
-                        from PySide6.QtCore import QMetaObject, Qt, Q_ARG
-                        QMetaObject.invokeMethod(
-                            self,
-                            "_reload_preview_after_toggle",
-                            Qt.ConnectionType.QueuedConnection,
-                            Q_ARG(str, src_path),
-                            Q_ARG(str, orig_path)
-                        )
-                    except Exception as _e:
-                        print(f"[CLEANED_TOGGLE] invokeMethod failed: {_e}")
-                
-                try:
-                    if self._toggle_executor:
-                        self._toggle_executor.submit(_bg_resolve_and_reload)
-                    else:
-                        # Fallback: call resolver directly then invoke on UI thread
-                        _bg_resolve_and_reload()
-                except Exception:
-                    _bg_resolve_and_reload()
+                print(f"[CLEANED_TOGGLE] Reloading image with cleaned mode: {self.cleaned_images_enabled}")
+                self.load_image(self.current_image_path, preserve_rectangles=True, preserve_text_overlays=True)
             
         except Exception as e:
             print(f"[ERROR] Failed to toggle cleaned image mode: {e}")
-
-    @Slot(str, str)
-    def _reload_preview_after_toggle(self, src_path: str, orig_path: str):
-        """UI-thread reload after cleaned/original toggle"""
-        try:
-            # Enable light swap mode to suppress heavy overlay churn in load handlers
-            self._light_swap_mode = True
-            self._preserve_rectangles_on_load = True
-            self._preserve_text_overlays_on_load = True
-            # Load source tab image (CompactImageViewer has its own QThread)
-            self.viewer.load_image(src_path)
-            # Keep tracking original path for state
-            self.current_image_path = orig_path
-            # Do not refresh output tab or thumbnails on sponge toggle
-        except Exception as e:
-            print(f"[CLEANED_TOGGLE] UI reload error: {e}")
     
     def _on_download_images_clicked(self):
         """Handle download images button - consolidate isolated images into structured folder"""
