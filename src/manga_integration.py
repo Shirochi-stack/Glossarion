@@ -4205,34 +4205,34 @@ class MangaTranslationTab(QObject):
         self.bubble_size_factor_checkbox.stateChanged.connect(lambda: (setattr(self, 'bubble_size_factor_value', self.bubble_size_factor_checkbox.isChecked()), self._save_rendering_settings(), self._apply_rendering_settings()))
         sizing_group_layout.addWidget(self.bubble_size_factor_checkbox)
 
-        # Safe area toggle
+        # Safe area controls (checkbox + inline scale)
+        safe_area_row = QWidget()
+        sa_row_layout = QHBoxLayout(safe_area_row)
+        sa_row_layout.setContentsMargins(0, 2, 0, 4)
+        sa_row_layout.setSpacing(10)
+        
         self.safe_area_enabled_checkbox = self._create_styled_checkbox("Use safe area (mask/polygon)")
-        self.safe_area_enabled_checkbox.setChecked(getattr(self, 'safe_area_enabled_value', True))
+        self.safe_area_enabled_checkbox.setChecked(getattr(self, 'safe_area_enabled_value', False))
         self.safe_area_enabled_checkbox.stateChanged.connect(lambda: (setattr(self, 'safe_area_enabled_value', self.safe_area_enabled_checkbox.isChecked()), self._save_rendering_settings(), self._apply_rendering_settings()))
-        sizing_group_layout.addWidget(self.safe_area_enabled_checkbox)
-
-        # Safe area scale row
-        row_sa = QWidget()
-        sa_layout = QHBoxLayout(row_sa)
-        sa_layout.setContentsMargins(20, 2, 0, 4)
-        sa_layout.setSpacing(10)
-        sa_label = QLabel("Safe Area Scale:")
-        sa_label.setMinimumWidth(150)
-        sa_layout.addWidget(sa_label)
+        sa_row_layout.addWidget(self.safe_area_enabled_checkbox)
+        
+        # Inline scale (no label) with x-suffix
         self.safe_area_scale_spinbox = QDoubleSpinBox()
         self.safe_area_scale_spinbox.setMinimum(0.70)
         self.safe_area_scale_spinbox.setMaximum(1.10)
         self.safe_area_scale_spinbox.setSingleStep(0.01)
         self.safe_area_scale_spinbox.setValue(getattr(self, 'safe_area_scale_value', 1.0))
-        self.safe_area_scale_spinbox.setMinimumWidth(100)
+        self.safe_area_scale_spinbox.setMinimumWidth(80)
+        try:
+            self.safe_area_scale_spinbox.setSuffix("x")
+        except Exception:
+            pass
+        self.safe_area_scale_spinbox.setToolTip("Safe area scale factor")
         self.safe_area_scale_spinbox.valueChanged.connect(lambda value: (self._on_safe_area_scale_changed(value), self._save_rendering_settings(), self._apply_rendering_settings()))
         self._disable_spinbox_mousewheel(self.safe_area_scale_spinbox)
-        sa_layout.addWidget(self.safe_area_scale_spinbox)
-        self.safe_area_scale_value_label = QLabel(f"{getattr(self, 'safe_area_scale_value', 1.0):.2f}")
-        self.safe_area_scale_value_label.setMinimumWidth(50)
-        sa_layout.addWidget(self.safe_area_scale_value_label)
-        sa_layout.addStretch()
-        sizing_group_layout.addWidget(row_sa)
+        sa_row_layout.addWidget(self.safe_area_scale_spinbox)
+        sa_row_layout.addStretch()
+        sizing_group_layout.addWidget(safe_area_row)
 
         # Line Spacing row with live value label
         row_ls = QWidget()
@@ -5379,7 +5379,7 @@ class MangaTranslationTab(QObject):
         self.strict_text_wrapping_value = config.get('manga_strict_text_wrapping', True)
         
         # Safe area controls
-        self.safe_area_enabled_value = bool(config.get('manga_safe_area_enabled', True))
+        self.safe_area_enabled_value = bool(config.get('manga_safe_area_enabled', False))
         try:
             self.safe_area_scale_value = float(config.get('manga_safe_area_scale', 1.0))
         except Exception:
@@ -17063,7 +17063,7 @@ class MangaTranslationTab(QObject):
         except Exception:
             pass
         try:
-            self._log(f"  Safe area: {'Enabled' if bool(getattr(self, 'safe_area_enabled_value', True)) else 'Disabled'} (scale {float(getattr(self, 'safe_area_scale_value', 1.0)):.2f})", "info")
+            self._log(f"  Safe area: {'Enabled' if bool(getattr(self, 'safe_area_enabled_value', False)) else 'Disabled'} (scale {float(getattr(self, 'safe_area_scale_value', 1.0)):.2f})", "info")
         except Exception:
             pass
         self._log(f"  Full Page Context: {'Enabled' if self.full_page_context_value else 'Disabled'}", "info")

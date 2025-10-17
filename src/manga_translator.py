@@ -1206,7 +1206,7 @@ class MangaTranslator:
         self.skip_inpainting = config.get('manga_skip_inpainting', False)  # Default: perform inpainting
 
         # Safe area controls
-        self.safe_area_enabled = bool(config.get('manga_safe_area_enabled', True))
+        self.safe_area_enabled = bool(config.get('manga_safe_area_enabled', False))
         try:
             self.safe_area_scale = float(config.get('manga_safe_area_scale', 1.0))
         except Exception:
