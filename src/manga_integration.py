@@ -637,6 +637,10 @@ class MangaTranslationTab(QObject):
         self.current_file_index = 0
         self.font_mapping = {}  # Initialize font mapping dictionary
 
+        # Shared inpainting model instance for reuse
+        self._shared_inpainter = None
+        self._shared_inpainter_method = None
+        self._shared_inpainter_path = None
         
         # Progress tracking
         self.total_files = 0
@@ -11577,10 +11581,20 @@ class MangaTranslationTab(QObject):
             # Start pulse effect on the rectangle
             self._add_rectangle_pulse_effect(target_rect, region_index)
             
+            # Lazy preloading: if this is the first time using clean rectangle, preload the model
+            # This happens in the background thread so it doesn't block the UI
+            if (self._shared_inpainter is None or not getattr(self._shared_inpainter, 'model_loaded', False)):
+                print(f"[CLEAN_RECT] First use detected - will preload inpainter in background")
+            
             # Run everything in background thread to avoid GUI lag
             def run_single_rect_clean():
                 try:
                     print(f"[CLEAN_RECT_THREAD] Starting background processing for region {region_index}")
+                    
+                    # Lazy preload inpainter if not already loaded (first use optimization)
+                    if (self._shared_inpainter is None or not getattr(self._shared_inpainter, 'model_loaded', False)):
+                        print(f"[CLEAN_RECT_THREAD] Preloading inpainter for first use...")
+                        self._preload_shared_inpainter()
                     
                     # Determine which image to use as base - prefer output image if available
                     base_image_path = current_image_path
@@ -11673,6 +11687,101 @@ class MangaTranslationTab(QObject):
             print(f"[CLEAN_RECT] Traceback: {traceback.format_exc()}")
             self._log(f"❌ Failed to start rectangle cleaning: {str(e)}", "error")
     
+    def _get_or_create_shared_inpainter(self, method: str, model_path: str):
+        """Get or create shared inpainter instance, reusing if same method/path"""
+        try:
+            from local_inpainter import LocalInpainter
+            import os
+            
+            # Check if we already have a loaded inpainter for this method/path
+            if (self._shared_inpainter is not None and 
+                self._shared_inpainter_method == method and 
+                self._shared_inpainter_path == model_path and
+                hasattr(self._shared_inpainter, 'model_loaded') and 
+                self._shared_inpainter.model_loaded):
+                print(f"[SHARED_INPAINTER] Reusing loaded {method} model: {os.path.basename(model_path)}")
+                return self._shared_inpainter
+            
+            # Need to create or reload inpainter
+            print(f"[SHARED_INPAINTER] Creating/loading {method} inpainter: {os.path.basename(model_path)}")
+            
+            # Create new inpainter instance if needed
+            if self._shared_inpainter is None:
+                self._shared_inpainter = LocalInpainter()
+                print(f"[SHARED_INPAINTER] Created new LocalInpainter instance")
+            
+            # Load the model
+            success = self._shared_inpainter.load_model_with_retry(method, model_path, force_reload=False)
+            if not success:
+                print(f"[SHARED_INPAINTER] Failed to load {method} model")
+                return None
+            
+            # Update tracking variables
+            self._shared_inpainter_method = method
+            self._shared_inpainter_path = model_path
+            
+            print(f"[SHARED_INPAINTER] Successfully loaded {method} model: {os.path.basename(model_path)}")
+            return self._shared_inpainter
+            
+        except Exception as e:
+            print(f"[SHARED_INPAINTER] Error creating/loading inpainter: {e}")
+            import traceback
+            print(f"[SHARED_INPAINTER] Traceback: {traceback.format_exc()}")
+            return None
+    
+    def _preload_shared_inpainter(self):
+        """Preload the shared inpainter with current settings if not already loaded"""
+        try:
+            import os
+            
+            # Get current inpainting settings
+            inpaint_method = self.main_gui.config.get('manga_inpaint_method', 'local')
+            local_model = self.main_gui.config.get('manga_local_inpaint_model', 'anime_onnx')
+            
+            if inpaint_method != 'local':
+                print(f"[PRELOAD_INPAINTER] Skipping preload - method is {inpaint_method}, not local")
+                return
+            
+            # Check if already loaded
+            if (self._shared_inpainter is not None and 
+                self._shared_inpainter_method == local_model and
+                hasattr(self._shared_inpainter, 'model_loaded') and 
+                self._shared_inpainter.model_loaded):
+                print(f"[PRELOAD_INPAINTER] {local_model} inpainter already loaded")
+                return
+            
+            # Get model path
+            model_path = self.main_gui.config.get(f'manga_{local_model}_model_path', '')
+            
+            # Try to download if path not found
+            if not model_path or not os.path.exists(model_path):
+                try:
+                    print(f"[PRELOAD_INPAINTER] Downloading {local_model} model for preloading...")
+                    from local_inpainter import LocalInpainter
+                    temp_inpainter = LocalInpainter()
+                    model_path = temp_inpainter.download_jit_model(local_model)
+                    if model_path:
+                        # Update config with downloaded path
+                        self.main_gui.config[f'manga_{local_model}_model_path'] = model_path
+                        print(f"[PRELOAD_INPAINTER] Downloaded and cached model path: {os.path.basename(model_path)}")
+                except Exception as e:
+                    print(f"[PRELOAD_INPAINTER] Failed to download {local_model}: {e}")
+                    return
+            
+            if model_path and os.path.exists(model_path):
+                print(f"[PRELOAD_INPAINTER] Preloading {local_model} inpainter...")
+                inpainter = self._get_or_create_shared_inpainter(local_model, model_path)
+                if inpainter:
+                    print(f"[PRELOAD_INPAINTER] Successfully preloaded {local_model} inpainter")
+                    self._log(f"🎯 Preloaded {local_model.upper()} inpainting model", "info")
+                else:
+                    print(f"[PRELOAD_INPAINTER] Failed to preload {local_model} inpainter")
+            
+        except Exception as e:
+            print(f"[PRELOAD_INPAINTER] Error during preload: {e}")
+            import traceback
+            print(f"[PRELOAD_INPAINTER] Traceback: {traceback.format_exc()}")
+    
     def _run_inpainting_on_region(self, image, mask, region_index, custom_iterations=None):
         """Run inpainting on a specific region with the given mask"""
         try:
@@ -11689,12 +11798,6 @@ class MangaTranslationTab(QObject):
             print(f"[INPAINT_REGION] Using method: {inpaint_method}, model: {local_model}")
             
             if inpaint_method == 'local':
-                # Use local inpainter with the same method as _run_clean_background
-                print(f"[INPAINT_REGION] Creating LocalInpainter instance")
-                
-                # Create local inpainter
-                inpainter = LocalInpainter()
-                
                 # Get model path from config (same way as _run_clean_background)
                 model_path = self.main_gui.config.get(f'manga_{local_model}_model_path', '')
                 
@@ -11702,26 +11805,23 @@ class MangaTranslationTab(QObject):
                 resolved_model_path = model_path
                 if not resolved_model_path or not os.path.exists(resolved_model_path):
                     try:
-                        print(f"[INPAINT_REGION] Downloading {local_model} model...")
-                        resolved_model_path = inpainter.download_jit_model(local_model)
+                        print(f"[INPAINT_REGION] Model path not found, downloading {local_model} model...")
+                        from local_inpainter import LocalInpainter
+                        temp_inpainter = LocalInpainter()
+                        resolved_model_path = temp_inpainter.download_jit_model(local_model)
                     except Exception as e:
                         print(f"[INPAINT_REGION] Model download failed: {e}")
                         resolved_model_path = None
                 
-                # Load the model using the same method as _run_clean_background
-                if resolved_model_path and os.path.exists(resolved_model_path):
-                    try:
-                        print(f"[INPAINT_REGION] Loading {local_model} model from: {os.path.basename(resolved_model_path)}")
-                        # Use load_model_with_retry like _run_clean_background does
-                        success = inpainter.load_model_with_retry(local_model, resolved_model_path, force_reload=False)
-                        if not success:
-                            print(f"[INPAINT_REGION] Failed to load model with retry")
-                            return None
-                    except Exception as e:
-                        print(f"[INPAINT_REGION] Model loading error: {str(e)}")
-                        return None
-                else:
+                if not resolved_model_path or not os.path.exists(resolved_model_path):
                     print(f"[INPAINT_REGION] No valid model path for {local_model}")
+                    return None
+                
+                # Use shared inpainter instance instead of creating new one
+                print(f"[INPAINT_REGION] Getting shared inpainter for {local_model}")
+                inpainter = self._get_or_create_shared_inpainter(local_model, resolved_model_path)
+                if inpainter is None:
+                    print(f"[INPAINT_REGION] Failed to get shared inpainter")
                     return None
                 
                 # Run inpainting with custom iterations if available
