@@ -8192,9 +8192,12 @@ class MangaTranslationTab(QObject):
                         pass
                     viewer._scene.addItem(rect_item)
                     viewer.rectangles.append(rect_item)
-                    # Mark as detection-only (no recognized text yet)
+                    # Attach region index and move-sync handler
                     try:
-                        rect_item.is_recognized = False
+                        rect_item.region_index = idx
+                        self._attach_move_sync_to_rectangle(rect_item, idx)
+                        # Add context menu to restored rectangles
+                        self._add_context_menu_to_rectangle(rect_item, idx)
                     except Exception:
                         pass
                 
@@ -8309,6 +8312,15 @@ class MangaTranslationTab(QObject):
                         pass
                     viewer._scene.addItem(rect_item)
                     viewer.rectangles.append(rect_item)
+                    
+                    # Add context menu to restored rectangles
+                    try:
+                        rect_item.region_index = idx
+                        self._attach_move_sync_to_rectangle(rect_item, idx)
+                        self._add_context_menu_to_rectangle(rect_item, idx)
+                    except Exception:
+                        pass
+                        
                 print(f"[STATE] Restored {len(state['viewer_rectangles'])} viewer rectangles (preferred)")
                 used_boxes = True
             
@@ -8397,20 +8409,22 @@ class MangaTranslationTab(QObject):
                     
                     pen.setCosmetic(True)
                     rect_item = MoveableRectItem(rect, pen=pen, brush=brush)
-                    # Attach viewer for move signal
+                    # Attach viewer reference so moved emits
                     try:
                         rect_item._viewer = viewer
                     except Exception:
                         pass
                     viewer._scene.addItem(rect_item)
                     viewer.rectangles.append(rect_item)
-                    # Attach flags and menu; mark recognized if we had text
+                    # Attach region index and move-sync handler for blue rectangles (ones with text)
                     try:
-                        rect_item.region_index = idx
-                        rect_item.is_recognized = bool(has_text_for_this_rect)
-                        self._add_context_menu_to_rectangle(rect_item, idx)
                         if has_text_for_this_rect:
+                            rect_item.region_index = idx
                             self._attach_move_sync_to_rectangle(rect_item, idx)
+                        else:
+                            # Remove any region_index from green rectangles that don't have text
+                            if hasattr(rect_item, 'region_index'):
+                                delattr(rect_item, 'region_index')
                     except Exception:
                         pass
                 
@@ -8570,7 +8584,7 @@ class MangaTranslationTab(QObject):
             print(f"[DRAW_BOXES] Drawing {len(self._current_regions)} regions")
             print(f"[DRAW_BOXES] Current rectangles count before drawing: {len(viewer.rectangles)}")
             
-                    # Draw boxes for each region
+            # Draw boxes for each region
             for i, region in enumerate(self._current_regions):
                 bbox = region.get('bbox', [])
                 if len(bbox) >= 4:
@@ -8587,12 +8601,6 @@ class MangaTranslationTab(QObject):
                     
                     # Create rectangle item with colors set from the start (avoids double rendering)
                     rect_item = MoveableRectItem(rect, pen=pen, brush=brush)
-                    # Mark detection-only
-                    try:
-                        rect_item.is_recognized = False
-                        rect_item.region_index = i
-                    except Exception:
-                        pass
                     
                     # Explicitly disable antialiasing on this item to prevent blur artifacts
                     from PySide6.QtWidgets import QGraphicsItem
@@ -8608,12 +8616,12 @@ class MangaTranslationTab(QObject):
                     viewer._scene.addItem(rect_item)
                     viewer.rectangles.append(rect_item)
                     
-                    # Track region index, attach menu, and move-sync handler
+                    # Track region index on the rectangle and attach move-sync handler
                     try:
                         rect_item.region_index = i
-                        rect_item.is_recognized = False
-                        self._add_context_menu_to_rectangle(rect_item, i)
                         self._attach_move_sync_to_rectangle(rect_item, i)
+                        # Add context menu to green detection rectangles
+                        self._add_context_menu_to_rectangle(rect_item, i)
                     except Exception:
                         pass
             
@@ -9491,85 +9499,77 @@ class MangaTranslationTab(QObject):
                     return []
             
             elif provider in ['azure', 'azure-document-intelligence']:
-                # Use correct Azure API per provider name
+                # Use Azure OCR on full image (both legacy and new document intelligence APIs)
                 print(f"[OCR_REGIONS] Running {provider} OCR on full image")
                 try:
-                    if provider == 'azure':
-                        # Azure Computer Vision (Image Analysis) path
-                        from azure.ai.vision.imageanalysis import ImageAnalysisClient
-                        from azure.core.credentials import AzureKeyCredential
-                        from azure.ai.vision.imageanalysis.models import VisualFeatures
-                        import time
+                    from azure.ai.vision.imageanalysis import ImageAnalysisClient
+                    from azure.core.credentials import AzureKeyCredential
+                    from azure.ai.vision.imageanalysis.models import VisualFeatures
+                    import time
+                    
+                    # Create Azure client - support both azure and azure-document-intelligence
+                    # Both use the same API, just different provider names in config
+                    azure_endpoint = ocr_config.get('azure_endpoint') or ocr_config.get('endpoint', '')
+                    azure_key = ocr_config.get('azure_key') or ocr_config.get('key', '')
+                    
+                    if not azure_endpoint or not azure_key:
+                        print(f"[OCR_REGIONS] Missing Azure credentials: endpoint={bool(azure_endpoint)}, key={bool(azure_key)}")
+                        self._log(f"❌ Azure credentials not configured", "error")
+                        return []
+                    
+                    vision_client = ImageAnalysisClient(
+                        endpoint=azure_endpoint,
+                        credential=AzureKeyCredential(azure_key)
+                    )
+                    
+                    # Convert full image to bytes
+                    _, encoded = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                    image_bytes = encoded.tobytes()
+                    
+                    # Call Azure OCR on full image with timeout handling
+                    start_time = time.time()
+                    
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        future = executor.submit(
+                            vision_client.analyze,
+                            image_data=image_bytes,
+                            visual_features=[VisualFeatures.READ]
+                        )
                         
-                        azure_endpoint = ocr_config.get('azure_endpoint') or ocr_config.get('endpoint', '')
-                        azure_key = ocr_config.get('azure_key') or ocr_config.get('key', '')
-                        if not azure_endpoint or not azure_key:
-                            print(f"[OCR_REGIONS] Missing Azure credentials: endpoint={bool(azure_endpoint)}, key={bool(azure_key)}")
-                            self._log(f"❌ Azure credentials not configured", "error")
+                        try:
+                            # Wait for result with 30 second timeout
+                            result = future.result(timeout=30.0)
+                            elapsed = time.time() - start_time
+                            print(f"[OCR_REGIONS] Azure OCR completed in {elapsed:.2f}s")
+                        except concurrent.futures.TimeoutError:
+                            print(f"[OCR_REGIONS] Azure OCR timed out after 30 seconds")
+                            self._log(f"❌ Azure OCR timed out after 30 seconds", "error")
                             return []
-                        vision_client = ImageAnalysisClient(
-                            endpoint=azure_endpoint,
-                            credential=AzureKeyCredential(azure_key)
-                        )
-                        # Convert full image to bytes
-                        _, encoded = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                        image_bytes = encoded.tobytes()
-                        # Call Azure OCR on full image with timeout handling
-                        start_time = time.time()
-                        import concurrent.futures
-                        with concurrent.futures.ThreadPoolExecutor() as executor:
-                            future = executor.submit(
-                                vision_client.analyze,
-                                image_data=image_bytes,
-                                visual_features=[VisualFeatures.READ]
-                            )
-                            try:
-                                result = future.result(timeout=30.0)
-                                elapsed = time.time() - start_time
-                                print(f"[OCR_REGIONS] Azure OCR completed in {elapsed:.2f}s")
-                            except concurrent.futures.TimeoutError:
-                                print(f"[OCR_REGIONS] Azure OCR timed out after 30 seconds")
-                                self._log(f"❌ Azure OCR timed out after 30 seconds", "error")
-                                return []
-                        # Extract all text lines from full image OCR
-                        if result.read and result.read.blocks:
-                            for line in result.read.blocks[0].lines:
-                                if hasattr(line, 'bounding_polygon') and line.bounding_polygon:
-                                    points = line.bounding_polygon
-                                    xs = [p.x for p in points]
-                                    ys = [p.y for p in points]
-                                    x_min, x_max = int(min(xs)), int(max(xs))
-                                    y_min, y_max = int(min(ys)), int(max(ys))
-                                    from ocr_manager import OCRResult
-                                    ocr_line = OCRResult(
-                                        text=line.text,
-                                        bbox=(x_min, y_min, x_max - x_min, y_max - y_min),
-                                        confidence=0.9,
-                                        vertices=[(int(p.x), int(p.y)) for p in points]
-                                    )
-                                    full_image_ocr_results.append(ocr_line)
-                        print(f"[OCR_REGIONS] Azure OCR found {len(full_image_ocr_results)} text lines")
-                    else:
-                        # Azure Document Intelligence path via OCRManager provider (Form Recognizer)
-                        provider_obj = self.ocr_manager.get_provider('azure-document-intelligence')
-                        if provider_obj is None:
-                            self._log(f"❌ OCR provider 'azure-document-intelligence' not available in OCRManager", "error")
-                            return []
-                        # Load provider with endpoint/key if needed
-                        if not provider_obj.is_loaded:
-                            print(f"[OCR_REGIONS] Loading OCR provider: azure-document-intelligence")
-                            load_success = self.ocr_manager.load_provider('azure-document-intelligence', **ocr_config)
-                            print(f"[OCR_REGIONS] Provider load result: {load_success}")
-                            if not load_success:
-                                self._log(f"❌ Failed to load azure-document-intelligence", "error")
-                                return []
-                        # Run full-image OCR using Document Intelligence
-                        full_image_ocr_results = self.ocr_manager.detect_text(
-                            image,
-                            'azure-document-intelligence',
-                            **ocr_config
-                        )
-                        print(f"[OCR_REGIONS] azure-document-intelligence found {len(full_image_ocr_results)} text regions")
+                    
+                    # Extract all text lines from full image OCR
+                    if result.read and result.read.blocks:
+                        for line in result.read.blocks[0].lines:
+                            if hasattr(line, 'bounding_polygon') and line.bounding_polygon:
+                                # Get line bounding box
+                                points = line.bounding_polygon
+                                xs = [p.x for p in points]
+                                ys = [p.y for p in points]
+                                x_min, x_max = int(min(xs)), int(max(xs))
+                                y_min, y_max = int(min(ys)), int(max(ys))
+                                
+                                # Create OCR result
+                                from ocr_manager import OCRResult
+                                ocr_line = OCRResult(
+                                    text=line.text,
+                                    bbox=(x_min, y_min, x_max - x_min, y_max - y_min),
+                                    confidence=0.9,
+                                    vertices=[(int(p.x), int(p.y)) for p in points]
+                                )
+                                full_image_ocr_results.append(ocr_line)
+                    
+                    print(f"[OCR_REGIONS] Azure OCR found {len(full_image_ocr_results)} text lines")
+                    
                 except Exception as e:
                     print(f"[OCR_REGIONS] Azure OCR error: {str(e)}")
                     import traceback
@@ -10617,10 +10617,6 @@ class MangaTranslationTab(QObject):
                     from PySide6.QtGui import QPen, QBrush, QColor
                     rect_item.setPen(QPen(QColor(0, 150, 255), 2))  # Blue border
                     rect_item.setBrush(QBrush(QColor(0, 150, 255, 50)))  # Semi-transparent blue fill
-                    try:
-                        rect_item.is_recognized = True
-                    except Exception:
-                        pass
                     
                     # Add context menu support to rectangle
                     self._add_context_menu_to_rectangle(rect_item, region_index)
@@ -10793,8 +10789,83 @@ class MangaTranslationTab(QObject):
         except Exception as e:
             print(f"[DEBUG] Error removing processing overlay: {str(e)}")
     
+    def _handle_ocr_this_text(self, region_index: int, rect_item=None):
+        """Handle OCR this text context menu action for any rectangle type"""
+        try:
+            print(f"[OCR_CONTEXT] Starting OCR for region {region_index}")
+            
+            # Get current image path
+            if not hasattr(self, 'image_preview_widget') or not self.image_preview_widget.current_image_path:
+                self._log("⚠️ No image loaded for OCR", "warning")
+                return
+            
+            image_path = self.image_preview_widget.current_image_path
+            
+            # Get the rectangle from viewer
+            if rect_item is None:
+                rectangles = getattr(self.image_preview_widget.viewer, 'rectangles', [])
+                if region_index >= len(rectangles):
+                    self._log(f"⚠️ Rectangle index {region_index} out of range", "warning")
+                    return
+                rect_item = rectangles[region_index]
+            
+            # Get rectangle bounds
+            rect = rect_item.sceneBoundingRect()
+            bbox = [int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height())]
+            
+            # Create a region dict for OCR processing (reusing existing format)
+            region = {
+                'bbox': bbox,
+                'confidence': 1.0
+            }
+            
+            # Get OCR configuration
+            ocr_config = self._get_ocr_config()
+            print(f"[OCR_CONTEXT] Using OCR provider: {ocr_config['provider']}")
+            
+            # Reuse the existing _run_ocr_on_regions method with a single region
+            recognized_texts = self._run_ocr_on_regions(image_path, [region], ocr_config)
+            
+            if recognized_texts and len(recognized_texts) > 0:
+                recognized_text = recognized_texts[0]['text']
+                self._log(f"✅ OCR result: {recognized_text}", "success")
+                
+                # Show OCR result in popup
+                self._show_ocr_popup(recognized_text, region_index)
+                
+                # Store recognition data for future use
+                if not hasattr(self, '_recognition_data'):
+                    self._recognition_data = {}
+                
+                self._recognition_data[region_index] = {
+                    'text': recognized_text,
+                    'confidence': recognized_texts[0].get('confidence', 1.0),
+                    'bbox': bbox
+                }
+                
+                # Change rectangle color to blue to indicate it now has recognized text
+                from PySide6.QtGui import QPen, QBrush, QColor
+                rect_item.setPen(QPen(QColor(0, 150, 255), 2))  # Blue border
+                rect_item.setBrush(QBrush(QColor(0, 150, 255, 50)))  # Semi-transparent blue fill
+                rect_item.is_recognized = True
+                rect_item.region_index = region_index
+                
+                # Add/update context menu for the now-blue rectangle
+                self._add_context_menu_to_rectangle(rect_item, region_index)
+                
+                print(f"[OCR_CONTEXT] Successfully recognized text in region {region_index}")
+                
+            else:
+                self._log("⚠️ No text found in selected region", "warning")
+                
+        except Exception as e:
+            print(f"[OCR_CONTEXT] Error in _handle_ocr_this_text: {e}")
+            import traceback
+            print(f"[OCR_CONTEXT] Traceback: {traceback.format_exc()}")
+            self._log(f"❌ OCR failed: {str(e)}", "error")
+    
     def _add_context_menu_to_rectangle(self, rect_item, region_index: int):
-        """Add context menu to rectangle for showing OCR text on right-click"""
+        """Add context menu to rectangle for OCR and translation options on right-click"""
         try:
             from PySide6.QtWidgets import QMenu, QMessageBox
             from PySide6.QtCore import QPoint
@@ -10816,15 +10887,17 @@ class MangaTranslationTab(QObject):
                         menu = QMenu()
                         
                         # Get recognition data (fresh lookup for up-to-date text)
-                        # Resolve actual index robustly
-                        actual_index = getattr(rect_item, 'region_index', None)
-                        if actual_index is None:
-                            # Fallback: find by identity in viewer list
-                            try:
-                                rects_list = getattr(self.image_preview_widget.viewer, 'rectangles', []) or []
-                                actual_index = rects_list.index(rect_item)
-                            except Exception:
-                                actual_index = 0
+                        # Use rect_item.region_index to get the actual stored index for this specific rectangle
+                        actual_index = rect_item.region_index
+                        
+                        # ALWAYS add "OCR this text" option first - available for all rectangles
+                        ocr_this_action = QAction("🔍 OCR This Text", menu)
+                        def make_ocr_this_handler(idx, rect):
+                            return lambda: self._handle_ocr_this_text(idx, rect)
+                        ocr_this_action.triggered.connect(make_ocr_this_handler(actual_index, rect_item))
+                        menu.addAction(ocr_this_action)
+                        
+                        # Add "Edit OCR" option if text already exists
                         if hasattr(self, '_recognition_data') and actual_index in self._recognition_data:
                             recognition_text = self._recognition_data[actual_index]['text']
                             # Add action to show OCR text (with better preview formatting)
@@ -10838,7 +10911,6 @@ class MangaTranslationTab(QObject):
                         
                         # Get translation data if available (fresh lookup)
                         if hasattr(self, '_translation_data') and actual_index in self._translation_data:
-                            menu.addSeparator()
                             current_trans = self._translation_data[actual_index]['translation']
                             preview_trans = (current_trans[:22] + "...") if len(current_trans) > 25 else current_trans
                             trans_action = QAction(f"🌍 Edit Translation: \"{preview_trans}\"", menu)
@@ -10848,11 +10920,12 @@ class MangaTranslationTab(QObject):
                             trans_action.triggered.connect(make_trans_handler(actual_index))
                             menu.addAction(trans_action)
                         
-                        # Add "Translate This Text" option for manual editing (when OCR text exists)
+                        # Add "Translate This Text" option for manual editing (only if text already recognized)
                         if hasattr(self, '_recognition_data') and actual_index in self._recognition_data:
                             # Get manual edit settings from config
                             translate_prompt = 'output only the {language} translation of this text:'  # default
                             target_language = 'English'  # default
+                            
                             try:
                                 if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'config'):
                                     manga_settings = self.main_gui.config.get('manga_settings', {})
@@ -10861,26 +10934,16 @@ class MangaTranslationTab(QObject):
                                     target_language = manual_edit.get('translate_target_language', target_language)
                             except Exception:
                                 pass
+                            
+                            # Create the actual prompt by replacing {language} placeholder
                             actual_prompt = translate_prompt.replace('{language}', target_language)
-                            if not menu.isEmpty():
-                                menu.addSeparator()
+                            
+                            # Add the translate action
                             translate_action = QAction(f"📞 Translate This Text ({target_language})", menu)
                             def make_translate_handler(idx, prompt_text):
                                 return lambda: self._handle_translate_this_text(idx, prompt_text)
                             translate_action.triggered.connect(make_translate_handler(actual_index, actual_prompt))
                             menu.addAction(translate_action)
-                        
-                        # Add "OCR This Text" option for any rectangle (red or blue)
-                        try:
-                            if not menu.isEmpty():
-                                menu.addSeparator()
-                            ocr_action = QAction("🔎 OCR This Text", menu)
-                            def make_ocr_handler(idx):
-                                return lambda: self._handle_ocr_this_text(idx)
-                            ocr_action.triggered.connect(make_ocr_handler(actual_index))
-                            menu.addAction(ocr_action)
-                        except Exception:
-                            pass
                         
                         if not menu.isEmpty():
                             # Set menu properties for better display
@@ -11847,171 +11910,6 @@ class MangaTranslationTab(QObject):
             self._log(f"❌ API translation failed: {e}", "error")
             import traceback
             traceback.print_exc()
-    
-    def _handle_ocr_this_text(self, region_index: int):
-        """Handle 'OCR This Text' for a single rectangle (cropped region only)."""
-        try:
-            # Run in background so UI doesn't block
-            import threading
-            t = threading.Thread(target=self._ocr_this_text_background, args=(region_index,), daemon=True)
-            t.start()
-        except Exception as e:
-            self._log(f"❌ Failed to start OCR: {e}", "error")
-    
-    def _ocr_this_text_background(self, region_index: int):
-        try:
-            import cv2, os
-            # Get current image path
-            image_path = getattr(self.image_preview_widget, 'current_image_path', None)
-            if not image_path or not os.path.exists(image_path):
-                self._log("❌ No image for OCR", "error")
-                return
-            # Load image
-            image = cv2.imread(image_path)
-            if image is None:
-                self._log("❌ Failed to load image for OCR", "error")
-                return
-            # Get bbox from viewer rectangle
-            rects = getattr(self.image_preview_widget.viewer, 'rectangles', []) or []
-            if not (0 <= int(region_index) < len(rects)):
-                self._log("❌ Invalid rectangle index for OCR", "error")
-                return
-            br = rects[int(region_index)].sceneBoundingRect()
-            x, y, w, h = int(br.x()), int(br.y()), int(br.width()), int(br.height())
-            if w <= 0 or h <= 0:
-                self._log("❌ Empty region for OCR", "error")
-                return
-            # Clamp to image bounds
-            H, W = image.shape[:2]
-            x = max(0, min(x, W-1)); y = max(0, min(y, H-1))
-            w = max(1, min(w, W - x)); h = max(1, min(h, H - y))
-            cropped = image[y:y+h, x:x+w]
-            # Get OCR config/provider
-            ocr_config = self._get_ocr_config()
-            provider = ocr_config.get('provider', 'custom-api')
-            text = ""
-            
-            # Ensure OCRManager exists
-            if not hasattr(self, 'ocr_manager') or not self.ocr_manager:
-                from ocr_manager import OCRManager
-                self.ocr_manager = OCRManager(log_callback=self._log)
-            
-            # Special handling for custom-api: reuse cropped flow and set OCR prompt env
-            if provider == 'custom-api':
-                try:
-                    # Set environment vars from GUI (exclude SYSTEM_PROMPT)
-                    api_key = None
-                    if hasattr(self.main_gui, 'api_key_entry'):
-                        try:
-                            if hasattr(self.main_gui.api_key_entry, 'text'):
-                                api_key = self.main_gui.api_key_entry.text().strip()
-                            elif hasattr(self.main_gui.api_key_entry, 'get'):
-                                api_key = self.main_gui.api_key_entry.get().strip()
-                        except Exception:
-                            api_key = None
-                    if not api_key:
-                        api_key = self.main_gui.config.get('api_key', '') if hasattr(self.main_gui, 'config') else ''
-                    if hasattr(self.main_gui, '_get_environment_variables'):
-                        env_vars = self.main_gui._get_environment_variables(epub_path='', api_key=api_key or '')
-                        for k, v in env_vars.items():
-                            if k == 'SYSTEM_PROMPT':
-                                continue
-                            os.environ[k] = str(v)
-                    # Set OCR prompt
-                    if getattr(self, 'ocr_prompt', None):
-                        os.environ['OCR_SYSTEM_PROMPT'] = self.ocr_prompt
-                except Exception:
-                    pass
-                # Load provider with API key/model if needed
-                try:
-                    model = None
-                    if hasattr(self.main_gui, 'model_var'):
-                        model = self.main_gui.model_var.get() if hasattr(self.main_gui.model_var, 'get') else self.main_gui.model_var
-                    elif hasattr(self.main_gui, 'config'):
-                        model = self.main_gui.config.get('model')
-                    load_kwargs = {}
-                    if model:
-                        load_kwargs['model'] = model
-                    if api_key:
-                        load_kwargs['api_key'] = api_key
-                    prov = self.ocr_manager.get_provider(provider)
-                    if prov and not prov.is_loaded:
-                        self.ocr_manager.load_provider(provider, **load_kwargs)
-                except Exception:
-                    pass
-                # Run OCR on cropped region only
-                results = self.ocr_manager.detect_text(cropped, provider, confidence=0.5)
-                text = " "+" ".join([r.text.strip() for r in results if getattr(r, 'text', '').strip()]) if results else ""
-            elif provider == 'google':
-                # Use Google Cloud Vision on CROPPED region
-                try:
-                    from google.cloud import vision
-                    # Credentials
-                    google_creds = ocr_config.get('google_credentials_path', '')
-                    if not google_creds or not os.path.exists(google_creds):
-                        self._log("❌ Google Cloud Vision credentials not found", "error")
-                        text = ""
-                    else:
-                        os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = google_creds
-                        client = vision.ImageAnnotatorClient()
-                        import cv2
-                        _, encoded = cv2.imencode('.jpg', cropped, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                        image_bytes = encoded.tobytes()
-                        vimage = vision.Image(content=image_bytes)
-                        response = client.text_detection(image=vimage)
-                        if response.error.message:
-                            raise Exception(response.error.message)
-                        texts = response.text_annotations
-                        if texts:
-                            # Combine all but first (which is full block)
-                            parts = [t.description.strip() for t in texts[1:] if t.description.strip()]
-                            if not parts and texts[0].description.strip():
-                                parts = [texts[0].description.strip()]
-                            text = " ".join(parts)
-                        else:
-                            text = ""
-                except Exception as ge:
-                    import traceback
-                    self._log(f"❌ Google OCR failed: {ge}", "error")
-                    print(traceback.format_exc())
-                    text = ""
-            elif provider in ['azure', 'azure-document-intelligence']:
-                # Use Azure providers on the CROPPED region via OCRManager
-                try:
-                    prov = self.ocr_manager.get_provider(provider)
-                    if prov and not prov.is_loaded:
-                        self.ocr_manager.load_provider(provider, **ocr_config)
-                    results = self.ocr_manager.detect_text(cropped, provider, confidence=0.5)
-                    text = " ".join([r.text.strip() for r in results if getattr(r, 'text', '').strip()]) if results else ""
-                except Exception as ae:
-                    import traceback
-                    self._log(f"❌ {provider} OCR failed: {ae}", "error")
-                    print(traceback.format_exc())
-                    text = ""
-            else:
-                # All other providers via OCRManager on CROPPED region
-                try:
-                    prov = self.ocr_manager.get_provider(provider)
-                    if prov and not prov.is_loaded:
-                        self.ocr_manager.load_provider(provider, **ocr_config)
-                    results = self.ocr_manager.detect_text(cropped, provider, confidence=0.5)
-                    text = " ".join([r.text.strip() for r in results if getattr(r, 'text', '').strip()]) if results else ""
-                except Exception as oe:
-                    import traceback
-                    self._log(f"❌ {provider} OCR failed: {oe}", "error")
-                    print(traceback.format_exc())
-                    text = ""
-            text = text.strip()
-            # Post back to GUI thread
-            self.update_queue.put(('ocr_this_text_result', {
-                'region_index': int(region_index),
-                'text': text,
-                'bbox': [x, y, w, h]
-            }))
-        except Exception as e:
-            import traceback
-            self._log(f"❌ OCR error: {e}", "error")
-            print(traceback.format_exc())
     
     def _clean_up_deleted_rectangle_overlays(self, region_index: int):
         """Clean up text overlays and data associated with a deleted rectangle"""
@@ -16276,62 +16174,6 @@ class MangaTranslationTab(QObject):
                             self.image_preview_widget.translate_all_btn.setText(f"Translating... ({current}/{total})")
                     except Exception as e:
                         print(f"Error updating translate all progress: {str(e)}")
-                
-                elif update[0] == 'ocr_this_text_result':
-                    # Update recognition data and rectangle color for a single region
-                    _, data = update
-                    try:
-                        region_index = int(data.get('region_index'))
-                        text = data.get('text', '').strip()
-                        bbox = data.get('bbox') or [0,0,0,0]
-                        if not hasattr(self, '_recognition_data'):
-                            self._recognition_data = {}
-                        # Upsert recognition data
-                        self._recognition_data[region_index] = {
-                            'text': text,
-                            'bbox': bbox
-                        }
-                        # Turn rectangle blue and attach menu/move sync
-                        try:
-                            rects = getattr(self.image_preview_widget.viewer, 'rectangles', []) or []
-                            if 0 <= region_index < len(rects):
-                                from PySide6.QtGui import QPen, QBrush, QColor
-                                rects[region_index].setPen(QPen(QColor(0,150,255), 2))
-                                rects[region_index].setBrush(QBrush(QColor(0,150,255,50)))
-                                rects[region_index].region_index = region_index
-                                try:
-                                    rects[region_index].is_recognized = True
-                                except Exception:
-                                    pass
-                                self._add_context_menu_to_rectangle(rects[region_index], region_index)
-                                try:
-                                    self._attach_move_sync_to_rectangle(rects[region_index], region_index)
-                                except Exception:
-                                    pass
-                        except Exception:
-                            pass
-                        # Persist to state
-                        try:
-                            current_image = getattr(self.image_preview_widget, 'current_image_path', None)
-                            if current_image and hasattr(self, 'image_state_manager') and self.image_state_manager:
-                                st = self.image_state_manager.get_state(current_image) or {}
-                                rec_list = st.get('recognized_texts') or []
-                                if len(rec_list) <= region_index:
-                                    rec_list = list(rec_list) + [{} for _ in range(region_index + 1 - len(rec_list))]
-                                rec_list[region_index] = {
-                                    'text': text,
-                                    'bbox': bbox,
-                                    'confidence': 1.0
-                                }
-                                st['recognized_texts'] = rec_list
-                                self.image_state_manager.set_state(current_image, st, save=True)
-                        except Exception:
-                            pass
-                        self._log(f"✅ OCR updated for region {region_index}", "success")
-                    except Exception as e:
-                        import traceback
-                        self._log(f"❌ Error applying OCR result: {e}", "error")
-                        print(traceback.format_exc())
                 
                 elif update[0] == 'translate_this_text_result':
                     # Process translation result on the GUI thread and add/replace a single overlay
