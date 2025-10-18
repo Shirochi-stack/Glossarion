@@ -10993,8 +10993,14 @@ class MangaTranslationTab(QObject):
             # Add comprehensive logging for OCR operation
             self._log(f"🔍 Starting OCR on region using {ocr_config['provider']}", "info")
             
+            # Start pulse effect on the rectangle
+            self._add_rectangle_pulse_effect(rect_item, region_index)
+            
             # Reuse the existing _run_ocr_on_regions method with a single region
             recognized_texts = self._run_ocr_on_regions(image_path, [region], ocr_config)
+            
+            # Stop pulse effect regardless of outcome
+            self._remove_rectangle_pulse_effect(rect_item, region_index)
             
             # Log the results
             if recognized_texts and len(recognized_texts) > 0:
@@ -11032,6 +11038,9 @@ class MangaTranslationTab(QObject):
                 self._log("⚠️ No text found in selected region", "warning")
                 
         except Exception as e:
+            # Stop pulse effect on error
+            if 'rect_item' in locals() and 'region_index' in locals():
+                self._remove_rectangle_pulse_effect(rect_item, region_index)
             print(f"[OCR_CONTEXT] Error in _handle_ocr_this_text: {e}")
             import traceback
             print(f"[OCR_CONTEXT] Traceback: {traceback.format_exc()}")
@@ -12821,6 +12830,16 @@ class MangaTranslationTab(QObject):
             
             self._log(f"🌍 Translating text from region {region_index}...", "info")
             
+            # Start pulse effect on the rectangle
+            try:
+                if hasattr(self.image_preview_widget, 'viewer') and hasattr(self.image_preview_widget.viewer, 'rectangles'):
+                    rectangles = self.image_preview_widget.viewer.rectangles
+                    if 0 <= region_index < len(rectangles):
+                        rect_item = rectangles[region_index]
+                        self._add_rectangle_pulse_effect(rect_item, region_index)
+            except Exception as pulse_err:
+                print(f"[TRANSLATE] Error starting pulse effect: {pulse_err}")
+            
             # Run translation in background thread
             import threading
             thread = threading.Thread(
@@ -12831,6 +12850,16 @@ class MangaTranslationTab(QObject):
             thread.start()
         
         except Exception as e:
+            # Stop pulse effect on error
+            try:
+                if 'region_index' in locals() and hasattr(self.image_preview_widget, 'viewer'):
+                    rectangles = self.image_preview_widget.viewer.rectangles
+                    if 0 <= region_index < len(rectangles):
+                        rect_item = rectangles[region_index]
+                        self._remove_rectangle_pulse_effect(rect_item, region_index)
+            except Exception as pulse_err:
+                print(f"[TRANSLATE_HANDLER_ERROR] Error stopping pulse effect: {pulse_err}")
+            
             self._log(f"❌ Error in translate this text: {e}", "error")
             print(f"[TRANSLATE] Error traceback: {e}")
             import traceback
@@ -12945,6 +12974,16 @@ class MangaTranslationTab(QObject):
             }))
         
         except Exception as e:
+            # Stop pulse effect on error
+            try:
+                if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'viewer'):
+                    rectangles = self.image_preview_widget.viewer.rectangles
+                    if 0 <= region_index < len(rectangles):
+                        rect_item = rectangles[region_index]
+                        self._remove_rectangle_pulse_effect(rect_item, region_index)
+            except Exception as pulse_err:
+                print(f"[TRANSLATE_ERROR] Error stopping pulse effect: {pulse_err}")
+            
             self._log(f"❌ API translation failed: {e}", "error")
             import traceback
             traceback.print_exc()
@@ -17325,6 +17364,17 @@ class MangaTranslationTab(QObject):
                         original_text = data.get('original_text', '')
                         translation_result = data.get('translation_result', '')
                         bbox = data.get('bbox') or [0, 0, 100, 100]
+                        
+                        # Stop pulse effect on the rectangle
+                        try:
+                            if hasattr(self.image_preview_widget, 'viewer') and hasattr(self.image_preview_widget.viewer, 'rectangles'):
+                                rectangles = self.image_preview_widget.viewer.rectangles
+                                if 0 <= region_index < len(rectangles):
+                                    rect_item = rectangles[region_index]
+                                    self._remove_rectangle_pulse_effect(rect_item, region_index)
+                        except Exception as pulse_err:
+                            print(f"[TRANSLATE_RESULT] Error stopping pulse effect: {pulse_err}")
+                        
                         # Ensure in-memory translation map is updated
                         if not hasattr(self, '_translation_data'):
                             self._translation_data = {}
