@@ -11145,6 +11145,13 @@ class MangaTranslationTab(QObject):
                         iterations_action.triggered.connect(make_iterations_handler(actual_index, rect_item))
                         menu.addAction(iterations_action)
                         
+                        # Add "Clean This Rectangle" option
+                        clean_action = QAction("🧽 Clean This Rectangle", menu)
+                        def make_clean_handler(idx, rect):
+                            return lambda: self._handle_clean_this_rectangle(idx, rect)
+                        clean_action.triggered.connect(make_clean_handler(actual_index, rect_item))
+                        menu.addAction(clean_action)
+                        
                         # Add "Delete Selected" option
                         delete_action = QAction("🗑️ Delete Selected", menu)
                         def make_delete_handler(idx, rect):
@@ -11450,6 +11457,226 @@ class MangaTranslationTab(QObject):
             import traceback
             print(f"[INPAINT_ITERATIONS] Traceback: {traceback.format_exc()}")
             self._log(f"❌ Failed to set inpainting iterations: {str(e)}", "error")
+    
+    def _handle_clean_this_rectangle(self, region_index: int, rect_item):
+        """Handle cleaning/inpainting a specific rectangle region"""
+        try:
+            from PySide6.QtWidgets import QMessageBox
+            import numpy as np
+            import cv2
+            
+            print(f"[CLEAN_RECT] Starting single rectangle clean for region {region_index}")
+            self._log(f"🎯 Starting clean for rectangle {region_index}...", "info")
+            
+            # Validate current state
+            if not hasattr(self.image_preview_widget, 'current_image_path') or not self.image_preview_widget.current_image_path:
+                self._log(f"❌ No image loaded", "error")
+                return
+            
+            current_image_path = self.image_preview_widget.current_image_path
+            
+            # Get the rectangle bounds
+            if not hasattr(self.image_preview_widget, 'viewer') or not hasattr(self.image_preview_widget.viewer, 'rectangles'):
+                self._log(f"❌ No rectangles available", "error")
+                return
+            
+            rectangles = self.image_preview_widget.viewer.rectangles
+            if region_index < 0 or region_index >= len(rectangles):
+                self._log(f"❌ Invalid rectangle index: {region_index}", "error")
+                return
+            
+            target_rect = rectangles[region_index]
+            rect_bounds = target_rect.rect()
+            
+            print(f"[CLEAN_RECT] Target rectangle {region_index} bounds: {rect_bounds.x()}, {rect_bounds.y()}, {rect_bounds.width()}, {rect_bounds.height()}")
+            
+            # Check if rectangle is excluded from cleaning
+            is_excluded = getattr(target_rect, 'exclude_from_clean', False)
+            if is_excluded:
+                reply = QMessageBox.question(
+                    self.dialog,
+                    "Rectangle Excluded",
+                    f"Rectangle {region_index} is currently excluded from inpainting.\n\nDo you want to clean it anyway?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No
+                )
+                if reply == QMessageBox.No:
+                    print(f"[CLEAN_RECT] User cancelled - rectangle {region_index} is excluded")
+                    return
+            
+            # Load the image
+            try:
+                original_image = cv2.imread(current_image_path)
+                if original_image is None:
+                    self._log(f"❌ Failed to load image: {current_image_path}", "error")
+                    return
+                
+                print(f"[CLEAN_RECT] Loaded image: {original_image.shape}")
+            except Exception as e:
+                self._log(f"❌ Error loading image: {str(e)}", "error")
+                return
+            
+            # Convert rectangle bounds to image coordinates
+            img_height, img_width = original_image.shape[:2]
+            
+            # Get viewer dimensions for scaling
+            viewer_rect = self.image_preview_widget.viewer.sceneRect()
+            scale_x = img_width / viewer_rect.width()
+            scale_y = img_height / viewer_rect.height()
+            
+            # Convert to image coordinates
+            x = int(rect_bounds.x() * scale_x)
+            y = int(rect_bounds.y() * scale_y)
+            w = int(rect_bounds.width() * scale_x)
+            h = int(rect_bounds.height() * scale_y)
+            
+            # Ensure bounds are within image
+            x = max(0, min(x, img_width - 1))
+            y = max(0, min(y, img_height - 1))
+            w = max(1, min(w, img_width - x))
+            h = max(1, min(h, img_height - y))
+            
+            print(f"[CLEAN_RECT] Image coordinates: x={x}, y={y}, w={w}, h={h} (image: {img_width}x{img_height})")
+            
+            # Create a mask for this specific region
+            mask = np.zeros((img_height, img_width), dtype=np.uint8)
+            mask[y:y+h, x:x+w] = 255
+            
+            print(f"[CLEAN_RECT] Created mask with {np.sum(mask > 0)} white pixels")
+            
+            # Get custom iterations for this rectangle if set
+            custom_iterations = getattr(target_rect, 'inpaint_iterations', None)
+            print(f"[CLEAN_RECT] Custom iterations for rectangle {region_index}: {custom_iterations}")
+            
+            # Run inpainting on this specific region
+            try:
+                # Use the existing inpainting logic but only for this region
+                result = self._run_inpainting_on_region(
+                    original_image, 
+                    mask, 
+                    region_index, 
+                    custom_iterations
+                )
+                
+                if result is None:
+                    self._log(f"❌ Inpainting failed for rectangle {region_index}", "error")
+                    return
+                
+                print(f"[CLEAN_RECT] Inpainting completed for rectangle {region_index}")
+                
+                # Update the image preview with the result
+                self._update_image_preview_with_result(result, current_image_path)
+                
+                self._log(f"✅ Successfully cleaned rectangle {region_index}", "info")
+                
+            except Exception as e:
+                print(f"[CLEAN_RECT] Error during inpainting: {e}")
+                import traceback
+                print(f"[CLEAN_RECT] Traceback: {traceback.format_exc()}")
+                self._log(f"❌ Inpainting error: {str(e)}", "error")
+            
+        except Exception as e:
+            print(f"[CLEAN_RECT] Error cleaning rectangle: {e}")
+            import traceback
+            print(f"[CLEAN_RECT] Traceback: {traceback.format_exc()}")
+            self._log(f"❌ Failed to clean rectangle: {str(e)}", "error")
+    
+    def _run_inpainting_on_region(self, image, mask, region_index, custom_iterations=None):
+        """Run inpainting on a specific region with the given mask"""
+        try:
+            import cv2
+            import numpy as np
+            import os
+            from local_inpainter import LocalInpainter
+            print(f"[INPAINT_REGION] Running local inpainting on region {region_index}")
+            
+            # Get inpainting settings from manga integration config (same as _run_clean_background)
+            inpaint_method = self.main_gui.config.get('manga_inpaint_method', 'local')
+            local_model = self.main_gui.config.get('manga_local_inpaint_model', 'anime_onnx')
+            
+            print(f"[INPAINT_REGION] Using method: {inpaint_method}, model: {local_model}")
+            
+            if inpaint_method == 'local':
+                # Use local inpainter with the same method as _run_clean_background
+                print(f"[INPAINT_REGION] Creating LocalInpainter instance")
+                
+                # Create local inpainter
+                inpainter = LocalInpainter()
+                
+                # Get model path from config (same way as _run_clean_background)
+                model_path = self.main_gui.config.get(f'manga_{local_model}_model_path', '')
+                
+                # Ensure we have a model path (download if needed)
+                resolved_model_path = model_path
+                if not resolved_model_path or not os.path.exists(resolved_model_path):
+                    try:
+                        print(f"[INPAINT_REGION] Downloading {local_model} model...")
+                        resolved_model_path = inpainter.download_jit_model(local_model)
+                    except Exception as e:
+                        print(f"[INPAINT_REGION] Model download failed: {e}")
+                        resolved_model_path = None
+                
+                # Load the model using the same method as _run_clean_background
+                if resolved_model_path and os.path.exists(resolved_model_path):
+                    try:
+                        print(f"[INPAINT_REGION] Loading {local_model} model from: {os.path.basename(resolved_model_path)}")
+                        # Use load_model_with_retry like _run_clean_background does
+                        success = inpainter.load_model_with_retry(local_model, resolved_model_path, force_reload=False)
+                        if not success:
+                            print(f"[INPAINT_REGION] Failed to load model with retry")
+                            return None
+                    except Exception as e:
+                        print(f"[INPAINT_REGION] Model loading error: {str(e)}")
+                        return None
+                else:
+                    print(f"[INPAINT_REGION] No valid model path for {local_model}")
+                    return None
+                
+                # Run inpainting with custom iterations if available
+                if custom_iterations is not None:
+                    print(f"[INPAINT_REGION] Using custom iterations: {custom_iterations}")
+                    cleaned_image = inpainter.inpaint(image, mask, iterations=custom_iterations)
+                else:
+                    print(f"[INPAINT_REGION] Using auto iterations")
+                    cleaned_image = inpainter.inpaint(image, mask)
+                
+                print(f"[INPAINT_REGION] Local inpainting completed for region {region_index}")
+                return cleaned_image
+                
+            else:
+                # For cloud/hybrid methods, fallback to OpenCV inpainting
+                print(f"[INPAINT_REGION] Using OpenCV fallback for method: {inpaint_method}")
+                cleaned_image = cv2.inpaint(image, mask, 3, cv2.INPAINT_TELEA)
+                return cleaned_image
+            
+        except Exception as e:
+            print(f"[INPAINT_REGION] Error during inpainting: {e}")
+            import traceback
+            print(f"[INPAINT_REGION] Traceback: {traceback.format_exc()}")
+            return None
+    
+    def _update_image_preview_with_result(self, result_image, original_path):
+        """Update the image preview with the inpainting result"""
+        try:
+            import cv2
+            import tempfile
+            import os
+            
+            # Save result to temporary file
+            temp_dir = tempfile.gettempdir()
+            temp_filename = f"manga_clean_result_{os.path.basename(original_path)}"
+            temp_path = os.path.join(temp_dir, temp_filename)
+            
+            cv2.imwrite(temp_path, result_image)
+            print(f"[UPDATE_PREVIEW] Saved result to: {temp_path}")
+            
+            # Update the preview widget
+            if hasattr(self.image_preview_widget, 'load_image'):
+                self.image_preview_widget.load_image(temp_path)
+                print(f"[UPDATE_PREVIEW] Updated preview with cleaned result")
+            
+        except Exception as e:
+            print(f"[UPDATE_PREVIEW] Error updating preview: {e}")
     
     def _restore_exclusion_status_from_state(self, image_path: str):
         """Restore exclusion status for rectangles from saved state - DISABLED"""
@@ -16202,13 +16429,16 @@ class MangaTranslationTab(QObject):
             image_count = 0
             image_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
             
-            # Create CBZ (ZIP) file
+            # Create CBZ (ZIP) file - only include the main translated images, not _cleaned versions
             with zipfile.ZipFile(cbz_path, 'w', zipfile.ZIP_DEFLATED) as zf:
                 # Sort folders to maintain order
                 for folder in sorted(translated_folders):
                     # Get all images from this folder
                     for filename in sorted(os.listdir(folder)):
                         if filename.lower().endswith(image_extensions):
+                            # Skip _cleaned versions - only include the main translated images
+                            if '_cleaned' in filename.lower():
+                                continue
                             src_path = os.path.join(folder, filename)
                             # Add to CBZ with just the filename (flat structure)
                             zf.write(src_path, filename)
@@ -16258,28 +16488,41 @@ class MangaTranslationTab(QObject):
                 except Exception:
                     pass
 
-                # Helper to iterate files in out_dir
-                all_files = []
-                for root, _, files in os.walk(out_dir):
-                    for fn in files:
-                        fp = os.path.join(root, fn)
-                        rel = os.path.relpath(fp, out_dir)
-                        all_files.append((fp, rel, fn))
-
-                # 1) CLEAN ARCHIVE: only final images matching original basenames
+                # 1) CLEAN ARCHIVE: only final translated images from *_translated folders
                 clean_zip = os.path.join(parent, f"{base}_translated.cbz")
                 clean_count = 0
+                
+                # Look specifically in *_translated subfolders for final images
+                translated_images = []
+                if os.path.isdir(out_dir):
+                    for item in os.listdir(out_dir):
+                        item_path = os.path.join(out_dir, item)
+                        if os.path.isdir(item_path) and item.endswith('_translated'):
+                            # This is a *_translated folder, collect its images
+                            for fn in os.listdir(item_path):
+                                if fn.lower().endswith(image_exts):
+                                    fp = os.path.join(item_path, fn)
+                                    fn_lower = fn.lower()
+                                    # Skip debug artifacts
+                                    if any(p in fn_lower for p in excluded_patterns):
+                                        continue
+                                    translated_images.append((fp, fn))
+                
+                # If no *_translated folders found, fall back to root level images in out_dir
+                if not translated_images:
+                    for fn in os.listdir(out_dir) if os.path.isdir(out_dir) else []:
+                        fp = os.path.join(out_dir, fn)
+                        if os.path.isfile(fp) and fn.lower().endswith(image_exts):
+                            fn_lower = fn.lower()
+                            # Skip debug artifacts and only include if matches original basenames (if available)
+                            if any(p in fn_lower for p in excluded_patterns):
+                                continue
+                            if original_basenames and fn not in original_basenames:
+                                continue
+                            translated_images.append((fp, fn))
+                
                 with zipfile.ZipFile(clean_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
-                    for fp, rel, fn in all_files:
-                        fn_lower = fn.lower()
-                        if not fn_lower.endswith(image_exts):
-                            continue
-                        if original_basenames and fn not in original_basenames:
-                            # Only include pages corresponding to original entries
-                            continue
-                        # Also skip obvious debug artifacts by pattern (extra safeguard)
-                        if any(p in fn_lower for p in excluded_patterns):
-                            continue
+                    for fp, fn in sorted(translated_images, key=lambda x: x[1]):
                         zf.write(fp, fn)  # place at root with page filename
                         clean_count += 1
                 self._log(f"📦 Compiled CLEAN {clean_count} pages into {os.path.basename(clean_zip)}", "success")
@@ -16290,14 +16533,30 @@ class MangaTranslationTab(QObject):
                     dbg_count = 0
                     raw_count = 0
                     page_count = 0
+                    
+                    # Helper to iterate all files in out_dir for debug archive
+                    all_files = []
+                    if os.path.isdir(out_dir):
+                        for root, _, files in os.walk(out_dir):
+                            for fn in files:
+                                fp = os.path.join(root, fn)
+                                rel = os.path.relpath(fp, out_dir)
+                                all_files.append((fp, rel, fn))
+                    
                     with zipfile.ZipFile(debug_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
+                        # Add final translated pages at root (reuse the same translated_images list)
+                        for fp, fn in translated_images:
+                            zf.write(fp, fn)
+                            page_count += 1
+                        
+                        # Add all other files under appropriate subfolders
                         for fp, rel, fn in all_files:
                             fn_lower = fn.lower()
-                            # Final pages at root
-                            if fn_lower.endswith(image_exts) and (not original_basenames or fn in original_basenames) and not any(p in fn_lower for p in excluded_patterns):
-                                zf.write(fp, fn)
-                                page_count += 1
+                            
+                            # Skip files already added as final pages
+                            if any(fp == tfp for tfp, _ in translated_images):
                                 continue
+                                
                             # Raw text/logs
                             if fn_lower.endswith(text_exts):
                                 zf.write(fp, os.path.join('raw', rel))
