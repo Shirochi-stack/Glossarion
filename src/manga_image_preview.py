@@ -460,10 +460,19 @@ class CompactImageViewer(QGraphicsView):
     
     def clear_rectangles(self):
         """Clear all rectangles"""
+        import traceback
+        rectangle_count = len(self.rectangles)
+        print(f"[CLEAR_RECTANGLES] 🚨 About to clear {rectangle_count} rectangles")
+        print(f"[CLEAR_RECTANGLES] Called from:")
+        for line in traceback.format_stack()[-6:]:
+            print(f"  {line.strip()}")
+        
         for rect in self.rectangles:
             self._scene.removeItem(rect)
         self.rectangles.clear()
         self.selected_rect = None
+        
+        print(f"[CLEAR_RECTANGLES] ✅ Cleared {rectangle_count} rectangles")
     
     def clear_brush_strokes(self):
         """Clear all brush strokes from scene and memory"""
