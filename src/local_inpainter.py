@@ -2396,9 +2396,18 @@ class LocalInpainter:
         except Exception as e:
             logger.debug(f"Diag log failed: {e}")
 
-    def inpaint(self, image, mask, refinement='normal', _retry_attempt: int = 0, _skip_hd: bool = False, _skip_tiling: bool = False):
+    def inpaint(self, image, mask, refinement='normal', iterations=None, _retry_attempt: int = 0, _skip_hd: bool = False, _skip_tiling: bool = False):
         """Inpaint - compatible with JIT, checkpoint, and ONNX models
         Implements HD strategy (Resize/Crop) similar to comic-translate to speed up large images.
+        
+        Args:
+            image: Input image
+            mask: Inpainting mask
+            refinement: Refinement mode ('normal', 'fast')
+            iterations: Number of inpainting iterations (None for auto/default)
+            _retry_attempt: Internal retry counter
+            _skip_hd: Skip HD processing
+            _skip_tiling: Skip tiling
         """
         # Check for stop at start
         if self._check_stop():

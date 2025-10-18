@@ -8188,6 +8188,12 @@ class MangaTranslationTab(QObject):
             except Exception as e:
                 print(f"[STATE] Failed to restore exclusion status: {e}")
             
+            # Restore custom inpainting iterations after rectangles are drawn
+            try:
+                self._restore_inpainting_iterations_from_state(image_path)
+            except Exception as e:
+                print(f"[STATE] Failed to restore inpainting iterations: {e}")
+            
             # Restore overlay rectangles
             if 'overlay_rects' in state and state['overlay_rects']:
                 if hasattr(self.image_preview_widget.viewer, 'overlay_rects'):
@@ -8919,9 +8925,20 @@ class MangaTranslationTab(QObject):
                     self.update_queue.put(('clean_button_restore', None))
                     return
                 
-                # Run inpainting
-                self._log("🧽 Running local inpainting...", "info")
-                cleaned_image = inpainter.inpaint(image, mask)
+                # Run inpainting with custom iterations if available
+                # Get custom iteration values from rectangles
+                custom_iterations = self._get_custom_iterations_for_regions(filtered_regions)
+                
+                if custom_iterations:
+                    iterations_str = ', '.join([f"{region}:{iters}" for region, iters in custom_iterations.items()])
+                    self._log(f"🧽 Running local inpainting with custom iterations: {iterations_str}", "info")
+                    # For now, use the first custom iteration value found
+                    # TODO: Implement per-region inpainting with different iterations
+                    first_iteration_value = next(iter(custom_iterations.values()))
+                    cleaned_image = inpainter.inpaint(image, mask, iterations=first_iteration_value)
+                else:
+                    self._log("🧽 Running local inpainting with auto iterations", "info")
+                    cleaned_image = inpainter.inpaint(image, mask)
                 
             else:
                 # For cloud/hybrid methods, would need more complex setup
@@ -11150,6 +11167,18 @@ class MangaTranslationTab(QObject):
                         exclude_action.triggered.connect(make_exclude_handler(actual_index, rect_item))
                         menu.addAction(exclude_action)
                         
+                        # Add "Set Inpainting Iterations" option
+                        current_iterations = getattr(rect_item, 'inpaint_iterations', None)
+                        if current_iterations is not None:
+                            iterations_text = f"🔧 Set Inpainting Iterations (Current: {current_iterations})"
+                        else:
+                            iterations_text = "🔧 Set Inpainting Iterations (Auto)"
+                        iterations_action = QAction(iterations_text, menu)
+                        def make_iterations_handler(idx, rect):
+                            return lambda: self._handle_set_inpainting_iterations(idx, rect)
+                        iterations_action.triggered.connect(make_iterations_handler(actual_index, rect_item))
+                        menu.addAction(iterations_action)
+                        
                         # Add "Delete Selected" option
                         delete_action = QAction("🗑️ Delete Selected", menu)
                         def make_delete_handler(idx, rect):
@@ -11436,6 +11465,103 @@ class MangaTranslationTab(QObject):
             print(f"[EXCLUDE_CLEAN] Traceback: {traceback.format_exc()}")
             self._log(f"❌ Failed to toggle exclude status: {str(e)}", "error")
     
+    def _handle_set_inpainting_iterations(self, region_index: int, rect_item):
+        """Handle setting custom inpainting iterations for a rectangle"""
+        try:
+            from PySide6.QtWidgets import QInputDialog, QMessageBox
+            from PySide6.QtCore import Qt
+            
+            print(f"[INPAINT_ITERATIONS] Setting iterations for rectangle {region_index}")
+            
+            # Get current value
+            current_iterations = getattr(rect_item, 'inpaint_iterations', None)
+            current_display = current_iterations if current_iterations is not None else "Auto"
+            
+            # Show input dialog
+            dialog_text = (
+                f"Set inpainting iterations for rectangle {region_index}\n\n"
+                f"Current: {current_display}\n\n"
+                f"Enter number of iterations (0-50):\n0 = Auto, 1-50 = Custom iterations"
+            )
+            
+            value, ok = QInputDialog.getInt(
+                self.dialog,
+                "Set Inpainting Iterations",
+                dialog_text,
+                current_iterations if current_iterations is not None else 0
+            )
+            
+            if ok:
+                # Validate input range (0-50, where 0 means auto)
+                if value < 0 or value > 50:
+                    QMessageBox.warning(
+                        self.dialog,
+                        "Invalid Input", 
+                        f"Please enter a value between 0 and 50.\n0 = Auto, 1-50 = Custom iterations"
+                    )
+                    return
+                
+                if value == 0:
+                    # Reset to auto
+                    rect_item.inpaint_iterations = None
+                    self._log(f"🔧 Rectangle {region_index}: inpainting set to AUTO", "info")
+                    print(f"[INPAINT_ITERATIONS] Rectangle {region_index} set to auto iterations")
+                else:
+                    # Set custom value
+                    rect_item.inpaint_iterations = value
+                    self._log(f"🔧 Rectangle {region_index}: inpainting set to {value} iterations", "info")
+                    print(f"[INPAINT_ITERATIONS] Rectangle {region_index} set to {value} iterations")
+                
+                # Store in state management for persistence
+                try:
+                    if hasattr(self, 'image_state_manager') and hasattr(self.image_preview_widget, 'current_image_path'):
+                        current_image = self.image_preview_widget.current_image_path
+                        if current_image:
+                            # Get current state
+                            state = self.image_state_manager.get_state(current_image)
+                            
+                            # Initialize inpainting iterations dict if not present
+                            if 'inpaint_iterations' not in state:
+                                state['inpaint_iterations'] = {}
+                            
+                            # Store the iteration value for this region
+                            if value == 0:
+                                # Remove from dict when set to auto
+                                if str(region_index) in state['inpaint_iterations']:
+                                    del state['inpaint_iterations'][str(region_index)]
+                                    print(f"[INPAINT_ITERATIONS] Removed custom iterations for region {region_index} from state")
+                            else:
+                                state['inpaint_iterations'][str(region_index)] = value
+                                print(f"[INPAINT_ITERATIONS] Saved {value} iterations for region {region_index} to state")
+                            
+                            # Update state
+                            self.image_state_manager.set_state(current_image, state)
+                            print(f"[INPAINT_ITERATIONS] Updated state management")
+                except Exception as e:
+                    print(f"[INPAINT_ITERATIONS] Error updating state: {e}")
+                
+                # Visual feedback - update rectangle appearance slightly
+                from PySide6.QtGui import QPen, QBrush, QColor
+                if value != 0:
+                    # Custom iterations - add slight blue tint to border
+                    if getattr(rect_item, 'exclude_from_clean', False):
+                        # Keep orange if excluded
+                        pass
+                    else:
+                        # Add blue tint to show custom iterations
+                        if hasattr(rect_item, 'is_recognized') and rect_item.is_recognized:
+                            # Slightly brighter blue for recognized + custom iterations
+                            rect_item.setPen(QPen(QColor(50, 170, 255), 2))
+                        else:
+                            # Slightly blue-green for detection + custom iterations
+                            rect_item.setPen(QPen(QColor(0, 200, 150), 2))
+            
+        except Exception as e:
+            print(f"[INPAINT_ITERATIONS] Error setting iterations: {e}")
+            import traceback
+            print(f"[INPAINT_ITERATIONS] Traceback: {traceback.format_exc()}")
+            self._log(f"❌ Failed to set inpainting iterations: {str(e)}", "error")
+    
     def _restore_exclusion_status_from_state(self, image_path: str):
         """Restore exclusion status for rectangles from saved state"""
         try:
@@ -11491,6 +11617,100 @@ class MangaTranslationTab(QObject):
         except Exception as e:
             print(f"[EXCLUDE_RESTORE] Error restoring exclusion status: {e}")
     
+    def _get_custom_iterations_for_regions(self, regions: list) -> dict:
+        """Get custom inpainting iterations for regions from rectangles.
+        
+        Args:
+            regions: List of region dictionaries with rect_index
+            
+        Returns:
+            dict: Mapping of region_index -> custom_iterations for regions with custom values
+        """
+        custom_iterations = {}
+        try:
+            if not hasattr(self.image_preview_widget, 'viewer') or not self.image_preview_widget.viewer.rectangles:
+                return custom_iterations
+            
+            rectangles = self.image_preview_widget.viewer.rectangles
+            print(f"[CUSTOM_ITERATIONS] Checking {len(rectangles)} rectangles for custom iterations")
+            
+            for region in regions:
+                rect_index = region.get('rect_index', None)
+                if rect_index is not None and 0 <= rect_index < len(rectangles):
+                    rect_item = rectangles[rect_index]
+                    custom_iters = getattr(rect_item, 'inpaint_iterations', None)
+                    if custom_iters is not None:
+                        custom_iterations[rect_index] = custom_iters
+                        print(f"[CUSTOM_ITERATIONS] Found custom iterations for region {rect_index}: {custom_iters}")
+            
+            print(f"[CUSTOM_ITERATIONS] Total custom iterations found: {len(custom_iterations)}")
+            return custom_iterations
+            
+        except Exception as e:
+            print(f"[CUSTOM_ITERATIONS] Error getting custom iterations: {e}")
+            return custom_iterations
+    
+    def _restore_inpainting_iterations_from_state(self, image_path: str):
+        """Restore custom inpainting iterations for rectangles from saved state"""
+        try:
+            print(f"[ITERATIONS_RESTORE] === ITERATION RESTORATION CALLED FOR IMAGE: {image_path} ===")
+            
+            if not hasattr(self, 'image_state_manager'):
+                print(f"[ITERATIONS_RESTORE] No image_state_manager available")
+                return
+            
+            # Get iterations dict from state
+            state = self.image_state_manager.get_state(image_path)
+            print(f"[ITERATIONS_RESTORE] State for {image_path}: {state}")
+            
+            custom_iterations = state.get('inpaint_iterations', {})
+            print(f"[ITERATIONS_RESTORE] Custom iterations from state: {custom_iterations}")
+            
+            if not custom_iterations:
+                print(f"[ITERATIONS_RESTORE] No custom iterations to restore")
+                return
+            
+            # Apply custom iterations to rectangles
+            if hasattr(self.image_preview_widget, 'viewer') and hasattr(self.image_preview_widget.viewer, 'rectangles'):
+                rectangles = self.image_preview_widget.viewer.rectangles
+                print(f"[ITERATIONS_RESTORE] Found {len(rectangles)} rectangles in viewer")
+                
+                for region_str, iterations in custom_iterations.items():
+                    try:
+                        region_index = int(region_str)
+                        print(f"[ITERATIONS_RESTORE] Processing custom iterations for region {region_index}: {iterations}")
+                        
+                        if 0 <= region_index < len(rectangles):
+                            rect_item = rectangles[region_index]
+                            
+                            # Set custom iterations
+                            rect_item.inpaint_iterations = iterations
+                            print(f"[ITERATIONS_RESTORE] Set inpaint_iterations={iterations} for region {region_index}")
+                            
+                            # Apply visual styling to indicate custom iterations
+                            from PySide6.QtGui import QPen, QBrush, QColor
+                            if not getattr(rect_item, 'exclude_from_clean', False):
+                                # Only apply styling if not excluded (excluded styling takes priority)
+                                if hasattr(rect_item, 'is_recognized') and rect_item.is_recognized:
+                                    # Slightly brighter blue for recognized + custom iterations
+                                    rect_item.setPen(QPen(QColor(50, 170, 255), 2))
+                                else:
+                                    # Slightly blue-green for detection + custom iterations
+                                    rect_item.setPen(QPen(QColor(0, 200, 150), 2))
+                            
+                            print(f"[ITERATIONS_RESTORE] Applied styling for custom iterations to region {region_index}")
+                        else:
+                            print(f"[ITERATIONS_RESTORE] Region index {region_index} out of bounds (rectangles: {len(rectangles)})")
+                    except (ValueError, TypeError) as e:
+                        print(f"[ITERATIONS_RESTORE] Error processing region {region_str}: {e}")
+            else:
+                print(f"[ITERATIONS_RESTORE] No rectangles available in viewer")
+            
+            print(f"[ITERATIONS_RESTORE] Completed restoration for {len(custom_iterations)} custom iteration settings")
+            
+        except Exception as e:
+            print(f"[ITERATIONS_RESTORE] Error restoring inpainting iterations: {e}")
+    
     def _debug_exclusion_status(self):
         """Debug function to show current exclusion status"""
         try:
@@ -11514,10 +11734,56 @@ class MangaTranslationTab(QObject):
                 
                 for i, rect_item in enumerate(rectangles):
                     is_excluded = getattr(rect_item, 'exclude_from_clean', False)
-                    print(f"[EXCLUSION_DEBUG] Rectangle {i}: exclude_from_clean={is_excluded}")
+                    print(f"[EXCLUSION_DEBUG] Rectangle {i}: excluded={is_excluded}")
             
         except Exception as e:
-            print(f"[EXCLUSION_DEBUG] Error: {e}")
+            print(f"[EXCLUSION_DEBUG] Error in debug: {e}")
+    
+    def _clear_all_exclusion_states(self):
+        """Clear exclusion states for all images - useful for debugging"""
+        try:
+            if not hasattr(self, 'image_state_manager'):
+                print(f"[CLEAR_EXCLUSION] No image_state_manager available")
+                return
+            
+            # Get current image if available
+            current_image = None
+            if hasattr(self, 'image_preview_widget') and self.image_preview_widget.current_image_path:
+                current_image = self.image_preview_widget.current_image_path
+            
+            # Clear current image's exclusion state
+            if current_image:
+                state = self.image_state_manager.get_state(current_image)
+                if 'excluded_from_clean' in state:
+                    old_exclusions = state['excluded_from_clean']
+                    state['excluded_from_clean'] = []
+                    self.image_state_manager.set_state(current_image, state)
+                    print(f"[CLEAR_EXCLUSION] Cleared exclusions for current image: {old_exclusions} -> []")
+                    
+                    # Also clear visual state from rectangles
+                    if hasattr(self.image_preview_widget, 'viewer') and hasattr(self.image_preview_widget.viewer, 'rectangles'):
+                        rectangles = self.image_preview_widget.viewer.rectangles
+                        for i, rect_item in enumerate(rectangles):
+                            if getattr(rect_item, 'exclude_from_clean', False):
+                                rect_item.exclude_from_clean = False
+                                # Restore normal styling
+                                from PySide6.QtGui import QPen, QBrush, QColor
+                                if hasattr(rect_item, 'is_recognized') and rect_item.is_recognized:
+                                    rect_item.setPen(QPen(QColor(0, 150, 255), 2))
+                                    rect_item.setBrush(QBrush(QColor(0, 150, 255, 50)))
+                                else:
+                                    rect_item.setPen(QPen(QColor(0, 255, 0), 2))
+                                    rect_item.setBrush(QBrush(QColor(0, 255, 0, 50)))
+                                print(f"[CLEAR_EXCLUSION] Cleared visual exclusion for rectangle {i}")
+                    
+                    self._log("✅ Cleared all exclusion states for current image", "info")
+                else:
+                    print(f"[CLEAR_EXCLUSION] No exclusions found for current image")
+            
+        except Exception as e:
+            print(f"[CLEAR_EXCLUSION] Error clearing exclusions: {e}")
+            import traceback
+            print(f"[CLEAR_EXCLUSION] Traceback: {traceback.format_exc()}")
     
     def _clear_all_exclusions(self):
         """Clear all exclusion flags and reset rectangles to normal appearance"""
