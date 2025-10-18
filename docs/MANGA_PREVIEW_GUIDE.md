@@ -94,8 +94,10 @@ The workflow buttons work in sequence:
 
 2. **Clean**
    - Removes detected text from the image
-   - Uses inpainting to fill text areas
+   - Uses inpainting to fill text areas with multiple iterations for better quality
    - Manual brush strokes guide the cleaning process
+   - Boxes marked for inpainting exclusion are automatically skipped
+   - Inpainting iterations can be configured for optimal results
 
 3. **Recognize Text**
    - Performs OCR on detected text regions
@@ -117,22 +119,47 @@ The workflow buttons work in sequence:
 - Box colors indicate different classifications
 
 ### Right-Click Context Menu
-**Important**: After running "Recognize Text" or "Translate", you can right-click on any detection box to edit the results:
+**Important**: After running "Recognize Text" or "Translate", you can right-click on any detection box to access various editing options:
 
 1. **Edit OCR Results**
    - Right-click any detection box after text recognition
    - Select "📝 Edit OCR: "[preview text]"" from the context menu
    - Opens an editable dialog showing the recognized text
    - Make corrections to fix OCR errors
-   - Click "💾 Save" to apply changes
+   - **Save button is required** to update the overlay with changes
 
 2. **Edit Translation Results**
    - Right-click any detection box after translation
    - Select "🌍 Edit Translation: "[preview text]"" from the context menu
    - Opens a dialog with both original and translated text
    - Edit either the original text or the translation
-   - Click "💾 Save & Update Overlay" to apply changes
-   - Text overlays update immediately with your edits
+   - **Save button is required** to update the overlay with changes
+   - Text overlays update immediately after saving
+
+3. **Clean This Text**
+   - Right-click any detection box
+   - Select "🧹 Clean this text" to apply targeted cleaning
+   - Removes text content from the selected region only
+   - Useful for spot-cleaning specific problematic areas
+
+4. **OCR This Text**
+   - Right-click any detection box
+   - Select "👁 OCR this text" to perform text recognition on this box only
+   - Processes just the selected region instead of all detected text
+   - Helpful for re-processing individual boxes with poor recognition
+
+5. **Translate This Text**
+   - Right-click any detection box (after OCR)
+   - Select "🌍 Translate this text" to translate just this box
+   - Processes individual text regions independently
+   - Allows selective translation of specific content
+
+6. **Inpainting Exclusion**
+   - Right-click any detection box
+   - Select "🚫 Exclude from inpainting" to protect this region during cleaning
+   - Excluded boxes will not be processed during the Clean step
+   - Useful for preserving important visual elements or text you want to keep
+   - Toggle option - can be enabled/disabled per box
 
 ### Manual Editing
 When manual editing is enabled:
@@ -156,10 +183,18 @@ When manual editing is enabled:
    - Click Delete Selected (🗑) button
    - Or use Clear Boxes (🧹) to remove all
 
-### Box Persistence
+### Box Persistence & Auto-Save
 - Manual boxes are automatically saved per image
+- Position and editing state auto-saved continuously
 - Restored when switching between images
 - Survives application restarts
+- **Auto-save replaces manual "save position" functionality**
+
+### Incremental Editing Support
+- All editing operations support incremental updates
+- Changes are applied progressively without losing previous work
+- OCR and translation results can be refined iteratively
+- Context menu operations work on individual boxes for precise control
 
 ---
 
@@ -214,7 +249,10 @@ When manual editing is enabled:
 
 ### Mouse Navigation
 - **Left Click**: Select boxes/tools (Pan mode)
-- **Right Click**: Open context menu on detection boxes (after recognition/translation)
+- **Right Click**: Open context menu on detection boxes with editing options:
+  - Edit OCR/Translation results
+  - Clean, OCR, or Translate individual boxes
+  - Access incremental editing features
 - **Click + Drag**: Create boxes (Box Draw mode) or draw strokes (Brush/Eraser modes)
 - **Shift + Mouse Wheel**: Zoom in/out at cursor position
 - **Mouse Wheel**: Scroll content when zoomed in
