@@ -9499,77 +9499,85 @@ class MangaTranslationTab(QObject):
                     return []
             
             elif provider in ['azure', 'azure-document-intelligence']:
-                # Use Azure OCR on full image (both legacy and new document intelligence APIs)
+                # Use correct Azure API per provider name
                 print(f"[OCR_REGIONS] Running {provider} OCR on full image")
                 try:
-                    from azure.ai.vision.imageanalysis import ImageAnalysisClient
-                    from azure.core.credentials import AzureKeyCredential
-                    from azure.ai.vision.imageanalysis.models import VisualFeatures
-                    import time
-                    
-                    # Create Azure client - support both azure and azure-document-intelligence
-                    # Both use the same API, just different provider names in config
-                    azure_endpoint = ocr_config.get('azure_endpoint') or ocr_config.get('endpoint', '')
-                    azure_key = ocr_config.get('azure_key') or ocr_config.get('key', '')
-                    
-                    if not azure_endpoint or not azure_key:
-                        print(f"[OCR_REGIONS] Missing Azure credentials: endpoint={bool(azure_endpoint)}, key={bool(azure_key)}")
-                        self._log(f"❌ Azure credentials not configured", "error")
-                        return []
-                    
-                    vision_client = ImageAnalysisClient(
-                        endpoint=azure_endpoint,
-                        credential=AzureKeyCredential(azure_key)
-                    )
-                    
-                    # Convert full image to bytes
-                    _, encoded = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                    image_bytes = encoded.tobytes()
-                    
-                    # Call Azure OCR on full image with timeout handling
-                    start_time = time.time()
-                    
-                    import concurrent.futures
-                    with concurrent.futures.ThreadPoolExecutor() as executor:
-                        future = executor.submit(
-                            vision_client.analyze,
-                            image_data=image_bytes,
-                            visual_features=[VisualFeatures.READ]
-                        )
+                    if provider == 'azure':
+                        # Azure Computer Vision (Image Analysis) path
+                        from azure.ai.vision.imageanalysis import ImageAnalysisClient
+                        from azure.core.credentials import AzureKeyCredential
+                        from azure.ai.vision.imageanalysis.models import VisualFeatures
+                        import time
                         
-                        try:
-                            # Wait for result with 30 second timeout
-                            result = future.result(timeout=30.0)
-                            elapsed = time.time() - start_time
-                            print(f"[OCR_REGIONS] Azure OCR completed in {elapsed:.2f}s")
-                        except concurrent.futures.TimeoutError:
-                            print(f"[OCR_REGIONS] Azure OCR timed out after 30 seconds")
-                            self._log(f"❌ Azure OCR timed out after 30 seconds", "error")
+                        azure_endpoint = ocr_config.get('azure_endpoint') or ocr_config.get('endpoint', '')
+                        azure_key = ocr_config.get('azure_key') or ocr_config.get('key', '')
+                        if not azure_endpoint or not azure_key:
+                            print(f"[OCR_REGIONS] Missing Azure credentials: endpoint={bool(azure_endpoint)}, key={bool(azure_key)}")
+                            self._log(f"❌ Azure credentials not configured", "error")
                             return []
-                    
-                    # Extract all text lines from full image OCR
-                    if result.read and result.read.blocks:
-                        for line in result.read.blocks[0].lines:
-                            if hasattr(line, 'bounding_polygon') and line.bounding_polygon:
-                                # Get line bounding box
-                                points = line.bounding_polygon
-                                xs = [p.x for p in points]
-                                ys = [p.y for p in points]
-                                x_min, x_max = int(min(xs)), int(max(xs))
-                                y_min, y_max = int(min(ys)), int(max(ys))
-                                
-                                # Create OCR result
-                                from ocr_manager import OCRResult
-                                ocr_line = OCRResult(
-                                    text=line.text,
-                                    bbox=(x_min, y_min, x_max - x_min, y_max - y_min),
-                                    confidence=0.9,
-                                    vertices=[(int(p.x), int(p.y)) for p in points]
-                                )
-                                full_image_ocr_results.append(ocr_line)
-                    
-                    print(f"[OCR_REGIONS] Azure OCR found {len(full_image_ocr_results)} text lines")
-                    
+                        vision_client = ImageAnalysisClient(
+                            endpoint=azure_endpoint,
+                            credential=AzureKeyCredential(azure_key)
+                        )
+                        # Convert full image to bytes
+                        _, encoded = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                        image_bytes = encoded.tobytes()
+                        # Call Azure OCR on full image with timeout handling
+                        start_time = time.time()
+                        import concurrent.futures
+                        with concurrent.futures.ThreadPoolExecutor() as executor:
+                            future = executor.submit(
+                                vision_client.analyze,
+                                image_data=image_bytes,
+                                visual_features=[VisualFeatures.READ]
+                            )
+                            try:
+                                result = future.result(timeout=30.0)
+                                elapsed = time.time() - start_time
+                                print(f"[OCR_REGIONS] Azure OCR completed in {elapsed:.2f}s")
+                            except concurrent.futures.TimeoutError:
+                                print(f"[OCR_REGIONS] Azure OCR timed out after 30 seconds")
+                                self._log(f"❌ Azure OCR timed out after 30 seconds", "error")
+                                return []
+                        # Extract all text lines from full image OCR
+                        if result.read and result.read.blocks:
+                            for line in result.read.blocks[0].lines:
+                                if hasattr(line, 'bounding_polygon') and line.bounding_polygon:
+                                    points = line.bounding_polygon
+                                    xs = [p.x for p in points]
+                                    ys = [p.y for p in points]
+                                    x_min, x_max = int(min(xs)), int(max(xs))
+                                    y_min, y_max = int(min(ys)), int(max(ys))
+                                    from ocr_manager import OCRResult
+                                    ocr_line = OCRResult(
+                                        text=line.text,
+                                        bbox=(x_min, y_min, x_max - x_min, y_max - y_min),
+                                        confidence=0.9,
+                                        vertices=[(int(p.x), int(p.y)) for p in points]
+                                    )
+                                    full_image_ocr_results.append(ocr_line)
+                        print(f"[OCR_REGIONS] Azure OCR found {len(full_image_ocr_results)} text lines")
+                    else:
+                        # Azure Document Intelligence path via OCRManager provider (Form Recognizer)
+                        provider_obj = self.ocr_manager.get_provider('azure-document-intelligence')
+                        if provider_obj is None:
+                            self._log(f"❌ OCR provider 'azure-document-intelligence' not available in OCRManager", "error")
+                            return []
+                        # Load provider with endpoint/key if needed
+                        if not provider_obj.is_loaded:
+                            print(f"[OCR_REGIONS] Loading OCR provider: azure-document-intelligence")
+                            load_success = self.ocr_manager.load_provider('azure-document-intelligence', **ocr_config)
+                            print(f"[OCR_REGIONS] Provider load result: {load_success}")
+                            if not load_success:
+                                self._log(f"❌ Failed to load azure-document-intelligence", "error")
+                                return []
+                        # Run full-image OCR using Document Intelligence
+                        full_image_ocr_results = self.ocr_manager.detect_text(
+                            image,
+                            'azure-document-intelligence',
+                            **ocr_config
+                        )
+                        print(f"[OCR_REGIONS] azure-document-intelligence found {len(full_image_ocr_results)} text regions")
                 except Exception as e:
                     print(f"[OCR_REGIONS] Azure OCR error: {str(e)}")
                     import traceback
@@ -10823,15 +10831,21 @@ class MangaTranslationTab(QObject):
             ocr_config = self._get_ocr_config()
             print(f"[OCR_CONTEXT] Using OCR provider: {ocr_config['provider']}")
             
+            # Add comprehensive logging for OCR operation
+            self._log(f"🔍 Starting OCR on region using {ocr_config['provider']}", "info")
+            
             # Reuse the existing _run_ocr_on_regions method with a single region
             recognized_texts = self._run_ocr_on_regions(image_path, [region], ocr_config)
+            
+            # Log the results
+            if recognized_texts and len(recognized_texts) > 0:
+                self._log(f"✅ OCR completed successfully using {ocr_config['provider']}", "success")
+            else:
+                self._log(f"⚠️ OCR found no text using {ocr_config['provider']}", "warning")
             
             if recognized_texts and len(recognized_texts) > 0:
                 recognized_text = recognized_texts[0]['text']
                 self._log(f"✅ OCR result: {recognized_text}", "success")
-                
-                # Show OCR result in popup
-                self._show_ocr_popup(recognized_text, region_index)
                 
                 # Store recognition data for future use
                 if not hasattr(self, '_recognition_data'):
