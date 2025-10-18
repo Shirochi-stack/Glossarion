@@ -13754,22 +13754,10 @@ class MangaTranslationTab(QObject):
                         base_image = cand
                 except Exception:
                     pass
-            if base_image is None:
-                try:
-                    cand = None
-                    if hasattr(self, 'image_state_manager') and self.image_state_manager:
-                        st = self.image_state_manager.get_state(current_image) or {}
-                        cand = st.get('rendered_image_path')
-                    if not cand and hasattr(self, '_rendered_images_map'):
-                        cand = self._rendered_images_map.get(current_image)
-                    if not cand:
-                        cand = getattr(self.image_preview_widget, 'current_translated_path', None)
-                    if cand and os.path.exists(cand):
-                        base_image = cand
-                except Exception:
-                    pass
+            # For source tab incremental previews, prefer original over translated base
             if base_image is None:
                 base_image = current_image
+                print(f"[DEBUG] Using original image as base (no cleaned image available)")
             
             # Scale regions if needed (same logic as _update_single_text_overlay)
             try:
@@ -14113,7 +14101,7 @@ class MangaTranslationTab(QObject):
                 
                 if regions:
                     print(f"[DEBUG] ✅ Built {len(regions)} regions, selecting base image for renderer...")
-                    # Choose base image for CONSISTENT re-render (prefer cleaned base)
+                    # Choose base image for CONSISTENT re-render (prefer cleaned base for source tab previews)
                     base_image = None
                     try:
                         if hasattr(self, 'image_state_manager') and self.image_state_manager:
@@ -14130,23 +14118,14 @@ class MangaTranslationTab(QObject):
                                 base_image = cand
                         except Exception:
                             pass
-                    # Fallback to current translated if no cleaned
-                    if base_image is None:
-                        try:
-                            cand = None
-                            if hasattr(self, 'image_state_manager') and self.image_state_manager:
-                                st = self.image_state_manager.get_state(current_image) or {}
-                                cand = st.get('rendered_image_path')
-                            if not cand and hasattr(self, '_rendered_images_map'):
-                                cand = self._rendered_images_map.get(current_image)
-                            if not cand:
-                                cand = getattr(self.image_preview_widget, 'current_translated_path', None)
-                            if cand and os.path.exists(cand):
-                                base_image = cand
-                        except Exception:
-                            pass
+                    
+                    # For source tab incremental previews, always prefer original over translated base
+                    # to avoid showing translated text behind overlays
                     if base_image is None:
                         base_image = current_image
+                        print(f"[DEBUG] Using original image as base (no cleaned image available)")
+                    else:
+                        print(f"[DEBUG] Using cleaned image as base for incremental preview")
                     
                     # Scale regions (from source coords) to base image dimensions if needed
                     try:
@@ -14285,21 +14264,10 @@ class MangaTranslationTab(QObject):
                         base_image = cand
                 except Exception:
                     pass
-            if base_image is None:
-                try:
-                    cand = None
-                    st = self.image_state_manager.get_state(current_image) if hasattr(self, 'image_state_manager') else {}
-                    cand = (st or {}).get('rendered_image_path')
-                    if not cand and hasattr(self, '_rendered_images_map'):
-                        cand = self._rendered_images_map.get(current_image)
-                    if not cand:
-                        cand = getattr(self.image_preview_widget, 'current_translated_path', None)
-                    if cand and os.path.exists(cand):
-                        base_image = cand
-                except Exception:
-                    pass
+            # For consistency, prefer original image over translated base to avoid artifacts
             if base_image is None:
                 base_image = current_image
+                print(f"[SAVE_POS] Using original image as base (no cleaned image available)")
             
             # Scale regions if base dims differ
             try:

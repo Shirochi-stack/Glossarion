@@ -1632,27 +1632,37 @@ class MangaImagePreviewWidget(QWidget):
             # Only clear strokes, keep rectangles for workflow continuity (e.g., after cleaning)
             self._clear_strokes()
         
-        # Also hide any existing translated text overlays immediately to prevent carryover
+        # Handle text overlays based on preserve flag
+        preserve_overlays = getattr(self, '_preserve_text_overlays_on_load', False)
         try:
             if hasattr(self, 'manga_integration') and self.manga_integration:
-                # This hides all overlays and will only show those for the incoming image if any
-                self.manga_integration.show_text_overlays_for_image(image_path)
-                # IMPORTANT: Clear per-image recognition/translation caches to prevent cross-image reuse
-                try:
-                    if hasattr(self.manga_integration, '_recognized_texts'):
-                        del self.manga_integration._recognized_texts
-                    if hasattr(self.manga_integration, '_recognized_texts_image_path'):
-                        del self.manga_integration._recognized_texts_image_path
-                    if hasattr(self.manga_integration, '_recognition_data'):
-                        del self.manga_integration._recognition_data
-                    if hasattr(self.manga_integration, '_translation_data'):
-                        del self.manga_integration._translation_data
-                except Exception:
-                    pass
+                if preserve_overlays:
+                    # Keep existing overlays - just ensure they're visible for the current image
+                    print(f"[LOAD] Preserving text overlays for: {os.path.basename(image_path)}")
+                    self.manga_integration.show_text_overlays_for_image(image_path)
+                else:
+                    # Hide existing overlays and clear caches for new image
+                    self.manga_integration.show_text_overlays_for_image(image_path)
+                    # Clear per-image recognition/translation caches to prevent cross-image reuse
+                    try:
+                        if hasattr(self.manga_integration, '_recognized_texts'):
+                            del self.manga_integration._recognized_texts
+                        if hasattr(self.manga_integration, '_recognized_texts_image_path'):
+                            del self.manga_integration._recognized_texts_image_path
+                        if hasattr(self.manga_integration, '_recognition_data'):
+                            del self.manga_integration._recognition_data
+                        if hasattr(self.manga_integration, '_translation_data'):
+                            del self.manga_integration._translation_data
+                    except Exception:
+                        pass
         except Exception:
             pass
         
-        # Reset the preserve flags after use
+        # Store the preserve flags for _on_image_loaded_success to use
+        self._preserve_rectangles_after_load = getattr(self, '_preserve_rectangles_on_load', False)
+        self._preserve_text_overlays_after_load = getattr(self, '_preserve_text_overlays_on_load', False)
+        
+        # Reset the load flags after storing them
         self._preserve_rectangles_on_load = False
         self._preserve_text_overlays_on_load = False
     
@@ -1663,18 +1673,33 @@ class MangaImagePreviewWidget(QWidget):
             self.file_label.setText(f"📄 {os.path.basename(self.current_image_path)}")
             self.file_label.setStyleSheet("color: gray; font-size: 8pt;")  # Back to normal
         
-        # Restore overlays for the newly loaded image (and hide others)
+        # Restore overlays for the newly loaded image (but only if not preserving)
+        preserve_overlays_after = getattr(self, '_preserve_text_overlays_after_load', False)
+        preserve_rectangles_after = getattr(self, '_preserve_rectangles_after_load', False)
+        
         try:
             if hasattr(self, 'manga_integration') and self.manga_integration:
-                # Restore detection/recognition overlays
-                self.manga_integration._restore_image_state_overlays_only(self.current_image_path)
-                # Attach recognition tooltips/updates
-                if hasattr(self.manga_integration, 'show_recognized_overlays_for_image'):
-                    self.manga_integration.show_recognized_overlays_for_image(self.current_image_path)
-                # Restore translated text overlays
-                self.manga_integration.show_text_overlays_for_image(self.current_image_path)
+                if not preserve_rectangles_after and not preserve_overlays_after:
+                    # Normal load - restore full state from persistence
+                    print(f"[LOADED] Normal state restoration for: {os.path.basename(self.current_image_path)}")
+                    # Restore detection/recognition overlays
+                    self.manga_integration._restore_image_state_overlays_only(self.current_image_path)
+                    # Attach recognition tooltips/updates
+                    if hasattr(self.manga_integration, 'show_recognized_overlays_for_image'):
+                        self.manga_integration.show_recognized_overlays_for_image(self.current_image_path)
+                    # Restore translated text overlays
+                    self.manga_integration.show_text_overlays_for_image(self.current_image_path)
+                else:
+                    # Preserve mode - don't restore from state, keep current rectangles/overlays
+                    print(f"[LOADED] Preserve mode - skipping state restoration for: {os.path.basename(self.current_image_path)}")
+                    # Just ensure translated output is still loaded
+                    self._check_and_load_translated_output(self.current_image_path)
         except Exception:
             pass
+        
+        # Reset the preserve flags after use
+        self._preserve_rectangles_after_load = False
+        self._preserve_text_overlays_after_load = False
         
     def _on_tab_changed(self, index: int):
         """Refit only if user hasn't manually zoomed, to avoid resetting zoom."""
@@ -2074,38 +2099,73 @@ class MangaImagePreviewWidget(QWidget):
             if cleaned_path and _load_output(cleaned_path):
                 return
 
-            # 3) Nothing found — show placeholder
+            # 3) Check for rendered/translated images from state as last resort for output tab
+            rendered_path = None
+            try:
+                if hasattr(self, 'manga_integration') and self.manga_integration and \
+                   hasattr(self.manga_integration, 'image_state_manager') and self.manga_integration.image_state_manager:
+                    state = self.manga_integration.image_state_manager.get_state(source_image_path) or {}
+                    cand = state.get('rendered_image_path')
+                    if cand and os.path.exists(cand):
+                        rendered_path = cand
+                        print(f"[OUTPUT] Found rendered image from state: {os.path.basename(rendered_path)}")
+                # Also check _rendered_images_map
+                if not rendered_path and hasattr(self, 'manga_integration') and self.manga_integration and \
+                   hasattr(self.manga_integration, '_rendered_images_map'):
+                    cand = self.manga_integration._rendered_images_map.get(source_image_path)
+                    if cand and os.path.exists(cand):
+                        rendered_path = cand
+                        print(f"[OUTPUT] Found rendered image from map: {os.path.basename(rendered_path)}")
+                # Also check current_translated_path
+                if not rendered_path and hasattr(self, 'current_translated_path') and self.current_translated_path and os.path.exists(self.current_translated_path):
+                    rendered_path = self.current_translated_path
+                    print(f"[OUTPUT] Using current translated path: {os.path.basename(rendered_path)}")
+            except Exception:
+                pass
+            
+            if rendered_path and _load_output(rendered_path):
+                return
+
+            # 4) Nothing found — show placeholder
             self._show_output_placeholder()
             self.current_translated_path = None
 
-            # Auto-clear blue rectangles and related state when no output exists
-            try:
-                # Clear rectangles from viewer and update count
-                if hasattr(self, 'viewer') and hasattr(self.viewer, 'clear_rectangles'):
-                    self.viewer.clear_rectangles()
-                    try:
-                        self._update_box_count()
-                    except Exception:
-                        pass
-                # Clear persisted detection/recognition state and overlays for this image
-                if hasattr(self, 'manga_integration') and self.manga_integration:
-                    try:
-                        if hasattr(self.manga_integration, '_clear_detection_state_for_image'):
-                            self.manga_integration._clear_detection_state_for_image(source_image_path)
-                    except Exception:
-                        pass
-                    try:
-                        if hasattr(self.manga_integration, 'clear_text_overlays_for_image'):
-                            self.manga_integration.clear_text_overlays_for_image(source_image_path)
-                    except Exception:
-                        pass
-                # Persist empty rectangles to state (viewer_rectangles)
+            # Only auto-clear rectangles if not in preserve mode (e.g., loading a completely new image)
+            # Check if we're in preserve mode by looking for the preserve flags
+            preserve_mode = (getattr(self, '_preserve_rectangles_after_load', False) or 
+                           getattr(self, '_preserve_text_overlays_after_load', False))
+            
+            if not preserve_mode:
+                # Auto-clear blue rectangles and related state when no output exists (normal mode)
                 try:
-                    self._persist_rectangles_state()
+                    # Clear rectangles from viewer and update count
+                    if hasattr(self, 'viewer') and hasattr(self.viewer, 'clear_rectangles'):
+                        self.viewer.clear_rectangles()
+                        try:
+                            self._update_box_count()
+                        except Exception:
+                            pass
+                    # Clear persisted detection/recognition state and overlays for this image
+                    if hasattr(self, 'manga_integration') and self.manga_integration:
+                        try:
+                            if hasattr(self.manga_integration, '_clear_detection_state_for_image'):
+                                self.manga_integration._clear_detection_state_for_image(source_image_path)
+                        except Exception:
+                            pass
+                        try:
+                            if hasattr(self.manga_integration, 'clear_text_overlays_for_image'):
+                                self.manga_integration.clear_text_overlays_for_image(source_image_path)
+                        except Exception:
+                            pass
+                    # Persist empty rectangles to state (viewer_rectangles)
+                    try:
+                        self._persist_rectangles_state()
+                    except Exception:
+                        pass
                 except Exception:
                     pass
-            except Exception:
-                pass
+            else:
+                print(f"[OUTPUT] Preserve mode - not clearing rectangles for: {os.path.basename(source_image_path)}")
 
         except Exception:
             pass
@@ -2134,7 +2194,7 @@ class MangaImagePreviewWidget(QWidget):
             # Look for cleaned image in isolated folder first
             translated_folder = os.path.join(source_dir, f"{source_name_no_ext}_translated")
             
-            # 1) Check state manager for saved cleaned image path (but only if it lives alongside this source)
+            # 1) Check state manager for saved cleaned image path (but only if it's actually a cleaned image)
             cleaned_path = None
             try:
                 if hasattr(self, 'manga_integration') and self.manga_integration and \
@@ -2142,23 +2202,33 @@ class MangaImagePreviewWidget(QWidget):
                     state = self.manga_integration.image_state_manager.get_state(source_image_path) or {}
                     cand = state.get('cleaned_image_path')
                     if cand and os.path.exists(cand):
-                        # Accept only if the path is inside the expected translated folder or the same directory
-                        try:
-                            cand_abs = os.path.abspath(cand)
-                            tdir_abs = os.path.abspath(translated_folder)
-                            sdir_abs = os.path.abspath(source_dir)
-                            def _under(p, base):
-                                try:
-                                    return os.path.commonpath([os.path.normcase(p), os.path.normcase(base)]) == os.path.normcase(base)
-                                except Exception:
-                                    return False
-                            if _under(cand_abs, tdir_abs) or _under(cand_abs, sdir_abs):
-                                cleaned_path = cand_abs
-                                print(f"[SRC] Found cleaned image from state: {os.path.basename(cleaned_path)}")
-                            else:
-                                # Ignore stale path from another folder/session
+                        # IMPORTANT: Validate that this is actually a cleaned image, not a translated image
+                        cand_filename = os.path.basename(cand).lower()
+                        print(f"[SRC] State has cleaned_image_path: {os.path.basename(cand)}")
+                        print(f"[SRC] Validating filename: '{cand_filename}' contains '_cleaned': {'_cleaned' in cand_filename}")
+                        if '_cleaned' in cand_filename and not cand_filename.endswith('.json'):
+                            # Accept only if the path is inside the expected translated folder or the same directory
+                            try:
+                                cand_abs = os.path.abspath(cand)
+                                tdir_abs = os.path.abspath(translated_folder)
+                                sdir_abs = os.path.abspath(source_dir)
+                                def _under(p, base):
+                                    try:
+                                        return os.path.commonpath([os.path.normcase(p), os.path.normcase(base)]) == os.path.normcase(base)
+                                    except Exception:
+                                        return False
+                                if _under(cand_abs, tdir_abs) or _under(cand_abs, sdir_abs):
+                                    cleaned_path = cand_abs
+                                    print(f"[SRC] Found validated cleaned image from state: {os.path.basename(cleaned_path)}")
+                                else:
+                                    # Ignore stale path from another folder/session
+                                    print(f"[SRC] Ignoring cleaned image path from different folder: {os.path.basename(cand)}")
+                                    cleaned_path = None
+                            except Exception:
                                 cleaned_path = None
-                        except Exception:
+                        else:
+                            # This path doesn't look like a cleaned image - might be a translated image
+                            print(f"[SRC] Ignoring non-cleaned image path from state: {os.path.basename(cand)}")
                             cleaned_path = None
             except Exception:
                 pass
