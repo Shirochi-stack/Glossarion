@@ -8397,11 +8397,15 @@ class MangaTranslationTab(QObject):
                         if isinstance(result, dict) and result.get('deleted'):
                             continue
                         # Handle both simple string format and complex dict format
+                        # Match the format expected by context menu (dict with 'text' and 'bbox' keys)
                         if isinstance(result, str):
-                            self._recognition_data[int(i)] = result
+                            self._recognition_data[int(i)] = {'text': result, 'bbox': [0, 0, 100, 100]}
                         elif isinstance(result, dict) and 'text' in result:
                             idx = result.get('region_index', i)
-                            self._recognition_data[int(idx)] = result.get('text', '')
+                            self._recognition_data[int(idx)] = {
+                                'text': result.get('text', ''),
+                                'bbox': result.get('bbox', [0, 0, 100, 100])
+                            }
                     print(f"[STATE] Restored recognition_data for {len(self._recognition_data)} regions")
             except Exception as re:
                 print(f"[STATE] Failed to restore recognition_data: {re}")
@@ -8427,11 +8431,17 @@ class MangaTranslationTab(QObject):
             # Reattach context menus for rectangles (after both recognition and translation data are restored)
             try:
                 rects = getattr(self.image_preview_widget.viewer, 'rectangles', []) or []
+                print(f"[STATE] Debug - Available recognition_data keys: {list(getattr(self, '_recognition_data', {}).keys())}")
+                print(f"[STATE] Debug - Available translation_data keys: {list(getattr(self, '_translation_data', {}).keys())}")
                 for idx, rect_item in enumerate(rects):
                     try:
-                        self._add_context_menu_to_rectangle(rect_item, idx)
-                    except Exception:
-                        pass
+                        # Make sure region_index is set correctly on the rectangle
+                        if not hasattr(rect_item, 'region_index'):
+                            rect_item.region_index = idx
+                        print(f"[STATE] Debug - Rectangle {idx} has region_index: {getattr(rect_item, 'region_index', 'None')}")
+                        self._add_context_menu_to_rectangle(rect_item, rect_item.region_index)
+                    except Exception as e:
+                        print(f"[STATE] Error attaching context menu to rect {idx}: {e}")
                 print(f"[STATE] Reattached context menus to {len(rects)} rectangles")
             except Exception as cm:
                 print(f"[STATE] Failed to reattach context menus: {cm}")
@@ -8484,15 +8494,12 @@ class MangaTranslationTab(QObject):
                         pass
                     viewer._scene.addItem(rect_item)
                     viewer.rectangles.append(rect_item)
-                    # Attach region index and move-sync handler for blue rectangles (ones with text)
+                    # Attach region index and move-sync handler for ALL rectangles
                     try:
-                        if has_text_for_this_rect:
-                            rect_item.region_index = idx
-                            self._attach_move_sync_to_rectangle(rect_item, idx)
-                        else:
-                            # Remove any region_index from green rectangles that don't have text
-                            if hasattr(rect_item, 'region_index'):
-                                delattr(rect_item, 'region_index')
+                        rect_item.region_index = idx
+                        self._attach_move_sync_to_rectangle(rect_item, idx)
+                        # CRITICAL: Add context menu to ALL rectangles (both blue and green)
+                        self._add_context_menu_to_rectangle(rect_item, idx)
                     except Exception:
                         pass
                 
