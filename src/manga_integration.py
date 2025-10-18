@@ -14149,18 +14149,20 @@ class MangaTranslationTab(QObject):
                         print(f"[DEBUG] Region scaling skipped due to error: {scale_err}")
                     
                     print(f"[DEBUG] Rendering base image: {os.path.basename(base_image)} (original: {os.path.basename(current_image)})")
-                    # Full re-render: overwrite existing translated image path if available
+                    # Generate proper isolated output path for this specific image
+                    output_path = None
                     try:
-                        # Strongly prefer overwriting the image currently shown in the output tab
-                        rendered_path = getattr(self.image_preview_widget, 'current_translated_path', None)
-                        if not rendered_path and hasattr(self, 'image_state_manager') and self.image_state_manager:
-                            st = self.image_state_manager.get_state(current_image) or {}
-                            rendered_path = st.get('rendered_image_path')
-                        if not rendered_path and hasattr(self, '_rendered_images_map'):
-                            rendered_path = self._rendered_images_map.get(current_image)
-                    except Exception:
-                        rendered_path = None
-                    output_path = rendered_path if (rendered_path and os.path.exists(os.path.dirname(rendered_path))) else None
+                        # Create isolated folder path based on current image (not reuse from other images)
+                        filename = os.path.basename(current_image)
+                        base_name = os.path.splitext(filename)[0]
+                        parent_dir = os.path.dirname(current_image)
+                        output_dir = os.path.join(parent_dir, f"{base_name}_translated")
+                        os.makedirs(output_dir, exist_ok=True)
+                        output_path = os.path.join(output_dir, filename)
+                        print(f"[DEBUG] Generated isolated output path: {output_path}")
+                    except Exception as e:
+                        print(f"[DEBUG] Failed to generate output path: {e}")
+                        output_path = None
                     self._render_with_manga_translator(base_image, regions, output_path=output_path, original_image_path=current_image, switch_tab=False)
                 else:
                     print(f"[DEBUG] ❌ No regions to render")
@@ -14289,19 +14291,19 @@ class MangaTranslationTab(QObject):
             except Exception:
                 pass
             
-            # Determine output path (overwrite existing rendered if possible)
+            # Generate proper isolated output path for this specific image
             output_path = None
             try:
-                # Strongly prefer the currently displayed translated image
-                cp = getattr(self.image_preview_widget, 'current_translated_path', None)
-                if cp and os.path.exists(os.path.dirname(cp)):
-                    output_path = cp
-                if output_path is None and hasattr(self, 'image_state_manager') and self.image_state_manager:
-                    st = self.image_state_manager.get_state(current_image) or {}
-                    rp = st.get('rendered_image_path')
-                    if rp and os.path.exists(os.path.dirname(rp)):
-                        output_path = rp
-            except Exception:
+                # Create isolated folder path based on current image (not reuse from other images)
+                filename = os.path.basename(current_image)
+                base_name = os.path.splitext(filename)[0]
+                parent_dir = os.path.dirname(current_image)
+                output_dir = os.path.join(parent_dir, f"{base_name}_translated")
+                os.makedirs(output_dir, exist_ok=True)
+                output_path = os.path.join(output_dir, filename)
+                print(f"[SAVE_POS] Generated isolated output path: {output_path}")
+            except Exception as e:
+                print(f"[SAVE_POS] Failed to generate output path: {e}")
                 output_path = None
             
             # Render
