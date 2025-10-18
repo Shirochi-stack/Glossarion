@@ -25,7 +25,7 @@ def get_model_options() -> List[str]:
         "claude-2.1", "claude-2", "claude-instant-1.2",
         
         # Grok Models
-        "grok-4-0709", "grok-4-fast", "grok-4-fast-reasoning",  "grok-4-fast-reasoning-latest", "grok-3", "grok-3-mini",
+        "grok-4-0709", "grok-4-fast", "grok-4-fast-reasoning", "grok-4-fast-non-reasoning",  "grok-4-fast-reasoning-latest", "grok-3", "grok-3-mini",
         
         # Vertex AI Model Garden - Claude models (confirmed)
         "claude-sonnet-4-5-20250929",

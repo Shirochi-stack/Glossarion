@@ -1737,6 +1737,8 @@ Recent translations to summarize:
             ('rolling_summary_mode_var', 'rolling_summary_mode', 'append'),
             # New: how many summaries to retain in append mode
             ('rolling_summary_max_entries_var', 'rolling_summary_max_entries', '5'),
+            # New: max tokens for rolling summary generation
+            ('rolling_summary_max_tokens_var', 'rolling_summary_max_tokens', '2048'),
             ('reinforcement_freq_var', 'reinforcement_frequency', '10'),
             ('max_retry_tokens_var', 'max_retry_tokens', '16384'),
             ('duplicate_lookback_var', 'duplicate_lookback_chapters', '5'),
@@ -5227,6 +5229,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'ROLLING_SUMMARY_SYSTEM_PROMPT': str(self.rolling_summary_system_prompt),
             'ROLLING_SUMMARY_USER_PROMPT': str(self.rolling_summary_user_prompt),
             'ROLLING_SUMMARY_MAX_ENTRIES': str(self.rolling_summary_max_entries_var),
+            'ROLLING_SUMMARY_MAX_TOKENS': str(self.rolling_summary_max_tokens_var),
             'PROFILE_NAME': self.lang_var.lower(),
             'TRANSLATION_TEMPERATURE': str(self.trans_temp.text()),
             'TRANSLATION_HISTORY_LIMIT': str(self.trans_history.text()),
@@ -8380,6 +8383,7 @@ Important rules:
                 ('rolling_summary_exchanges', ['rolling_summary_exchanges_var'], 5, lambda v: safe_int(v, 5)),
                 ('rolling_summary_mode', ['rolling_summary_mode_var'], 'chapter', str),
                 ('rolling_summary_max_entries', ['rolling_summary_max_entries_var'], 10, lambda v: safe_int(v, 10)),
+                ('rolling_summary_max_tokens', ['rolling_summary_max_tokens_var'], 8192, lambda v: safe_int(v, 8192)),
 
                 # QA/Scanning
                 ('qa_auto_search_output', ['qa_auto_search_output_var'], False, bool),
@@ -9066,6 +9070,7 @@ Important rules:
                 ('ROLLING_SUMMARY_SYSTEM_PROMPT', getattr(self, 'rolling_summary_system_prompt', getattr(self, 'default_rolling_summary_system_prompt', ''))),
                 ('ROLLING_SUMMARY_USER_PROMPT', getattr(self, 'rolling_summary_user_prompt', getattr(self, 'default_rolling_summary_user_prompt', ''))),
                 ('ROLLING_SUMMARY_MAX_ENTRIES', str(getattr(self, 'rolling_summary_max_entries_var', '10'))),
+                ('ROLLING_SUMMARY_MAX_TOKENS', str(getattr(self, 'rolling_summary_max_tokens_var', '8192'))),
 
                 # Retry/network controls
                 ('RETRY_TRUNCATED', '1' if getattr(self, 'retry_truncated_var', False) else '0'),

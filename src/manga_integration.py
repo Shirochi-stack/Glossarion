@@ -227,6 +227,13 @@ class ImageStateManager:
             if save:
                 self._schedule_save()
     
+    def clear_all_states(self, save: bool = True):
+        """Clear all saved states for all images"""
+        self._states.clear()
+        print(f"[STATE] Cleared all saved states")
+        if save:
+            self._schedule_save()
+    
     def flush(self):
         """Force immediate save if dirty"""
         if self._dirty:

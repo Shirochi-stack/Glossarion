@@ -1921,9 +1921,11 @@ class TranslationProcessor:
         
         
         try:
+            # Get configurable rolling summary token limit
+            rolling_summary_max_tokens = int(os.getenv('ROLLING_SUMMARY_MAX_TOKENS', '8192'))
             summary_resp, _ = send_with_interrupt(
                 summary_msgs, self.client, self.config.TEMP, 
-                min(2000, self.config.MAX_OUTPUT_TOKENS), 
+                min(rolling_summary_max_tokens, self.config.MAX_OUTPUT_TOKENS), 
                 self.check_stop,
                 context='summary'
             )

@@ -985,6 +985,25 @@ def _create_context_management_section(self, parent):
     mode_combo.currentTextChanged.connect(_on_mode_changed)
     settings_grid.addWidget(mode_combo, 0, 3, alignment=Qt.AlignLeft)
     rolling_controls.append(mode_combo)
+    
+    # Add Max Tokens field to the right of Mode
+    max_tokens_lbl = QLabel(" Max tokens: ")
+    settings_grid.addWidget(max_tokens_lbl, 0, 4, alignment=Qt.AlignRight)
+    rolling_controls.append(max_tokens_lbl)
+    max_tokens_edit = QLineEdit()
+    max_tokens_edit.setFixedWidth(80)
+    try:
+        max_tokens_edit.setText(str(self.rolling_summary_max_tokens_var))
+    except Exception:
+        pass
+    def _on_max_tokens_changed(text):
+        try:
+            self.rolling_summary_max_tokens_var = text
+        except Exception:
+            pass
+    max_tokens_edit.textChanged.connect(_on_max_tokens_changed)
+    settings_grid.addWidget(max_tokens_edit, 0, 5, alignment=Qt.AlignLeft)
+    rolling_controls.append(max_tokens_edit)
 
     # Row 1: Summarize last and Retain
     summ_lbl = QLabel("Summarize last \n  N exchanges: ")

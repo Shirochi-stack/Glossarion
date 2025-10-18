@@ -1316,12 +1316,25 @@ class MangaImagePreviewWidget(QWidget):
                         self.manga_integration.clear_text_overlays_for_image(self.current_image_path)
                     except Exception:
                         pass
+                    # Clear in-memory translation and recognition data that causes "Edit Translation" tooltips
+                    try:
+                        if hasattr(self.manga_integration, '_translation_data'):
+                            self.manga_integration._translation_data.clear()
+                        if hasattr(self.manga_integration, '_recognition_data'):
+                            self.manga_integration._recognition_data.clear()
+                        print(f"[CLEAR] Cleared in-memory translation and recognition data")
+                    except Exception:
+                        pass
                     try:
                         if hasattr(self.manga_integration, 'image_state_manager') and self.manga_integration.image_state_manager and self.current_image_path:
                             st = self.manga_integration.image_state_manager.get_state(self.current_image_path) or {}
+                            # Clear ALL saved state data - OCR, translations, overlays, etc.
                             st.pop('overlay_offsets', None)
                             st.pop('last_render_positions', None)
                             st.pop('translated_texts', None)
+                            st.pop('recognized_texts', None)  # Clear OCR data
+                            st.pop('detection_regions', None)  # Clear detection data
+                            st.pop('viewer_rectangles', None)  # Clear rectangle data
                             self.manga_integration.image_state_manager.set_state(self.current_image_path, st, save=True)
                     except Exception:
                         pass
@@ -1344,12 +1357,25 @@ class MangaImagePreviewWidget(QWidget):
                     self.manga_integration.clear_text_overlays_for_image(self.current_image_path)
                 except Exception:
                     pass
+                # Clear in-memory translation and recognition data that causes "Edit Translation" tooltips
+                try:
+                    if hasattr(self.manga_integration, '_translation_data'):
+                        self.manga_integration._translation_data.clear()
+                    if hasattr(self.manga_integration, '_recognition_data'):
+                        self.manga_integration._recognition_data.clear()
+                    print(f"[CLEAR_ALL] Cleared in-memory translation and recognition data")
+                except Exception:
+                    pass
                 try:
                     if hasattr(self.manga_integration, 'image_state_manager') and self.manga_integration.image_state_manager:
                         st = self.manga_integration.image_state_manager.get_state(self.current_image_path) or {}
+                        # Clear ALL saved state data - OCR, translations, overlays, etc.
                         st.pop('overlay_offsets', None)
                         st.pop('last_render_positions', None)
                         st.pop('translated_texts', None)
+                        st.pop('recognized_texts', None)  # Clear OCR data
+                        st.pop('detection_regions', None)  # Clear detection data
+                        st.pop('viewer_rectangles', None)  # Clear rectangle data
                         self.manga_integration.image_state_manager.set_state(self.current_image_path, st, save=True)
                 except Exception:
                     pass
