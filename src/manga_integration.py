@@ -9266,8 +9266,8 @@ class MangaTranslationTab(QObject):
             provider = ocr_config['provider']
             full_image_ocr_results = []
             
-            # SPECIAL HANDLING: custom-api processes CROPPED regions due to API call indexing
-            if provider == 'custom-api':
+            # SPECIAL HANDLING: custom-api and Qwen2-VL process CROPPED regions due to API call indexing
+            if provider in ['custom-api', 'Qwen2-VL']:
                 print(f"[OCR_REGIONS] Running custom-api OCR on cropped regions (required for API indexing)")
                 try:
                     # Set environment variables exactly like Start Translation (excluding SYSTEM_PROMPT)
@@ -9583,6 +9583,64 @@ class MangaTranslationTab(QObject):
                     import traceback
                     print(f"[OCR_REGIONS] Azure OCR traceback: {traceback.format_exc()}")
                     self._log(f"❌ Azure OCR failed: {str(e)}", "error")
+                    return []
+                    
+            elif provider == 'manga-ocr':
+                # For manga-ocr, process each region individually (cropped) for better accuracy
+                print(f"[OCR_REGIONS] Running manga-ocr OCR on cropped regions")
+                try:
+                    # Check if provider exists in OCRManager
+                    provider_obj = self.ocr_manager.get_provider(provider)
+                    if provider_obj is None:
+                        self._log(f"❌ OCR provider 'manga-ocr' not available in OCRManager", "error")
+                        print(f"[OCR_REGIONS] Provider 'manga-ocr' not found in OCRManager")
+                        return []
+                    
+                    # Load provider if not already loaded
+                    if not provider_obj.is_loaded:
+                        print(f"[OCR_REGIONS] Loading OCR provider: manga-ocr")
+                        load_success = self.ocr_manager.load_provider(provider, **ocr_config)
+                        print(f"[OCR_REGIONS] Provider load result: {load_success}")
+                        if not load_success:
+                            self._log(f"❌ Failed to load manga-ocr", "error")
+                            return []
+                    
+                    # Process each region individually (cropped) - same approach as custom-api
+                    for i, region in enumerate(regions):
+                        bbox = region.get('bbox', [])
+                        if len(bbox) >= 4:
+                            region_x, region_y, region_w, region_h = bbox
+                            
+                            # Crop the region from the full image
+                            cropped_region = image[region_y:region_y+region_h, region_x:region_x+region_w]
+                            
+                            # Run OCR on cropped region
+                            ocr_results = self.ocr_manager.detect_text(
+                                cropped_region,
+                                provider,
+                                confidence=0.5
+                            )
+                            
+                            # Combine all text from this region
+                            if ocr_results:
+                                region_text = " ".join([ocr.text.strip() for ocr in ocr_results if ocr.text.strip()])
+                                if region_text:
+                                    recognized_texts.append({
+                                        'region_index': i,
+                                        'bbox': bbox,
+                                        'text': region_text.strip(),
+                                        'confidence': region.get('confidence', 1.0)
+                                    })
+                                    print(f"[OCR_REGIONS] Region {i+1}: '{region_text.strip()}'")
+                    
+                    print(f"[OCR_REGIONS] manga-ocr recognized text in {len(recognized_texts)}/{len(regions)} regions")
+                    return recognized_texts
+                    
+                except Exception as e:
+                    print(f"[OCR_REGIONS] manga-ocr OCR error: {str(e)}")
+                    import traceback
+                    print(f"[OCR_REGIONS] manga-ocr OCR traceback: {traceback.format_exc()}")
+                    self._log(f"❌ manga-ocr OCR failed: {str(e)}", "error")
                     return []
                     
             else:
