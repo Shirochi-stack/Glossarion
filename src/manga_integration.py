@@ -8603,16 +8603,11 @@ class MangaTranslationTab(QObject):
             
             # Only clear rectangles if not preserving them (e.g., during clean operations)
             if not preserve_rectangles and hasattr(self.image_preview_widget.viewer, 'clear_rectangles'):
-                rectangle_count_before = len(getattr(self.image_preview_widget.viewer, 'rectangles', []))
                 self.image_preview_widget.viewer.clear_rectangles()
-                print(f"[DETECT_RESULTS] 🚨 CLEARED {rectangle_count_before} rectangles before drawing detection results")
-                import traceback
-                print(f"[DETECT_RESULTS] Clear rectangles called from:")
-                for line in traceback.format_stack()[-5:]:
-                    print(f"  {line.strip()}")
+                print(f"[DETECT_RESULTS] Cleared existing rectangles before drawing detection results")
             elif preserve_rectangles:
                 rectangle_count = len(getattr(self.image_preview_widget.viewer, 'rectangles', []))
-                print(f"[DETECT_RESULTS] ✅ Preserving {rectangle_count} existing rectangles during detection update")
+                print(f"[DETECT_RESULTS] Preserving {rectangle_count} existing rectangles during detection update")
             
             self._draw_detection_boxes_on_preview()
             
@@ -8952,11 +8947,10 @@ class MangaTranslationTab(QObject):
 
                 # Update Output viewer with cleaned image (no tab switch)
                 # Update Output viewer with cleaned image (include source for image-aware gating)
-                # Temporarily disable auto tab switching to preserve rectangles
                 self.update_queue.put(('preview_update', {
                     'translated_path': cleaned_path,
                     'source_path': image_path,
-                    'switch_to_output': False  # Keep user on source tab to preserve rectangles
+                    'switch_to_output': True
                 }))
                 self._log(f"✅ Cleaning complete!", "success")
             else:
@@ -11738,17 +11732,22 @@ class MangaTranslationTab(QObject):
             except Exception as e:
                 print(f"[UPDATE_PREVIEW] Failed to persist state: {e}")
             
-            # Update the preview widget WITH preserve_rectangles=True to keep rectangles visible
-            if hasattr(self.image_preview_widget, 'load_image'):
-                self.image_preview_widget.load_image(temp_path, preserve_rectangles=True, preserve_text_overlays=True)
-                print(f"[UPDATE_PREVIEW] Updated preview with cleaned result (rectangles preserved)")
-            
-            # Update Output tab with the permanent cleaned image (same as Clean button)
+            # Don't reload the source image - this preserves rectangles!
+            # Instead, just update the Output tab with the cleaned image (same as Clean button)
             try:
                 if hasattr(self.image_preview_widget, 'output_viewer'):
                     self.image_preview_widget.output_viewer.load_image(cleaned_path)
                     self.image_preview_widget.current_translated_path = cleaned_path
-                    print(f"[UPDATE_PREVIEW] Updated output tab with cleaned image")
+                    print(f"[UPDATE_PREVIEW] Updated output tab with cleaned image (source unchanged)")
+                    
+                    # Auto-switch to output tab to show the cleaned result
+                    try:
+                        if hasattr(self.image_preview_widget, 'viewer_tabs'):
+                            self.image_preview_widget.viewer_tabs.setCurrentIndex(1)
+                            print(f"[UPDATE_PREVIEW] Switched to output tab to show cleaned result")
+                    except Exception:
+                        pass
+                        
             except Exception as e:
                 print(f"[UPDATE_PREVIEW] Failed to update output tab: {e}")
             
