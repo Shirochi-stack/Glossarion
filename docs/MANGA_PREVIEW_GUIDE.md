@@ -62,22 +62,9 @@ To enable manual editing:
 - Selected boxes turn yellow with thicker borders
 - Use for manually marking text regions that auto-detection missed
 
-#### **🖌 Brush Tool**
-- Draw red strokes to mark areas needing cleaning/inpainting
-- Adjustable brush size (5-50 pixels using slider)
-- Strokes are semi-transparent red
-- Used to indicate text that should be removed
-
-#### **✏️ Eraser Tool**
-- Draw white strokes to mark areas to keep clean
-- Same size controls as brush tool
-- Strokes are semi-transparent white
-- Used to protect areas from cleaning
-
 ### Management Tools
 - **🗑 Delete Selected**: Remove currently selected box (yellow highlight)
-- **🧹 Clear Boxes**: Remove all detection boxes
-- **❌ Clear Strokes**: Remove all brush/eraser strokes
+- **❌ Clear Boxes**: Remove all detection boxes
 - **Box Counter**: Shows number of active detection boxes
 
 ---
@@ -181,7 +168,7 @@ When manual editing is enabled:
 4. **Deleting Boxes**
    - Select box first (click on it)
    - Click Delete Selected (🗑) button
-   - Or use Clear Boxes (🧹) to remove all
+   - Or use Clear Boxes (❌) to remove all
 
 ### Box Persistence & Auto-Save
 - Manual boxes are automatically saved per image
@@ -198,36 +185,6 @@ When manual editing is enabled:
 
 ---
 
-## Advanced Editing Techniques
-
-### Brush and Eraser Strokes
-1. **Marking Problem Areas**
-   - Use red brush strokes to mark text that needs better cleaning
-   - Helps guide the inpainting algorithm
-   - Useful for stubborn text remnants
-
-2. **Protecting Areas**
-   - Use white eraser strokes to protect important details
-   - Prevents over-cleaning of artwork
-   - Good for preserving fine details near text
-
-3. **Stroke Management**
-   - Adjust brush size with horizontal slider (5-50 pixels)
-   - Current size shown in label next to slider
-   - Clear all strokes with ❌ button
-
-### Multi-Image Workflow
-1. **Thumbnail Navigation**
-   - Thumbnails appear when 2+ images loaded
-   - Click thumbnail to switch images
-   - Each image maintains separate editing state
-
-2. **Consistent Editing**
-   - Settings persist across images
-   - Manual editing toggle remains active
-   - Tool selection stays consistent
-
----
 
 ## Output and Download
 
