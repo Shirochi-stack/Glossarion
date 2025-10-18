@@ -949,13 +949,18 @@ class MangaImagePreviewWidget(QWidget):
         self.delete_btn.clicked.connect(self.viewer.delete_selected_rectangle)
         tools_layout.addWidget(self.delete_btn)
         
-        self.clear_boxes_btn = self._create_tool_button("🧹", "Clear Boxes")
+        self.clear_boxes_btn = self._create_tool_button("❌", "Clear Boxes")
         self.clear_boxes_btn.clicked.connect(self._on_clear_boxes_clicked)
         tools_layout.addWidget(self.clear_boxes_btn)
         
-        self.clear_strokes_btn = self._create_tool_button("❌", "Clear Strokes")
-        self.clear_strokes_btn.clicked.connect(self._clear_strokes)
-        tools_layout.addWidget(self.clear_strokes_btn)
+        # Only show clear strokes button when experimental tools are enabled
+        if enable_experimental_tools:
+            self.clear_strokes_btn = self._create_tool_button("🧹", "Clear Strokes")
+            self.clear_strokes_btn.clicked.connect(self._clear_strokes)
+            tools_layout.addWidget(self.clear_strokes_btn)
+        else:
+            # Do not create the button at all when experimental is disabled
+            self.clear_strokes_btn = None
         
         # Brush size slider (stretches to fill space) - only show when experimental tools are enabled
         if enable_experimental_tools:
@@ -1832,7 +1837,9 @@ class MangaImagePreviewWidget(QWidget):
             self.eraser_btn.setVisible(enabled)
         self.delete_btn.setVisible(enabled)
         self.clear_boxes_btn.setVisible(enabled)
-        self.clear_strokes_btn.setVisible(enabled)
+        # Only set visibility for clear strokes button if it exists
+        if self.clear_strokes_btn is not None:
+            self.clear_strokes_btn.setVisible(enabled)
         # Only set visibility for size controls if they exist
         if self.size_slider is not None:
             self.size_slider.setVisible(enabled)
