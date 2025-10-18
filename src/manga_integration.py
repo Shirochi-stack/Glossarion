@@ -11017,6 +11017,17 @@ class MangaTranslationTab(QObject):
                             translate_action.triggered.connect(make_translate_handler(actual_index, actual_prompt))
                             menu.addAction(translate_action)
                         
+                        # Add separator before delete option
+                        if not menu.isEmpty():
+                            menu.addSeparator()
+                        
+                        # Add "Delete Selected" option (always available)
+                        delete_action = QAction("🗑️ Delete Selected", menu)
+                        def make_delete_handler(idx, rect):
+                            return lambda: self._handle_delete_rectangle(idx, rect)
+                        delete_action.triggered.connect(make_delete_handler(actual_index, rect_item))
+                        menu.addAction(delete_action)
+                        
                         if not menu.isEmpty():
                             # Set menu properties for better display
                             menu.setMinimumWidth(250)  # Increase minimum width for better readability
@@ -11070,6 +11081,102 @@ class MangaTranslationTab(QObject):
             
         except Exception as e:
             print(f"[DEBUG] Error adding context menu: {str(e)}")
+    
+    def _handle_delete_rectangle(self, region_index: int, rect_item):
+        """Handle deleting a rectangle from the preview"""
+        try:
+            print(f"[DELETE_RECT] Deleting rectangle at index {region_index}")
+            
+            # Get the viewer and rectangles list
+            if not hasattr(self, 'image_preview_widget') or not hasattr(self.image_preview_widget, 'viewer'):
+                self._log("⚠️ No image preview available for delete", "warning")
+                return
+            
+            viewer = self.image_preview_widget.viewer
+            if not hasattr(viewer, 'rectangles') or not viewer.rectangles:
+                self._log("⚠️ No rectangles to delete", "warning")
+                return
+            
+            # Remove the rectangle from the scene
+            if rect_item and hasattr(viewer, '_scene'):
+                try:
+                    viewer._scene.removeItem(rect_item)
+                    print(f"[DELETE_RECT] Removed rectangle from scene")
+                except Exception as e:
+                    print(f"[DELETE_RECT] Error removing from scene: {e}")
+            
+            # Remove from rectangles list
+            if rect_item in viewer.rectangles:
+                viewer.rectangles.remove(rect_item)
+                print(f"[DELETE_RECT] Removed rectangle from list")
+            
+            # Clean up any associated data
+            if hasattr(self, '_recognition_data') and region_index in self._recognition_data:
+                del self._recognition_data[region_index]
+                print(f"[DELETE_RECT] Cleaned up recognition data for region {region_index}")
+            
+            if hasattr(self, '_translation_data') and region_index in self._translation_data:
+                del self._translation_data[region_index]
+                print(f"[DELETE_RECT] Cleaned up translation data for region {region_index}")
+            
+            # Remove any text overlays for this region
+            try:
+                current_image = getattr(self.image_preview_widget, 'current_image_path', None)
+                if current_image and hasattr(self, '_text_overlays_by_image'):
+                    overlays_map = getattr(self, '_text_overlays_by_image', {}) or {}
+                    groups = overlays_map.get(current_image, [])
+                    overlays_to_remove = []
+                    for group in groups:
+                        if hasattr(group, '_overlay_region_index') and group._overlay_region_index == region_index:
+                            overlays_to_remove.append(group)
+                    
+                    for group in overlays_to_remove:
+                        try:
+                            if hasattr(viewer, '_scene'):
+                                viewer._scene.removeItem(group)
+                            groups.remove(group)
+                            print(f"[DELETE_RECT] Removed text overlay for region {region_index}")
+                        except Exception as e:
+                            print(f"[DELETE_RECT] Error removing overlay: {e}")
+            except Exception as e:
+                print(f"[DELETE_RECT] Error cleaning up overlays: {e}")
+            
+            # Update state management if available
+            try:
+                if hasattr(self, 'image_state_manager') and hasattr(self.image_preview_widget, 'current_image_path'):
+                    current_image = self.image_preview_widget.current_image_path
+                    if current_image:
+                        # Get current state
+                        state = self.image_state_manager.get_state(current_image)
+                        
+                        # Remove from detection regions if present
+                        if 'detection_regions' in state:
+                            regions = state['detection_regions']
+                            if isinstance(regions, list) and 0 <= region_index < len(regions):
+                                regions.pop(region_index)
+                                state['detection_regions'] = regions
+                        
+                        # Update state
+                        self.image_state_manager.set_state(current_image, state)
+                        print(f"[DELETE_RECT] Updated state management")
+            except Exception as e:
+                print(f"[DELETE_RECT] Error updating state: {e}")
+            
+            # Force scene update
+            try:
+                if hasattr(viewer, '_scene'):
+                    viewer._scene.update()
+            except Exception:
+                pass
+            
+            self._log(f"🗑️ Deleted rectangle {region_index}", "info")
+            print(f"[DELETE_RECT] Successfully deleted rectangle at index {region_index}")
+            
+        except Exception as e:
+            print(f"[DELETE_RECT] Error deleting rectangle: {e}")
+            import traceback
+            print(f"[DELETE_RECT] Traceback: {traceback.format_exc()}")
+            self._log(f"❌ Failed to delete rectangle: {str(e)}", "error")
     
     def _relayout_overlay_for_region(self, region_index: int):
         """Re-layout the overlay text to fit the current blue rectangle (auto-resize like pipeline)."""
