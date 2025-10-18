@@ -195,17 +195,14 @@ class ImageStateManager:
         """Get state for an image (returns empty dict if not found)"""
         state = self._states.get(image_path, {})
         
-        # BUGFIX: Clean up any erroneous [0] exclusions that got saved
-        # Rectangle 0 should not be automatically excluded
-        if 'excluded_from_clean' in state and isinstance(state['excluded_from_clean'], list):
-            # Remove any standalone [0] that shouldn't be there
-            # This fixes the persistent rectangle 0 exclusion bug
-            if state['excluded_from_clean'] == [0]:
-                print(f"[RECT_0_FIX] Cleaning up erroneous [0] exclusion from saved state")
-                state['excluded_from_clean'] = []
-                # Update the saved state to prevent this from happening again
-                self._states[image_path] = state
-                self._schedule_save()
+        # EXCLUSION PERSISTENCE REMOVAL: Always start with no exclusions across new sessions
+        # Remove any saved exclusion state to ensure exclusions don't persist
+        if 'excluded_from_clean' in state:
+            print(f"[EXCLUSION_RESET] Removing saved exclusion state - exclusions always start disabled")
+            del state['excluded_from_clean']
+            # Update the saved state to remove persistent exclusions
+            self._states[image_path] = state
+            self._schedule_save()
         
         return state
     
@@ -483,21 +480,11 @@ class SavePositionWorker(QObject):
             if base_image_array is None:
                 raise ValueError(f"Failed to load base image: {base_image_path}")
             
-            # Filter out excluded regions before rendering
+            # EXCLUSION PERSISTENCE REMOVAL: Worker thread no longer reads persisted exclusions
+            # Exclusions are now session-only and should be filtered before passing regions to worker
             excluded_regions = []
-            if original_image_path:
-                try:
-                    # Access the state manager from the main integration instance
-                    main_state_manager = getattr(self.manga_integration, 'image_state_manager', None)
-                    if main_state_manager:
-                        state = main_state_manager.get_state(original_image_path)
-                        if state and 'excluded_from_clean' in state:
-                            excluded_regions = state['excluded_from_clean']
-                            sys.__stdout__.write(f"[WORKER] Found {len(excluded_regions)} excluded regions: {excluded_regions}\n")
-                            sys.__stdout__.flush()
-                except Exception as e:
-                    sys.__stdout__.write(f"[WORKER] Failed to get excluded regions: {e}\n")
-                    sys.__stdout__.flush()
+            sys.__stdout__.write(f"[WORKER] Exclusion filtering now happens before worker thread\n")
+            sys.__stdout__.flush()
             
             # Filter regions based on exclusion status
             filtered_regions = []
@@ -8790,46 +8777,25 @@ class MangaTranslationTab(QObject):
                 self.update_queue.put(('clean_button_restore', None))
                 return
             
-            # TEMPORARY: Clear all exclusions if all regions would be excluded
-            # This is a safety check to prevent accidentally excluding everything
-            if hasattr(self, 'image_state_manager'):
-                state_image_path = self.image_preview_widget.current_image_path if hasattr(self.image_preview_widget, 'current_image_path') else image_path
-                state = self.image_state_manager.get_state(state_image_path)
-                if state:
-                    excluded_regions_check = state.get('excluded_from_clean', [])
-                    if len(excluded_regions_check) >= len(regions):
-                        print(f"[CLEAN_DEBUG] WARNING: All {len(regions)} regions would be excluded! Clearing exclusions.")
-                        self._log(f"⚠️ All regions were excluded - clearing exclusions to prevent empty clean", "warning")
-                        self._clear_all_exclusions()
-            
-            # Get exclusion list from state management - use consistent path with toggle function
+            # Get exclusion list directly from rectangle objects (session-only)
             excluded_regions = []
             try:
-                if hasattr(self, 'image_state_manager'):
-                    # Use current_image_path consistently with toggle function
-                    state_image_path = self.image_preview_widget.current_image_path if hasattr(self.image_preview_widget, 'current_image_path') else image_path
-                    print(f"[CLEAN_DEBUG] Using image path for state: {state_image_path}")
-                    print(f"[CLEAN_DEBUG] Original image_path was: {image_path}")
+                if hasattr(self.image_preview_widget, 'viewer') and self.image_preview_widget.viewer.rectangles:
+                    rectangles = self.image_preview_widget.viewer.rectangles
+                    for i, rect_item in enumerate(rectangles):
+                        if getattr(rect_item, 'exclude_from_clean', False):
+                            excluded_regions.append(i)
                     
-                    state = self.image_state_manager.get_state(state_image_path)
-                    print(f"[CLEAN_DEBUG] State for image: {state}")
-                    
-                    if state is None:
-                        state = {}
-                        print(f"[CLEAN_DEBUG] State was None, initialized empty dict")
-                    
-                    excluded_regions = state.get('excluded_from_clean', [])
-                    print(f"[CLEAN_DEBUG] Excluded regions from state: {excluded_regions}")
-                    print(f"[CLEAN_DEBUG] Type of excluded_regions: {type(excluded_regions)}")
+                    print(f"[CLEAN_DEBUG] Found exclusions from rectangles: {excluded_regions}")
                     
                     if excluded_regions:
                         self._log(f"🚫 Found {len(excluded_regions)} excluded regions: {excluded_regions}", "info")
                     else:
                         self._log(f"✅ No regions excluded from cleaning", "info")
                 else:
-                    print(f"[CLEAN_DEBUG] No image_state_manager available")
+                    print(f"[CLEAN_DEBUG] No rectangles available to check exclusions")
             except Exception as e:
-                print(f"[CLEAN_DEBUG] Error getting exclusion list: {e}")
+                print(f"[CLEAN_DEBUG] Error getting exclusion list from rectangles: {e}")
                 import traceback
                 print(f"[CLEAN_DEBUG] Traceback: {traceback.format_exc()}")
                 self._log(f"⚠️ Error getting exclusion list: {e}", "warning")
@@ -11376,86 +11342,9 @@ class MangaTranslationTab(QObject):
                     rect_item.setBrush(QBrush(QColor(0, 255, 0, 50)))
                 self._log(f"✅ Rectangle {region_index} included in inpainting", "info")
             
-            # Store the exclude status in state management for persistence
-            try:
-                if hasattr(self, 'image_state_manager') and hasattr(self.image_preview_widget, 'current_image_path'):
-                    current_image = self.image_preview_widget.current_image_path
-                    if current_image:
-                        # Get current state
-                        state = self.image_state_manager.get_state(current_image)
-                        
-                        # Initialize exclude list if not present
-                        if 'excluded_from_clean' not in state:
-                            state['excluded_from_clean'] = []
-                        
-                        # BUGFIX: Remove any existing 0 that shouldn't be there
-                        # This fixes the issue where rectangle 0 is always excluded
-                        if 'excluded_from_clean' in state and isinstance(state['excluded_from_clean'], list):
-                            # Only remove 0 if it's the only item or if it was accidentally added
-                            if state['excluded_from_clean'] == [0]:
-                                print(f"[RECT_0_FIX] Removing erroneous [0] from exclusion list")
-                                state['excluded_from_clean'] = []
-                        
-                        excluded_list = state['excluded_from_clean']
-                        
-                        # ALWAYS debug what's in the exclusion list when we get it
-                        print(f"[RECT_0_DEBUG] Retrieved exclusion list from state: {excluded_list}")
-                        if 0 in excluded_list:
-                            print(f"[RECT_0_DEBUG] *** FOUND 0 IN EXCLUSION LIST ON RETRIEVAL! ***")
-                        
-                        print(f"[TOGGLE_DEBUG] Before update - excluded_list: {excluded_list}")
-                        
-                        # Special debug for rectangle 0
-                        if region_index == 0:
-                            print(f"[RECT_0_DEBUG] About to modify exclusion list for rectangle 0")
-                            print(f"[RECT_0_DEBUG] Current excluded_list: {excluded_list}")
-                            print(f"[RECT_0_DEBUG] new_status (should exclude): {new_status}")
-                            print(f"[RECT_0_DEBUG] Is region 0 in list currently? {0 in excluded_list}")
-                        
-                        if new_status:
-                            # Add to excluded list if not already there
-                            if region_index not in excluded_list:
-                                excluded_list.append(region_index)
-                                print(f"[TOGGLE_DEBUG] Added region {region_index} to excluded list")
-                                if region_index == 0:
-                                    print(f"[RECT_0_DEBUG] Successfully added rectangle 0 to exclusion list")
-                            else:
-                                print(f"[TOGGLE_DEBUG] Region {region_index} already in excluded list")
-                                if region_index == 0:
-                                    print(f"[RECT_0_DEBUG] Rectangle 0 was already in exclusion list")
-                        else:
-                            # Remove from excluded list if present
-                            if region_index in excluded_list:
-                                excluded_list.remove(region_index)
-                                print(f"[TOGGLE_DEBUG] Removed region {region_index} from excluded list")
-                                if region_index == 0:
-                                    print(f"[RECT_0_DEBUG] Successfully removed rectangle 0 from exclusion list")
-                                    print(f"[RECT_0_DEBUG] List after removal: {excluded_list}")
-                            else:
-                                print(f"[TOGGLE_DEBUG] Region {region_index} not in excluded list")
-                                if region_index == 0:
-                                    print(f"[RECT_0_DEBUG] Rectangle 0 was not found in exclusion list to remove")
-                        
-                        print(f"[TOGGLE_DEBUG] After update - excluded_list: {excluded_list}")
-                        
-                        # Special debug for rectangle 0 post-update
-                        if region_index == 0:
-                            print(f"[RECT_0_DEBUG] Final exclusion list after toggle: {excluded_list}")
-                            print(f"[RECT_0_DEBUG] Is rectangle 0 still in list? {0 in excluded_list}")
-                        
-                        # Update state
-                        self.image_state_manager.set_state(current_image, state)
-                        print(f"[EXCLUDE_CLEAN] Updated exclude status in state management")
-                        
-                        # Verify the state was actually saved for rectangle 0
-                        if region_index == 0:
-                            # Read back the state to confirm
-                            verification_state = self.image_state_manager.get_state(current_image)
-                            verification_list = verification_state.get('excluded_from_clean', [])
-                            print(f"[RECT_0_DEBUG] Verification - state readback exclusion list: {verification_list}")
-                            print(f"[RECT_0_DEBUG] Verification - is rectangle 0 in saved state? {0 in verification_list}")
-            except Exception as e:
-                print(f"[EXCLUDE_CLEAN] Error updating state: {e}")
+            # EXCLUSION PERSISTENCE REMOVAL: Don't save exclusion state to persist across sessions
+            # Exclusions are now session-only and reset when the app is restarted
+            print(f"[EXCLUDE_CLEAN] Rectangle {region_index} exclude status: {new_status} (session-only, not persisted)")
             
             print(f"[EXCLUDE_CLEAN] Rectangle {region_index} exclude status: {new_status}")
             
@@ -11563,59 +11452,35 @@ class MangaTranslationTab(QObject):
             self._log(f"❌ Failed to set inpainting iterations: {str(e)}", "error")
     
     def _restore_exclusion_status_from_state(self, image_path: str):
-        """Restore exclusion status for rectangles from saved state"""
+        """Restore exclusion status for rectangles from saved state - DISABLED"""
         try:
-            print(f"[EXCLUDE_RESTORE] === RESTORATION CALLED FOR IMAGE: {image_path} ===")
+            print(f"[EXCLUDE_RESTORE] === EXCLUSION RESTORATION DISABLED - ALWAYS START WITH NO EXCLUSIONS ===")
+            print(f"[EXCLUDE_RESTORE] Exclusion toggle state no longer persists across sessions")
             
-            if not hasattr(self, 'image_state_manager'):
-                print(f"[EXCLUDE_RESTORE] No image_state_manager available")
-                return
-            
-            # Get exclusion list from state
-            state = self.image_state_manager.get_state(image_path)
-            print(f"[EXCLUDE_RESTORE] State for {image_path}: {state}")
-            
-            excluded_regions = state.get('excluded_from_clean', [])
-            print(f"[EXCLUDE_RESTORE] Excluded regions from state: {excluded_regions}")
-            
-            # Special debug for rectangle 0
-            if 0 in excluded_regions:
-                print(f"[RECT_0_DEBUG] *** RESTORATION: Rectangle 0 is in exclusion list! ***")
-                print(f"[RECT_0_DEBUG] This might be why rectangle 0 keeps appearing as excluded")
-            
-            if not excluded_regions:
-                print(f"[EXCLUDE_RESTORE] No excluded regions to restore")
-                return
-            
-            # Apply exclusion styling to rectangles
+            # Ensure all rectangles start with no exclusion styling
             if hasattr(self.image_preview_widget, 'viewer') and hasattr(self.image_preview_widget.viewer, 'rectangles'):
                 rectangles = self.image_preview_widget.viewer.rectangles
-                print(f"[EXCLUDE_RESTORE] Found {len(rectangles)} rectangles in viewer")
+                print(f"[EXCLUDE_RESTORE] Ensuring {len(rectangles)} rectangles start with normal styling")
                 
-                for region_index in excluded_regions:
-                    print(f"[EXCLUDE_RESTORE] Processing exclusion for region {region_index}")
-                    if 0 <= region_index < len(rectangles):
-                        rect_item = rectangles[region_index]
-                        
-                        # Set exclude flag
-                        rect_item.exclude_from_clean = True
-                        print(f"[EXCLUDE_RESTORE] Set exclude_from_clean=True for region {region_index}")
-                        
-                        # Apply orange styling
-                        from PySide6.QtGui import QPen, QBrush, QColor
-                        rect_item.setPen(QPen(QColor(255, 140, 0), 3))  # Orange border, thicker
-                        rect_item.setBrush(QBrush(QColor(255, 140, 0, 30)))  # Semi-transparent orange fill
-                        
-                        print(f"[EXCLUDE_RESTORE] Applied orange styling to region {region_index}")
+                from PySide6.QtGui import QPen, QBrush, QColor
+                for i, rect_item in enumerate(rectangles):
+                    # Ensure exclude flag is False
+                    rect_item.exclude_from_clean = False
+                    
+                    # Apply normal styling based on rectangle type
+                    if hasattr(rect_item, 'is_recognized') and rect_item.is_recognized:
+                        # Blue for recognized text
+                        rect_item.setPen(QPen(QColor(0, 150, 255), 2))
+                        rect_item.setBrush(QBrush(QColor(0, 150, 255, 50)))
                     else:
-                        print(f"[EXCLUDE_RESTORE] Region index {region_index} out of bounds (rectangles: {len(rectangles)})")
-            else:
-                print(f"[EXCLUDE_RESTORE] No rectangles available in viewer")
+                        # Green for detection boxes
+                        rect_item.setPen(QPen(QColor(0, 255, 0), 2))
+                        rect_item.setBrush(QBrush(QColor(0, 255, 0, 50)))
             
-            print(f"[EXCLUDE_RESTORE] Completed restoration for {len(excluded_regions)} excluded regions")
+            print(f"[EXCLUDE_RESTORE] All rectangles initialized with no exclusions")
             
         except Exception as e:
-            print(f"[EXCLUDE_RESTORE] Error restoring exclusion status: {e}")
+            print(f"[EXCLUDE_RESTORE] Error initializing exclusion status: {e}")
     
     def _get_custom_iterations_for_regions(self, regions: list) -> dict:
         """Get custom inpainting iterations for regions from rectangles.
@@ -14142,16 +14007,23 @@ class MangaTranslationTab(QObject):
             except Exception as _clr:
                 print(f"[RENDER] Pre-clear failed: {_clr}")
             
-            # Filter out excluded regions before rendering
+            # Filter out excluded regions before rendering (get from rectangle objects)
             excluded_regions = []
-            if original_image_path and hasattr(self, 'image_state_manager') and self.image_state_manager:
-                try:
-                    state = self.image_state_manager.get_state(original_image_path)
-                    if state and 'excluded_from_clean' in state:
-                        excluded_regions = state['excluded_from_clean']
+            try:
+                if hasattr(self.image_preview_widget, 'viewer') and self.image_preview_widget.viewer.rectangles:
+                    rectangles = self.image_preview_widget.viewer.rectangles
+                    for i, rect_item in enumerate(rectangles):
+                        if getattr(rect_item, 'exclude_from_clean', False):
+                            excluded_regions.append(i)
+                    
+                    if excluded_regions:
                         print(f"[RENDER] Found {len(excluded_regions)} excluded regions: {excluded_regions}")
-                except Exception as e:
-                    print(f"[RENDER] Failed to get excluded regions: {e}")
+                    else:
+                        print(f"[RENDER] No regions excluded from rendering")
+                else:
+                    print(f"[RENDER] No rectangles available to check exclusions")
+            except Exception as e:
+                print(f"[RENDER] Failed to get excluded regions from rectangles: {e}")
             
             # Filter regions based on exclusion status
             filtered_regions = []
