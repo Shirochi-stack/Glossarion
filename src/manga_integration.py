@@ -541,6 +541,10 @@ class MangaTranslationTab(QObject):
     # Signal for save position completion (emitted from background thread)
     save_position_completed = Signal(bool, int)  # success, region_index
     
+    # Signals for OCR completion (emitted from background thread)
+    ocr_result_signal = Signal(object, object, int, object, str)  # recognized_texts, rect_item, region_index, bbox, provider
+    ocr_error_signal = Signal(object, object, int)  # error, rect_item, region_index
+    
     # Class-level cancellation flag for all instances
     _global_cancelled = False
     _global_cancel_lock = threading.RLock()
@@ -761,6 +765,10 @@ class MangaTranslationTab(QObject):
         
         # Attach logging bridge so library logs appear in our log area
         self._attach_logging_bridge()
+        
+        # Connect OCR signals to handlers
+        self.ocr_result_signal.connect(self._process_ocr_result)
+        self.ocr_error_signal.connect(self._handle_ocr_error)
 
         # Start update loop
         self._process_updates()
@@ -11052,17 +11060,44 @@ class MangaTranslationTab(QObject):
             # Start pulse effect on the rectangle
             self._add_rectangle_pulse_effect(rect_item, region_index)
             
-            # Reuse the existing _run_ocr_on_regions method with a single region
-            recognized_texts = self._run_ocr_on_regions(image_path, [region], ocr_config)
+            # Run OCR in background thread to avoid GUI lag
+            import threading
             
+            def ocr_background():
+                try:
+                    # Reuse the existing _run_ocr_on_regions method with a single region
+                    recognized_texts = self._run_ocr_on_regions(image_path, [region], ocr_config)
+                    
+                    # Emit signal to process results on main thread
+                    self.ocr_result_signal.emit(recognized_texts, rect_item, region_index, bbox, ocr_config['provider'])
+                    
+                except Exception as e:
+                    # Emit signal to handle error on main thread
+                    self.ocr_error_signal.emit(e, rect_item, region_index)
+            
+            # Start background thread
+            threading.Thread(target=ocr_background, daemon=True).start()
+                
+        except Exception as e:
+            # Stop pulse effect on error
+            if 'rect_item' in locals() and 'region_index' in locals():
+                self._remove_rectangle_pulse_effect(rect_item, region_index)
+            print(f"[OCR_CONTEXT] Error in _handle_ocr_this_text: {e}")
+            import traceback
+            print(f"[OCR_CONTEXT] Traceback: {traceback.format_exc()}")
+            self._log(f"❌ OCR failed: {str(e)}", "error")
+    
+    def _process_ocr_result(self, recognized_texts, rect_item, region_index, bbox, ocr_provider):
+        """Process OCR result on main thread (called via signal)"""
+        try:
             # Stop pulse effect regardless of outcome
             self._remove_rectangle_pulse_effect(rect_item, region_index)
             
             # Log the results
             if recognized_texts and len(recognized_texts) > 0:
-                self._log(f"✅ OCR completed successfully using {ocr_config['provider']}", "success")
+                self._log(f"✅ OCR completed successfully using {ocr_provider}", "success")
             else:
-                self._log(f"⚠️ OCR found no text using {ocr_config['provider']}", "warning")
+                self._log(f"⚠️ OCR found no text using {ocr_provider}", "warning")
             
             if recognized_texts and len(recognized_texts) > 0:
                 recognized_text = recognized_texts[0]['text']
@@ -11094,13 +11129,22 @@ class MangaTranslationTab(QObject):
                 self._log("⚠️ No text found in selected region", "warning")
                 
         except Exception as e:
-            # Stop pulse effect on error
-            if 'rect_item' in locals() and 'region_index' in locals():
-                self._remove_rectangle_pulse_effect(rect_item, region_index)
-            print(f"[OCR_CONTEXT] Error in _handle_ocr_this_text: {e}")
+            print(f"[OCR_CONTEXT] Error processing OCR result: {e}")
             import traceback
             print(f"[OCR_CONTEXT] Traceback: {traceback.format_exc()}")
-            self._log(f"❌ OCR failed: {str(e)}", "error")
+            self._log(f"❌ OCR result processing failed: {str(e)}", "error")
+    
+    def _handle_ocr_error(self, error, rect_item, region_index):
+        """Handle OCR error on main thread (called via signal)"""
+        try:
+            # Stop pulse effect on error
+            self._remove_rectangle_pulse_effect(rect_item, region_index)
+            print(f"[OCR_CONTEXT] Error in background OCR: {error}")
+            import traceback
+            print(f"[OCR_CONTEXT] Background OCR error traceback: {traceback.format_exc()}")
+            self._log(f"❌ OCR failed: {str(error)}", "error")
+        except Exception as e:
+            print(f"[OCR_CONTEXT] Error handling OCR error: {e}")
     
     def _add_context_menu_to_rectangle(self, rect_item, region_index: int):
         """Add context menu to rectangle for OCR and translation options on right-click"""
