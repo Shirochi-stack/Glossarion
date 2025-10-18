@@ -11370,27 +11370,27 @@ class MangaTranslationTab(QObject):
             dialog_text = (
                 f"Set inpainting iterations for rectangle {region_index}\n\n"
                 f"Current: {current_display}\n\n"
-                f"Enter number of iterations (0-50):\n0 = Auto, 1-50 = Custom iterations"
+                f"Enter number of iterations (-1 to 50):\n-1 = Auto, 0-50 = Custom iterations"
             )
             
             value, ok = QInputDialog.getInt(
                 self.dialog,
                 "Set Inpainting Iterations",
                 dialog_text,
-                current_iterations if current_iterations is not None else 0
+                current_iterations if current_iterations is not None else -1
             )
             
             if ok:
-                # Validate input range (0-50, where 0 means auto)
-                if value < 0 or value > 50:
+                # Validate input range (-1 to 50, where -1 means auto)
+                if value < -1 or value > 50:
                     QMessageBox.warning(
                         self.dialog,
                         "Invalid Input", 
-                        f"Please enter a value between 0 and 50.\n0 = Auto, 1-50 = Custom iterations"
+                        f"Please enter a value between -1 and 50.\n-1 = Auto, 0-50 = Custom iterations"
                     )
                     return
                 
-                if value == 0:
+                if value == -1:
                     # Reset to auto
                     rect_item.inpaint_iterations = None
                     self._log(f"🔧 Rectangle {region_index}: inpainting set to AUTO", "info")
@@ -11414,7 +11414,7 @@ class MangaTranslationTab(QObject):
                                 state['inpaint_iterations'] = {}
                             
                             # Store the iteration value for this region
-                            if value == 0:
+                            if value == -1:
                                 # Remove from dict when set to auto
                                 if str(region_index) in state['inpaint_iterations']:
                                     del state['inpaint_iterations'][str(region_index)]
@@ -11431,7 +11431,7 @@ class MangaTranslationTab(QObject):
                 
                 # Visual feedback - update rectangle appearance slightly
                 from PySide6.QtGui import QPen, QBrush, QColor
-                if value != 0:
+                if value != -1:
                     # Custom iterations - add slight blue tint to border
                     if getattr(rect_item, 'exclude_from_clean', False):
                         # Keep orange if excluded
