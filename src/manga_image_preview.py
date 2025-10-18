@@ -1014,18 +1014,22 @@ class MangaImagePreviewWidget(QWidget):
         workflow_layout.setSpacing(2)
         
         self.detect_btn = self._create_compact_button("Detect Text")
+        self.detect_btn.setToolTip("Detect text regions in the current image")
         self.detect_btn.clicked.connect(self.detect_text_clicked.emit)
         workflow_layout.addWidget(self.detect_btn, stretch=1)
         
         self.clean_btn = self._create_compact_button("Clean")
+        self.clean_btn.setToolTip("Remove text from detected regions (inpainting)")
         self.clean_btn.clicked.connect(self.clean_image_clicked.emit)
         workflow_layout.addWidget(self.clean_btn, stretch=1)
         
         self.recognize_btn = self._create_compact_button("Recognize Text")
+        self.recognize_btn.setToolTip("Perform OCR on detected text regions")
         self.recognize_btn.clicked.connect(lambda: self._emit_recognize_signal())
         workflow_layout.addWidget(self.recognize_btn, stretch=1)
         
         self.translate_btn = self._create_compact_button("Translate")
+        self.translate_btn.setToolTip("Translate recognized text to target language")
         self.translate_btn.clicked.connect(lambda: self._emit_translate_signal())
         workflow_layout.addWidget(self.translate_btn, stretch=1)
         
@@ -1136,6 +1140,10 @@ class MangaImagePreviewWidget(QWidget):
         # Prevent focus and scroll issues
         btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn.wheelEvent = lambda event: None
+        
+        # Ensure tooltips always work by setting mouse tracking
+        btn.setMouseTracking(True)
+        
         return btn
     
     def _create_compact_button(self, text: str) -> QPushButton:
@@ -1167,6 +1175,10 @@ class MangaImagePreviewWidget(QWidget):
         btn.wheelEvent = lambda event: None
         # Prevent button from taking keyboard/mouse focus (prevents scroll on click)
         btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        
+        # Ensure tooltips always work by setting mouse tracking
+        btn.setMouseTracking(True)
+        
         return btn
     
     def _create_tool_frame(self, title: str) -> QFrame:
