@@ -8,6 +8,7 @@ These methods are dynamically injected into the TranslatorGUI class.
 import os
 import json
 import re
+import sys
 
 # PySide6 imports (fully migrated from Tkinter)
 from PySide6.QtWidgets import (
@@ -405,7 +406,9 @@ class HeaderTranslationHelpDialog(QDialog):
 
 def show_header_help_dialog(self):
     """Show the header translation help dialog"""
-    dialog = HeaderTranslationHelpDialog(self._other_settings_dialog or self.main_window)
+    # Use the current GUI instance as parent, fallback to None if needed
+    parent = getattr(self, '_other_settings_dialog', None) or self
+    dialog = HeaderTranslationHelpDialog(parent)
     dialog.exec()
 
 def configure_rolling_summary_prompts(self):

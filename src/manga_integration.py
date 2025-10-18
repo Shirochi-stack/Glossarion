@@ -8387,6 +8387,25 @@ class MangaTranslationTab(QObject):
                 self._cleaned_image_path = state['cleaned_image_path']
                 print(f"[STATE] Restored cleaned image path: {os.path.basename(self._cleaned_image_path)}")
             
+            # Restore recognition_data from persisted recognized_texts so Edit OCR menu works after reload
+            try:
+                recognized_texts = state.get('recognized_texts') or []
+                if recognized_texts:
+                    self._recognition_data = {}
+                    for i, result in enumerate(recognized_texts):
+                        # Skip deleted entries
+                        if isinstance(result, dict) and result.get('deleted'):
+                            continue
+                        # Handle both simple string format and complex dict format
+                        if isinstance(result, str):
+                            self._recognition_data[int(i)] = result
+                        elif isinstance(result, dict) and 'text' in result:
+                            idx = result.get('region_index', i)
+                            self._recognition_data[int(idx)] = result.get('text', '')
+                    print(f"[STATE] Restored recognition_data for {len(self._recognition_data)} regions")
+            except Exception as re:
+                print(f"[STATE] Failed to restore recognition_data: {re}")
+            
             # Restore translation_data from persisted translated_texts so Edit Translation menu works after reload
             try:
                 translated_texts = state.get('translated_texts') or []
@@ -8401,16 +8420,21 @@ class MangaTranslationTab(QObject):
                             'original': result.get('original', {}).get('text', ''),
                             'translation': result.get('translation', '')
                         }
-                    # Reattach context menus for rectangles
-                    rects = getattr(self.image_preview_widget.viewer, 'rectangles', []) or []
-                    for idx, rect_item in enumerate(rects):
-                        try:
-                            self._add_context_menu_to_rectangle(rect_item, idx)
-                        except Exception:
-                            pass
                     print(f"[STATE] Restored translation_data for {len(self._translation_data)} regions")
             except Exception as te:
                 print(f"[STATE] Failed to restore translation_data: {te}")
+            
+            # Reattach context menus for rectangles (after both recognition and translation data are restored)
+            try:
+                rects = getattr(self.image_preview_widget.viewer, 'rectangles', []) or []
+                for idx, rect_item in enumerate(rects):
+                    try:
+                        self._add_context_menu_to_rectangle(rect_item, idx)
+                    except Exception:
+                        pass
+                print(f"[STATE] Reattached context menus to {len(rects)} rectangles")
+            except Exception as cm:
+                print(f"[STATE] Failed to reattach context menus: {cm}")
             
             # Restore viewer rectangles (if no detection regions were restored)
             if 'viewer_rectangles' in state and not ('detection_regions' in state):
