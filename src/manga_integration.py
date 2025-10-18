@@ -11752,6 +11752,19 @@ class MangaTranslationTab(QObject):
                     
                     # Don't auto-switch tabs - let user manually switch to see result
                     # This matches the behavior of the main Clean button
+                    
+                    # Add sponge button refresh logic (same as main Clean button)
+                    # If sponge button is enabled, also refresh source tab with cleaned image
+                    try:
+                        if (hasattr(self.image_preview_widget, 'cleaned_images_enabled') and 
+                            self.image_preview_widget.cleaned_images_enabled and
+                            '_cleaned' in cleaned_path):
+                            print(f"[UPDATE_PREVIEW] Refreshing source tab with cleaned image due to sponge button being enabled")
+                            # Reload the source image which will automatically pick up the cleaned version
+                            # due to the sponge button being enabled
+                            self.image_preview_widget.viewer.load_image(self.image_preview_widget._check_for_cleaned_image(original_path))
+                    except Exception as refresh_err:
+                        print(f"[UPDATE_PREVIEW] Failed to refresh source tab: {refresh_err}")
                         
             except Exception as e:
                 print(f"[UPDATE_PREVIEW] Failed to update output tab: {e}")
