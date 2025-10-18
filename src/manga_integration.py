@@ -8579,6 +8579,7 @@ class MangaTranslationTab(QObject):
         try:
             image_path = results['image_path']
             regions = results['regions']
+            preserve_rectangles = results.get('preserve_rectangles', False)
             
             # Always persist regions for this image
             if hasattr(self, 'image_state_manager'):
@@ -8600,8 +8601,13 @@ class MangaTranslationTab(QObject):
             self._current_regions = regions
             self._original_image_path = image_path
             
-            if hasattr(self.image_preview_widget.viewer, 'clear_rectangles'):
+            # Only clear rectangles if not preserving them (e.g., during clean operations)
+            if not preserve_rectangles and hasattr(self.image_preview_widget.viewer, 'clear_rectangles'):
                 self.image_preview_widget.viewer.clear_rectangles()
+                print(f"[DETECT_RESULTS] Cleared existing rectangles before drawing detection results")
+            elif preserve_rectangles:
+                print(f"[DETECT_RESULTS] Preserving existing rectangles during detection update")
+            
             self._draw_detection_boxes_on_preview()
             
         except Exception as e:
@@ -8614,6 +8620,12 @@ class MangaTranslationTab(QObject):
                 return
             
             viewer = self.image_preview_widget.viewer
+            
+            # If we already have rectangles, don't redraw (preserve existing rectangles during clean operations)
+            if hasattr(viewer, 'rectangles') and viewer.rectangles and len(viewer.rectangles) > 0:
+                print(f"[DRAW_BOXES] Skipping rectangle drawing - {len(viewer.rectangles)} rectangles already exist")
+                return
+            
             from PySide6.QtCore import QRectF, Qt
             from PySide6.QtGui import QPen, QBrush, QColor
             from manga_image_preview import MoveableRectItem
@@ -8706,11 +8718,12 @@ class MangaTranslationTab(QObject):
                     self._log("⚠️ No text regions detected to clean", "warning")
                     self._restore_clean_button()
                     return
-                # Draw detected boxes on preview for user feedback
+                # Draw detected boxes on preview for user feedback (preserve any existing rectangles during clean operation)
                 try:
                     self.update_queue.put(('detect_results', {
                         'image_path': image_path,
-                        'regions': regions
+                        'regions': regions,
+                        'preserve_rectangles': True  # Don't clear existing rectangles during clean operation
                     }))
                     # Persist detection state
                     if hasattr(self, 'image_state_manager'):
@@ -11686,7 +11699,7 @@ class MangaTranslationTab(QObject):
             return None
     
     def _update_image_preview_with_result(self, result_image, original_path):
-        """Update the image preview with the inpainting result"""
+        """Update the image preview with the inpainting result while preserving rectangles"""
         try:
             import cv2
             import tempfile
@@ -11700,10 +11713,10 @@ class MangaTranslationTab(QObject):
             cv2.imwrite(temp_path, result_image)
             print(f"[UPDATE_PREVIEW] Saved result to: {temp_path}")
             
-            # Update the preview widget
+            # Update the preview widget WITH preserve_rectangles=True to keep rectangles visible
             if hasattr(self.image_preview_widget, 'load_image'):
-                self.image_preview_widget.load_image(temp_path)
-                print(f"[UPDATE_PREVIEW] Updated preview with cleaned result")
+                self.image_preview_widget.load_image(temp_path, preserve_rectangles=True, preserve_text_overlays=True)
+                print(f"[UPDATE_PREVIEW] Updated preview with cleaned result (rectangles preserved)")
             
         except Exception as e:
             print(f"[UPDATE_PREVIEW] Error updating preview: {e}")

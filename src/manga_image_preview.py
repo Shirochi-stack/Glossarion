@@ -914,15 +914,36 @@ class MangaImagePreviewWidget(QWidget):
         self.save_overlay_btn.clicked.connect(self._on_save_overlay_clicked)
         tools_layout.addWidget(self.save_overlay_btn)
         
-        self.brush_btn = self._create_tool_button("🖌", "Brush")
-        self.brush_btn.setCheckable(True)
-        self.brush_btn.clicked.connect(lambda: self._set_tool('brush'))
-        tools_layout.addWidget(self.brush_btn)
+        # Conditionally show brush/eraser tools only when experimental flag is enabled
+        enable_experimental_tools = False
+        try:
+            if self.main_gui and hasattr(self.main_gui, 'config') and isinstance(self.main_gui.config, dict):
+                cfg = self.main_gui.config
+                # Either flat key or nested under an experimental block
+                enable_experimental_tools = bool(
+                    cfg.get('experimental_translate_all', False) or
+                    (isinstance(cfg.get('experimental'), dict) and cfg.get('experimental', {}).get('translate_all', False))
+                )
+            # Environment override
+            if not enable_experimental_tools:
+                enable_experimental_tools = (os.getenv('EXPERIMENTAL_TRANSLATE_ALL', '0') == '1')
+        except Exception:
+            enable_experimental_tools = False
         
-        self.eraser_btn = self._create_tool_button("✏️", "Eraser")
-        self.eraser_btn.setCheckable(True)
-        self.eraser_btn.clicked.connect(lambda: self._set_tool('eraser'))
-        tools_layout.addWidget(self.eraser_btn)
+        if enable_experimental_tools:
+            self.brush_btn = self._create_tool_button("🖌", "Brush")
+            self.brush_btn.setCheckable(True)
+            self.brush_btn.clicked.connect(lambda: self._set_tool('brush'))
+            tools_layout.addWidget(self.brush_btn)
+            
+            self.eraser_btn = self._create_tool_button("✏️", "Eraser")
+            self.eraser_btn.setCheckable(True)
+            self.eraser_btn.clicked.connect(lambda: self._set_tool('eraser'))
+            tools_layout.addWidget(self.eraser_btn)
+        else:
+            # Do not create the buttons at all when experimental is disabled
+            self.brush_btn = None
+            self.eraser_btn = None
         
         self.delete_btn = self._create_tool_button("🗑", "Delete Selected")
         self.delete_btn.clicked.connect(self.viewer.delete_selected_rectangle)
@@ -936,32 +957,37 @@ class MangaImagePreviewWidget(QWidget):
         self.clear_strokes_btn.clicked.connect(self._clear_strokes)
         tools_layout.addWidget(self.clear_strokes_btn)
         
-        # Brush size slider (stretches to fill space)
-        self.size_slider = QSlider(Qt.Orientation.Horizontal)
-        self.size_slider.setMinimum(5)
-        self.size_slider.setMaximum(50)
-        self.size_slider.setValue(20)
-        self.size_slider.setStyleSheet("""
-            QSlider::groove:horizontal {
-                height: 6px;
-                background: #3a3a3a;
-                border-radius: 3px;
-            }
-            QSlider::handle:horizontal {
-                background: #ffd700;
-                width: 14px;
-                height: 14px;
-                margin: -4px 0;
-                border-radius: 7px;
-            }
-        """)
-        self.size_slider.valueChanged.connect(self._update_brush_size)
-        self.size_slider.wheelEvent = lambda event: None
-        tools_layout.addWidget(self.size_slider, stretch=1)  # Stretch to fill
-        
-        self.size_label = QLabel("20")
-        self.size_label.setStyleSheet("color: white; min-width: 25px;")
-        tools_layout.addWidget(self.size_label)
+        # Brush size slider (stretches to fill space) - only show when experimental tools are enabled
+        if enable_experimental_tools:
+            self.size_slider = QSlider(Qt.Orientation.Horizontal)
+            self.size_slider.setMinimum(5)
+            self.size_slider.setMaximum(50)
+            self.size_slider.setValue(20)
+            self.size_slider.setStyleSheet("""
+                QSlider::groove:horizontal {
+                    height: 6px;
+                    background: #3a3a3a;
+                    border-radius: 3px;
+                }
+                QSlider::handle:horizontal {
+                    background: #ffd700;
+                    width: 14px;
+                    height: 14px;
+                    margin: -4px 0;
+                    border-radius: 7px;
+                }
+            """)
+            self.size_slider.valueChanged.connect(self._update_brush_size)
+            self.size_slider.wheelEvent = lambda event: None
+            tools_layout.addWidget(self.size_slider, stretch=1)  # Stretch to fill
+            
+            self.size_label = QLabel("20")
+            self.size_label.setStyleSheet("color: white; min-width: 25px;")
+            tools_layout.addWidget(self.size_label)
+        else:
+            # Do not create the slider/label at all when experimental is disabled
+            self.size_slider = None
+            self.size_label = None
         
         # Box count
         self.box_count_label = QLabel("0")
@@ -1180,8 +1206,11 @@ class MangaImagePreviewWidget(QWidget):
         # Update button states
         self.hand_tool_btn.setChecked(tool == 'pan')
         self.box_draw_btn.setChecked(tool == 'box_draw')
-        self.brush_btn.setChecked(tool == 'brush')
-        self.eraser_btn.setChecked(tool == 'eraser')
+        # Only update experimental tool buttons if they exist
+        if self.brush_btn is not None:
+            self.brush_btn.setChecked(tool == 'brush')
+        if self.eraser_btn is not None:
+            self.eraser_btn.setChecked(tool == 'eraser')
     
     def _fit_active_view(self):
         """Fit the active viewer to view (source or output)."""
@@ -1244,7 +1273,9 @@ class MangaImagePreviewWidget(QWidget):
     
     def _update_brush_size(self, value: int):
         """Update brush/eraser size"""
-        self.size_label.setText(str(value))
+        # Only update size label if it exists
+        if self.size_label is not None:
+            self.size_label.setText(str(value))
         self.viewer.brush_size = value
         self.viewer.eraser_size = value
 
@@ -1755,13 +1786,19 @@ class MangaImagePreviewWidget(QWidget):
         # Show/hide manual editing tools ONLY (not pan/zoom which are always visible)
         self.box_draw_btn.setVisible(enabled)
         self.save_overlay_btn.setVisible(enabled)
-        self.brush_btn.setVisible(enabled)
-        self.eraser_btn.setVisible(enabled)
+        # Only set visibility for experimental tools if they exist
+        if self.brush_btn is not None:
+            self.brush_btn.setVisible(enabled)
+        if self.eraser_btn is not None:
+            self.eraser_btn.setVisible(enabled)
         self.delete_btn.setVisible(enabled)
         self.clear_boxes_btn.setVisible(enabled)
         self.clear_strokes_btn.setVisible(enabled)
-        self.size_slider.setVisible(enabled)
-        self.size_label.setVisible(enabled)
+        # Only set visibility for size controls if they exist
+        if self.size_slider is not None:
+            self.size_slider.setVisible(enabled)
+        if self.size_label is not None:
+            self.size_label.setVisible(enabled)
         self.box_count_label.setVisible(enabled)
         
         # Show/hide the entire Translation Workflow frame based on manual editing toggle
