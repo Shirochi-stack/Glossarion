@@ -17486,6 +17486,25 @@ class MangaTranslationTab(QObject):
                                 self.image_state_manager.set_state(current_image, state, save=True)
                         except Exception as persist_err:
                             self._log(f"⚠️ Failed to persist overlay text: {persist_err}", "warning")
+                        
+                        # Render to actual output file (same as main Translate button)
+                        # This ensures the translated text is saved to the output image file
+                        try:
+                            current_image = getattr(self.image_preview_widget, 'current_image_path', None)
+                            if current_image and hasattr(self, '_translation_data') and self._translation_data:
+                                print(f"[TRANSLATE_THIS_TEXT] Triggering render to output file for region {region_index}")
+                                self._log(f"🎨 Rendering translation to output file...", "info")
+                                
+                                # Use the same async overlay rendering as Save & Update Overlay
+                                # This will render all translations (including this new one) to the output file
+                                try:
+                                    self._save_overlay_async(region_index, translation_result)
+                                except Exception as render_err:
+                                    print(f"[TRANSLATE_THIS_TEXT] Render error: {render_err}")
+                                    self._log(f"⚠️ Failed to render to output file: {render_err}", "warning")
+                        except Exception as file_render_err:
+                            print(f"[TRANSLATE_THIS_TEXT] File render setup error: {file_render_err}")
+                            self._log(f"⚠️ Failed to setup file rendering: {file_render_err}", "warning")
                     except Exception as e:
                         import traceback
                         self._log(f"❌ Error handling translate result: {e}", "error")
