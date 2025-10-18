@@ -1638,8 +1638,10 @@ class MangaImagePreviewWidget(QWidget):
             if hasattr(self, 'manga_integration') and self.manga_integration:
                 if preserve_overlays:
                     # Keep existing overlays - just ensure they're visible for the current image
-                    print(f"[LOAD] Preserving text overlays for: {os.path.basename(image_path)}")
-                    self.manga_integration.show_text_overlays_for_image(image_path)
+                    # Use current_image_path (original) for overlay lookup since overlays are mapped to original path
+                    overlay_path = getattr(self, 'current_image_path', image_path) or image_path
+                    print(f"[LOAD] Preserving text overlays for: {os.path.basename(overlay_path)}")
+                    self.manga_integration.show_text_overlays_for_image(overlay_path)
                 else:
                     # Hide existing overlays and clear caches for new image
                     self.manga_integration.show_text_overlays_for_image(image_path)
@@ -1687,7 +1689,7 @@ class MangaImagePreviewWidget(QWidget):
                     # Attach recognition tooltips/updates
                     if hasattr(self.manga_integration, 'show_recognized_overlays_for_image'):
                         self.manga_integration.show_recognized_overlays_for_image(self.current_image_path)
-                    # Restore translated text overlays
+                    # Restore translated text overlays using current_image_path (original)
                     self.manga_integration.show_text_overlays_for_image(self.current_image_path)
                 else:
                     # Preserve mode - don't restore from state, keep current rectangles/overlays

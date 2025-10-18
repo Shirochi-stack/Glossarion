@@ -13175,6 +13175,9 @@ class MangaTranslationTab(QObject):
             if image_path in self._text_overlays_by_image:
                 for overlay in self._text_overlays_by_image[image_path]:
                     overlay.setVisible(True)
+                # Force scene update to ensure overlays are visible
+                viewer._scene.update()
+                viewer.update()
                 print(f"[DEBUG] Restored {len(self._text_overlays_by_image[image_path])} overlays for image: {os.path.basename(image_path)}")
             else:
                 #print(f"[DEBUG] No overlays found for image: {os.path.basename(image_path)}")
