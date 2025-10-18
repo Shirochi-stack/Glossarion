@@ -8950,7 +8950,7 @@ class MangaTranslationTab(QObject):
                 self.update_queue.put(('preview_update', {
                     'translated_path': cleaned_path,
                     'source_path': image_path,
-                    'switch_to_output': True
+                    'switch_to_output': False  # Don't auto-switch tabs, let user manually switch
                 }))
                 self._log(f"✅ Cleaning complete!", "success")
             else:
@@ -11544,12 +11544,22 @@ class MangaTranslationTab(QObject):
                 try:
                     print(f"[CLEAN_RECT_THREAD] Starting background processing for region {region_index}")
                     
-                    # Load image in background thread
-                    original_image = cv2.imread(current_image_path)
+                    # Determine which image to use as base - prefer output image if available
+                    base_image_path = current_image_path
+                    if (hasattr(self.image_preview_widget, 'current_translated_path') and 
+                        self.image_preview_widget.current_translated_path and 
+                        os.path.exists(self.image_preview_widget.current_translated_path)):
+                        base_image_path = self.image_preview_widget.current_translated_path
+                        print(f"[CLEAN_RECT_THREAD] Using output image as base: {os.path.basename(base_image_path)}")
+                    else:
+                        print(f"[CLEAN_RECT_THREAD] Using source image as base: {os.path.basename(base_image_path)}")
+                    
+                    # Load the base image in background thread
+                    original_image = cv2.imread(base_image_path)
                     if original_image is None:
                         self.update_queue.put(('single_clean_error', {
                             'region_index': region_index,
-                            'error': f'Failed to load image: {current_image_path}'
+                            'error': f'Failed to load base image: {base_image_path}'
                         }))
                         return
                     
@@ -11740,13 +11750,8 @@ class MangaTranslationTab(QObject):
                     self.image_preview_widget.current_translated_path = cleaned_path
                     print(f"[UPDATE_PREVIEW] Updated output tab with cleaned image (source unchanged)")
                     
-                    # Auto-switch to output tab to show the cleaned result
-                    try:
-                        if hasattr(self.image_preview_widget, 'viewer_tabs'):
-                            self.image_preview_widget.viewer_tabs.setCurrentIndex(1)
-                            print(f"[UPDATE_PREVIEW] Switched to output tab to show cleaned result")
-                    except Exception:
-                        pass
+                    # Don't auto-switch tabs - let user manually switch to see result
+                    # This matches the behavior of the main Clean button
                         
             except Exception as e:
                 print(f"[UPDATE_PREVIEW] Failed to update output tab: {e}")
@@ -17379,6 +17384,21 @@ class MangaTranslationTab(QObject):
                             print(f"[PREVIEW_UPDATE] Loading translated image into output tab: {translated_path}")
                             self.image_preview_widget.output_viewer.load_image(translated_path)
                             self.image_preview_widget.current_translated_path = translated_path
+                            
+                            # If sponge button is enabled and this is a cleaned image, also refresh source tab
+                            # to immediately show the cleaned version without requiring toggle
+                            try:
+                                if (hasattr(self.image_preview_widget, 'cleaned_images_enabled') and 
+                                    self.image_preview_widget.cleaned_images_enabled and
+                                    '_cleaned' in translated_path and
+                                    source_path):
+                                    print(f"[PREVIEW_UPDATE] Refreshing source tab with cleaned image due to sponge button being enabled")
+                                    # Reload the source image which will automatically pick up the cleaned version
+                                    # due to the sponge button being enabled
+                                    self.image_preview_widget.viewer.load_image(self.image_preview_widget._check_for_cleaned_image(source_path))
+                            except Exception as refresh_err:
+                                print(f"[PREVIEW_UPDATE] Failed to refresh source tab: {refresh_err}")
+                            
                             # Auto-switch to the Translated Output tab if requested (e.g., after cleaning)
                             try:
                                 if switch_to_output and hasattr(self.image_preview_widget, 'viewer_tabs'):
