@@ -11459,11 +11459,13 @@ class MangaTranslationTab(QObject):
             self._log(f"❌ Failed to set inpainting iterations: {str(e)}", "error")
     
     def _handle_clean_this_rectangle(self, region_index: int, rect_item):
-        """Handle cleaning/inpainting a specific rectangle region"""
+        """Handle cleaning/inpainting a specific rectangle region in background thread"""
         try:
             from PySide6.QtWidgets import QMessageBox
+            from PySide6.QtCore import QThread
             import numpy as np
             import cv2
+            import threading
             
             print(f"[CLEAN_RECT] Starting single rectangle clean for region {region_index}")
             self._log(f"🎯 Starting clean for rectangle {region_index}...", "info")
@@ -11504,82 +11506,101 @@ class MangaTranslationTab(QObject):
                     print(f"[CLEAN_RECT] User cancelled - rectangle {region_index} is excluded")
                     return
             
-            # Load the image
-            try:
-                original_image = cv2.imread(current_image_path)
-                if original_image is None:
-                    self._log(f"❌ Failed to load image: {current_image_path}", "error")
-                    return
-                
-                print(f"[CLEAN_RECT] Loaded image: {original_image.shape}")
-            except Exception as e:
-                self._log(f"❌ Error loading image: {str(e)}", "error")
-                return
-            
-            # Convert rectangle bounds to image coordinates
-            img_height, img_width = original_image.shape[:2]
-            
-            # Get viewer dimensions for scaling
+            # Get viewer dimensions for scaling (lightweight operation)
             viewer_rect = self.image_preview_widget.viewer.sceneRect()
-            scale_x = img_width / viewer_rect.width()
-            scale_y = img_height / viewer_rect.height()
-            
-            # Convert to image coordinates
-            x = int(rect_bounds.x() * scale_x)
-            y = int(rect_bounds.y() * scale_y)
-            w = int(rect_bounds.width() * scale_x)
-            h = int(rect_bounds.height() * scale_y)
-            
-            # Ensure bounds are within image
-            x = max(0, min(x, img_width - 1))
-            y = max(0, min(y, img_height - 1))
-            w = max(1, min(w, img_width - x))
-            h = max(1, min(h, img_height - y))
-            
-            print(f"[CLEAN_RECT] Image coordinates: x={x}, y={y}, w={w}, h={h} (image: {img_width}x{img_height})")
-            
-            # Create a mask for this specific region
-            mask = np.zeros((img_height, img_width), dtype=np.uint8)
-            mask[y:y+h, x:x+w] = 255
-            
-            print(f"[CLEAN_RECT] Created mask with {np.sum(mask > 0)} white pixels")
             
             # Get custom iterations for this rectangle if set
             custom_iterations = getattr(target_rect, 'inpaint_iterations', None)
             print(f"[CLEAN_RECT] Custom iterations for rectangle {region_index}: {custom_iterations}")
             
-            # Run inpainting on this specific region
-            try:
-                # Use the existing inpainting logic but only for this region
-                result = self._run_inpainting_on_region(
-                    original_image, 
-                    mask, 
-                    region_index, 
-                    custom_iterations
-                )
-                
-                if result is None:
-                    self._log(f"❌ Inpainting failed for rectangle {region_index}", "error")
-                    return
-                
-                print(f"[CLEAN_RECT] Inpainting completed for rectangle {region_index}")
-                
-                # Update the image preview with the result
-                self._update_image_preview_with_result(result, current_image_path)
-                
-                self._log(f"✅ Successfully cleaned rectangle {region_index}", "info")
-                
-            except Exception as e:
-                print(f"[CLEAN_RECT] Error during inpainting: {e}")
-                import traceback
-                print(f"[CLEAN_RECT] Traceback: {traceback.format_exc()}")
-                self._log(f"❌ Inpainting error: {str(e)}", "error")
+            # Start pulse effect on the rectangle
+            self._add_rectangle_pulse_effect(target_rect, region_index)
+            
+            # Run everything in background thread to avoid GUI lag
+            def run_single_rect_clean():
+                try:
+                    print(f"[CLEAN_RECT_THREAD] Starting background processing for region {region_index}")
+                    
+                    # Load image in background thread
+                    original_image = cv2.imread(current_image_path)
+                    if original_image is None:
+                        self.update_queue.put(('single_clean_error', {
+                            'region_index': region_index,
+                            'error': f'Failed to load image: {current_image_path}'
+                        }))
+                        return
+                    
+                    print(f"[CLEAN_RECT_THREAD] Loaded image: {original_image.shape}")
+                    
+                    # Convert rectangle bounds to image coordinates
+                    img_height, img_width = original_image.shape[:2]
+                    
+                    scale_x = img_width / viewer_rect.width()
+                    scale_y = img_height / viewer_rect.height()
+                    
+                    # Convert to image coordinates
+                    x = int(rect_bounds.x() * scale_x)
+                    y = int(rect_bounds.y() * scale_y)
+                    w = int(rect_bounds.width() * scale_x)
+                    h = int(rect_bounds.height() * scale_y)
+                    
+                    # Ensure bounds are within image
+                    x = max(0, min(x, img_width - 1))
+                    y = max(0, min(y, img_height - 1))
+                    w = max(1, min(w, img_width - x))
+                    h = max(1, min(h, img_height - y))
+                    
+                    print(f"[CLEAN_RECT_THREAD] Image coordinates: x={x}, y={y}, w={w}, h={h} (image: {img_width}x{img_height})")
+                    
+                    # Create a mask for this specific region
+                    mask = np.zeros((img_height, img_width), dtype=np.uint8)
+                    mask[y:y+h, x:x+w] = 255
+                    
+                    print(f"[CLEAN_RECT_THREAD] Created mask with {np.sum(mask > 0)} white pixels")
+                    
+                    # Run inpainting
+                    result = self._run_inpainting_on_region(
+                        original_image, 
+                        mask, 
+                        region_index, 
+                        custom_iterations
+                    )
+                    
+                    if result is None:
+                        self.update_queue.put(('single_clean_error', {
+                            'region_index': region_index,
+                            'error': 'Inpainting failed'
+                        }))
+                        return
+                    
+                    print(f"[CLEAN_RECT_THREAD] Inpainting completed for rectangle {region_index}")
+                    
+                    # Send result back to main thread
+                    self.update_queue.put(('single_clean_complete', {
+                        'region_index': region_index,
+                        'result_image': result,
+                        'original_path': current_image_path
+                    }))
+                    
+                except Exception as e:
+                    print(f"[CLEAN_RECT_THREAD] Error during inpainting: {e}")
+                    import traceback
+                    print(f"[CLEAN_RECT_THREAD] Traceback: {traceback.format_exc()}")
+                    self.update_queue.put(('single_clean_error', {
+                        'region_index': region_index,
+                        'error': str(e)
+                    }))
+            
+            # Start background thread
+            clean_thread = threading.Thread(target=run_single_rect_clean, daemon=True)
+            clean_thread.start()
+            print(f"[CLEAN_RECT] Started background thread for region {region_index} cleaning")
             
         except Exception as e:
-            print(f"[CLEAN_RECT] Error cleaning rectangle: {e}")
+            print(f"[CLEAN_RECT] Error setting up rectangle cleaning: {e}")
             import traceback
             print(f"[CLEAN_RECT] Traceback: {traceback.format_exc()}")
-            self._log(f"❌ Failed to clean rectangle: {str(e)}", "error")
+            self._log(f"❌ Failed to start rectangle cleaning: {str(e)}", "error")
     
     def _run_inpainting_on_region(self, image, mask, region_index, custom_iterations=None):
         """Run inpainting on a specific region with the given mask"""
@@ -11677,6 +11698,97 @@ class MangaTranslationTab(QObject):
             
         except Exception as e:
             print(f"[UPDATE_PREVIEW] Error updating preview: {e}")
+    
+    def _add_rectangle_pulse_effect(self, rect_item, region_index):
+        """Add a blue pulse effect to a specific rectangle during cleaning"""
+        try:
+            from PySide6.QtWidgets import QGraphicsRectItem
+            from PySide6.QtCore import QRectF, QPropertyAnimation, QEasingCurve, Qt, QObject, Property
+            from PySide6.QtGui import QPen, QBrush, QColor
+            
+            print(f"[RECT_PULSE] Adding pulse effect to rectangle {region_index}")
+            
+            # Store original pen for restoration
+            original_pen = rect_item.pen()
+            setattr(rect_item, '_original_pen', original_pen)
+            
+            # Create pulsing animation using QObject wrapper
+            class PulsingRectangle(QObject):
+                def __init__(self, rect_item, parent=None):
+                    super().__init__(parent)
+                    self._rect_item = rect_item
+                    self._intensity = 100
+                
+                def get_intensity(self):
+                    return self._intensity
+                
+                def set_intensity(self, value):
+                    self._intensity = value
+                    # Create purple pen with varying intensity
+                    purple_color = QColor(147, 112, 219, int(value))  # Medium slate blue/purple
+                    pen = QPen(purple_color, 3)  # Thicker pen for visibility
+                    self._rect_item.setPen(pen)
+                
+                intensity = Property(int, get_intensity, set_intensity)
+            
+            # Store pulse wrapper on the rectangle item
+            pulse_wrapper = PulsingRectangle(rect_item)
+            setattr(rect_item, '_pulse_wrapper', pulse_wrapper)
+            
+            # Create the animation
+            pulse_animation = QPropertyAnimation(pulse_wrapper, b"intensity")
+            pulse_animation.setDuration(1000)  # 1 second
+            pulse_animation.setStartValue(80)
+            pulse_animation.setEndValue(255)
+            pulse_animation.setEasingCurve(QEasingCurve.InOutQuad)
+            pulse_animation.setLoopCount(-1)  # Infinite loop
+            pulse_animation.start()
+            
+            # Store animation on the rectangle item
+            setattr(rect_item, '_pulse_animation', pulse_animation)
+            
+            print(f"[RECT_PULSE] Started pulse animation for rectangle {region_index}")
+            
+        except Exception as e:
+            print(f"[RECT_PULSE] Error adding pulse effect: {e}")
+            import traceback
+            print(f"[RECT_PULSE] Traceback: {traceback.format_exc()}")
+    
+    def _remove_rectangle_pulse_effect(self, rect_item, region_index):
+        """Remove the pulse effect from a specific rectangle"""
+        try:
+            print(f"[RECT_PULSE] Removing pulse effect from rectangle {region_index}")
+            
+            # Stop animation
+            if hasattr(rect_item, '_pulse_animation'):
+                rect_item._pulse_animation.stop()
+                delattr(rect_item, '_pulse_animation')
+            
+            # Remove pulse wrapper
+            if hasattr(rect_item, '_pulse_wrapper'):
+                delattr(rect_item, '_pulse_wrapper')
+            
+            # Restore original pen
+            if hasattr(rect_item, '_original_pen'):
+                rect_item.setPen(rect_item._original_pen)
+                delattr(rect_item, '_original_pen')
+            else:
+                # Fallback: restore normal styling based on rectangle type
+                from PySide6.QtGui import QPen, QBrush, QColor
+                if getattr(rect_item, 'exclude_from_clean', False):
+                    # Orange for excluded
+                    rect_item.setPen(QPen(QColor(255, 165, 0), 2))
+                elif hasattr(rect_item, 'is_recognized') and rect_item.is_recognized:
+                    # Blue for recognized text
+                    rect_item.setPen(QPen(QColor(0, 150, 255), 2))
+                else:
+                    # Green for detection boxes
+                    rect_item.setPen(QPen(QColor(0, 255, 0), 2))
+            
+            print(f"[RECT_PULSE] Removed pulse effect from rectangle {region_index}")
+            
+        except Exception as e:
+            print(f"[RECT_PULSE] Error removing pulse effect: {e}")
     
     def _restore_exclusion_status_from_state(self, image_path: str):
         """Restore exclusion status for rectangles from saved state - DISABLED"""
@@ -17059,6 +17171,53 @@ class MangaTranslationTab(QObject):
                         self._restore_clean_button()
                     except Exception as e:
                         self._log(f"❌ Failed to restore clean button: {str(e)}", "error")
+                
+                elif update[0] == 'single_clean_complete':
+                    # Handle single rectangle clean completion
+                    _, data = update
+                    try:
+                        region_index = data['region_index']
+                        result_image = data['result_image']
+                        original_path = data['original_path']
+                        
+                        # Stop pulse effect on the rectangle
+                        try:
+                            if hasattr(self.image_preview_widget, 'viewer') and hasattr(self.image_preview_widget.viewer, 'rectangles'):
+                                rectangles = self.image_preview_widget.viewer.rectangles
+                                if 0 <= region_index < len(rectangles):
+                                    rect_item = rectangles[region_index]
+                                    self._remove_rectangle_pulse_effect(rect_item, region_index)
+                        except Exception as pulse_err:
+                            print(f"[CLEAN_COMPLETE] Error stopping pulse effect: {pulse_err}")
+                        
+                        # Update the image preview with the result
+                        self._update_image_preview_with_result(result_image, original_path)
+                        self._log(f"✅ Successfully cleaned rectangle {region_index}", "success")
+                        
+                    except Exception as e:
+                        self._log(f"❌ Failed to handle single clean result: {str(e)}", "error")
+                
+                elif update[0] == 'single_clean_error':
+                    # Handle single rectangle clean error
+                    _, data = update
+                    try:
+                        region_index = data['region_index']
+                        error = data['error']
+                        
+                        # Stop pulse effect on the rectangle
+                        try:
+                            if hasattr(self.image_preview_widget, 'viewer') and hasattr(self.image_preview_widget.viewer, 'rectangles'):
+                                rectangles = self.image_preview_widget.viewer.rectangles
+                                if 0 <= region_index < len(rectangles):
+                                    rect_item = rectangles[region_index]
+                                    self._remove_rectangle_pulse_effect(rect_item, region_index)
+                        except Exception as pulse_err:
+                            print(f"[CLEAN_ERROR] Error stopping pulse effect: {pulse_err}")
+                        
+                        self._log(f"❌ Rectangle {region_index} cleaning failed: {error}", "error")
+                        
+                    except Exception as e:
+                        self._log(f"❌ Failed to handle single clean error: {str(e)}", "error")
                 
                 elif update[0] == 'detect_results':
                     _, results = update
