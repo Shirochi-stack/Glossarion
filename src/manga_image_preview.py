@@ -77,6 +77,16 @@ class MoveableRectItem(QGraphicsRectItem):
             pass
         super().mousePressEvent(event)
 
+    def paint(self, painter, option, widget=None):
+        """Custom paint to avoid Qt's default dashed selection rectangle; draw only our pen/brush."""
+        try:
+            painter.setPen(self.pen())
+            painter.setBrush(self.brush())
+            painter.drawRect(self.rect())
+        except Exception:
+            # Fallback to default painter if something goes wrong
+            super().paint(painter, option, widget)
+
 
 class MoveableEllipseItem(QGraphicsEllipseItem):
     """Moveable ellipse for circular text region selection"""
@@ -137,6 +147,15 @@ class MoveableEllipseItem(QGraphicsEllipseItem):
         except Exception:
             pass
         super().mousePressEvent(event)
+
+    def paint(self, painter, option, widget=None):
+        """Custom paint to avoid Qt's default dashed selection rectangle; draw only our pen/brush."""
+        try:
+            painter.setPen(self.pen())
+            painter.setBrush(self.brush())
+            painter.drawEllipse(self.rect())
+        except Exception:
+            super().paint(painter, option, widget)
 
 
 class ImageLoaderWorker(QObject):
