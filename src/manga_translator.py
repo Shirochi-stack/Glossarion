@@ -10510,11 +10510,13 @@ class MangaTranslator:
             # Convert back to string
             return '\n'.join([line[0] for line in lines if line])
         
-        def eval_metrics(txt, font):
+        def eval_metrics(txt, font, apply_qt_overhead=False):
             """Calculate width/height of multiline text.
             
             CRITICAL: Must match the rendering logic exactly to prevent overflow.
             Rendering uses font_size * 1.2 as line_height, so we must do the same here.
+            
+            apply_qt_overhead: If True, add 40% to width to account for Qt rendering overhead
             """
             lines = txt.split('\n')
             if not lines:
@@ -10526,6 +10528,10 @@ class MangaTranslator:
                 bbox = draw.textbbox((0, 0), line if line else "A", font=font)
                 line_width = bbox[2] - bbox[0]
                 max_width = max(max_width, line_width)
+            
+            # Qt renders text wider than PIL measures - add overhead in compact mode
+            if apply_qt_overhead:
+                max_width = int(max_width * 1.4)
             
             # Calculate height using same logic as rendering:
             # line_height = max(font.size * 1.2, actual_bbox_height * 1.1)
@@ -10640,10 +10646,11 @@ class MangaTranslator:
             # For narrow bubbles with compact mode: strict fitting (no overflow allowed)
             if is_narrow and auto_fit_style == 'compact':
                 words = text.split()
+                
                 high = init_font_size
                 low = min_font_size
                 best_font_size = min_font_size
-                best_wrapped = wrap_narrow_bubble_with_shortword_merge(text, ImageFont.truetype(font_path, max(min_font_size, 10)) if font_path else ImageFont.load_default(), roi_width)
+                best_wrapped = wrap_narrow_bubble_with_shortword_merge(text, ImageFont.truetype(font_path, max(min_font_size, 10)) if font_path else ImageFont.load_default(), roi_width, allow_overflow=False)
                 
                 while low <= high:
                     mid = (low + high) // 2
@@ -10658,16 +10665,23 @@ class MangaTranslator:
                     wrapped = wrap_narrow_bubble_with_shortword_merge(text, test_font, roi_width, allow_overflow=False)
                     
                     # Measure both width and height - STRICT (no overflow)
-                    width, height = eval_metrics(wrapped, test_font)
+                    # Apply Qt rendering overhead (40% wider) to match actual rendering
+                    width, height = eval_metrics(wrapped, test_font, apply_qt_overhead=True)
                     
+                    print(f"[COMPACT DEBUG] font_size={mid}, width={width:.1f} (with Qt overhead), roi_width={roi_width}, height={height:.1f}, roi_height={roi_height}")
+                    print(f"[COMPACT DEBUG] wrapped text:\n{wrapped}\n")
+                    
+                    # Compact mode: STRICT - no overflow allowed
                     if width <= roi_width and height <= roi_height:
-                        # Fits perfectly, try larger
+                        # Fits within 90%, try larger
                         best_font_size = mid
                         best_wrapped = wrapped
                         low = mid + 1
+                        print(f"[COMPACT DEBUG] -> FITS, trying larger")
                     else:
                         # Too large, try smaller
                         high = mid - 1
+                        print(f"[COMPACT DEBUG] -> TOO LARGE, trying smaller")
                 
                 return best_wrapped, int(best_font_size)
             

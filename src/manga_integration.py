@@ -15582,8 +15582,10 @@ class MangaTranslationTab(QObject):
                 pass
             
             # Respect "Scale with bubble size" toggle by scaling font size relative to page-average bubble
+            # BUT: disable in compact mode - compact means compact!
             try:
-                if bool(settings.get('bubble_size_factor', True)):
+                auto_fit_style = settings.get('auto_fit_style', 'balanced')
+                if bool(settings.get('bubble_size_factor', True)) and auto_fit_style != 'compact':
                     # Baseline area = average of current viewer rectangles; fallback to this region
                     rects = getattr(self.image_preview_widget.viewer, 'rectangles', []) or []
                     areas = []
@@ -15655,8 +15657,12 @@ class MangaTranslationTab(QObject):
                 pass
             
             # Make QTextItem manage horizontal centering by giving it a fixed text width = available_width
+            # BUT: in compact mode, don't force width expansion - use natural width
             try:
-                text_item.setTextWidth(max(1.0, float(available_width)))
+                auto_fit_style = settings.get('auto_fit_style', 'balanced')
+                if auto_fit_style != 'compact':
+                    text_item.setTextWidth(max(1.0, float(available_width)))
+                # In compact mode, leave textWidth at -1 (natural width) to prevent expansion
             except Exception:
                 pass
             
