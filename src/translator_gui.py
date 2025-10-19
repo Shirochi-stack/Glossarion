@@ -2694,37 +2694,17 @@ Recent translations to summarize:
         # Connect scrollbar to detect manual scrolling
         scrollbar = self.log_text.verticalScrollBar()
         scrollbar.valueChanged.connect(self._on_log_scroll)
-        
-        # Auto-Scroll resume button (overlay near the scrollbar)
-        try:
-            from PySide6.QtWidgets import QToolButton
-            from PySide6.QtCore import QSize
-            self._autoscroll_btn = QToolButton(self.log_text)
-            self._autoscroll_btn.setText("Auto")
-            self._autoscroll_btn.setToolTip("Resume auto-scroll")
-            self._autoscroll_btn.setAutoRaise(True)
-            self._autoscroll_btn.setCursor(Qt.PointingHandCursor)
-            self._autoscroll_btn.setVisible(False)
-            self._autoscroll_btn.setStyleSheet(
-                "QToolButton {"
-                "  background-color: rgba(45,45,45,180);"
-                "  color: white;"
-                "  border: 1px solid #5a9fd4;"
-                "  border-radius: 10px;"
-                "  padding: 2px 6px;"
-                "  font-size: 9pt;"
-                "}"
-                "QToolButton:hover { background-color: rgba(70,70,70,220); }"
-            )
-            self._autoscroll_btn.clicked.connect(self._force_autoscroll)
-            # Reposition on viewport changes
-            try:
-                self.log_text.viewport().installEventFilter(self)
-            except Exception:
-                pass
-            QTimer.singleShot(0, self._position_autoscroll_button)
-        except Exception:
-            self._autoscroll_btn = None
+
+        # Auto-scroll helper button (appears when scrolled up)
+        self.log_scroll_btn = QToolButton(self.log_text.viewport())
+        self.log_scroll_btn.setText("Scroll to bottom")
+        self.log_scroll_btn.setStyleSheet("QToolButton { background: #2d2d2d; color: white; border: 1px solid #4a5568; padding: 4px 8px; border-radius: 3px; }")
+        self.log_scroll_btn.hide()
+        self.log_scroll_btn.clicked.connect(self._scroll_log_to_bottom)
+        # Track resize to keep button anchored
+        self.log_text.installEventFilter(self)
+        self.log_text.viewport().installEventFilter(self)
+        QTimer.singleShot(0, self._update_log_scroll_button)
 
     def _check_poe_model(self, *args):
         """Automatically show POE helper when POE model is selected"""
@@ -7065,11 +7045,58 @@ Important rules:
             
             # Track current state for next comparison
             self._was_at_bottom = at_bottom
-            
-            # Update auto-scroll button visibility/position
-            self._update_autoscroll_button()
+
+            # Update helper button visibility/position
+            self._update_log_scroll_button()
         except Exception:
             pass
+
+    def _position_log_scroll_button(self):
+        try:
+            if not hasattr(self, 'log_scroll_btn') or not hasattr(self, 'log_text'):
+                return
+            btn = self.log_scroll_btn
+            vp = self.log_text.viewport()
+            margin = 8
+            x = max(0, vp.width() - btn.sizeHint().width() - margin)
+            y = max(0, vp.height() - btn.sizeHint().height() - margin)
+            btn.move(x, y)
+        except Exception:
+            pass
+
+    def _update_log_scroll_button(self):
+        try:
+            if not hasattr(self, 'log_scroll_btn') or not hasattr(self, 'log_text'):
+                return
+            visible = bool(getattr(self, '_user_scrolled_up', False))
+            self.log_scroll_btn.setVisible(visible)
+            if visible:
+                self._position_log_scroll_button()
+        except Exception:
+            pass
+
+    def _scroll_log_to_bottom(self):
+        try:
+            if hasattr(self, 'log_text'):
+                sb = self.log_text.verticalScrollBar()
+                sb.setValue(sb.maximum())
+                self._user_scrolled_up = False
+                self._update_log_scroll_button()
+        except Exception:
+            pass
+
+    def eventFilter(self, obj, event):
+        try:
+            if hasattr(self, 'log_text') and obj in (self.log_text, self.log_text.viewport()):
+                if event.type() in (QEvent.Resize, QEvent.Show):
+                    QTimer.singleShot(0, self._position_log_scroll_button)
+        except Exception:
+            pass
+        # Do not consume the event
+        try:
+            return super().eventFilter(obj, event)
+        except Exception:
+            return False
     
     def _start_autoscroll_delay(self, ms=0):
         try:
@@ -7077,7 +7104,6 @@ Important rules:
             self._autoscroll_delay_until = _time.time() + (ms / 1000.0)
             # Reset manual scroll flag when starting new operation
             self._user_scrolled_up = False
-            self._update_autoscroll_button()
         except Exception:
             self._autoscroll_delay_until = 0.0
     
@@ -7110,8 +7136,6 @@ Important rules:
                     not getattr(self, '_user_scrolled_up', False)):
                     scrollbar = self.log_text.verticalScrollBar()
                     scrollbar.setValue(scrollbar.maximum())
-                # Update button visibility state after append
-                self._update_autoscroll_button()
             except Exception:
                 pass
         except Exception as e:
@@ -7196,8 +7220,6 @@ Important rules:
                    # Force immediate update of the widget
                    self.log_text.update()
                    self.log_text.repaint()
-                   # Update button visibility state after append
-                   self._update_autoscroll_button()
                except Exception:
                    pass
            except Exception as e:
@@ -7381,55 +7403,6 @@ Important rules:
     def select_all_log(self):
        """Select all text in the log"""
        self.log_text.selectAll()
-
-    # --- Auto-scroll button helpers ---
-    def _force_autoscroll(self):
-        try:
-            self._user_scrolled_up = False
-            sb = self.log_text.verticalScrollBar()
-            sb.setValue(sb.maximum())
-            self._update_autoscroll_button()
-        except Exception:
-            pass
-
-    def _position_autoscroll_button(self):
-        try:
-            if not getattr(self, '_autoscroll_btn', None):
-                return
-            vw = self.log_text.viewport()
-            if not vw.isVisible():
-                return
-            btn = self._autoscroll_btn
-            btn.adjustSize()
-            # Place at bottom-right inside the viewport
-            r = vw.geometry()
-            x = r.right() - btn.width() - 8
-            y = r.bottom() - btn.height() - 8
-            btn.move(x, y)
-        except Exception:
-            pass
-
-    def _update_autoscroll_button(self):
-        try:
-            if not getattr(self, '_autoscroll_btn', None):
-                return
-            sb = self.log_text.verticalScrollBar()
-            at_bottom = sb.value() >= sb.maximum() - 10
-            should_show = getattr(self, '_user_scrolled_up', False) and not at_bottom
-            self._autoscroll_btn.setVisible(bool(should_show))
-            if should_show:
-                self._position_autoscroll_button()
-        except Exception:
-            pass
-
-    def eventFilter(self, obj, event):
-        try:
-            if hasattr(self, 'log_text') and obj == self.log_text.viewport():
-                if event.type() in (QEvent.Resize, QEvent.Show):
-                    self._position_autoscroll_button()
-        except Exception:
-            pass
-        return super().eventFilter(obj, event)
 
     def auto_load_glossary_for_file(self, file_path):
         """Automatically load glossary if it exists in the output folder"""
@@ -9083,7 +9056,7 @@ Important rules:
                 ('MANGA_FULL_PAGE_CONTEXT', '1' if self.config.get('manga_full_page_context', False) else '0'),
                 ('MANGA_VISUAL_CONTEXT_ENABLED', '1' if self.config.get('manga_visual_context_enabled', True) else '0'),
                 ('MANGA_CREATE_SUBFOLDER', '1' if self.config.get('manga_create_subfolder', True) else '0'),
-                ('MANGA_BG_OPACITY', str(self.config.get('manga_bg_opacity', 130))),
+                ('MANGA_BG_OPACITY', str(self.config.get('manga_bg_opacity', 0))),
                 ('MANGA_BG_STYLE', str(self.config.get('manga_bg_style', 'circle'))),
                 ('MANGA_BG_REDUCTION', str(self.config.get('manga_bg_reduction', 1.0))),
                 ('MANGA_FONT_SIZE', str(self.config.get('manga_font_size', 0))),
@@ -9093,13 +9066,13 @@ Important rules:
                 ('MANGA_FONT_SIZE_MULTIPLIER', str(self.config.get('manga_font_size_multiplier', 1.0))),
                 ('MANGA_MAX_FONT_SIZE', str(self.config.get('manga_max_font_size', rendering.get('auto_max_size', font_cfg.get('max_size', 48))))),
                 ('MANGA_AUTO_MIN_SIZE', str(rendering.get('auto_min_size', font_cfg.get('min_size', 10)))),
-                ('MANGA_FREE_TEXT_ONLY_BG_OPACITY', '1' if self.config.get('manga_free_text_only_bg_opacity', True) else '0'),
+                ('MANGA_FREE_TEXT_ONLY_BG_OPACITY', '1' if self.config.get('manga_free_text_only_bg_opacity', False) else '0'),
                 ('MANGA_FORCE_CAPS_LOCK', '1' if self.config.get('manga_force_caps_lock', True) else '0'),
                 ('MANGA_STRICT_TEXT_WRAPPING', '1' if self.config.get('manga_strict_text_wrapping', True) else '0'),
                 ('MANGA_CONSTRAIN_TO_BUBBLE', '1' if self.config.get('manga_constrain_to_bubble', True) else '0'),
                 ('MANGA_TEXT_COLOR', _rgb_list_to_str(self.config.get('manga_text_color', [102,0,0]), '102,0,0')),
                 ('MANGA_SHADOW_ENABLED', '1' if self.config.get('manga_shadow_enabled', True) else '0'),
-                ('MANGA_SHADOW_COLOR', _rgb_list_to_str(self.config.get('manga_shadow_color', [204,128,128]), '204,128,128')),
+                ('MANGA_SHADOW_COLOR', _rgb_list_to_str(self.config.get('manga_shadow_color', [255,255,255]), '255,255,255')),
                 ('MANGA_SHADOW_OFFSET_X', str(self.config.get('manga_shadow_offset_x', 2))),
                 ('MANGA_SHADOW_OFFSET_Y', str(self.config.get('manga_shadow_offset_y', 2))),
                 ('MANGA_SHADOW_BLUR', str(self.config.get('manga_shadow_blur', 0))),

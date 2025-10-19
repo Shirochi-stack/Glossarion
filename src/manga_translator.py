@@ -1177,7 +1177,7 @@ class MangaTranslator:
         # Enhanced text rendering settings - Load from config if available
         config = main_gui.config if hasattr(main_gui, 'config') else {}
         
-        self.text_bg_opacity = config.get('manga_bg_opacity', 0)  # 0-255, default fully transparent
+        self.text_bg_opacity = config.get('manga_bg_opacity', 255)  # 0-255, default fully opaque
         self.text_bg_style = config.get('manga_bg_style', 'box')  # 'box', 'circle', 'wrap'
         self.text_bg_reduction = config.get('manga_bg_reduction', 1.0)  # Size reduction factor (0.5-1.0)
         self.constrain_to_bubble = config.get('manga_constrain_to_bubble', True) 
@@ -1194,7 +1194,7 @@ class MangaTranslator:
         
         # Text shadow settings from config
         self.shadow_enabled = config.get('manga_shadow_enabled', False)
-        manga_shadow_color = config.get('manga_shadow_color', [255, 255, 255])
+        manga_shadow_color = config.get('manga_shadow_color', [128, 128, 128])
         self.shadow_color = tuple(manga_shadow_color)  # Convert list to tuple
         # If shadow is enabled, use its color for outline as well (prevents "white shadow" look)
         if self.shadow_enabled and isinstance(self.shadow_color, tuple) and len(self.shadow_color) == 3:

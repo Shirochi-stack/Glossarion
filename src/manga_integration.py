@@ -2874,22 +2874,22 @@ class MangaTranslationTab(QObject):
         
         add_files_btn = QPushButton("Add Files")
         add_files_btn.clicked.connect(self._add_files)
-        add_files_btn.setStyleSheet("QPushButton { background-color: #007bff; color: white; padding: 6px 15px; font-size: 10pt; font-weight: bold; }")
+        add_files_btn.setStyleSheet("QPushButton { background-color: #007bff; color: white; padding: 6px 14px; font-size: 11pt; font-weight: bold; }")
         file_btn_layout.addWidget(add_files_btn)
         
         add_folder_btn = QPushButton("Add Folder")
         add_folder_btn.clicked.connect(self._add_folder)
-        add_folder_btn.setStyleSheet("QPushButton { background-color: #007bff; color: white; padding: 6px 15px; font-size: 10pt; font-weight: bold; }")
+        add_folder_btn.setStyleSheet("QPushButton { background-color: #007bff; color: white; padding: 6px 14px; font-size: 11pt; font-weight: bold; }")
         file_btn_layout.addWidget(add_folder_btn)
         
         remove_btn = QPushButton("Remove Selected")
         remove_btn.clicked.connect(self._remove_selected)
-        remove_btn.setStyleSheet("QPushButton { background-color: #dc3545; color: white; padding: 6px 15px; font-size: 10pt; font-weight: bold; }")
+        remove_btn.setStyleSheet("QPushButton { background-color: #dc3545; color: white; padding: 6px 14px; font-size: 11pt; font-weight: bold; }")
         file_btn_layout.addWidget(remove_btn)
         
         clear_btn = QPushButton("Clear All")
         clear_btn.clicked.connect(self._clear_all)
-        clear_btn.setStyleSheet("QPushButton { background-color: #ffc107; color: black; padding: 6px 15px; font-size: 10pt; font-weight: bold; }")
+        clear_btn.setStyleSheet("QPushButton { background-color: #ffc107; color: black; padding: 6px 14px; font-size: 11pt; font-weight: bold; }")
         file_btn_layout.addWidget(clear_btn)
         
         file_btn_layout.addStretch()
@@ -4916,35 +4916,17 @@ class MangaTranslationTab(QObject):
         # Connect scrollbar to detect manual scrolling
         scrollbar = self.log_text.verticalScrollBar()
         scrollbar.valueChanged.connect(self._on_log_scroll)
-        
-        # Auto-Scroll resume button (overlay near the scrollbar)
-        try:
-            self._log_autoscroll_btn = QToolButton(self.log_text)
-            self._log_autoscroll_btn.setText("Auto")
-            self._log_autoscroll_btn.setToolTip("Resume auto-scroll")
-            self._log_autoscroll_btn.setAutoRaise(True)
-            self._log_autoscroll_btn.setCursor(Qt.PointingHandCursor)
-            self._log_autoscroll_btn.setVisible(False)
-            self._log_autoscroll_btn.setStyleSheet(
-                "QToolButton {"
-                "  background-color: rgba(45,45,45,180);"
-                "  color: white;"
-                "  border: 1px solid #5a9fd4;"
-                "  border-radius: 10px;"
-                "  padding: 2px 6px;"
-                "  font-size: 9pt;"
-                "}"
-                "QToolButton:hover { background-color: rgba(70,70,70,220); }"
-            )
-            self._log_autoscroll_btn.clicked.connect(self._force_log_autoscroll)
-            # Reposition on viewport changes
-            try:
-                self.log_text.viewport().installEventFilter(self)
-            except Exception:
-                pass
-            QTimer.singleShot(0, self._position_log_autoscroll_button)
-        except Exception:
-            self._log_autoscroll_btn = None
+
+        # Auto-scroll helper button (appears when scrolled up)
+        self.log_scroll_btn = QToolButton(self.log_text.viewport())
+        self.log_scroll_btn.setText("Scroll to bottom")
+        self.log_scroll_btn.setStyleSheet("QToolButton { background: #2d2d2d; color: white; border: 1px solid #4a5568; padding: 4px 8px; border-radius: 3px; }")
+        self.log_scroll_btn.hide()
+        self.log_scroll_btn.clicked.connect(self._scroll_log_to_bottom)
+        # Track resize to keep button anchored
+        self.log_text.installEventFilter(self)
+        self.log_text.viewport().installEventFilter(self)
+        QTimer.singleShot(0, self._update_log_scroll_button)
         
         main_layout.addWidget(log_frame)
         
@@ -5798,7 +5780,7 @@ class MangaTranslationTab(QObject):
             
             # Auto fit style
             self.auto_fit_style_value = 'compact'
-            self.auto_min_size_value = 8
+            self.auto_min_size_value = 10
             self.max_font_size_value = 48
             
             # Text wrapping and constraints
@@ -5841,14 +5823,13 @@ class MangaTranslationTab(QObject):
                 self.bg_style_combo.setCurrentText(self.bg_style_value)
             
             # Update font mode
-            if hasattr(self, 'font_size_mode_group'):
-                for button in self.font_size_mode_group.buttons():
+            if hasattr(self, 'font_mode_group'):
+                for button in self.font_mode_group.buttons():
                     button_text = button.text().lower().replace(' ', '_')
                     if button_text == 'auto':
                         button.setChecked(True)
                         break
-            
-            # Update font algorithm
+            # Update font algorithm radio
             if hasattr(self, 'font_algorithm_group'):
                 for button in self.font_algorithm_group.buttons():
                     if button.text().lower() == 'smart':
@@ -5882,6 +5863,14 @@ class MangaTranslationTab(QObject):
                 self.min_size_spinbox.setValue(self.auto_min_size_value)
             if hasattr(self, 'max_size_spinbox'):
                 self.max_size_spinbox.setValue(self.max_font_size_value)
+            # Update fixed size spinbox
+            if hasattr(self, 'font_size_spinbox'):
+                self.font_size_spinbox.setValue(self.font_size_value)
+            # Update multiplier control and label
+            if hasattr(self, 'multiplier_slider'):
+                self.multiplier_slider.setValue(self.font_size_multiplier_value)
+            if hasattr(self, 'multiplier_label'):
+                self._update_multiplier_label(self.font_size_multiplier_value)
             
             # Update line spacing
             if hasattr(self, 'line_spacing_spinbox'):
@@ -5915,8 +5904,8 @@ class MangaTranslationTab(QObject):
             if hasattr(self, 'shadow_rgb_label'):
                 self.shadow_rgb_label.setText(f"RGB({self.shadow_color_r_value},{self.shadow_color_g_value},{self.shadow_color_b_value})")
             self._update_shadow_preview(None)
-            
-            # Update shadow offset and blur spinboxes
+
+            # Update shadow offset/blur widgets
             if hasattr(self, 'shadow_offset_x_spinbox'):
                 self.shadow_offset_x_spinbox.setValue(self.shadow_offset_x_value)
             if hasattr(self, 'shadow_offset_y_spinbox'):
@@ -15531,7 +15520,7 @@ class MangaTranslationTab(QObject):
             return {
                 'show_background': True,
                 'bg_color': [255, 255, 255],
-                'bg_opacity': 0,
+                'bg_opacity': 130,
                 'bg_style': 'circle',
                 'bg_reduction': 1.0,
                 'font_family': 'Arial',
@@ -17343,10 +17332,53 @@ class MangaTranslationTab(QObject):
                 self._was_at_bottom = False
             # If in between thresholds, keep prior state (prevents flapping)
 
-            # Update auto-scroll button visibility/position
-            self._update_log_autoscroll_button()
+            # Update helper button
+            self._update_log_scroll_button()
         except Exception:
             pass
+
+    def _position_log_scroll_button(self):
+        try:
+            if not hasattr(self, 'log_scroll_btn') or not hasattr(self, 'log_text'):
+                return
+            btn = self.log_scroll_btn
+            vp = self.log_text.viewport()
+            margin = 8
+            x = max(0, vp.width() - btn.sizeHint().width() - margin)
+            y = max(0, vp.height() - btn.sizeHint().height() - margin)
+            btn.move(x, y)
+        except Exception:
+            pass
+
+    def _update_log_scroll_button(self):
+        try:
+            if not hasattr(self, 'log_scroll_btn') or not hasattr(self, 'log_text'):
+                return
+            visible = bool(getattr(self, '_user_scrolled_up', False))
+            self.log_scroll_btn.setVisible(visible)
+            if visible:
+                self._position_log_scroll_button()
+        except Exception:
+            pass
+
+    def _scroll_log_to_bottom(self):
+        try:
+            if hasattr(self, 'log_text'):
+                sb = self.log_text.verticalScrollBar()
+                sb.setValue(sb.maximum())
+                self._user_scrolled_up = False
+                self._update_log_scroll_button()
+        except Exception:
+            pass
+
+    def eventFilter(self, obj, event):
+        try:
+            if hasattr(self, 'log_text') and obj in (self.log_text, self.log_text.viewport()):
+                if event.type() in (QEvent.Resize, QEvent.Show):
+                    QTimer.singleShot(0, self._position_log_scroll_button)
+        except Exception:
+            pass
+        return False
     
     def _should_autoscroll(self) -> bool:
         """Return True if we should auto-scroll to bottom based on current scrollbar position and flags."""
@@ -17377,7 +17409,6 @@ class MangaTranslationTab(QObject):
             self._autoscroll_delay_until = _time.time() + (ms / 1000.0)
             # Reset manual scroll flag when starting new operation
             self._user_scrolled_up = False
-            self._update_log_autoscroll_button()
         except Exception:
             self._autoscroll_delay_until = 0.0
     
@@ -17461,11 +17492,6 @@ class MangaTranslationTab(QObject):
                             scrollbar.setValue(scrollbar.maximum())
                             for delay in [50, 100, 200]:
                                 QTimer.singleShot(delay, lambda sb=scrollbar: (sb.setValue(sb.maximum()) if self._should_autoscroll() else None))
-                        # Update button state
-                        try:
-                            self._update_log_autoscroll_button()
-                        except Exception:
-                            pass
                     except Exception:
                         pass
                 except Exception:
@@ -17568,11 +17594,6 @@ class MangaTranslationTab(QObject):
                         try:
                             if self._should_autoscroll():
                                 self.log_text.ensureCursorVisible()
-                        except Exception:
-                            pass
-                        # Update button state
-                        try:
-                            self._update_log_autoscroll_button()
                         except Exception:
                             pass
                     except Exception:
@@ -18319,54 +18340,6 @@ class MangaTranslationTab(QObject):
             self._start_periodic_thread_demoter()
         except Exception:
             pass
-
-    # --- Auto-scroll button helpers for log ---
-    def _force_log_autoscroll(self):
-        try:
-            self._user_scrolled_up = False
-            sb = self.log_text.verticalScrollBar()
-            sb.setValue(sb.maximum())
-            self._update_log_autoscroll_button()
-        except Exception:
-            pass
-
-    def _position_log_autoscroll_button(self):
-        try:
-            if not getattr(self, '_log_autoscroll_btn', None):
-                return
-            vw = self.log_text.viewport()
-            if not vw.isVisible():
-                return
-            btn = self._log_autoscroll_btn
-            btn.adjustSize()
-            r = vw.geometry()
-            x = r.right() - btn.width() - 8
-            y = r.bottom() - btn.height() - 8
-            btn.move(x, y)
-        except Exception:
-            pass
-
-    def _update_log_autoscroll_button(self):
-        try:
-            if not getattr(self, '_log_autoscroll_btn', None):
-                return
-            sb = self.log_text.verticalScrollBar()
-            at_bottom = sb.value() >= sb.maximum() - 10
-            should_show = getattr(self, '_user_scrolled_up', False) and not at_bottom
-            self._log_autoscroll_btn.setVisible(bool(should_show))
-            if should_show:
-                self._position_log_autoscroll_button()
-        except Exception:
-            pass
-
-    def eventFilter(self, obj, event):
-        try:
-            if hasattr(self, 'log_text') and obj == self.log_text.viewport():
-                if event.type() in (QEvent.Resize, QEvent.Show):
-                    self._position_log_autoscroll_button()
-        except Exception:
-            pass
-        return super().eventFilter(obj, event)
         
         # Run the heavy preparation and kickoff in a background thread to avoid GUI freeze
         threading.Thread(target=self._start_translation_heavy, name="MangaStartHeavy", daemon=True).start()
