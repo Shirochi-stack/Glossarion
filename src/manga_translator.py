@@ -10397,6 +10397,92 @@ class MangaTranslator:
             
             return '\n'.join(lines)
         
+        def wrap_narrow_bubble_with_shortword_merge(txt, font, max_width, allow_overflow=False):
+            """For narrow bubbles: start with one word per line, then merge short words with neighbors.
+            
+            Example:
+            Input: "LIKE THIS. I CAN'T EVEN TAKE A PEACEFUL NAP~"
+            Start: ["LIKE", "THIS.", "I", "CAN'T", "EVEN", "TAKE", "A", "PEACEFUL", "NAP~"]
+            Merge "I" with "CAN'T" -> ["LIKE", "THIS.", "I CAN'T", "EVEN", "TAKE", "A", "PEACEFUL", "NAP~"]
+            Merge "A" with "PEACEFUL" -> ["LIKE", "THIS.", "I CAN'T", "EVEN", "TAKE A", "PEACEFUL", "NAP~"]
+            Result:
+            LIKE
+            THIS.
+            I CAN'T
+            EVEN
+            TAKE A
+            PEACEFUL
+            NAP~
+            """
+            words = txt.split()
+            if not words:
+                return txt
+            
+            def twidth(s: str) -> int:
+                bb = draw.textbbox((0, 0), s if s else "A", font=font)
+                return bb[2] - bb[0]
+            
+            def is_short(w: str) -> bool:
+                return len(w.strip('.,!?~;:"\'')) <= 2
+            
+            # Step 1: Start with one word per line
+            lines = [[word] for word in words]
+            
+            # Step 2: Merge short words with neighbors
+            i = 0
+            while i < len(lines):
+                if not lines[i]:
+                    i += 1
+                    continue
+                    
+                word = lines[i][0]
+                
+                if is_short(word):
+                    merged = False
+                    
+                    # DEBUG
+                    print(f"[DEBUG] Processing short word: '{word}' at line {i}, allow_overflow={allow_overflow}")
+                    
+                    # Try to merge with PREVIOUS word first (keep short word with word above it)
+                    # BUT: Don't merge if previous word ends in sentence-ending punctuation
+                    if i > 0 and lines[i - 1]:
+                        prev_word = lines[i - 1][0]
+                        # Check if previous word ends in sentence-ending punctuation
+                        ends_in_punctuation = prev_word.rstrip().endswith(('.', '!', '?', '~'))
+                        test = f"{prev_word} {word}"
+                        test_width = twidth(test)
+                        print(f"[DEBUG]   Prev word: '{prev_word}', ends_punct={ends_in_punctuation}, test='{test}', width={test_width}, max={max_width}")
+                        if not ends_in_punctuation and (allow_overflow or test_width <= max_width):
+                            # Merge with previous
+                            print(f"[DEBUG]   -> MERGED with previous")
+                            lines[i - 1] = [test]
+                            lines.pop(i)
+                            # Don't increment i since we removed current
+                            merged = True
+                            continue
+                    
+                    # If couldn't merge with previous, try with NEXT
+                    if not merged and i + 1 < len(lines) and lines[i + 1]:
+                        next_word = lines[i + 1][0]
+                        test = f"{word} {next_word}"
+                        test_width = twidth(test)
+                        print(f"[DEBUG]   Next word: '{next_word}', test='{test}', width={test_width}, max={max_width}")
+                        if allow_overflow or test_width <= max_width:
+                            # Merge with next
+                            print(f"[DEBUG]   -> MERGED with next")
+                            lines[i] = [test]
+                            lines.pop(i + 1)
+                            merged = True
+                        else:
+                            print(f"[DEBUG]   -> NOT MERGED (too wide)")
+                    else:
+                        print(f"[DEBUG]   No next word to merge with")
+                
+                i += 1
+            
+            # Convert back to string
+            return '\n'.join([line[0] for line in lines if line])
+        
         def eval_metrics(txt, font):
             """Calculate width/height of multiline text.
             
@@ -10476,7 +10562,13 @@ class MangaTranslator:
                     low = min_font_size
                     high = max(init_font_size, median_font_size)
                     best_font_size = min_font_size
-                    best_wrapped = '\n'.join(words)
+                    
+                    # In readable/balanced modes: allow overflow for short word merging
+                    # This prevents orphaned short words even in very narrow bubbles
+                    allow_overflow = (auto_fit_style in ['readable', 'balanced'])
+                    merge_width = roi_width
+                    
+                    best_wrapped = wrap_narrow_bubble_with_shortword_merge(text, ImageFont.truetype(font_path, max(min_font_size, 10)) if font_path else ImageFont.load_default(), merge_width, allow_overflow)
                     
                     while low <= high:
                         mid = (low + high) // 2
@@ -10487,8 +10579,8 @@ class MangaTranslator:
                         except Exception:
                             test_font = ImageFont.load_default()
                         
-                        # Wrap: one word per line
-                        wrapped = '\n'.join(words)
+                        # Wrap: one word per line, merge short words
+                        wrapped = wrap_narrow_bubble_with_shortword_merge(text, test_font, merge_width, allow_overflow)
                         
                         # Measure height and width
                         width, height = eval_metrics(wrapped, test_font)
@@ -10498,19 +10590,8 @@ class MangaTranslator:
                             # Readable mode: IGNORE width validation entirely, only check height
                             fits = height <= roi_height
                         else:
-                            # Balanced mode: allow outliers to overflow, but most words must fit
-                            overflow_count = 0
-                            for word in words:
-                                bbox = draw.textbbox((0, 0), word, font=test_font)
-                                word_width = bbox[2] - bbox[0]
-                                if word_width > roi_width:
-                                    overflow_count += 1
-                            
-                            # Allow up to 1 outlier word (or 20% of words) to overflow
-                            max_overflow = max(1, int(len(words) * 0.2))
-                            fits_width = overflow_count <= max_overflow
-                            fits_height = height <= roi_height
-                            fits = fits_width and fits_height
+                            # Balanced mode: we wrapped with width constraint; just validate height
+                            fits = height <= roi_height
                         
                         if fits:
                             # Fits, try larger
@@ -10524,7 +10605,9 @@ class MangaTranslator:
                     return best_wrapped, int(best_font_size)
                 else:
                     # Fallback
-                    wrapped = '\n'.join(words)
+                    allow_overflow = (auto_fit_style in ['readable', 'balanced'])
+                    merge_width = roi_width
+                    wrapped = wrap_narrow_bubble_with_shortword_merge(text, ImageFont.truetype(font_path, max(min_font_size, 10)) if font_path else ImageFont.load_default(), merge_width, allow_overflow)
                     return wrapped, init_font_size
             
             # For narrow bubbles with compact mode: strict fitting (no overflow allowed)
@@ -10533,7 +10616,7 @@ class MangaTranslator:
                 high = init_font_size
                 low = min_font_size
                 best_font_size = min_font_size
-                best_wrapped = '\n'.join(words)
+                best_wrapped = wrap_narrow_bubble_with_shortword_merge(text, ImageFont.truetype(font_path, max(min_font_size, 10)) if font_path else ImageFont.load_default(), roi_width)
                 
                 while low <= high:
                     mid = (low + high) // 2
@@ -10544,8 +10627,8 @@ class MangaTranslator:
                     except Exception:
                         test_font = ImageFont.load_default()
                     
-                    # Wrap: one word per line
-                    wrapped = '\n'.join(words)
+                    # Wrap: one word per line, merge short words (strict width in compact mode)
+                    wrapped = wrap_narrow_bubble_with_shortword_merge(text, test_font, roi_width, allow_overflow=False)
                     
                     # Measure both width and height - STRICT (no overflow)
                     width, height = eval_metrics(wrapped, test_font)
@@ -10576,8 +10659,28 @@ class MangaTranslator:
                 except Exception:
                     test_font = ImageFont.load_default()
                 
-                # Normal: greedy word wrapping for natural grouping
-                wrapped = greedy_word_wrap(text, test_font, roi_width * 2)
+                # Normal: greedy word wrapping with short-word protection
+                wrapped = greedy_word_wrap(text, test_font, roi_width)
+                # Post-process to merge orphaned short words
+                lines = wrapped.split('\n')
+                merged_lines = []
+                i = 0
+                while i < len(lines):
+                    line = lines[i].strip()
+                    words_in_line = line.split()
+                    # If line is a single short word (1-2 letters) and there's a next line
+                    if len(words_in_line) == 1 and len(words_in_line[0].strip('.,!?~;:"\'')) <= 2 and i + 1 < len(lines):
+                        next_line = lines[i + 1].strip()
+                        # Try to merge with next line
+                        test_merged = f"{line} {next_line}"
+                        bbox = draw.textbbox((0, 0), test_merged, font=test_font)
+                        if bbox[2] - bbox[0] <= roi_width:
+                            merged_lines.append(test_merged)
+                            i += 2  # Skip next line since we merged it
+                            continue
+                    merged_lines.append(line)
+                    i += 1
+                wrapped = '\n'.join(merged_lines)
                 
                 # Measure the wrapped text
                 width, height = eval_metrics(wrapped, test_font)
