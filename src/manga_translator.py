@@ -10257,8 +10257,11 @@ class MangaTranslator:
         """Binary search for perfect-fit font sizing.
         
         When strict_text_wrapping is disabled:
-        - Binary searches for MAXIMUM font size that fits perfectly within bounds
-        - For narrow bubbles (aspect > 2): ONE WORD PER LINE, validates width & height
+        - Binary searches for MAXIMUM font size that fits within bounds
+        - For narrow bubbles (aspect > 2):
+          * 'compact': strict fitting, all words must fit within bounds
+          * 'balanced': median-based sizing, allows up to 20% of words to overflow
+          * 'readable': ignores width entirely, only validates height (maximum font)
         - For normal bubbles: greedy word wrapping for natural grouping, validates height
         
         When strict_text_wrapping is enabled:
@@ -10389,9 +10392,19 @@ class MangaTranslator:
             aspect_ratio = roi_height / max(roi_width, 1)
             is_narrow = aspect_ratio > 2.0
             
+            # Check auto_fit_style setting
+            auto_fit_style = 'balanced'  # default
+            try:
+                manga_settings = self.main_gui.config.get('manga_settings', {})
+                rendering = manga_settings.get('rendering', {})
+                auto_fit_style = rendering.get('auto_fit_style', 'balanced').lower()
+            except Exception:
+                pass
+            
             # For narrow bubbles: calculate median font size based on all words
             # This ignores outliers like "PEACEFULLY~" and sizes for typical words
-            if is_narrow:
+            # DISABLED when auto_fit_style is 'compact' - uses strict fitting instead
+            if is_narrow and auto_fit_style != 'compact':
                 words = text.split()
                 word_font_sizes = []
                 
@@ -10411,7 +10424,7 @@ class MangaTranslator:
                     median_idx = len(sorted_sizes) // 2
                     median_font_size = sorted_sizes[median_idx]
                     
-                    # Binary search: allow outliers to overflow, but most words must fit
+                    # Binary search configuration based on auto_fit_style
                     low = min_font_size
                     high = max(init_font_size, median_font_size)
                     best_font_size = min_font_size
@@ -10429,24 +10442,30 @@ class MangaTranslator:
                         # Wrap: one word per line
                         wrapped = '\n'.join(words)
                         
-                        # Measure height (strict) and check individual word widths
+                        # Measure height and width
                         width, height = eval_metrics(wrapped, test_font)
                         
-                        # Count how many words overflow
-                        overflow_count = 0
-                        for word in words:
-                            bbox = draw.textbbox((0, 0), word, font=test_font)
-                            word_width = bbox[2] - bbox[0]
-                            if word_width > roi_width:
-                                overflow_count += 1
+                        # Validation based on auto_fit_style
+                        if auto_fit_style == 'readable':
+                            # Readable mode: IGNORE width validation entirely, only check height
+                            fits = height <= roi_height
+                        else:
+                            # Balanced mode: allow outliers to overflow, but most words must fit
+                            overflow_count = 0
+                            for word in words:
+                                bbox = draw.textbbox((0, 0), word, font=test_font)
+                                word_width = bbox[2] - bbox[0]
+                                if word_width > roi_width:
+                                    overflow_count += 1
+                            
+                            # Allow up to 1 outlier word (or 20% of words) to overflow
+                            max_overflow = max(1, int(len(words) * 0.2))
+                            fits_width = overflow_count <= max_overflow
+                            fits_height = height <= roi_height
+                            fits = fits_width and fits_height
                         
-                        # Allow up to 1 outlier word (or 20% of words) to overflow
-                        max_overflow = max(1, int(len(words) * 0.2))
-                        fits_width = overflow_count <= max_overflow
-                        fits_height = height <= roi_height
-                        
-                        if fits_width and fits_height:
-                            # Fits (with allowed overflows), try larger
+                        if fits:
+                            # Fits, try larger
                             best_font_size = mid
                             best_wrapped = wrapped
                             low = mid + 1
@@ -10459,6 +10478,40 @@ class MangaTranslator:
                     # Fallback
                     wrapped = '\n'.join(words)
                     return wrapped, init_font_size
+            
+            # For narrow bubbles with compact mode: strict fitting (no overflow allowed)
+            if is_narrow and auto_fit_style == 'compact':
+                words = text.split()
+                high = init_font_size
+                low = min_font_size
+                best_font_size = min_font_size
+                best_wrapped = '\n'.join(words)
+                
+                while low <= high:
+                    mid = (low + high) // 2
+                    
+                    # Load font at this size
+                    try:
+                        test_font = ImageFont.truetype(font_path, mid) if font_path else ImageFont.load_default()
+                    except Exception:
+                        test_font = ImageFont.load_default()
+                    
+                    # Wrap: one word per line
+                    wrapped = '\n'.join(words)
+                    
+                    # Measure both width and height - STRICT (no overflow)
+                    width, height = eval_metrics(wrapped, test_font)
+                    
+                    if width <= roi_width and height <= roi_height:
+                        # Fits perfectly, try larger
+                        best_font_size = mid
+                        best_wrapped = wrapped
+                        low = mid + 1
+                    else:
+                        # Too large, try smaller
+                        high = mid - 1
+                
+                return best_wrapped, int(best_font_size)
             
             # For normal bubbles: original greedy wrapping logic
             high = init_font_size
