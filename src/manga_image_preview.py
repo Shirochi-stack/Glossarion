@@ -2002,6 +2002,10 @@ class MangaImagePreviewWidget(QWidget):
             for folder in translated_folders:
                 for filename in os.listdir(folder):
                     if filename.lower().endswith(image_extensions):
+                        # Skip cleaned images (intermediate files)
+                        if '_cleaned' in filename.lower():
+                            continue
+                        
                         src_path = os.path.join(folder, filename)
                         dest_path = os.path.join(consolidated_folder, filename)
                         
@@ -2068,15 +2072,15 @@ class MangaImagePreviewWidget(QWidget):
             for item in os.listdir(parent_dir):
                 item_path = os.path.join(parent_dir, item)
                 if os.path.isdir(item_path) and item.endswith('_translated'):
-                    # Check if this folder has images
-                    if any(f.lower().endswith(image_extensions) for f in os.listdir(item_path)):
+                    # Check if this folder has images (excluding cleaned images)
+                    if any(f.lower().endswith(image_extensions) and '_cleaned' not in f.lower() for f in os.listdir(item_path)):
                         has_translated_images = True
                         break
             
             # Also check the folder_path itself for backward compatibility
             if not has_translated_images and os.path.isdir(folder_path):
                 has_translated_images = any(
-                    f.lower().endswith(image_extensions) 
+                    f.lower().endswith(image_extensions) and '_cleaned' not in f.lower()
                     for f in os.listdir(folder_path)
                 )
             
