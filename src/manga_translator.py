@@ -10296,6 +10296,53 @@ class MangaTranslator:
                 idx = int(len(sorted_widths) * 0.75)
                 return sorted_widths[min(idx, len(sorted_widths) - 1)]
         
+        def greedy_word_wrap(txt, font, max_width):
+            """Greedily pack words into lines to maximize font size.
+            
+            This creates natural groupings like:
+            - 'Like This.'
+            - 'I Can\'t Even'
+            - 'Nap Peacefully~'
+            
+            Instead of one word per line.
+            """
+            words = txt.split()
+            if not words:
+                return txt
+            
+            lines = []
+            current_line = []
+            
+            for word in words:
+                # Try adding this word to current line
+                test_line = current_line + [word]
+                test_text = ' '.join(test_line)
+                bbox = draw.textbbox((0, 0), test_text, font=font)
+                line_width = bbox[2] - bbox[0]
+                
+                if line_width <= max_width:
+                    # Word fits, add it
+                    current_line.append(word)
+                else:
+                    # Word doesn't fit
+                    if current_line:
+                        # Save current line and start new one
+                        lines.append(' '.join(current_line))
+                        current_line = [word]
+                    else:
+                        # Single word too long - add it anyway if not strict mode
+                        if not self.strict_text_wrapping:
+                            current_line = [word]
+                        else:
+                            # In strict mode, try to break it
+                            lines.append(word)
+            
+            # Add last line
+            if current_line:
+                lines.append(' '.join(current_line))
+            
+            return '\n'.join(lines)
+        
         def eval_metrics(txt, font):
             """Calculate width/height of multiline text.
             
@@ -10375,48 +10422,24 @@ class MangaTranslator:
                 font_size -= 0.75
                 mutable_message = text  # Restore original text
             elif width > roi_width:
-                # Text is too wide, try wrapping with column optimization
-                # When using median-based sizing, allow more aggressive wrapping/breaking
-                columns = len(mutable_message)
+                # Text is too wide, try word-based greedy wrapping
+                wrapped = greedy_word_wrap(text, font, roi_width)
+                wrapped_width, wrapped_height = eval_metrics(wrapped, font)
                 
-                # Search for optimal column width
-                while columns > 0:
-                    columns -= 1
-                    if columns == 0:
-                        break
-                    
-                    # Use hyphen_wrap for smart wrapping
-                    try:
-                        # When strict wrapping disabled, be more aggressive with breaking
-                        break_long = not self.strict_text_wrapping
-                        wrapped = '\n'.join(hyphen_wrap(
-                            text, columns,
-                            break_on_hyphens=False,
-                            break_long_words=break_long,  # Allow breaking outlier words
-                            hyphenate_broken_words=True
-                        ))
-                        wrapped_width, wrapped_height = eval_metrics(wrapped, font)
-                        
-                        # Check both width and height constraints
-                        if wrapped_width <= roi_width and wrapped_height <= roi_height:
-                            mutable_message = wrapped
-                            break
-                    except Exception:
-                        # Fallback to simple wrapping if hyphen_wrap fails
-                        break
-                
-                if columns < 1:
-                    # Couldn't find good column width, reduce font size
+                if wrapped_width <= roi_width and wrapped_height <= roi_height:
+                    # Wrapped text fits!
+                    mutable_message = wrapped
+                else:
+                    # Wrapped text still doesn't fit, reduce font size
                     font_size -= 0.75
                     mutable_message = text  # Restore original text
             else:
                 # Text fits!
                 break
         
-        # If we hit minimum font size, do brute-force optimization
+        # If we hit minimum font size, do final optimization
         if font_size <= min_font_size:
             font_size = min_font_size
-            mutable_message = text
             
             try:
                 if font_path:
@@ -10426,28 +10449,8 @@ class MangaTranslator:
             except Exception:
                 font = ImageFont.load_default()
             
-            # Brute force: minimize cost function (width - roi_width)^2 + (height - roi_height)^2
-            min_cost = 1e9
-            min_text = text
-            
-            for columns in range(1, min(len(text) + 1, 100)):  # Limit iterations for performance
-                try:
-                    wrapped_text = '\n'.join(hyphen_wrap(
-                        text, columns,
-                        break_on_hyphens=False,
-                        break_long_words=False,
-                        hyphenate_broken_words=True
-                    ))
-                    wrapped_width, wrapped_height = eval_metrics(wrapped_text, font)
-                    cost = (wrapped_width - roi_width)**2 + (wrapped_height - roi_height)**2
-                    
-                    if cost < min_cost:
-                        min_cost = cost
-                        min_text = wrapped_text
-                except Exception:
-                    continue
-            
-            mutable_message = min_text
+            # Use greedy word wrap for best fit at minimum font size
+            mutable_message = greedy_word_wrap(text, font, roi_width)
         
         return mutable_message, int(font_size)
     
