@@ -10254,15 +10254,47 @@ class MangaTranslator:
      
     def _pil_word_wrap(self, text: str, font_path: str, roi_width: int, roi_height: int,
                        init_font_size: int, min_font_size: int, draw: ImageDraw) -> Tuple[str, int]:
-        """Comic-translate's pil_word_wrap algorithm - top-down font sizing with column wrapping.
+        """Smart word wrap algorithm with median-based font sizing.
         
-        Break long text to multiple lines, and reduce point size until all text fits within bounds.
-        This is a direct port from comic-translate for better text fitting.
+        Instead of sizing based on the longest word (outlier), this uses the median word length
+        to determine optimal font size, then allows outlier words to break/hyphenate naturally.
+        This results in better space utilization when a few long words would otherwise force
+        the entire text to shrink unnecessarily.
         """
         from hyphen_textwrap import wrap as hyphen_wrap
+        import statistics
         
         mutable_message = text
         font_size = init_font_size
+        
+        def get_median_word_width(txt, font, use_strict=False):
+            """Calculate median word width to avoid outlier-based sizing.
+            
+            Args:
+                txt: Text to analyze
+                font: Font to measure with
+                use_strict: If False (default), uses 75th percentile instead of true median
+                           This is more conservative and handles distributions with many outliers
+            """
+            words = txt.split()
+            if not words:
+                return 0
+            
+            # Measure width of each word
+            word_widths = []
+            for word in words:
+                bbox = draw.textbbox((0, 0), word, font=font)
+                word_widths.append(bbox[2] - bbox[0])
+            
+            # Use 75th percentile by default (or median if strict=True)
+            # 75th percentile is more forgiving with outliers than median
+            if use_strict:
+                return statistics.median(word_widths)
+            else:
+                # 75th percentile
+                sorted_widths = sorted(word_widths)
+                idx = int(len(sorted_widths) * 0.75)
+                return sorted_widths[min(idx, len(sorted_widths) - 1)]
         
         def eval_metrics(txt, font):
             """Calculate width/height of multiline text.
@@ -10299,6 +10331,33 @@ class MangaTranslator:
         except Exception:
             font = ImageFont.load_default()
         
+        # SMART SIZING: Use median word width for initial sizing (unless strict wrapping enabled)
+        if not self.strict_text_wrapping:
+            # Calculate what font size would make the median word fit comfortably
+            # We want median word to take ~70% of width, leaving room for longer words
+            median_width = get_median_word_width(text, font)
+            if median_width > 0:
+                # Calculate ideal font size based on median
+                target_median_ratio = 0.70  # Median word should use 70% of width
+                ideal_font_size = int(font_size * (roi_width * target_median_ratio) / median_width)
+                
+                # Clamp to reasonable range
+                ideal_font_size = max(min_font_size, min(init_font_size, ideal_font_size))
+                
+                # Only apply if it's a significant improvement (>10% larger)
+                if ideal_font_size > font_size * 1.1:
+                    font_size = ideal_font_size
+                    try:
+                        if font_path:
+                            font = ImageFont.truetype(font_path, font_size)
+                        else:
+                            font = ImageFont.load_default()
+                    except Exception:
+                        font = ImageFont.load_default()
+                    
+                    if not getattr(self, 'concise_logs', False):
+                        self._log(f"  📊 Median-based sizing: {init_font_size} → {font_size} (median_width={median_width:.0f}, roi_width={roi_width})", "debug")
+        
         # Top-down algorithm: start with large font, shrink until it fits
         while font_size > min_font_size:
             try:
@@ -10317,6 +10376,7 @@ class MangaTranslator:
                 mutable_message = text  # Restore original text
             elif width > roi_width:
                 # Text is too wide, try wrapping with column optimization
+                # When using median-based sizing, allow more aggressive wrapping/breaking
                 columns = len(mutable_message)
                 
                 # Search for optimal column width
@@ -10327,14 +10387,18 @@ class MangaTranslator:
                     
                     # Use hyphen_wrap for smart wrapping
                     try:
+                        # When strict wrapping disabled, be more aggressive with breaking
+                        break_long = not self.strict_text_wrapping
                         wrapped = '\n'.join(hyphen_wrap(
                             text, columns,
                             break_on_hyphens=False,
-                            break_long_words=False,
+                            break_long_words=break_long,  # Allow breaking outlier words
                             hyphenate_broken_words=True
                         ))
-                        wrapped_width, _ = eval_metrics(wrapped, font)
-                        if wrapped_width <= roi_width:
+                        wrapped_width, wrapped_height = eval_metrics(wrapped, font)
+                        
+                        # Check both width and height constraints
+                        if wrapped_width <= roi_width and wrapped_height <= roi_height:
                             mutable_message = wrapped
                             break
                     except Exception:
