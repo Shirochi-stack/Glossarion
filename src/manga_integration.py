@@ -8484,22 +8484,35 @@ class MangaTranslationTab(QObject):
                 if hasattr(viewer, 'clear_rectangles'):
                     viewer.clear_rectangles()
                 from PySide6.QtCore import QRectF, Qt
-                from PySide6.QtGui import QPen, QBrush, QColor
-                from manga_image_preview import MoveableRectItem
+                from PySide6.QtGui import QPen, QBrush, QColor, QPainterPath
+                from manga_image_preview import MoveableRectItem, MoveableEllipseItem, MoveablePathItem
                 for rect_data in state['viewer_rectangles']:
+                    shape = rect_data.get('shape', 'rect')
                     rect = QRectF(rect_data['x'], rect_data['y'], rect_data['width'], rect_data['height'])
                     pen = QPen(QColor(0, 255, 0), 1)
                     pen.setCosmetic(True)
                     brush = QBrush(QColor(0, 255, 0, 50))
-                    rect_item = MoveableRectItem(rect, pen=pen, brush=brush)
+                    if shape == 'ellipse':
+                        item = MoveableEllipseItem(rect, pen=pen, brush=brush)
+                    elif shape == 'polygon' and rect_data.get('polygon'):
+                        path = QPainterPath()
+                        pts = rect_data.get('polygon') or []
+                        if pts:
+                            path.moveTo(pts[0][0], pts[0][1])
+                            for px, py in pts[1:]:
+                                path.lineTo(px, py)
+                            path.closeSubpath()
+                        item = MoveablePathItem(path, pen=pen, brush=brush)
+                    else:
+                        item = MoveableRectItem(rect, pen=pen, brush=brush)
                     # Attach viewer for move signal
                     try:
-                        rect_item._viewer = viewer
+                        item._viewer = viewer
                     except Exception:
                         pass
-                    viewer._scene.addItem(rect_item)
-                    viewer.rectangles.append(rect_item)
-                print(f"[STATE] Restored {len(state['viewer_rectangles'])} viewer rectangles (preferred)")
+                    viewer._scene.addItem(item)
+                    viewer.rectangles.append(item)
+                print(f"[STATE] Restored {len(state['viewer_rectangles'])} viewer shapes (preferred)")
                 used_boxes = True
             
             if not used_boxes and 'detection_regions' in state:
@@ -8555,32 +8568,45 @@ class MangaTranslationTab(QObject):
                     viewer.clear_rectangles()
                 
                 from PySide6.QtCore import QRectF, Qt
-                from PySide6.QtGui import QPen, QBrush, QColor
-                from manga_image_preview import MoveableRectItem
+                from PySide6.QtGui import QPen, QBrush, QColor, QPainterPath
+                from manga_image_preview import MoveableRectItem, MoveableEllipseItem, MoveablePathItem
                 
                 for idx, rect_data in enumerate(state['viewer_rectangles']):
+                    shape = rect_data.get('shape', 'rect')
                     rect = QRectF(rect_data['x'], rect_data['y'], rect_data['width'], rect_data['height'])
                     pen = QPen(QColor(0, 255, 0), 1)
                     pen.setCosmetic(True)
                     brush = QBrush(QColor(0, 255, 0, 50))
-                    rect_item = MoveableRectItem(rect, pen=pen, brush=brush)
+                    if shape == 'ellipse':
+                        item = MoveableEllipseItem(rect, pen=pen, brush=brush)
+                    elif shape == 'polygon' and rect_data.get('polygon'):
+                        path = QPainterPath()
+                        pts = rect_data.get('polygon') or []
+                        if pts:
+                            path.moveTo(pts[0][0], pts[0][1])
+                            for px, py in pts[1:]:
+                                path.lineTo(px, py)
+                            path.closeSubpath()
+                        item = MoveablePathItem(path, pen=pen, brush=brush)
+                    else:
+                        item = MoveableRectItem(rect, pen=pen, brush=brush)
                     # Attach viewer reference so moved emits
                     try:
-                        rect_item._viewer = viewer
+                        item._viewer = viewer
                     except Exception:
                         pass
-                    viewer._scene.addItem(rect_item)
-                    viewer.rectangles.append(rect_item)
+                    viewer._scene.addItem(item)
+                    viewer.rectangles.append(item)
                     # Attach region index and move-sync handler
                     try:
-                        rect_item.region_index = idx
-                        self._attach_move_sync_to_rectangle(rect_item, idx)
+                        item.region_index = idx
+                        self._attach_move_sync_to_rectangle(item, idx)
                         # Add context menu to restored rectangles
-                        self._add_context_menu_to_rectangle(rect_item, idx)
+                        self._add_context_menu_to_rectangle(item, idx)
                     except Exception:
                         pass
                 
-                print(f"[STATE] Restored {len(state['viewer_rectangles'])} viewer rectangles")
+                print(f"[STATE] Restored {len(state['viewer_rectangles'])} viewer shapes")
             
             print(f"[STATE] State restoration complete for {os.path.basename(image_path)}")
             
@@ -11991,9 +12017,11 @@ class MangaTranslationTab(QObject):
                 return
             
             target_rect = rectangles[region_index]
-            rect_bounds = target_rect.rect()
+            shape_type = getattr(target_rect, 'shape_type', 'rect')
             
-            print(f"[CLEAN_RECT] Target rectangle {region_index} bounds: {rect_bounds.x()}, {rect_bounds.y()}, {rect_bounds.width()}, {rect_bounds.height()}")
+            # Prefer sceneBoundingRect for robust coordinates across item types
+            rect_bounds = target_rect.sceneBoundingRect()
+            print(f"[CLEAN_RECT] Target shape {region_index} type={shape_type} bounds: {rect_bounds.x()}, {rect_bounds.y()}, {rect_bounds.width()}, {rect_bounds.height()}")
             
             # Check if rectangle is excluded from cleaning
             is_excluded = getattr(target_rect, 'exclude_from_clean', False)
@@ -12077,7 +12105,39 @@ class MangaTranslationTab(QObject):
                     
                     # Create a mask for this specific region
                     mask = np.zeros((img_height, img_width), dtype=np.uint8)
-                    mask[y:y+h, x:x+w] = 255
+                    
+                    try:
+                        if shape_type == 'polygon' and hasattr(target_rect, 'path'):
+                            # Convert polygon points to image coordinates
+                            poly_scene = target_rect.mapToScene(target_rect.path().toFillPolygon())
+                            pts_img = []
+                            for p in poly_scene:
+                                px = int(round(p.x() * scale_x))
+                                py = int(round(p.y() * scale_y))
+                                # Clamp
+                                px = max(0, min(px, img_width - 1))
+                                py = max(0, min(py, img_height - 1))
+                                pts_img.append([px, py])
+                            if len(pts_img) >= 3:
+                                import numpy as _np
+                                arr = _np.array(pts_img, dtype=_np.int32).reshape((-1, 1, 2))
+                                cv2.fillPoly(mask, [arr], 255)
+                            else:
+                                # Fallback to bounding rect
+                                mask[y:y+h, x:x+w] = 255
+                        elif shape_type == 'ellipse':
+                            # Draw ellipse mask from bounding rect
+                            cx = int(round((x + x + w) / 2))
+                            cy = int(round((y + y + h) / 2))
+                            rx = max(1, int(round(w / 2)))
+                            ry = max(1, int(round(h / 2)))
+                            cv2.ellipse(mask, (cx, cy), (rx, ry), 0, 0, 360, 255, -1)
+                        else:
+                            # Rectangle
+                            mask[y:y+h, x:x+w] = 255
+                    except Exception as me:
+                        print(f"[CLEAN_RECT_THREAD] Mask build error, using rectangle fallback: {me}")
+                        mask[y:y+h, x:x+w] = 255
                     
                     print(f"[CLEAN_RECT_THREAD] Created mask with {np.sum(mask > 0)} white pixels")
                     

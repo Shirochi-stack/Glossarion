@@ -1486,15 +1486,33 @@ class MangaImagePreviewWidget(QWidget):
             image_path = getattr(self, 'current_image_path', None)
             if not image_path:
                 return
-            # Collect current viewer rectangles geometry for persistence
+            # Collect current viewer shapes for persistence (rect/ellipse/polygon)
             rect_data = []
             try:
                 for rect_item in getattr(self.viewer, 'rectangles', []) or []:
                     r = rect_item.sceneBoundingRect()
-                    rect_data.append({'x': r.x(), 'y': r.y(), 'width': r.width(), 'height': r.height()})
+                    entry = {
+                        'x': r.x(),
+                        'y': r.y(),
+                        'width': r.width(),
+                        'height': r.height(),
+                        'shape': getattr(rect_item, 'shape_type', 'rect')
+                    }
+                    # Persist polygon points if lasso
+                    try:
+                        if entry['shape'] == 'polygon' and hasattr(rect_item, 'path'):
+                            poly = rect_item.mapToScene(rect_item.path().toFillPolygon())
+                            pts = []
+                            for p in poly:
+                                pts.append([float(p.x()), float(p.y())])
+                            if len(pts) >= 3:
+                                entry['polygon'] = pts
+                    except Exception:
+                        pass
+                    rect_data.append(entry)
             except Exception:
                 rect_data = []
-            # Persist ONLY viewer_rectangles to avoid cascading changes to all overlays
+            # Persist ONLY viewer_rectangles/shapes to avoid cascading changes to all overlays
             if hasattr(self.manga_integration, 'image_state_manager') and self.manga_integration.image_state_manager:
                 # Merge into existing state without touching detection_regions
                 prev = self.manga_integration.image_state_manager.get_state(image_path) or {}
