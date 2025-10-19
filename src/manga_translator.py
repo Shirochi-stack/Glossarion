@@ -1194,7 +1194,7 @@ class MangaTranslator:
         
         # Text shadow settings from config
         self.shadow_enabled = config.get('manga_shadow_enabled', False)
-        manga_shadow_color = config.get('manga_shadow_color', [128, 128, 128])
+        manga_shadow_color = config.get('manga_shadow_color', [255, 255, 255])
         self.shadow_color = tuple(manga_shadow_color)  # Convert list to tuple
         # If shadow is enabled, use its color for outline as well (prevents "white shadow" look)
         if self.shadow_enabled and isinstance(self.shadow_color, tuple) and len(self.shadow_color) == 3:

@@ -2694,6 +2694,37 @@ Recent translations to summarize:
         # Connect scrollbar to detect manual scrolling
         scrollbar = self.log_text.verticalScrollBar()
         scrollbar.valueChanged.connect(self._on_log_scroll)
+        
+        # Auto-Scroll resume button (overlay near the scrollbar)
+        try:
+            from PySide6.QtWidgets import QToolButton
+            from PySide6.QtCore import QSize
+            self._autoscroll_btn = QToolButton(self.log_text)
+            self._autoscroll_btn.setText("Auto")
+            self._autoscroll_btn.setToolTip("Resume auto-scroll")
+            self._autoscroll_btn.setAutoRaise(True)
+            self._autoscroll_btn.setCursor(Qt.PointingHandCursor)
+            self._autoscroll_btn.setVisible(False)
+            self._autoscroll_btn.setStyleSheet(
+                "QToolButton {"
+                "  background-color: rgba(45,45,45,180);"
+                "  color: white;"
+                "  border: 1px solid #5a9fd4;"
+                "  border-radius: 10px;"
+                "  padding: 2px 6px;"
+                "  font-size: 9pt;"
+                "}"
+                "QToolButton:hover { background-color: rgba(70,70,70,220); }"
+            )
+            self._autoscroll_btn.clicked.connect(self._force_autoscroll)
+            # Reposition on viewport changes
+            try:
+                self.log_text.viewport().installEventFilter(self)
+            except Exception:
+                pass
+            QTimer.singleShot(0, self._position_autoscroll_button)
+        except Exception:
+            self._autoscroll_btn = None
 
     def _check_poe_model(self, *args):
         """Automatically show POE helper when POE model is selected"""
@@ -7034,6 +7065,9 @@ Important rules:
             
             # Track current state for next comparison
             self._was_at_bottom = at_bottom
+            
+            # Update auto-scroll button visibility/position
+            self._update_autoscroll_button()
         except Exception:
             pass
     
@@ -7043,6 +7077,7 @@ Important rules:
             self._autoscroll_delay_until = _time.time() + (ms / 1000.0)
             # Reset manual scroll flag when starting new operation
             self._user_scrolled_up = False
+            self._update_autoscroll_button()
         except Exception:
             self._autoscroll_delay_until = 0.0
     
@@ -7075,6 +7110,8 @@ Important rules:
                     not getattr(self, '_user_scrolled_up', False)):
                     scrollbar = self.log_text.verticalScrollBar()
                     scrollbar.setValue(scrollbar.maximum())
+                # Update button visibility state after append
+                self._update_autoscroll_button()
             except Exception:
                 pass
         except Exception as e:
@@ -7159,6 +7196,8 @@ Important rules:
                    # Force immediate update of the widget
                    self.log_text.update()
                    self.log_text.repaint()
+                   # Update button visibility state after append
+                   self._update_autoscroll_button()
                except Exception:
                    pass
            except Exception as e:
@@ -7342,6 +7381,55 @@ Important rules:
     def select_all_log(self):
        """Select all text in the log"""
        self.log_text.selectAll()
+
+    # --- Auto-scroll button helpers ---
+    def _force_autoscroll(self):
+        try:
+            self._user_scrolled_up = False
+            sb = self.log_text.verticalScrollBar()
+            sb.setValue(sb.maximum())
+            self._update_autoscroll_button()
+        except Exception:
+            pass
+
+    def _position_autoscroll_button(self):
+        try:
+            if not getattr(self, '_autoscroll_btn', None):
+                return
+            vw = self.log_text.viewport()
+            if not vw.isVisible():
+                return
+            btn = self._autoscroll_btn
+            btn.adjustSize()
+            # Place at bottom-right inside the viewport
+            r = vw.geometry()
+            x = r.right() - btn.width() - 8
+            y = r.bottom() - btn.height() - 8
+            btn.move(x, y)
+        except Exception:
+            pass
+
+    def _update_autoscroll_button(self):
+        try:
+            if not getattr(self, '_autoscroll_btn', None):
+                return
+            sb = self.log_text.verticalScrollBar()
+            at_bottom = sb.value() >= sb.maximum() - 10
+            should_show = getattr(self, '_user_scrolled_up', False) and not at_bottom
+            self._autoscroll_btn.setVisible(bool(should_show))
+            if should_show:
+                self._position_autoscroll_button()
+        except Exception:
+            pass
+
+    def eventFilter(self, obj, event):
+        try:
+            if hasattr(self, 'log_text') and obj == self.log_text.viewport():
+                if event.type() in (QEvent.Resize, QEvent.Show):
+                    self._position_autoscroll_button()
+        except Exception:
+            pass
+        return super().eventFilter(obj, event)
 
     def auto_load_glossary_for_file(self, file_path):
         """Automatically load glossary if it exists in the output folder"""
