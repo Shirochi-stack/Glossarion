@@ -4603,6 +4603,30 @@ class MangaTranslationTab(QObject):
         # Initially disable shadow controls
         self._toggle_shadow_controls()
         
+        # Reset to Defaults Button
+        reset_btn_frame = QWidget()
+        reset_btn_layout = QHBoxLayout(reset_btn_frame)
+        reset_btn_layout.setContentsMargins(0, 15, 0, 10)
+        reset_btn_layout.setSpacing(10)
+        
+        reset_defaults_btn = QPushButton("🔄 Reset to Defaults")
+        reset_defaults_btn.clicked.connect(self._reset_rendering_to_defaults)
+        reset_defaults_btn.setStyleSheet(
+            "QPushButton { "
+            "  background-color: #ff9800; "
+            "  color: white; "
+            "  padding: 8px 20px; "
+            "  font-size: 10pt; "
+            "  font-weight: bold; "
+            "  border-radius: 4px; "
+            "} "
+            "QPushButton:hover { background-color: #fb8c00; }"
+        )
+        reset_btn_layout.addWidget(reset_defaults_btn)
+        reset_btn_layout.addStretch()
+        
+        font_render_frame_layout.addWidget(reset_btn_frame)
+        
         # Add decorative icon at the bottom of Font & Text Settings to balance the layout
         font_icon_frame = QWidget()
         font_icon_layout = QVBoxLayout(font_icon_frame)
@@ -5230,6 +5254,8 @@ class MangaTranslationTab(QObject):
                 self.prefer_larger_value = False
                 self.bubble_size_factor_value = True
                 self.line_spacing_value = 1.2
+                # Small bubbles use strict wrapping
+                self.strict_text_wrapping_value = True
             elif preset == 'balanced':
                 self.font_algorithm_value = 'smart'
                 self.auto_min_size_value = 12
@@ -5237,6 +5263,8 @@ class MangaTranslationTab(QObject):
                 self.prefer_larger_value = True
                 self.bubble_size_factor_value = True
                 self.line_spacing_value = 1.3
+                # Balanced preset disables strict wrapping for more flexibility
+                self.strict_text_wrapping_value = False
             elif preset == 'large':
                 self.font_algorithm_value = 'aggressive'
                 self.auto_min_size_value = 14
@@ -5244,6 +5272,8 @@ class MangaTranslationTab(QObject):
                 self.prefer_larger_value = True
                 self.bubble_size_factor_value = False
                 self.line_spacing_value = 1.4
+                # Large text preset disables strict wrapping for more flexibility
+                self.strict_text_wrapping_value = False
             
             # Update all spinboxes with new values
             if hasattr(self, 'min_size_spinbox'):
@@ -5258,6 +5288,8 @@ class MangaTranslationTab(QObject):
                 self.prefer_larger_checkbox.setChecked(self.prefer_larger_value)
             if hasattr(self, 'bubble_size_factor_checkbox'):
                 self.bubble_size_factor_checkbox.setChecked(self.bubble_size_factor_value)
+            if hasattr(self, 'strict_wrap_checkbox'):
+                self.strict_wrap_checkbox.setChecked(self.strict_text_wrapping_value)
             
             # Update the line spacing label
             if hasattr(self, 'line_spacing_value_label'):
@@ -5689,6 +5721,137 @@ class MangaTranslationTab(QObject):
         except Exception as e:
             # Log error but don't crash
             print(f"Error saving manga settings: {e}")
+    
+    def _reset_rendering_to_defaults(self):
+        """Reset all rendering settings to their default values"""
+        from PySide6.QtWidgets import QMessageBox
+        
+        # Confirm with user
+        reply = QMessageBox.question(
+            self.dialog,
+            "Reset to Defaults",
+            "Are you sure you want to reset all rendering settings to their default values?\n\nThis will reset:\n" +
+            "• Background opacity and style\n" +
+            "• Font size and style settings\n" +
+            "• Text color and shadow settings\n" +
+            "• Auto-fit style and text wrapping\n" +
+            "• All other rendering options",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+        
+        try:
+            # Background settings
+            self.bg_opacity_value = 130
+            self.free_text_only_bg_opacity_value = True
+            self.bg_style_value = 'circle'
+            self.bg_reduction_value = 1.0
+            
+            # Font settings
+            self.font_size_value = 0
+            self.font_size_mode_value = 'fixed'
+            self.font_size_multiplier_value = 1.0
+            self.selected_font_path = None
+            self.font_style_value = 'Default'
+            
+            # Auto fit style
+            self.auto_fit_style_value = 'compact'
+            self.auto_min_size_value = 10
+            self.max_font_size_value = 48
+            
+            # Text wrapping and constraints
+            self.strict_text_wrapping_value = True
+            self.constrain_to_bubble_value = True
+            self.force_caps_lock_value = True
+            
+            # Font algorithm settings
+            self.font_algorithm_value = 'smart'
+            self.prefer_larger_value = True
+            self.bubble_size_factor_value = True
+            self.line_spacing_value = 1.3
+            
+            # Text color
+            self.text_color_r_value = 102
+            self.text_color_g_value = 0
+            self.text_color_b_value = 0
+            
+            # Shadow settings
+            self.shadow_enabled_value = True
+            self.shadow_color_r_value = 204
+            self.shadow_color_g_value = 128
+            self.shadow_color_b_value = 128
+            self.shadow_offset_x_value = 2
+            self.shadow_offset_y_value = 2
+            self.shadow_blur_value = 0
+            
+            # Safe area
+            self.safe_area_enabled_value = False
+            self.safe_area_scale_value = 1.0
+            
+            # Update UI widgets
+            if hasattr(self, 'opacity_slider'):
+                self.opacity_slider.setValue(self.bg_opacity_value)
+            if hasattr(self, 'ft_only_checkbox'):
+                self.ft_only_checkbox.setChecked(self.free_text_only_bg_opacity_value)
+            if hasattr(self, 'reduction_slider'):
+                self.reduction_slider.setValue(self.bg_reduction_value)
+            if hasattr(self, 'bg_style_combo'):
+                self.bg_style_combo.setCurrentText(self.bg_style_value)
+            
+            # Update font mode
+            if hasattr(self, 'font_mode_group'):
+                for button in self.font_mode_group.buttons():
+                    if button.text().lower().replace(' ', '_') == 'fixed':
+                        button.setChecked(True)
+            
+            # Update auto fit style
+            if hasattr(self, 'auto_fit_style_group'):
+                for button in self.auto_fit_style_group.buttons():
+                    if button.text().lower() == 'compact':
+                        button.setChecked(True)
+            
+            # Update text wrapping checkbox
+            if hasattr(self, 'strict_wrapping_checkbox'):
+                self.strict_wrapping_checkbox.setChecked(True)
+            
+            # Update constrain checkbox
+            if hasattr(self, 'constrain_checkbox'):
+                self.constrain_checkbox.setChecked(True)
+            
+            # Update force caps checkbox
+            if hasattr(self, 'force_caps_checkbox'):
+                self.force_caps_checkbox.setChecked(True)
+            
+            # Update shadow checkbox
+            if hasattr(self, 'shadow_checkbox'):
+                self.shadow_checkbox.setChecked(True)
+            
+            # Update min/max font size spinboxes
+            if hasattr(self, 'min_font_size_spin'):
+                self.min_font_size_spin.setValue(self.auto_min_size_value)
+            if hasattr(self, 'max_font_size_spin'):
+                self.max_font_size_spin.setValue(self.max_font_size_value)
+            
+            # Save and apply settings
+            self._save_rendering_settings()
+            self._apply_rendering_settings()
+            
+            # Show confirmation
+            QMessageBox.information(
+                self.dialog,
+                "Settings Reset",
+                "All rendering settings have been reset to their default values."
+            )
+            
+        except Exception as e:
+            QMessageBox.warning(
+                self.dialog,
+                "Error",
+                f"Failed to reset settings: {str(e)}"
+            )
     
     def _on_context_toggle(self, state=None):
         """Handle full page context toggle"""
