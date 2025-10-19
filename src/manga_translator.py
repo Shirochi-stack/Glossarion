@@ -10428,7 +10428,32 @@ class MangaTranslator:
             # Step 1: Start with one word per line
             lines = [[word] for word in words]
             
-            # Step 2: Merge short words with neighbors
+            # Step 2: First pass - merge consecutive short words together
+            i = 0
+            while i < len(lines):
+                if not lines[i]:
+                    i += 1
+                    continue
+                word = lines[i][0]
+                
+                # If this is a short word AND next is also a short word, merge them
+                if is_short(word) and i + 1 < len(lines) and lines[i + 1]:
+                    next_word = lines[i + 1][0]
+                    if is_short(next_word):
+                        test = f"{word} {next_word}"
+                        test_width = twidth(test)
+                        print(f"[DEBUG] Merging consecutive short words: '{word}' + '{next_word}' = '{test}', width={test_width}, max={max_width}")
+                        if allow_overflow or test_width <= max_width:
+                            lines[i] = [test]
+                            lines.pop(i + 1)
+                            print(f"[DEBUG]   -> MERGED consecutive shorts")
+                            # Don't increment i, check if we can merge more
+                            continue
+                
+                i += 1
+            
+            # Step 3: Second pass - merge remaining orphaned short words with neighbors
+            # Only merge SINGLE short words, not pairs that were already merged in step 2
             i = 0
             while i < len(lines):
                 if not lines[i]:
@@ -10437,7 +10462,9 @@ class MangaTranslator:
                     
                 word = lines[i][0]
                 
-                if is_short(word):
+                # Check if this is a SINGLE short word (not already merged with another)
+                words_in_line = word.split()
+                if len(words_in_line) == 1 and is_short(word):
                     merged = False
                     
                     # DEBUG
