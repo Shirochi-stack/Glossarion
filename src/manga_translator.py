@@ -10254,13 +10254,12 @@ class MangaTranslator:
      
     def _pil_word_wrap(self, text: str, font_path: str, roi_width: int, roi_height: int,
                        init_font_size: int, min_font_size: int, draw: ImageDraw) -> Tuple[str, int]:
-        """Smart text wrapping with height-based font sizing.
+        """Binary search for perfect-fit font sizing.
         
         When strict_text_wrapping is disabled:
-        - Calculates font size based on HEIGHT to maximize readability
-        - Uses greedy word-based line breaking for natural grouping
-        - For narrow bubbles (aspect > 2), respects width to force line breaks
-        - For normal bubbles, allows generous width for natural word grouping
+        - Binary searches for MAXIMUM font size that fits perfectly within bounds
+        - For narrow bubbles (aspect > 2): ONE WORD PER LINE, validates width & height
+        - For normal bubbles: greedy word wrapping for natural grouping, validates height
         
         When strict_text_wrapping is enabled:
         - Falls back to original column-based algorithm (legacy behavior)
@@ -10365,10 +10364,12 @@ class MangaTranslator:
                 max_width = max(max_width, line_width)
             
             # Calculate height using same logic as rendering:
-            # line_height = max(font_size * 1.2, actual_bbox_height * 1.1)
+            # line_height = max(font.size * 1.2, actual_bbox_height * 1.1)
+            # Extract font size from the font object
+            current_font_size = getattr(font, 'size', init_font_size)
             sample_bbox = draw.textbbox((0, 0), lines[0] if lines[0] else "Ay", font=font)
             actual_line_height = sample_bbox[3] - sample_bbox[1]
-            line_height = max(font_size * 1.2, actual_line_height * 1.1)
+            line_height = max(current_font_size * 1.2, actual_line_height * 1.1)
             total_height = len(lines) * line_height
             
             return (max_width, total_height)
@@ -10382,41 +10383,115 @@ class MangaTranslator:
         except Exception:
             font = ImageFont.load_default()
         
-        # SIMPLE HEIGHT-BASED SIZING: When strict mode disabled, focus on height
+        # BINARY SEARCH FOR PERFECT FIT: When strict mode disabled
         if not self.strict_text_wrapping:
             # Check if this is a narrow vertical bubble
             aspect_ratio = roi_height / max(roi_width, 1)
             is_narrow = aspect_ratio > 2.0
             
-            # Estimate lines based on word count
-            words = text.split()
+            # For narrow bubbles: calculate median font size based on all words
+            # This ignores outliers like "PEACEFULLY~" and sizes for typical words
             if is_narrow:
-                # Narrow: 1-2 words per line
-                estimated_lines = max(len(words) // 1.5, 3)
-            else:
-                # Normal: 2-3 words per line  
-                estimated_lines = max(len(words) // 2.5, 2)
+                words = text.split()
+                word_font_sizes = []
+                
+                for word in words:
+                    # What font size would make this word use 90% of width?
+                    bbox = draw.textbbox((0, 0), word, font=font)
+                    word_width_at_init = bbox[2] - bbox[0]
+                    
+                    if word_width_at_init > 0:
+                        # Scale to 95% of roi_width (more aggressive)
+                        ideal_size = int(init_font_size * (roi_width * 0.95) / word_width_at_init)
+                        word_font_sizes.append(ideal_size)
+                
+                # Use 50th percentile (true median) - ignore outliers completely
+                if word_font_sizes:
+                    sorted_sizes = sorted(word_font_sizes)
+                    median_idx = len(sorted_sizes) // 2
+                    median_font_size = sorted_sizes[median_idx]
+                    
+                    # Binary search: allow outliers to overflow, but most words must fit
+                    low = min_font_size
+                    high = max(init_font_size, median_font_size)
+                    best_font_size = min_font_size
+                    best_wrapped = '\n'.join(words)
+                    
+                    while low <= high:
+                        mid = (low + high) // 2
+                        
+                        # Load font at this size
+                        try:
+                            test_font = ImageFont.truetype(font_path, mid) if font_path else ImageFont.load_default()
+                        except Exception:
+                            test_font = ImageFont.load_default()
+                        
+                        # Wrap: one word per line
+                        wrapped = '\n'.join(words)
+                        
+                        # Measure height (strict) and check individual word widths
+                        width, height = eval_metrics(wrapped, test_font)
+                        
+                        # Count how many words overflow
+                        overflow_count = 0
+                        for word in words:
+                            bbox = draw.textbbox((0, 0), word, font=test_font)
+                            word_width = bbox[2] - bbox[0]
+                            if word_width > roi_width:
+                                overflow_count += 1
+                        
+                        # Allow up to 1 outlier word (or 20% of words) to overflow
+                        max_overflow = max(1, int(len(words) * 0.2))
+                        fits_width = overflow_count <= max_overflow
+                        fits_height = height <= roi_height
+                        
+                        if fits_width and fits_height:
+                            # Fits (with allowed overflows), try larger
+                            best_font_size = mid
+                            best_wrapped = wrapped
+                            low = mid + 1
+                        else:
+                            # Too large, try smaller
+                            high = mid - 1
+                    
+                    return best_wrapped, int(best_font_size)
+                else:
+                    # Fallback
+                    wrapped = '\n'.join(words)
+                    return wrapped, init_font_size
             
-            # Calculate font from HEIGHT only
-            line_spacing = 1.3
-            font_size = int(roi_height / (estimated_lines * line_spacing))
-            font_size = max(min_font_size, min(init_font_size, font_size))
+            # For normal bubbles: original greedy wrapping logic
+            high = init_font_size
+            low = min_font_size
+            best_font_size = min_font_size
+            best_wrapped = text
             
-            # Load font
-            try:
-                font = ImageFont.truetype(font_path, font_size) if font_path else ImageFont.load_default()
-            except Exception:
-                font = ImageFont.load_default()
+            while low <= high:
+                mid = (low + high) // 2
+                
+                # Load font at this size
+                try:
+                    test_font = ImageFont.truetype(font_path, mid) if font_path else ImageFont.load_default()
+                except Exception:
+                    test_font = ImageFont.load_default()
+                
+                # Normal: greedy word wrapping for natural grouping
+                wrapped = greedy_word_wrap(text, test_font, roi_width * 2)
+                
+                # Measure the wrapped text
+                width, height = eval_metrics(wrapped, test_font)
+                
+                # Normal: only check height (width is already generous)
+                if height <= roi_height:
+                    # This font size works, try larger
+                    best_font_size = mid
+                    best_wrapped = wrapped
+                    low = mid + 1
+                else:
+                    # Too large, try smaller
+                    high = mid - 1
             
-            # Wrap with appropriate width
-            if is_narrow:
-                # Narrow bubble: respect width to avoid extreme overflow
-                wrapped = greedy_word_wrap(text, font, roi_width)
-            else:
-                # Normal bubble: generous width for natural grouping
-                wrapped = greedy_word_wrap(text, font, roi_width * 2)
-            
-            return wrapped, int(font_size)
+            return best_wrapped, int(best_font_size)
         
         # STRICT MODE: Original algorithm (unused code below, kept for fallback)
         if False:
