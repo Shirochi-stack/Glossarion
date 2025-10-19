@@ -15454,6 +15454,8 @@ class MangaTranslationTab(QObject):
                         pass
                     tr.strict_text_wrapping = bool(settings.get('strict_wrapping', True))
                     tr.constrain_to_bubble = bool(settings.get('constrain_to_bubble', True))
+                    # Sync auto_fit_style for narrow bubble handling
+                    tr.auto_fit_style = str(settings.get('auto_fit_style', 'balanced'))
                     
                     # Font mode
                     fs_mode = str(settings.get('font_size_mode', 'auto'))
