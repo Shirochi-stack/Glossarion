@@ -8441,18 +8441,34 @@ class MangaTranslationTab(QObject):
             
             # Store viewer rectangles for visual state
             if hasattr(self.image_preview_widget, 'viewer') and self.image_preview_widget.viewer.rectangles:
-                # Store rectangle geometry
+                # Store geometry + shape metadata (rect/ellipse/polygon) in SCENE coords
                 rect_data = []
                 for rect_item in self.image_preview_widget.viewer.rectangles:
-                    rect = rect_item.rect()
-                    rect_data.append({
-                        'x': rect.x(),
-                        'y': rect.y(),
-                        'width': rect.width(),
-                        'height': rect.height()
-                    })
+                    try:
+                        br = rect_item.sceneBoundingRect()
+                    except Exception:
+                        br = rect_item.rect()
+                    entry = {
+                        'x': br.x(),
+                        'y': br.y(),
+                        'width': br.width(),
+                        'height': br.height(),
+                        'shape': getattr(rect_item, 'shape_type', 'rect')
+                    }
+                    # Persist polygon points if lasso/path
+                    try:
+                        if entry['shape'] == 'polygon' and hasattr(rect_item, 'path'):
+                            poly = rect_item.mapToScene(rect_item.path().toFillPolygon())
+                            pts = []
+                            for p in poly:
+                                pts.append([float(p.x()), float(p.y())])
+                            if len(pts) >= 3:
+                                entry['polygon'] = pts
+                    except Exception:
+                        pass
+                    rect_data.append(entry)
                 state['viewer_rectangles'] = rect_data
-                print(f"[STATE] Persisting {len(rect_data)} viewer rectangles for {os.path.basename(image_path)}")
+                print(f"[STATE] Persisting {len(rect_data)} viewer shapes for {os.path.basename(image_path)}")
             
             # Save state to manager
             self.image_state_manager.set_state(image_path, state, save=True)
@@ -8677,8 +8693,8 @@ class MangaTranslationTab(QObject):
                 if hasattr(viewer, 'clear_rectangles'):
                     viewer.clear_rectangles()
                 from PySide6.QtCore import QRectF, Qt
-                from PySide6.QtGui import QPen, QBrush, QColor
-                from manga_image_preview import MoveableRectItem
+                from PySide6.QtGui import QPen, QBrush, QColor, QPainterPath
+                from manga_image_preview import MoveableRectItem, MoveableEllipseItem, MoveablePathItem
                 # Check if there are OCR or translated texts to determine rectangle colors
                 recognized_texts = state.get('recognized_texts', [])
                 translated_texts = state.get('translated_texts', [])
@@ -8709,7 +8725,20 @@ class MangaTranslationTab(QObject):
                         brush = QBrush(QColor(0, 255, 0, 50))
                     
                     pen.setCosmetic(True)
-                    rect_item = MoveableRectItem(rect, pen=pen, brush=brush)
+                    shape = rect_data.get('shape', 'rect')
+                    if shape == 'ellipse':
+                        rect_item = MoveableEllipseItem(rect, pen=pen, brush=brush)
+                    elif shape == 'polygon' and rect_data.get('polygon'):
+                        path = QPainterPath()
+                        pts = rect_data.get('polygon') or []
+                        if pts:
+                            path.moveTo(pts[0][0], pts[0][1])
+                            for px, py in pts[1:]:
+                                path.lineTo(px, py)
+                            path.closeSubpath()
+                        rect_item = MoveablePathItem(path, pen=pen, brush=brush)
+                    else:
+                        rect_item = MoveableRectItem(rect, pen=pen, brush=brush)
                     # Attach viewer for move signal
                     try:
                         rect_item._viewer = viewer
@@ -8726,7 +8755,7 @@ class MangaTranslationTab(QObject):
                     except Exception:
                         pass
                         
-                print(f"[STATE] Restored {len(state['viewer_rectangles'])} viewer rectangles (preferred)")
+                print(f"[STATE] Restored {len(state['viewer_rectangles'])} viewer shapes (preferred)")
                 used_boxes = True
             
             if not used_boxes and 'detection_regions' in state:
@@ -8814,8 +8843,8 @@ class MangaTranslationTab(QObject):
                     viewer.clear_rectangles()
                 
                 from PySide6.QtCore import QRectF, Qt
-                from PySide6.QtGui import QPen, QBrush, QColor
-                from manga_image_preview import MoveableRectItem
+                from PySide6.QtGui import QPen, QBrush, QColor, QPainterPath
+                from manga_image_preview import MoveableRectItem, MoveableEllipseItem, MoveablePathItem
                 
                 # Check if there are OCR or translated texts to determine rectangle colors
                 recognized_texts = state.get('recognized_texts', [])
@@ -8847,7 +8876,20 @@ class MangaTranslationTab(QObject):
                         brush = QBrush(QColor(0, 255, 0, 50))
                     
                     pen.setCosmetic(True)
-                    rect_item = MoveableRectItem(rect, pen=pen, brush=brush)
+                    shape = rect_data.get('shape', 'rect')
+                    if shape == 'ellipse':
+                        rect_item = MoveableEllipseItem(rect, pen=pen, brush=brush)
+                    elif shape == 'polygon' and rect_data.get('polygon'):
+                        path = QPainterPath()
+                        pts = rect_data.get('polygon') or []
+                        if pts:
+                            path.moveTo(pts[0][0], pts[0][1])
+                            for px, py in pts[1:]:
+                                path.lineTo(px, py)
+                            path.closeSubpath()
+                        rect_item = MoveablePathItem(path, pen=pen, brush=brush)
+                    else:
+                        rect_item = MoveableRectItem(rect, pen=pen, brush=brush)
                     # Attach viewer reference so moved emits
                     try:
                         rect_item._viewer = viewer
@@ -8864,7 +8906,7 @@ class MangaTranslationTab(QObject):
                     except Exception:
                         pass
                 
-                print(f"[STATE] Restored {len(state['viewer_rectangles'])} viewer rectangles")
+                print(f"[STATE] Restored {len(state['viewer_rectangles'])} viewer shapes")
             
             # If translated_texts exist and rectangles are present, restore text overlays on source viewer
             try:
