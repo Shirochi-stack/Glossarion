@@ -10617,8 +10617,8 @@ class MangaTranslator:
                             # Readable mode: IGNORE width validation entirely, only check height
                             fits = height <= roi_height
                         else:
-                            # Balanced mode: we wrapped with width constraint; just validate height
-                            fits = height <= roi_height
+                            # Balanced mode: allow some width overflow (55%) for outlier words, but not unlimited
+                            fits = height <= roi_height and width <= roi_width * 1.55
                         
                         if fits:
                             # Fits, try larger
