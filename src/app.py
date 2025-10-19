@@ -168,7 +168,7 @@ class GlossarionWeb:
         if 'algorithm' not in self.config['manga_settings']['font_sizing']:
             self.config['manga_settings']['font_sizing']['algorithm'] = 'smart'
         if 'auto_fit_style' not in self.config['manga_settings']['rendering']:
-            self.config['manga_settings']['rendering']['auto_fit_style'] = 'balanced'
+            self.config['manga_settings']['rendering']['auto_fit_style'] = 'compact'
         
         # Also ensure they're in decrypted_config
         if 'manga_settings' not in self.decrypted_config:
@@ -180,7 +180,7 @@ class GlossarionWeb:
         if 'algorithm' not in self.decrypted_config['manga_settings']['font_sizing']:
             self.decrypted_config['manga_settings']['font_sizing']['algorithm'] = 'smart'
         if 'auto_fit_style' not in self.decrypted_config['manga_settings']['rendering']:
-            self.decrypted_config['manga_settings']['rendering']['auto_fit_style'] = 'balanced'
+            self.decrypted_config['manga_settings']['rendering']['auto_fit_style'] = 'compact'
         
         print(f"🎨 Initialized font algorithm: {self.config['manga_settings']['font_sizing']['algorithm']}")
         print(f"🎨 Initialized auto fit style: {self.config['manga_settings']['rendering']['auto_fit_style']}")
@@ -2184,7 +2184,7 @@ class GlossarionWeb:
             if 'algorithm' not in merged_config['manga_settings']['font_sizing']:
                 merged_config['manga_settings']['font_sizing']['algorithm'] = 'smart'
             if 'auto_fit_style' not in merged_config['manga_settings']['rendering']:
-                merged_config['manga_settings']['rendering']['auto_fit_style'] = 'balanced'
+                merged_config['manga_settings']['rendering']['auto_fit_style'] = 'compact'
             
             print(f"📦 Batch: BATCH_TRANSLATION={os.environ.get('BATCH_TRANSLATION')}, BATCH_SIZE={os.environ.get('BATCH_SIZE')}")
             print(f"🎨 Font: algorithm={merged_config['manga_settings']['font_sizing']['algorithm']}, auto_fit_style={merged_config['manga_settings']['rendering']['auto_fit_style']}")

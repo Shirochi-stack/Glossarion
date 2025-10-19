@@ -5357,7 +5357,7 @@ class MangaTranslationTab(QObject):
             rend_cfg = (config.get('manga_settings', {}) or {}).get('rendering', {})
         except Exception:
             rend_cfg = {}
-        self.auto_fit_style_value = rend_cfg.get('auto_fit_style', 'balanced')
+        self.auto_fit_style_value = rend_cfg.get('auto_fit_style', 'compact')
         
         # Auto minimum font size (from rendering or font_sizing)
         try:
@@ -15425,7 +15425,7 @@ class MangaTranslationTab(QObject):
                     tr.strict_text_wrapping = bool(settings.get('strict_wrapping', True))
                     tr.constrain_to_bubble = bool(settings.get('constrain_to_bubble', True))
                     # Sync auto_fit_style for narrow bubble handling
-                    tr.auto_fit_style = str(settings.get('auto_fit_style', 'balanced'))
+                    tr.auto_fit_style = str(settings.get('auto_fit_style', 'compact'))
                     
                     # Font mode
                     fs_mode = str(settings.get('font_size_mode', 'auto'))
@@ -15584,7 +15584,7 @@ class MangaTranslationTab(QObject):
             # Respect "Scale with bubble size" toggle by scaling font size relative to page-average bubble
             # BUT: disable in compact mode - compact means compact!
             try:
-                auto_fit_style = settings.get('auto_fit_style', 'balanced')
+                auto_fit_style = settings.get('auto_fit_style', 'compact')
                 if bool(settings.get('bubble_size_factor', True)) and auto_fit_style != 'compact':
                     # Baseline area = average of current viewer rectangles; fallback to this region
                     rects = getattr(self.image_preview_widget.viewer, 'rectangles', []) or []
@@ -15659,7 +15659,7 @@ class MangaTranslationTab(QObject):
             # Make QTextItem manage horizontal centering by giving it a fixed text width = available_width
             # BUT: in compact mode, don't force width expansion - use natural width
             try:
-                auto_fit_style = settings.get('auto_fit_style', 'balanced')
+                auto_fit_style = settings.get('auto_fit_style', 'compact')
                 if auto_fit_style != 'compact':
                     text_item.setTextWidth(max(1.0, float(available_width)))
                 # In compact mode, leave textWidth at -1 (natural width) to prevent expansion

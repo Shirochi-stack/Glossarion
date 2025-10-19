@@ -1172,7 +1172,7 @@ class MangaTranslator:
         except Exception:
             self.min_readable_size = int(main_gui.config.get('manga_min_readable_size', 16))
         self.max_font_size_limit = main_gui.config.get('manga_max_font_size', 24)
-        self.strict_text_wrapping = main_gui.config.get('manga_strict_text_wrapping', False)
+        self.strict_text_wrapping = main_gui.config.get('manga_strict_text_wrapping', True)
         
         # Enhanced text rendering settings - Load from config if available
         config = main_gui.config if hasattr(main_gui, 'config') else {}
@@ -10895,7 +10895,7 @@ class MangaTranslator:
             rendering = manga_settings.get('rendering', {})
             
             font_algorithm = font_sizing.get('algorithm', 'smart')
-            auto_fit_style = rendering.get('auto_fit_style', 'balanced')
+            auto_fit_style = rendering.get('auto_fit_style', 'compact')
             
             # Check if using Azure/Google without RT-DETR guidance
             ocr_settings = manga_settings.get('ocr', {})

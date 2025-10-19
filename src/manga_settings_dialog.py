@@ -470,7 +470,7 @@ class MangaSettingsDialog(QDialog):
         quality_layout.addWidget(QLabel("Fit Style:"))
         
         self.auto_fit_style_group = QButtonGroup()
-        self.auto_fit_style = 'balanced'  # Store as string attribute
+        self.auto_fit_style = 'compact'  # Store as string attribute
         
         fit_styles = [
             ("Compact", "compact", "Fit more text, smaller size"),
@@ -480,7 +480,7 @@ class MangaSettingsDialog(QDialog):
         
         for text, value, tooltip in fit_styles:
             rb = QRadioButton(text)
-            rb.setChecked(value == 'balanced')
+            rb.setChecked(value == 'compact')
             rb.setToolTip(tooltip)
             rb.toggled.connect(lambda checked, v=value: self._on_fit_style_change(v) if checked else None)
             quality_layout.addWidget(rb)
