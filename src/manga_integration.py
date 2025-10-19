@@ -4304,28 +4304,6 @@ class MangaTranslationTab(QObject):
         
         sizing_group_layout.addWidget(row_ls)
 
-        # Max Lines
-        row_ml = QWidget()
-        ml_layout = QHBoxLayout(row_ml)
-        ml_layout.setContentsMargins(0, 2, 0, 4)
-        ml_layout.setSpacing(10)
-        
-        ml_label = QLabel("Max Lines:")
-        ml_label.setMinimumWidth(110)
-        ml_layout.addWidget(ml_label)
-        
-        self.max_lines_spinbox = QSpinBox()
-        self.max_lines_spinbox.setMinimum(5)
-        self.max_lines_spinbox.setMaximum(20)
-        self.max_lines_spinbox.setValue(self.max_lines_value)
-        self.max_lines_spinbox.setMinimumWidth(100)
-        self.max_lines_spinbox.valueChanged.connect(lambda value: (setattr(self, 'max_lines_value', value), self._save_rendering_settings(), self._apply_rendering_settings()))
-        self._disable_spinbox_mousewheel(self.max_lines_spinbox)
-        ml_layout.addWidget(self.max_lines_spinbox)
-        ml_layout.addStretch()
-        
-        sizing_group_layout.addWidget(row_ml)
-
         # Quick Presets (horizontal) merged into sizing group
         row_presets = QWidget()
         presets_layout = QHBoxLayout(row_presets)
@@ -5252,7 +5230,6 @@ class MangaTranslationTab(QObject):
                 self.prefer_larger_value = False
                 self.bubble_size_factor_value = True
                 self.line_spacing_value = 1.2
-                self.max_lines_value = 8
             elif preset == 'balanced':
                 self.font_algorithm_value = 'smart'
                 self.auto_min_size_value = 12
@@ -5260,7 +5237,6 @@ class MangaTranslationTab(QObject):
                 self.prefer_larger_value = True
                 self.bubble_size_factor_value = True
                 self.line_spacing_value = 1.3
-                self.max_lines_value = 10
             elif preset == 'large':
                 self.font_algorithm_value = 'aggressive'
                 self.auto_min_size_value = 14
@@ -5268,7 +5244,6 @@ class MangaTranslationTab(QObject):
                 self.prefer_larger_value = True
                 self.bubble_size_factor_value = False
                 self.line_spacing_value = 1.4
-                self.max_lines_value = 12
             
             # Update all spinboxes with new values
             if hasattr(self, 'min_size_spinbox'):
@@ -5277,8 +5252,6 @@ class MangaTranslationTab(QObject):
                 self.max_size_spinbox.setValue(self.max_font_size_value)
             if hasattr(self, 'line_spacing_spinbox'):
                 self.line_spacing_spinbox.setValue(self.line_spacing_value)
-            if hasattr(self, 'max_lines_spinbox'):
-                self.max_lines_spinbox.setValue(self.max_lines_value)
             
             # Update checkboxes
             if hasattr(self, 'prefer_larger_checkbox'):
@@ -5403,7 +5376,6 @@ class MangaTranslationTab(QObject):
         self.prefer_larger_value = bool(font_settings.get('prefer_larger', True))
         self.bubble_size_factor_value = bool(font_settings.get('bubble_size_factor', True))
         self.line_spacing_value = float(font_settings.get('line_spacing', 1.3))
-        self.max_lines_value = int(font_settings.get('max_lines', 10))
         
         # Determine effective max font size with fallback
         font_max_top = config.get('manga_max_font_size', None)
@@ -15259,7 +15231,6 @@ class MangaTranslationTab(QObject):
                 'force_caps': getattr(self, 'force_caps_lock_value', False),
                 'strict_wrapping': getattr(self, 'strict_text_wrapping_value', True),
                 'line_spacing': getattr(self, 'line_spacing_value', 1.3),
-                'max_lines': getattr(self, 'max_lines_value', 10),
                 
                 # Shadow settings
                 'shadow_enabled': getattr(self, 'shadow_enabled_value', False),
@@ -15299,7 +15270,6 @@ class MangaTranslationTab(QObject):
                 'force_caps': False,
                 'strict_wrapping': True,
                 'line_spacing': 1.3,
-                'max_lines': 10,
                 'shadow_enabled': False,
                 'constrain_to_bubble': True,
                 'text_padding': 4
@@ -15922,15 +15892,10 @@ class MangaTranslationTab(QObject):
             
             metrics = QFontMetrics(font)
             line_height = metrics.height() * settings.get('line_spacing', 1.3)
-            max_lines = settings.get('max_lines', 10)
             
             # Wrap text and count lines
             wrapped_text = self._wrap_text_for_bubble(text, width, font, settings)
             lines = wrapped_text.split('\n')
-            
-            # Check line count
-            if len(lines) > max_lines:
-                return False
             
             # Check total height
             total_height = len(lines) * line_height
@@ -15957,7 +15922,6 @@ class MangaTranslationTab(QObject):
             
             metrics = QFontMetrics(font)
             strict_wrapping = settings.get('strict_wrapping', True)
-            max_lines = settings.get('max_lines', 10)
             
             # Calculate approximate characters per line based on font metrics
             # Use average character width for estimation
@@ -16031,15 +15995,6 @@ class MangaTranslationTab(QObject):
                 
                 if current_line:
                     lines.append(' '.join(current_line))
-            
-            # Limit to max lines
-            if len(lines) > max_lines:
-                lines = lines[:max_lines]
-                if lines:
-                    # Add ellipsis to last line if truncated
-                    last_line = lines[-1]
-                    if len(last_line) > 3:
-                        lines[-1] = last_line[:-3] + '...'
             
             return '\n'.join(lines)
             
@@ -18976,6 +18931,15 @@ class MangaTranslationTab(QObject):
         except Exception:
             pass
         self._log(f"  Full Page Context: {'Enabled' if self.full_page_context_value else 'Disabled'}", "info")
+        
+        # Refresh text overlays with new settings if translations exist
+        try:
+            if hasattr(self, '_translated_texts') and self._translated_texts and hasattr(self, 'image_preview_widget'):
+                # Rebuild overlays with updated settings
+                self._add_text_overlay_to_viewer(self._translated_texts)
+        except Exception as e:
+            # Don't fail if overlay refresh fails - just log it
+            pass
     
     def _on_create_cbz_toggle(self, state=None):
         """Handle create .cbz file at translation end toggle"""

@@ -1721,7 +1721,11 @@ class MangaImagePreviewWidget(QWidget):
                     if hasattr(self.manga_integration, 'show_recognized_overlays_for_image'):
                         self.manga_integration.show_recognized_overlays_for_image(self.current_image_path)
                     # Restore translated text overlays using current_image_path (original)
-                    self.manga_integration.show_text_overlays_for_image(self.current_image_path)
+                    # Rebuild overlays with current settings to ensure they match
+                    if hasattr(self.manga_integration, '_translated_texts') and self.manga_integration._translated_texts:
+                        self.manga_integration._add_text_overlay_to_viewer(self.manga_integration._translated_texts)
+                    else:
+                        self.manga_integration.show_text_overlays_for_image(self.current_image_path)
                 else:
                     # Preserve mode - don't restore from state, keep current rectangles/overlays
                     print(f"[LOADED] Preserve mode - skipping state restoration for: {os.path.basename(self.current_image_path)}")
