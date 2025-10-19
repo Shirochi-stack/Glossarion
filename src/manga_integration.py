@@ -16986,7 +16986,14 @@ class MangaTranslationTab(QObject):
                 
                 # If allowed, update on-canvas text overlays for the CURRENT image only
                 try:
-                    self._add_text_overlay_to_viewer(translated_texts)
+                    current_image = getattr(self.image_preview_widget, 'current_image_path', None)
+                    # Skip overlay updates during batch or when results are for a different image
+                    if getattr(self, '_batch_mode_active', False):
+                        print(f"[TRANSLATE] Batch active — skipping overlay update for {os.path.basename(original_image_path) if original_image_path else 'unknown'}")
+                    elif current_image and original_image_path and os.path.normpath(current_image) == os.path.normpath(original_image_path):
+                        self._add_text_overlay_to_viewer(translated_texts)
+                    else:
+                        print(f"[TRANSLATE] Skipping overlay update; not current image: {os.path.basename(original_image_path) if original_image_path else 'unknown'}")
                 except Exception as _ov_err:
                     print(f"[TRANSLATE] Overlay update skipped/failed: {_ov_err}")
                 
