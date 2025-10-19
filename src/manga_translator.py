@@ -10442,7 +10442,7 @@ class MangaTranslator:
                     if is_short(next_word):
                         test = f"{word} {next_word}"
                         test_width = twidth(test)
-                        print(f"[DEBUG] Merging consecutive short words: '{word}' + '{next_word}' = '{test}', width={test_width}, max={max_width}")
+                       # print(f"[DEBUG] Merging consecutive short words: '{word}' + '{next_word}' = '{test}', width={test_width}, max={max_width}")
                         if allow_overflow or test_width <= max_width:
                             lines[i] = [test]
                             lines.pop(i + 1)
@@ -10468,7 +10468,7 @@ class MangaTranslator:
                     merged = False
                     
                     # DEBUG
-                    print(f"[DEBUG] Processing short word: '{word}' at line {i}, allow_overflow={allow_overflow}")
+                    #print(f"[DEBUG] Processing short word: '{word}' at line {i}, allow_overflow={allow_overflow}")
                     
                     # Try to merge with PREVIOUS word first (keep short word with word above it)
                     # BUT: Don't merge if previous word ends in sentence-ending punctuation
@@ -10478,10 +10478,10 @@ class MangaTranslator:
                         ends_in_punctuation = prev_word.rstrip().endswith(('.', '!', '?', '~'))
                         test = f"{prev_word} {word}"
                         test_width = twidth(test)
-                        print(f"[DEBUG]   Prev word: '{prev_word}', ends_punct={ends_in_punctuation}, test='{test}', width={test_width}, max={max_width}")
+                       # print(f"[DEBUG]   Prev word: '{prev_word}', ends_punct={ends_in_punctuation}, test='{test}', width={test_width}, max={max_width}")
                         if not ends_in_punctuation and (allow_overflow or test_width <= max_width):
                             # Merge with previous
-                            print(f"[DEBUG]   -> MERGED with previous")
+                            #print(f"[DEBUG]   -> MERGED with previous")
                             lines[i - 1] = [test]
                             lines.pop(i)
                             # Don't increment i since we removed current
@@ -10493,17 +10493,19 @@ class MangaTranslator:
                         next_word = lines[i + 1][0]
                         test = f"{word} {next_word}"
                         test_width = twidth(test)
-                        print(f"[DEBUG]   Next word: '{next_word}', test='{test}', width={test_width}, max={max_width}")
+                       # print(f"[DEBUG]   Next word: '{next_word}', test='{test}', width={test_width}, max={max_width}")
                         if allow_overflow or test_width <= max_width:
                             # Merge with next
-                            print(f"[DEBUG]   -> MERGED with next")
+                            #print(f"[DEBUG]   -> MERGED with next")
                             lines[i] = [test]
                             lines.pop(i + 1)
                             merged = True
                         else:
-                            print(f"[DEBUG]   -> NOT MERGED (too wide)")
+                            #print(f"[DEBUG]   -> NOT MERGED (too wide)")
+                            pass
                     else:
-                        print(f"[DEBUG]   No next word to merge with")
+                        #print(f"[DEBUG]   No next word to merge with")
+                        pass
                 
                 i += 1
             
