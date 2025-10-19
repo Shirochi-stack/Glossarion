@@ -1676,16 +1676,10 @@ class MangaImagePreviewWidget(QWidget):
                 else:
                     # Hide existing overlays and clear caches for new image
                     self.manga_integration.show_text_overlays_for_image(image_path)
-                    # Clear per-image recognition/translation caches to prevent cross-image reuse
+                    # STATE ISOLATION FIX: Use centralized state clearing method
                     try:
-                        if hasattr(self.manga_integration, '_recognized_texts'):
-                            del self.manga_integration._recognized_texts
-                        if hasattr(self.manga_integration, '_recognized_texts_image_path'):
-                            del self.manga_integration._recognized_texts_image_path
-                        if hasattr(self.manga_integration, '_recognition_data'):
-                            del self.manga_integration._recognition_data
-                        if hasattr(self.manga_integration, '_translation_data'):
-                            del self.manga_integration._translation_data
+                        if hasattr(self.manga_integration, '_clear_cross_image_state'):
+                            self.manga_integration._clear_cross_image_state()
                     except Exception:
                         pass
         except Exception:
@@ -1764,6 +1758,12 @@ class MangaImagePreviewWidget(QWidget):
                         st.pop('overlay_offsets', None)
                         st.pop('last_render_positions', None)
                         self.manga_integration.image_state_manager.set_state(self.current_image_path, st, save=True)
+                except Exception:
+                    pass
+                # STATE ISOLATION FIX: Clear cross-image state when clearing preview
+                try:
+                    if hasattr(self.manga_integration, '_clear_cross_image_state'):
+                        self.manga_integration._clear_cross_image_state()
                 except Exception:
                     pass
         except Exception:

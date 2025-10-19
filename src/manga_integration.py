@@ -8000,6 +8000,8 @@ class MangaTranslationTab(QObject):
             if not selected_items:
                 if hasattr(self, 'image_preview_widget'):
                     self.image_preview_widget.clear()
+                # CLEAR STATE ISOLATION FIX: Clear recognition and translation data when no image is selected
+                self._clear_cross_image_state()
                 self._current_image_path = None
                 return
             
@@ -8013,6 +8015,9 @@ class MangaTranslationTab(QObject):
                 
                 # Update current image path for state tracking
                 self._current_image_path = image_path
+                
+                # CLEAR STATE ISOLATION FIX: Clear recognition and translation data for new image to prevent cross-contamination
+                self._clear_cross_image_state()
                 
                 # DEBUG: Log the image loading attempt
                 self._log(f"🖼️ Loading preview: {os.path.basename(image_path)}", "debug")
@@ -8323,6 +8328,49 @@ class MangaTranslationTab(QObject):
                     pass
         except Exception as e:
             print(f"[STATE] Failed to clear detection state: {e}")
+    
+    def _clear_cross_image_state(self):
+        """Clear recognition and translation data to prevent state leaking between images.
+        This is the main fix for cross-contamination of OCR/translation states.
+        """
+        try:
+            # Clear recognition data to prevent "Edit OCR" tooltips from previous images
+            if hasattr(self, '_recognition_data'):
+                old_count = len(self._recognition_data) if self._recognition_data else 0
+                self._recognition_data = {}
+                if old_count > 0:
+                    print(f"[STATE_ISOLATION] Cleared {old_count} recognition data entries")
+            
+            # Clear translation data to prevent "Edit Translation" tooltips from previous images  
+            if hasattr(self, '_translation_data'):
+                old_count = len(self._translation_data) if self._translation_data else 0
+                self._translation_data = {}
+                if old_count > 0:
+                    print(f"[STATE_ISOLATION] Cleared {old_count} translation data entries")
+            
+            # Clear recognized texts list
+            if hasattr(self, '_recognized_texts'):
+                old_count = len(self._recognized_texts) if self._recognized_texts else 0
+                self._recognized_texts = []
+                if old_count > 0:
+                    print(f"[STATE_ISOLATION] Cleared {old_count} recognized texts")
+            
+            # Clear translated texts list
+            if hasattr(self, '_translated_texts'):
+                old_count = len(self._translated_texts) if self._translated_texts else 0
+                self._translated_texts = []
+                if old_count > 0:
+                    print(f"[STATE_ISOLATION] Cleared {old_count} translated texts")
+            
+            # Clear image-specific tracking variables
+            if hasattr(self, '_recognized_texts_image_path'):
+                self._recognized_texts_image_path = None
+                print(f"[STATE_ISOLATION] Cleared recognized texts image path tracking")
+            
+            print(f"[STATE_ISOLATION] Cross-image state isolation completed")
+            
+        except Exception as e:
+            print(f"[STATE_ISOLATION] Failed to clear cross-image state: {e}")
     
     def _persist_current_image_state(self):
         """Persist the current image's state (rectangles, overlays, paths) before switching"""
