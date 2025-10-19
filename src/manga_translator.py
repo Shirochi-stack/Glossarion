@@ -9926,6 +9926,9 @@ class MangaTranslator:
                     pass
                 if draw_bg:
                     self._draw_text_background(draw, render_x, render_y, render_w, render_h, lines, font, font_size, start_y, emote_font)
+                # Get image dimensions for bounds checking
+                img_width, img_height = overlay.size
+                
                 # Text - use render dimensions for centering
                 for i, line in enumerate(lines):
                     if emote_font is not None:
@@ -9935,7 +9938,27 @@ class MangaTranslator:
                         text_width = tb[2]-tb[0]
                     tx = render_x + (render_w - text_width)//2
                     ty = start_y + i*line_height
+                    
+                    # CLIPPING: Ensure text stays within image bounds
+                    # Add small padding to account for outline width
                     ow = max(1, font_size // self.outline_width_factor)
+                    padding = ow + 2
+                    
+                    # Horizontal bounds check
+                    if tx - padding < 0:
+                        tx = padding
+                    elif tx + text_width + padding > img_width:
+                        tx = img_width - text_width - padding
+                    
+                    # Vertical bounds check
+                    if ty - padding < 0:
+                        ty = padding
+                    elif ty + line_height + padding > img_height:
+                        ty = img_height - line_height - padding
+                    
+                    # Ensure final position is valid
+                    tx = max(0, min(tx, img_width - 1))
+                    ty = max(0, min(ty, img_height - 1))
                     if emote_font is not None:
                         self._draw_text_line_emote_mixed(draw, line, tx, ty, font, emote_font,
                                                          self.text_color + (255,), self.outline_color + (255,), ow,
@@ -10061,6 +10084,10 @@ class MangaTranslator:
                 # Authorized locations: Windows/Fonts, project fonts dir, saved custom fonts in config
                 is_using_custom_font = self._is_truly_custom_font()
                 emote_font = None if is_using_custom_font else self._get_emote_fallback_font(font_size)
+                
+                # Calculate total height
+                total_height = len(lines) * line_height
+                
                 # Ensure text doesn't overflow vertically - constrain start_y
                 ideal_start_y = render_y + (render_h - total_height) // 2
                 # Make sure text starts within render area and doesn't extend past bottom
@@ -10078,6 +10105,9 @@ class MangaTranslator:
                     self._draw_text_background(draw, render_x, render_y, render_w, render_h, lines, font, 
                                              font_size, start_y)
                 
+                # Get image dimensions for bounds checking
+                img_width, img_height = pil_image.size
+                
                 # Draw text - use render dimensions
                 for i, line in enumerate(lines):
                     # Mixed fallback not supported in legacy path; keep primary measurement
@@ -10087,10 +10117,28 @@ class MangaTranslator:
                     text_x = render_x + (render_w - text_width) // 2
                     text_y = start_y + i * line_height
                     
+                    # CLIPPING: Ensure text stays within image bounds
+                    outline_width = max(1, font_size // self.outline_width_factor)
+                    padding = outline_width + 2
+                    
+                    # Horizontal bounds check
+                    if text_x - padding < 0:
+                        text_x = padding
+                    elif text_x + text_width + padding > img_width:
+                        text_x = img_width - text_width - padding
+                    
+                    # Vertical bounds check
+                    if text_y - padding < 0:
+                        text_y = padding
+                    elif text_y + line_height + padding > img_height:
+                        text_y = img_height - line_height - padding
+                    
+                    # Ensure final position is valid
+                    text_x = max(0, min(text_x, img_width - 1))
+                    text_y = max(0, min(text_y, img_height - 1))
+                    
                     if self.shadow_enabled:
                         self._draw_text_shadow(draw, text_x, text_y, line, font)
-                    
-                    outline_width = max(1, font_size // self.outline_width_factor)
                     
                     # Draw outline
                     for dx in range(-outline_width, outline_width + 1):
