@@ -4314,12 +4314,12 @@ class MangaTranslationTab(QObject):
         presets_label.setMinimumWidth(110)
         presets_layout.addWidget(presets_label)
         
-        small_preset_btn = QPushButton("Small Bubbles")
+        small_preset_btn = QPushButton("Manga")
         small_preset_btn.setMinimumWidth(120)
         small_preset_btn.clicked.connect(lambda: self._set_font_preset('small'))
         presets_layout.addWidget(small_preset_btn)
         
-        balanced_preset_btn = QPushButton("Balanced")
+        balanced_preset_btn = QPushButton("Manhwa")
         balanced_preset_btn.setMinimumWidth(120)
         balanced_preset_btn.clicked.connect(lambda: self._set_font_preset('balanced'))
         presets_layout.addWidget(balanced_preset_btn)
@@ -5249,31 +5249,34 @@ class MangaTranslationTab(QObject):
         try:
             if preset == 'small':
                 self.font_algorithm_value = 'conservative'
-                self.auto_min_size_value = 10
+                self.auto_min_size_value = 8
                 self.max_font_size_value = 32
-                self.prefer_larger_value = False
+                self.prefer_larger_value = True
                 self.bubble_size_factor_value = True
                 self.line_spacing_value = 1.2
-                # Small bubbles use strict wrapping
+                # Small bubbles use strict wrapping and compact fit style
                 self.strict_text_wrapping_value = True
+                self.auto_fit_style_value = 'compact'
             elif preset == 'balanced':
                 self.font_algorithm_value = 'smart'
                 self.auto_min_size_value = 12
-                self.max_font_size_value = 48
+                self.max_font_size_value = 64
                 self.prefer_larger_value = True
                 self.bubble_size_factor_value = True
                 self.line_spacing_value = 1.3
-                # Balanced preset disables strict wrapping for more flexibility
+                # Balanced preset disables strict wrapping and uses balanced fit style
                 self.strict_text_wrapping_value = False
+                self.auto_fit_style_value = 'balanced'
             elif preset == 'large':
                 self.font_algorithm_value = 'aggressive'
                 self.auto_min_size_value = 14
-                self.max_font_size_value = 64
+                self.max_font_size_value = 96
                 self.prefer_larger_value = True
                 self.bubble_size_factor_value = False
                 self.line_spacing_value = 1.4
-                # Large text preset disables strict wrapping for more flexibility
+                # Large text preset disables strict wrapping and uses readable fit style
                 self.strict_text_wrapping_value = False
+                self.auto_fit_style_value = 'readable'
             
             # Update all spinboxes with new values
             if hasattr(self, 'min_size_spinbox'):
@@ -5290,6 +5293,13 @@ class MangaTranslationTab(QObject):
                 self.bubble_size_factor_checkbox.setChecked(self.bubble_size_factor_value)
             if hasattr(self, 'strict_wrap_checkbox'):
                 self.strict_wrap_checkbox.setChecked(self.strict_text_wrapping_value)
+            
+            # Update auto fit style radio buttons
+            if hasattr(self, 'auto_fit_style_group'):
+                for button in self.auto_fit_style_group.buttons():
+                    if button.text().lower() == self.auto_fit_style_value:
+                        button.setChecked(True)
+                        break
             
             # Update the line spacing label
             if hasattr(self, 'line_spacing_value_label'):
@@ -5752,7 +5762,7 @@ class MangaTranslationTab(QObject):
             
             # Font settings
             self.font_size_value = 0
-            self.font_size_mode_value = 'fixed'
+            self.font_size_mode_value = 'auto'
             self.font_size_multiplier_value = 1.0
             self.selected_font_path = None
             self.font_style_value = 'Default'
@@ -5804,8 +5814,10 @@ class MangaTranslationTab(QObject):
             # Update font mode
             if hasattr(self, 'font_mode_group'):
                 for button in self.font_mode_group.buttons():
-                    if button.text().lower().replace(' ', '_') == 'fixed':
+                    button_text = button.text().lower().replace(' ', '_')
+                    if button_text == 'auto':
                         button.setChecked(True)
+                        break
             
             # Update auto fit style
             if hasattr(self, 'auto_fit_style_group'):
@@ -5814,8 +5826,8 @@ class MangaTranslationTab(QObject):
                         button.setChecked(True)
             
             # Update text wrapping checkbox
-            if hasattr(self, 'strict_wrapping_checkbox'):
-                self.strict_wrapping_checkbox.setChecked(True)
+            if hasattr(self, 'strict_wrap_checkbox'):
+                self.strict_wrap_checkbox.setChecked(True)
             
             # Update constrain checkbox
             if hasattr(self, 'constrain_checkbox'):
@@ -5826,14 +5838,67 @@ class MangaTranslationTab(QObject):
                 self.force_caps_checkbox.setChecked(True)
             
             # Update shadow checkbox
-            if hasattr(self, 'shadow_checkbox'):
-                self.shadow_checkbox.setChecked(True)
+            if hasattr(self, 'shadow_enabled_checkbox'):
+                self.shadow_enabled_checkbox.setChecked(True)
             
             # Update min/max font size spinboxes
-            if hasattr(self, 'min_font_size_spin'):
-                self.min_font_size_spin.setValue(self.auto_min_size_value)
-            if hasattr(self, 'max_font_size_spin'):
-                self.max_font_size_spin.setValue(self.max_font_size_value)
+            if hasattr(self, 'min_size_spinbox'):
+                self.min_size_spinbox.setValue(self.auto_min_size_value)
+            if hasattr(self, 'max_size_spinbox'):
+                self.max_size_spinbox.setValue(self.max_font_size_value)
+            
+            # Update line spacing
+            if hasattr(self, 'line_spacing_spinbox'):
+                self.line_spacing_spinbox.setValue(self.line_spacing_value)
+            if hasattr(self, 'line_spacing_value_label'):
+                self.line_spacing_value_label.setText(f"{self.line_spacing_value:.2f}")
+            
+            # Update prefer larger checkbox
+            if hasattr(self, 'prefer_larger_checkbox'):
+                self.prefer_larger_checkbox.setChecked(self.prefer_larger_value)
+            
+            # Update bubble size factor checkbox
+            if hasattr(self, 'bubble_size_factor_checkbox'):
+                self.bubble_size_factor_checkbox.setChecked(self.bubble_size_factor_value)
+            
+            # Update safe area controls
+            if hasattr(self, 'safe_area_enabled_checkbox'):
+                self.safe_area_enabled_checkbox.setChecked(self.safe_area_enabled_value)
+            if hasattr(self, 'safe_area_scale_spinbox'):
+                self.safe_area_scale_spinbox.setValue(self.safe_area_scale_value)
+            
+            # Update font combo
+            if hasattr(self, 'font_combo'):
+                self.font_combo.setCurrentText(self.font_style_value)
+            
+            # Update color displays
+            if hasattr(self, 'rgb_label'):
+                self.rgb_label.setText(f"RGB({self.text_color_r_value},{self.text_color_g_value},{self.text_color_b_value})")
+            self._update_color_preview(None)
+            
+            if hasattr(self, 'shadow_rgb_label'):
+                self.shadow_rgb_label.setText(f"RGB({self.shadow_color_r_value},{self.shadow_color_g_value},{self.shadow_color_b_value})")
+            self._update_shadow_preview(None)
+            
+            # Trigger font mode change to update visibility
+            if hasattr(self, '_toggle_font_size_mode'):
+                self._toggle_font_size_mode()
+            
+            # Toggle shadow controls visibility
+            if hasattr(self, '_toggle_shadow_controls'):
+                self._toggle_shadow_controls()
+            
+            # Update multiplier label
+            if hasattr(self, '_update_multiplier_label'):
+                self._update_multiplier_label(self.font_size_multiplier_value)
+            
+            # Update opacity label
+            if hasattr(self, '_update_opacity_label'):
+                self._update_opacity_label(self.bg_opacity_value)
+            
+            # Update reduction label
+            if hasattr(self, '_update_reduction_label'):
+                self._update_reduction_label(self.bg_reduction_value)
             
             # Save and apply settings
             self._save_rendering_settings()
