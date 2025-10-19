@@ -2874,22 +2874,22 @@ class MangaTranslationTab(QObject):
         
         add_files_btn = QPushButton("Add Files")
         add_files_btn.clicked.connect(self._add_files)
-        add_files_btn.setStyleSheet("QPushButton { background-color: #007bff; color: white; padding: 3px 10px; font-size: 9pt; }")
+        add_files_btn.setStyleSheet("QPushButton { background-color: #007bff; color: white; padding: 6px 15px; font-size: 10pt; font-weight: bold; }")
         file_btn_layout.addWidget(add_files_btn)
         
         add_folder_btn = QPushButton("Add Folder")
         add_folder_btn.clicked.connect(self._add_folder)
-        add_folder_btn.setStyleSheet("QPushButton { background-color: #007bff; color: white; padding: 3px 10px; font-size: 9pt; }")
+        add_folder_btn.setStyleSheet("QPushButton { background-color: #007bff; color: white; padding: 6px 15px; font-size: 10pt; font-weight: bold; }")
         file_btn_layout.addWidget(add_folder_btn)
         
         remove_btn = QPushButton("Remove Selected")
         remove_btn.clicked.connect(self._remove_selected)
-        remove_btn.setStyleSheet("QPushButton { background-color: #dc3545; color: white; padding: 3px 10px; font-size: 9pt; }")
+        remove_btn.setStyleSheet("QPushButton { background-color: #dc3545; color: white; padding: 6px 15px; font-size: 10pt; font-weight: bold; }")
         file_btn_layout.addWidget(remove_btn)
         
         clear_btn = QPushButton("Clear All")
         clear_btn.clicked.connect(self._clear_all)
-        clear_btn.setStyleSheet("QPushButton { background-color: #ffc107; color: black; padding: 3px 10px; font-size: 9pt; }")
+        clear_btn.setStyleSheet("QPushButton { background-color: #ffc107; color: black; padding: 6px 15px; font-size: 10pt; font-weight: bold; }")
         file_btn_layout.addWidget(clear_btn)
         
         file_btn_layout.addStretch()
@@ -5769,7 +5769,7 @@ class MangaTranslationTab(QObject):
             
             # Auto fit style
             self.auto_fit_style_value = 'compact'
-            self.auto_min_size_value = 10
+            self.auto_min_size_value = 8
             self.max_font_size_value = 48
             
             # Text wrapping and constraints
@@ -5812,10 +5812,17 @@ class MangaTranslationTab(QObject):
                 self.bg_style_combo.setCurrentText(self.bg_style_value)
             
             # Update font mode
-            if hasattr(self, 'font_mode_group'):
-                for button in self.font_mode_group.buttons():
+            if hasattr(self, 'font_size_mode_group'):
+                for button in self.font_size_mode_group.buttons():
                     button_text = button.text().lower().replace(' ', '_')
                     if button_text == 'auto':
+                        button.setChecked(True)
+                        break
+            
+            # Update font algorithm
+            if hasattr(self, 'font_algorithm_group'):
+                for button in self.font_algorithm_group.buttons():
+                    if button.text().lower() == 'smart':
                         button.setChecked(True)
                         break
             
@@ -5879,6 +5886,16 @@ class MangaTranslationTab(QObject):
             if hasattr(self, 'shadow_rgb_label'):
                 self.shadow_rgb_label.setText(f"RGB({self.shadow_color_r_value},{self.shadow_color_g_value},{self.shadow_color_b_value})")
             self._update_shadow_preview(None)
+            
+            # Update shadow offset and blur spinboxes
+            if hasattr(self, 'shadow_offset_x_spinbox'):
+                self.shadow_offset_x_spinbox.setValue(self.shadow_offset_x_value)
+            if hasattr(self, 'shadow_offset_y_spinbox'):
+                self.shadow_offset_y_spinbox.setValue(self.shadow_offset_y_value)
+            if hasattr(self, 'shadow_blur_spinbox'):
+                self.shadow_blur_spinbox.setValue(self.shadow_blur_value)
+            if hasattr(self, 'shadow_blur_value_label'):
+                self.shadow_blur_value_label.setText(f"{self.shadow_blur_value}")
             
             # Trigger font mode change to update visibility
             if hasattr(self, '_toggle_font_size_mode'):
