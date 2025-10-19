@@ -1190,6 +1190,14 @@ class MangaTranslationTab(QObject):
             else:
                 checkmark.hide()
         
+        # Expose helpers for programmatic refresh (e.g., when signals are blocked)
+        try:
+            checkbox._checkmark_label = checkmark
+            checkbox._position_checkmark = position_checkmark
+            checkbox._update_checkmark = update_checkmark
+        except Exception:
+            pass
+        
         checkbox.stateChanged.connect(update_checkmark)
         # Delay initial positioning to ensure widget is properly rendered
         QTimer.singleShot(0, lambda: (position_checkmark(), update_checkmark()))
@@ -5269,6 +5277,7 @@ class MangaTranslationTab(QObject):
     def _set_font_preset(self, preset: str):
         """Apply font sizing preset (moved from dialog)"""
         try:
+            # Determine target values for the preset first
             if preset == 'small':
                 self.font_algorithm_value = 'conservative'
                 self.auto_min_size_value = 8
@@ -5300,33 +5309,64 @@ class MangaTranslationTab(QObject):
                 self.strict_text_wrapping_value = False
                 self.auto_fit_style_value = 'readable'
             
-            # Update all spinboxes with new values
+            # Helper to safely set widget values without emitting signals
+            def _safe_set(widget, setter_name, value):
+                try:
+                    prev = widget.blockSignals(True)
+                except Exception:
+                    prev = None
+                try:
+                    getattr(widget, setter_name)(value)
+                    # If this is a styled checkbox, manually refresh its checkmark overlay
+                    if setter_name == 'setChecked' and hasattr(widget, '_update_checkmark'):
+                        try:
+                            widget._update_checkmark()
+                        except Exception:
+                            pass
+                finally:
+                    try:
+                        widget.blockSignals(prev if isinstance(prev, bool) else False)
+                    except Exception:
+                        pass
+            
+            # Update spinboxes
             if hasattr(self, 'min_size_spinbox'):
-                self.min_size_spinbox.setValue(self.auto_min_size_value)
+                _safe_set(self.min_size_spinbox, 'setValue', self.auto_min_size_value)
             if hasattr(self, 'max_size_spinbox'):
-                self.max_size_spinbox.setValue(self.max_font_size_value)
+                _safe_set(self.max_size_spinbox, 'setValue', self.max_font_size_value)
             if hasattr(self, 'line_spacing_spinbox'):
-                self.line_spacing_spinbox.setValue(self.line_spacing_value)
+                _safe_set(self.line_spacing_spinbox, 'setValue', self.line_spacing_value)
             
             # Update checkboxes
             if hasattr(self, 'prefer_larger_checkbox'):
-                self.prefer_larger_checkbox.setChecked(self.prefer_larger_value)
+                _safe_set(self.prefer_larger_checkbox, 'setChecked', self.prefer_larger_value)
             if hasattr(self, 'bubble_size_factor_checkbox'):
-                self.bubble_size_factor_checkbox.setChecked(self.bubble_size_factor_value)
+                _safe_set(self.bubble_size_factor_checkbox, 'setChecked', self.bubble_size_factor_value)
             if hasattr(self, 'strict_wrap_checkbox'):
-                self.strict_wrap_checkbox.setChecked(self.strict_text_wrapping_value)
+                _safe_set(self.strict_wrap_checkbox, 'setChecked', self.strict_text_wrapping_value)
             
             # Update auto fit style radio buttons
             if hasattr(self, 'auto_fit_style_group'):
                 for button in self.auto_fit_style_group.buttons():
                     if button.text().lower() == self.auto_fit_style_value:
-                        button.setChecked(True)
+                        try:
+                            prev = button.blockSignals(True)
+                        except Exception:
+                            prev = None
+                        try:
+                            button.setChecked(True)
+                        finally:
+                            try:
+                                button.blockSignals(prev if isinstance(prev, bool) else False)
+                            except Exception:
+                                pass
                         break
             
             # Update the line spacing label
             if hasattr(self, 'line_spacing_value_label'):
                 self.line_spacing_value_label.setText(f"{float(self.line_spacing_value):.2f}")
             
+            # Persist/apply once after all UI updates
             self._save_rendering_settings()
             try:
                 self._apply_rendering_settings()
