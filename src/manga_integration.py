@@ -8270,11 +8270,32 @@ class MangaTranslationTab(QObject):
                             continue
                         seen_boxes.add(box_sig)
                         
+                        # Expand ellipse by 10% if circle mode is active (only for Detect)
+                        if getattr(self, '_use_circle_shapes', False):
+                            cx = (x1 + x2) / 2.0
+                            cy = (y1 + y2) / 2.0
+                            w = (x2 - x1)
+                            h = (y2 - y1)
+                            scale = 1.20
+                            new_w = max(1, int(round(w * scale)))
+                            new_h = max(1, int(round(h * scale)))
+                            nx1 = int(round(cx - new_w / 2))
+                            ny1 = int(round(cy - new_h / 2))
+                            nx2 = nx1 + new_w
+                            ny2 = ny1 + new_h
+                            # Clamp to image bounds
+                            nx1 = max(0, min(nx1, image.shape[1] - 1))
+                            ny1 = max(0, min(ny1, image.shape[0] - 1))
+                            nx2 = max(nx1 + 1, min(nx2, image.shape[1]))
+                            ny2 = max(ny1 + 1, min(ny2, image.shape[0]))
+                            x1, y1, x2, y2 = nx1, ny1, nx2, ny2
+                        
                         # Store region for workflow continuity
                         region_dict = {
                             'bbox': [x1, y1, x2 - x1, y2 - y1],  # (x, y, width, height)
                             'coords': [[x1, y1], [x2, y1], [x2, y2], [x1, y2]],  # Corner coordinates (use clamped values)
-                            'confidence': getattr(box, 'confidence', confidence) if hasattr(box, 'confidence') else confidence
+                            'confidence': getattr(box, 'confidence', confidence) if hasattr(box, 'confidence') else confidence,
+                            'shape': 'ellipse' if getattr(self, '_use_circle_shapes', False) else 'rect'
                         }
                         regions.append(region_dict)
                         print(f"[DETECT] Added region {len(regions)-1}: bbox={region_dict['bbox']}")
@@ -9550,10 +9571,28 @@ class MangaTranslationTab(QObject):
                         width = x2 - x
                         height = y2 - y
                         
+                        # Expand ellipse by 10% if circle mode is active (only for Detect Sync)
+                        if getattr(self, '_use_circle_shapes', False):
+                            cx = x + width / 2.0
+                            cy = y + height / 2.0
+                            scale = 1.20
+                            new_w = max(1, int(round(width * scale)))
+                            new_h = max(1, int(round(height * scale)))
+                            nx = int(round(cx - new_w / 2))
+                            ny = int(round(cy - new_h / 2))
+                            nx2 = nx + new_w
+                            ny2 = ny + new_h
+                            nx = max(0, min(nx, image.shape[1] - 1))
+                            ny = max(0, min(ny, image.shape[0] - 1))
+                            nx2 = max(nx + 1, min(nx2, image.shape[1]))
+                            ny2 = max(ny + 1, min(ny2, image.shape[0]))
+                            x, y, width, height = nx, ny, (nx2 - nx), (ny2 - ny)
+                        
                         region_dict = {
                             'bbox': [x, y, width, height],  # (x, y, width, height)
                             'coords': [[x, y], [x2, y], [x2, y2], [x, y2]],  # Corner coordinates
-                            'confidence': getattr(box, 'confidence', confidence) if hasattr(box, 'confidence') else confidence
+                            'confidence': getattr(box, 'confidence', confidence) if hasattr(box, 'confidence') else confidence,
+                            'shape': 'ellipse' if getattr(self, '_use_circle_shapes', False) else 'rect'
                         }
                         regions.append(region_dict)
                         
