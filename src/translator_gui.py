@@ -602,7 +602,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "6.1.4"
+        __version__ = "6.1.5"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -1833,7 +1833,7 @@ Recent translations to summarize:
             self.toggle_token_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")  # success-outline
         
         self.on_profile_select()
-        self.append_log("🚀 Glossarion v6.1.4 - Ready to use!")
+        self.append_log("🚀 Glossarion v6.1.5 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Restore last selected input files if available
@@ -2694,17 +2694,6 @@ Recent translations to summarize:
         # Connect scrollbar to detect manual scrolling
         scrollbar = self.log_text.verticalScrollBar()
         scrollbar.valueChanged.connect(self._on_log_scroll)
-
-        # Auto-scroll helper button (appears when scrolled up)
-        self.log_scroll_btn = QToolButton(self.log_text.viewport())
-        self.log_scroll_btn.setText("Scroll to bottom")
-        self.log_scroll_btn.setStyleSheet("QToolButton { background: #2d2d2d; color: white; border: 1px solid #4a5568; padding: 4px 8px; border-radius: 3px; }")
-        self.log_scroll_btn.hide()
-        self.log_scroll_btn.clicked.connect(self._scroll_log_to_bottom)
-        # Track resize to keep button anchored
-        self.log_text.installEventFilter(self)
-        self.log_text.viewport().installEventFilter(self)
-        QTimer.singleShot(0, self._update_log_scroll_button)
 
     def _check_poe_model(self, *args):
         """Automatically show POE helper when POE model is selected"""
@@ -7045,58 +7034,8 @@ Important rules:
             
             # Track current state for next comparison
             self._was_at_bottom = at_bottom
-
-            # Update helper button visibility/position
-            self._update_log_scroll_button()
         except Exception:
             pass
-
-    def _position_log_scroll_button(self):
-        try:
-            if not hasattr(self, 'log_scroll_btn') or not hasattr(self, 'log_text'):
-                return
-            btn = self.log_scroll_btn
-            vp = self.log_text.viewport()
-            margin = 8
-            x = max(0, vp.width() - btn.sizeHint().width() - margin)
-            y = max(0, vp.height() - btn.sizeHint().height() - margin)
-            btn.move(x, y)
-        except Exception:
-            pass
-
-    def _update_log_scroll_button(self):
-        try:
-            if not hasattr(self, 'log_scroll_btn') or not hasattr(self, 'log_text'):
-                return
-            visible = bool(getattr(self, '_user_scrolled_up', False))
-            self.log_scroll_btn.setVisible(visible)
-            if visible:
-                self._position_log_scroll_button()
-        except Exception:
-            pass
-
-    def _scroll_log_to_bottom(self):
-        try:
-            if hasattr(self, 'log_text'):
-                sb = self.log_text.verticalScrollBar()
-                sb.setValue(sb.maximum())
-                self._user_scrolled_up = False
-                self._update_log_scroll_button()
-        except Exception:
-            pass
-
-    def eventFilter(self, obj, event):
-        try:
-            if hasattr(self, 'log_text') and obj in (self.log_text, self.log_text.viewport()):
-                if event.type() in (QEvent.Resize, QEvent.Show):
-                    QTimer.singleShot(0, self._position_log_scroll_button)
-        except Exception:
-            pass
-        # Do not consume the event
-        try:
-            return super().eventFilter(obj, event)
-        except Exception:
-            return False
     
     def _start_autoscroll_delay(self, ms=0):
         try:
@@ -9056,7 +8995,7 @@ Important rules:
                 ('MANGA_FULL_PAGE_CONTEXT', '1' if self.config.get('manga_full_page_context', False) else '0'),
                 ('MANGA_VISUAL_CONTEXT_ENABLED', '1' if self.config.get('manga_visual_context_enabled', True) else '0'),
                 ('MANGA_CREATE_SUBFOLDER', '1' if self.config.get('manga_create_subfolder', True) else '0'),
-                ('MANGA_BG_OPACITY', str(self.config.get('manga_bg_opacity', 0))),
+                ('MANGA_BG_OPACITY', str(self.config.get('manga_bg_opacity', 130))),
                 ('MANGA_BG_STYLE', str(self.config.get('manga_bg_style', 'circle'))),
                 ('MANGA_BG_REDUCTION', str(self.config.get('manga_bg_reduction', 1.0))),
                 ('MANGA_FONT_SIZE', str(self.config.get('manga_font_size', 0))),
@@ -9066,13 +9005,13 @@ Important rules:
                 ('MANGA_FONT_SIZE_MULTIPLIER', str(self.config.get('manga_font_size_multiplier', 1.0))),
                 ('MANGA_MAX_FONT_SIZE', str(self.config.get('manga_max_font_size', rendering.get('auto_max_size', font_cfg.get('max_size', 48))))),
                 ('MANGA_AUTO_MIN_SIZE', str(rendering.get('auto_min_size', font_cfg.get('min_size', 10)))),
-                ('MANGA_FREE_TEXT_ONLY_BG_OPACITY', '1' if self.config.get('manga_free_text_only_bg_opacity', False) else '0'),
+                ('MANGA_FREE_TEXT_ONLY_BG_OPACITY', '1' if self.config.get('manga_free_text_only_bg_opacity', True) else '0'),
                 ('MANGA_FORCE_CAPS_LOCK', '1' if self.config.get('manga_force_caps_lock', True) else '0'),
                 ('MANGA_STRICT_TEXT_WRAPPING', '1' if self.config.get('manga_strict_text_wrapping', True) else '0'),
                 ('MANGA_CONSTRAIN_TO_BUBBLE', '1' if self.config.get('manga_constrain_to_bubble', True) else '0'),
                 ('MANGA_TEXT_COLOR', _rgb_list_to_str(self.config.get('manga_text_color', [102,0,0]), '102,0,0')),
                 ('MANGA_SHADOW_ENABLED', '1' if self.config.get('manga_shadow_enabled', True) else '0'),
-                ('MANGA_SHADOW_COLOR', _rgb_list_to_str(self.config.get('manga_shadow_color', [255,255,255]), '255,255,255')),
+                ('MANGA_SHADOW_COLOR', _rgb_list_to_str(self.config.get('manga_shadow_color', [204,128,128]), '204,128,128')),
                 ('MANGA_SHADOW_OFFSET_X', str(self.config.get('manga_shadow_offset_x', 2))),
                 ('MANGA_SHADOW_OFFSET_Y', str(self.config.get('manga_shadow_offset_y', 2))),
                 ('MANGA_SHADOW_BLUR', str(self.config.get('manga_shadow_blur', 0))),
@@ -9445,7 +9384,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v6.1.4...")
+    print("🚀 Starting Glossarion v6.1.5...")
     
     # Initialize splash screen
     splash_manager = None

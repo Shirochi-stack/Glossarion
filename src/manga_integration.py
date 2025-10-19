@@ -2874,22 +2874,22 @@ class MangaTranslationTab(QObject):
         
         add_files_btn = QPushButton("Add Files")
         add_files_btn.clicked.connect(self._add_files)
-        add_files_btn.setStyleSheet("QPushButton { background-color: #007bff; color: white; padding: 6px 14px; font-size: 11pt; font-weight: bold; }")
+        add_files_btn.setStyleSheet("QPushButton { background-color: #007bff; color: white; padding: 4px 10px; font-size: 10pt; font-weight: bold; }")
         file_btn_layout.addWidget(add_files_btn)
         
         add_folder_btn = QPushButton("Add Folder")
         add_folder_btn.clicked.connect(self._add_folder)
-        add_folder_btn.setStyleSheet("QPushButton { background-color: #007bff; color: white; padding: 6px 14px; font-size: 11pt; font-weight: bold; }")
+        add_folder_btn.setStyleSheet("QPushButton { background-color: #007bff; color: white; padding: 4px 10px; font-size: 10pt; font-weight: bold; }")
         file_btn_layout.addWidget(add_folder_btn)
         
         remove_btn = QPushButton("Remove Selected")
         remove_btn.clicked.connect(self._remove_selected)
-        remove_btn.setStyleSheet("QPushButton { background-color: #dc3545; color: white; padding: 6px 14px; font-size: 11pt; font-weight: bold; }")
+        remove_btn.setStyleSheet("QPushButton { background-color: #dc3545; color: white; padding: 4px 10px; font-size: 10pt; font-weight: bold; }")
         file_btn_layout.addWidget(remove_btn)
         
         clear_btn = QPushButton("Clear All")
         clear_btn.clicked.connect(self._clear_all)
-        clear_btn.setStyleSheet("QPushButton { background-color: #ffc107; color: black; padding: 6px 14px; font-size: 11pt; font-weight: bold; }")
+        clear_btn.setStyleSheet("QPushButton { background-color: #ffc107; color: black; padding: 4px 10px; font-size: 10pt; font-weight: bold; }")
         file_btn_layout.addWidget(clear_btn)
         
         file_btn_layout.addStretch()
@@ -5261,7 +5261,7 @@ class MangaTranslationTab(QObject):
             if preset == 'small':
                 self.font_algorithm_value = 'conservative'
                 self.auto_min_size_value = 8
-                self.max_font_size_value = 32
+                self.max_font_size_value = 48
                 self.prefer_larger_value = True
                 self.bubble_size_factor_value = True
                 self.line_spacing_value = 1.2
@@ -5317,6 +5317,14 @@ class MangaTranslationTab(QObject):
                 self.line_spacing_value_label.setText(f"{float(self.line_spacing_value):.2f}")
             
             self._save_rendering_settings()
+            try:
+                self._apply_rendering_settings()
+            except Exception:
+                pass
+            try:
+                self._relayout_all_overlays_for_current_image()
+            except Exception:
+                pass
         except Exception as e:
             self._log(f"Error setting preset: {e}", "debug")
     
@@ -5417,7 +5425,7 @@ class MangaTranslationTab(QObject):
             font_cfg = (config.get('manga_settings', {}) or {}).get('font_sizing', {})
         except Exception:
             font_cfg = {}
-        auto_min_default = rend_cfg.get('auto_min_size', font_cfg.get('min_size', 10))
+        auto_min_default = rend_cfg.get('auto_min_size', font_cfg.get('min_size', 8))
         self.auto_min_size_value = int(auto_min_default)
         
         self.force_caps_lock_value = config.get('manga_force_caps_lock', True)
@@ -5780,7 +5788,7 @@ class MangaTranslationTab(QObject):
             
             # Auto fit style
             self.auto_fit_style_value = 'compact'
-            self.auto_min_size_value = 10
+            self.auto_min_size_value = 8
             self.max_font_size_value = 48
             
             # Text wrapping and constraints
@@ -15477,7 +15485,7 @@ class MangaTranslationTab(QObject):
                 'font_size_mode': getattr(self, 'font_size_mode_value', 'auto'),
                 'font_size': getattr(self, 'font_size_value', 0),
                 'font_size_multiplier': getattr(self, 'font_size_multiplier_value', 1.0),
-                'auto_min_size': getattr(self, 'auto_min_size_value', 10),
+'auto_min_size': getattr(self, 'auto_min_size_value', 8),
                 'max_font_size': getattr(self, 'max_font_size_value', 48),
                 'font_algorithm': getattr(self, 'font_algorithm_value', 'smart'),
                 'auto_fit_style': getattr(self, 'auto_fit_style_value', 'balanced'),
