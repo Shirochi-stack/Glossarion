@@ -9,7 +9,7 @@ import threading
 from typing import List, Dict, Optional
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGraphicsView, 
                                QGraphicsScene, QGraphicsPixmapItem, QToolButton, 
-                               QLabel, QSlider, QFrame, QPushButton, QGraphicsRectItem,
+                               QLabel, QSlider, QFrame, QPushButton, QGraphicsRectItem, QGraphicsEllipseItem,
                                QSizePolicy, QListWidget, QListWidgetItem, QTabWidget)
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QSize, QThread, QObject, Slot
 from PySide6.QtGui import QPixmap, QImage, QPainter, QColor, QPen, QBrush, QCursor, QIcon
@@ -42,6 +42,7 @@ class MoveableRectItem(QGraphicsRectItem):
         
         self.setZValue(1)
         self.selected = False
+        self.shape_type = 'rect'
         
     def hoverEnterEvent(self, event):
         self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
@@ -66,6 +67,67 @@ class MoveableRectItem(QGraphicsRectItem):
         
     def mousePressEvent(self, event):
         """Ensure only this rectangle is selected to avoid multi-move of multiple items."""
+        try:
+            if event.button() == Qt.MouseButton.LeftButton:
+                sc = self.scene()
+                if sc is not None:
+                    sc.clearSelection()
+                self.setSelected(True)
+        except Exception:
+            pass
+        super().mousePressEvent(event)
+
+
+class MoveableEllipseItem(QGraphicsEllipseItem):
+    """Moveable ellipse for circular text region selection"""
+    
+    def __init__(self, rect=None, parent=None, pen=None, brush=None):
+        super().__init__(rect, parent)
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.setFlag(QGraphicsEllipseItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.setFlag(QGraphicsEllipseItem.GraphicsItemFlag.ItemIsSelectable, True)
+        self.setAcceptHoverEvents(True)
+        
+        # Disable caching to prevent double-draw artifacts
+        try:
+            self.setCacheMode(QGraphicsEllipseItem.CacheMode.NoCache)
+        except Exception:
+            pass
+        
+        # Colors
+        if brush is not None:
+            self.setBrush(brush)
+        else:
+            self.setBrush(QBrush(QColor(255, 192, 203, 125)))
+        if pen is not None:
+            self.setPen(pen)
+        else:
+            self.setPen(QPen(QColor(255, 0, 0), 2))
+        
+        self.setZValue(1)
+        self.selected = False
+        self.shape_type = 'ellipse'
+        
+    def hoverEnterEvent(self, event):
+        self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
+        super().hoverEnterEvent(event)
+        
+    def hoverLeaveEvent(self, event):
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        super().hoverLeaveEvent(event)
+        
+    def mouseReleaseEvent(self, event):
+        try:
+            super().mouseReleaseEvent(event)
+        finally:
+            try:
+                if hasattr(self, '_viewer') and self._viewer:
+                    r = self.sceneBoundingRect()
+                    self._viewer.rectangle_moved.emit(r)
+            except Exception:
+                pass
+        
+    def mousePressEvent(self, event):
         try:
             if event.button() == Qt.MouseButton.LeftButton:
                 sc = self.scene()
@@ -286,7 +348,7 @@ class CompactImageViewer(QGraphicsView):
             self.user_zoomed = False
     
     def set_tool(self, tool: str):
-        """Set current tool (box_draw, pan, brush, eraser)"""
+        """Set current tool (box_draw, circle_draw, pan, brush, eraser)"""
         self.current_tool = tool
         if tool == 'pan':
             self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
@@ -297,6 +359,7 @@ class CompactImageViewer(QGraphicsView):
             self.setDragMode(QGraphicsView.DragMode.NoDrag)
             self.setCursor(Qt.CursorShape.CrossCursor)
         else:
+            # box_draw or circle_draw
             self.setDragMode(QGraphicsView.DragMode.NoDrag)
             self.setCursor(Qt.CursorShape.ArrowCursor)
     
@@ -316,11 +379,14 @@ class CompactImageViewer(QGraphicsView):
     
     def mousePressEvent(self, event):
         """Handle mouse press for drawing boxes or inpainting"""
-        if self.current_tool == 'box_draw' and event.button() == Qt.MouseButton.LeftButton:
+        if self.current_tool in ['box_draw', 'circle_draw'] and event.button() == Qt.MouseButton.LeftButton:
             scene_pos = self.mapToScene(event.pos())
             self.start_point = scene_pos
             rect = QRectF(scene_pos, scene_pos)
-            self.current_rect = MoveableRectItem(rect)
+            if self.current_tool == 'circle_draw':
+                self.current_rect = MoveableEllipseItem(rect)
+            else:
+                self.current_rect = MoveableRectItem(rect)
             # Attach viewer reference so item can emit moved signal
             try:
                 self.current_rect._viewer = self
@@ -335,7 +401,7 @@ class CompactImageViewer(QGraphicsView):
             item = self.itemAt(event.pos())
             print(f"[SELECTION] Pan click - item at pos: {type(item).__name__ if item else 'None'}")
             
-            if isinstance(item, MoveableRectItem):
+            if isinstance(item, (MoveableRectItem, MoveableEllipseItem)):
                 print(f"[SELECTION] Selecting rectangle directly")
                 self._select_rectangle(item)
             elif hasattr(item, 'region_index'):
@@ -358,7 +424,7 @@ class CompactImageViewer(QGraphicsView):
     
     def mouseMoveEvent(self, event):
         """Handle mouse move for drawing boxes or inpainting"""
-        if self.current_tool == 'box_draw' and self.current_rect:
+        if self.current_tool in ['box_draw', 'circle_draw'] and self.current_rect:
             scene_pos = self.mapToScene(event.pos())
             rect = QRectF(self.start_point, scene_pos).normalized()
             self.current_rect.setRect(rect)
@@ -382,7 +448,7 @@ class CompactImageViewer(QGraphicsView):
     
     def mouseReleaseEvent(self, event):
         """Handle mouse release"""
-        if self.current_tool == 'box_draw' and self.current_rect:
+        if self.current_tool in ['box_draw', 'circle_draw'] and self.current_rect:
             if self.current_rect.rect().width() > 10 and self.current_rect.rect().height() > 10:
                 self.rectangles.append(self.current_rect)
                 self.rectangle_created.emit(self.current_rect.rect())
@@ -424,7 +490,10 @@ class CompactImageViewer(QGraphicsView):
         if self.selected_rect:
             print(f"[SELECTION] Rectangle selected - turning yellow")
             self.selected_rect.setPen(QPen(QColor(255, 255, 0), 3))  # Yellow for selected, thicker
-            self.rectangle_selected.emit(self.selected_rect.rect())
+            try:
+                self.rectangle_selected.emit(self.selected_rect.rect())
+            except Exception:
+                pass
         else:
             print(f"[SELECTION] No rectangle selected")
     
@@ -904,11 +973,20 @@ class MangaImagePreviewWidget(QWidget):
         # Add a stretch spacer after zoom and toggle controls
         tools_layout.addStretch()
         
-        # MANUAL EDITING TOOLS (hidden when manual editing is off)
+# MANUAL EDITING TOOLS (hidden when manual editing is off)
         self.box_draw_btn = self._create_tool_button("◭", "Draw Box")
         self.box_draw_btn.setCheckable(True)
         self.box_draw_btn.clicked.connect(lambda: self._set_tool('box_draw'))
         tools_layout.addWidget(self.box_draw_btn)
+        
+        # Circle draw / Circles mode button
+        self.circle_draw_btn = self._create_tool_button("◯", "Draw Circle (also use circles in pipeline)")
+        self.circle_draw_btn.setCheckable(True)
+        def on_circle_clicked():
+            self._set_tool('circle_draw')
+            self._set_use_circle_shapes(True)
+        self.circle_draw_btn.clicked.connect(on_circle_clicked)
+        tools_layout.addWidget(self.circle_draw_btn)
         
         self.save_overlay_btn = self._create_tool_button("💾", "Save & Update Overlay")
         self.save_overlay_btn.clicked.connect(self._on_save_overlay_clicked)
@@ -1005,7 +1083,7 @@ class MangaImagePreviewWidget(QWidget):
         self.viewer.rectangle_created.connect(lambda _: self._persist_rectangles_state())
         self.viewer.rectangle_deleted.connect(lambda _: self._persist_rectangles_state())
         self.viewer.rectangle_moved.connect(lambda _: self._persist_rectangles_state())
-        # Attach context menu to newly created rectangles (red)
+        # Attach context menu to newly created rectangles (red or ellipse)
         self.viewer.rectangle_created.connect(self._on_rectangle_created)
         # Auto-apply save position on rectangle movement
         self.viewer.rectangle_moved.connect(self._on_rectangle_moved)
@@ -1209,6 +1287,16 @@ class MangaImagePreviewWidget(QWidget):
         except Exception:
             return self.viewer
     
+    def _set_use_circle_shapes(self, enabled: bool):
+        """Toggle using circle shapes across pipeline (detect/clean/recognize/translate)."""
+        try:
+            self.use_circle_shapes = bool(enabled)
+            if hasattr(self, 'manga_integration') and self.manga_integration:
+                if hasattr(self.manga_integration, 'set_use_circle_shapes'):
+                    self.manga_integration.set_use_circle_shapes(bool(enabled))
+        except Exception:
+            pass
+    
     def _set_tool(self, tool: str):
         """Set active tool and update button states"""
         # Always set on source viewer
@@ -1223,6 +1311,13 @@ class MangaImagePreviewWidget(QWidget):
         # Update button states
         self.hand_tool_btn.setChecked(tool == 'pan')
         self.box_draw_btn.setChecked(tool == 'box_draw')
+        if hasattr(self, 'circle_draw_btn') and self.circle_draw_btn is not None:
+            self.circle_draw_btn.setChecked(tool == 'circle_draw')
+            # Sync pipeline circle usage
+            try:
+                self._set_use_circle_shapes(tool == 'circle_draw')
+            except Exception:
+                pass
         # Only update experimental tool buttons if they exist
         if self.brush_btn is not None:
             self.brush_btn.setChecked(tool == 'brush')
@@ -1859,6 +1954,8 @@ class MangaImagePreviewWidget(QWidget):
         
         # Show/hide manual editing tools ONLY (not pan/zoom which are always visible)
         self.box_draw_btn.setVisible(enabled)
+        if hasattr(self, 'circle_draw_btn') and self.circle_draw_btn is not None:
+            self.circle_draw_btn.setVisible(enabled)
         self.save_overlay_btn.setVisible(enabled)
         # Only set visibility for experimental tools if they exist
         if self.brush_btn is not None:

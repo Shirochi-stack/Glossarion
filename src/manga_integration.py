@@ -763,6 +763,9 @@ class MangaTranslationTab(QObject):
         # Now that everything is initialized, allow saving
         self._initializing = False
         
+        # Circle mode for selections and pipeline masks (rect by default)
+        self._use_circle_shapes = False
+        
         # Attach logging bridge so library logs appear in our log area
         self._attach_logging_bridge()
         
@@ -796,6 +799,14 @@ class MangaTranslationTab(QObject):
         """Reset all global cancellation flags for new translation"""
         # Reset local class flag
         self.set_global_cancellation(False)
+
+    def set_use_circle_shapes(self, enabled: bool):
+        """Enable/disable circle mode for ROI shapes across detect/clean/recognize/translate."""
+        try:
+            self._use_circle_shapes = bool(enabled)
+            # Optionally refresh drawing style later if needed
+        except Exception:
+            self._use_circle_shapes = False
         
         # Reset MangaTranslator class flag
         try:
@@ -8970,7 +8981,7 @@ class MangaTranslationTab(QObject):
             
             from PySide6.QtCore import QRectF, Qt
             from PySide6.QtGui import QPen, QBrush, QColor
-            from manga_image_preview import MoveableRectItem
+            from manga_image_preview import MoveableRectItem, MoveableEllipseItem
             
             print(f"[DRAW_BOXES] Drawing {len(self._current_regions)} regions")
             print(f"[DRAW_BOXES] Current rectangles count before drawing: {len(viewer.rectangles)}")
@@ -8981,38 +8992,37 @@ class MangaTranslationTab(QObject):
                 if len(bbox) >= 4:
                     x, y, width, height = bbox
                     rect = QRectF(x, y, width, height)
-                    print(f"[DRAW_BOXES] Drawing rectangle {i}: x={x}, y={y}, w={width}, h={height}")
+                    print(f"[DRAW_BOXES] Drawing shape {i}: x={x}, y={y}, w={width}, h={height}")
                     
                     # Create pen and brush with detection colors
                     pen = QPen(QColor(0, 255, 0), 1)  # Green border (width 1 to avoid double-line artifact)
                     pen.setCosmetic(True)  # Pen width stays constant regardless of zoom
-                    pen.setCapStyle(Qt.PenCapStyle.SquareCap)  # Sharp corners
-                    pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)  # Sharp joins
+                    pen.setCapStyle(Qt.PenCapStyle.SquareCap)
+                    pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
                     brush = QBrush(QColor(0, 255, 0, 50))  # Semi-transparent green fill
                     
-                    # Create rectangle item with colors set from the start (avoids double rendering)
-                    rect_item = MoveableRectItem(rect, pen=pen, brush=brush)
+                    # Create shape item (ellipse or rectangle)
+                    item = MoveableEllipseItem(rect, pen=pen, brush=brush) if getattr(self, '_use_circle_shapes', False) else MoveableRectItem(rect, pen=pen, brush=brush)
                     
                     # Explicitly disable antialiasing on this item to prevent blur artifacts
                     from PySide6.QtWidgets import QGraphicsItem
-                    rect_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemUsesExtendedStyleOption, False)
+                    item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemUsesExtendedStyleOption, False)
                     
                     # Attach viewer reference so item can emit moved signal
                     try:
-                        rect_item._viewer = viewer
+                        item._viewer = viewer
                     except Exception:
                         pass
                     
+                    viewer._scene.addItem(item)
+                    viewer.rectangles.append(item)
                     
-                    viewer._scene.addItem(rect_item)
-                    viewer.rectangles.append(rect_item)
-                    
-                    # Track region index on the rectangle and attach move-sync handler
+                    # Track region index on the item and attach move-sync handler
                     try:
-                        rect_item.region_index = i
-                        self._attach_move_sync_to_rectangle(rect_item, i)
+                        item.region_index = i
+                        self._attach_move_sync_to_rectangle(item, i)
                         # Add context menu to green detection rectangles
-                        self._add_context_menu_to_rectangle(rect_item, i)
+                        self._add_context_menu_to_rectangle(item, i)
                     except Exception:
                         pass
             
@@ -9104,7 +9114,8 @@ class MangaTranslationTab(QObject):
                         'bbox': [x, y, w, h],
                         'coords': [[x, y], [x + w, y], [x + w, y + h], [x, y + h]],
                         'confidence': 1.0,
-                        'rect_index': i  # Preserve original rectangle index for exclusion checking
+                        'rect_index': i,  # Preserve original rectangle index for exclusion checking
+                        'shape': getattr(rect_item, 'shape_type', 'rect')
                     }
                     regions.append(region_dict)
                 
@@ -9200,8 +9211,25 @@ class MangaTranslationTab(QObject):
                 x2 = max(x1 + 1, min(x2, image.shape[1]))
                 y2 = max(y1 + 1, min(y2, image.shape[0]))
                 
-                # Draw filled rectangle on mask
-                cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
+                # Determine shape for mask
+                shape = None
+                try:
+                    if isinstance(region, dict):
+                        shape = region.get('shape')
+                except Exception:
+                    shape = None
+                use_ellipse = bool(shape == 'ellipse' or getattr(self, '_use_circle_shapes', False))
+                
+                if use_ellipse:
+                    # Draw filled ellipse that fits the bbox
+                    cx = int((x1 + x2) / 2)
+                    cy = int((y1 + y2) / 2)
+                    rx = max(1, int((x2 - x1) / 2))
+                    ry = max(1, int((y2 - y1) / 2))
+                    cv2.ellipse(mask, (cx, cy), (rx, ry), 0, 0, 360, 255, -1)
+                else:
+                    # Draw filled rectangle on mask
+                    cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
             
             # Get inpainting settings from manga integration config
             inpaint_method = self.main_gui.config.get('manga_inpaint_method', 'local')
@@ -9611,8 +9639,25 @@ class MangaTranslationTab(QObject):
                 x2 = max(x1 + 1, min(x2, image.shape[1]))
                 y2 = max(y1 + 1, min(y2, image.shape[0]))
                 
-                # Draw filled rectangle on mask
-                cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
+                # Determine shape for mask
+                shape = None
+                try:
+                    if isinstance(region, dict):
+                        shape = region.get('shape')
+                except Exception:
+                    shape = None
+                use_ellipse = bool(shape == 'ellipse' or getattr(self, '_use_circle_shapes', False))
+                
+                if use_ellipse:
+                    # Draw filled ellipse that fits the bbox
+                    cx = int((x1 + x2) / 2)
+                    cy = int((y1 + y2) / 2)
+                    rx = max(1, int((x2 - x1) / 2))
+                    ry = max(1, int((y2 - y1) / 2))
+                    cv2.ellipse(mask, (cx, cy), (rx, ry), 0, 0, 360, 255, -1)
+                else:
+                    # Draw filled rectangle on mask
+                    cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
             
             # Get inpainting settings from manga integration config
             inpaint_method = self.main_gui.config.get('manga_inpaint_method', 'local')
@@ -10542,7 +10587,8 @@ class MangaTranslationTab(QObject):
                 region_dict = {
                     'bbox': bbox,
                     'coords': [[bbox[0], bbox[1]], [bbox[0] + bbox[2], bbox[1]], [bbox[0] + bbox[2], bbox[1] + bbox[3]], [bbox[0], bbox[1] + bbox[3]]],
-                    'confidence': text_data.get('confidence', 1.0)
+                    'confidence': text_data.get('confidence', 1.0),
+                    'shape': 'ellipse' if getattr(self, '_use_circle_shapes', False) else 'rect'
                 }
                 regions.append(region_dict)
 
