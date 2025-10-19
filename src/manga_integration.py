@@ -5408,8 +5408,8 @@ class MangaTranslationTab(QObject):
                 self.local_model_path_value = path
         
         # Initialize with defaults (plain Python values, no Tkinter variables)
-        self.bg_opacity_value = config.get('manga_bg_opacity', 130)
-        self.free_text_only_bg_opacity_value = config.get('manga_free_text_only_bg_opacity', True)
+        self.bg_opacity_value = config.get('manga_bg_opacity', 0)
+        self.free_text_only_bg_opacity_value = config.get('manga_free_text_only_bg_opacity', False)
         self.bg_style_value = config.get('manga_bg_style', 'circle')
         self.bg_reduction_value = config.get('manga_bg_reduction', 1.0)
         self.font_size_value = config.get('manga_font_size', 0)
@@ -5784,8 +5784,8 @@ class MangaTranslationTab(QObject):
         
         try:
             # Background settings
-            self.bg_opacity_value = 130
-            self.free_text_only_bg_opacity_value = True
+            self.bg_opacity_value = 0
+            self.free_text_only_bg_opacity_value = False
             self.bg_style_value = 'circle'
             self.bg_reduction_value = 1.0
             
@@ -15531,7 +15531,7 @@ class MangaTranslationTab(QObject):
             return {
                 'show_background': True,
                 'bg_color': [255, 255, 255],
-                'bg_opacity': 130,
+                'bg_opacity': 0,
                 'bg_style': 'circle',
                 'bg_reduction': 1.0,
                 'font_family': 'Arial',

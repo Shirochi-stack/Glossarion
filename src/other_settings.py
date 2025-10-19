@@ -3827,7 +3827,7 @@ def _create_processing_options_section(self, parent):
     
     # Disable Chapter Merging
     if not hasattr(self, 'disable_chapter_merging_var'):
-        self.disable_chapter_merging_var = self.config.get('disable_chapter_merging', False)
+        self.disable_chapter_merging_var = self.config.get('disable_chapter_merging', True)
     
     disable_merging_cb = self._create_styled_checkbox("Disable Chapter Merging")
     try:
