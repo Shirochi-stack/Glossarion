@@ -9126,21 +9126,32 @@ class MangaTranslationTab(QObject):
         regions = []
         try:
             if hasattr(self.image_preview_widget, 'viewer') and self.image_preview_widget.viewer.rectangles:
-                # Build region dicts directly from rectangles without merging to preserve indices
+                # Build region dicts directly from shapes without merging to preserve indices
                 for i, rect_item in enumerate(self.image_preview_widget.viewer.rectangles):
-                    rect = rect_item.sceneBoundingRect()
-                    x, y, w, h = int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height())
-                    
+                    br = rect_item.sceneBoundingRect()
+                    x, y, w, h = int(br.x()), int(br.y()), int(br.width()), int(br.height())
+                    shape = getattr(rect_item, 'shape_type', 'rect')
                     region_dict = {
                         'bbox': [x, y, w, h],
                         'coords': [[x, y], [x + w, y], [x + w, y + h], [x, y + h]],
                         'confidence': 1.0,
-                        'rect_index': i,  # Preserve original rectangle index for exclusion checking
-                        'shape': getattr(rect_item, 'shape_type', 'rect')
+                        'rect_index': i,
+                        'shape': shape
                     }
+                    # If polygon, capture points in scene coordinates
+                    try:
+                        if shape == 'polygon' and hasattr(rect_item, 'path'):
+                            poly = rect_item.mapToScene(rect_item.path().toFillPolygon())
+                            pts = []
+                            for p in poly:
+                                pts.append([int(p.x()), int(p.y())])
+                            if len(pts) >= 3:
+                                region_dict['polygon'] = pts
+                    except Exception:
+                        pass
                     regions.append(region_dict)
                 
-                self._log(f"🎯 Extracted {len(regions)} regions from preview rectangles (preserving indices)", "info")
+                self._log(f"🎯 Extracted {len(regions)} regions from preview shapes (preserving indices)", "info")
             else:
                 self._log("⚠️ No rectangles found in preview widget", "warning")
         except Exception as e:
@@ -9149,7 +9160,6 @@ class MangaTranslationTab(QObject):
             print(f"Extract regions error: {traceback.format_exc()}")
         
         return regions
-    
     def _run_clean_background(self, image_path: str, regions: list):
         """Run the actual cleaning process in background thread"""
         try:
@@ -9241,7 +9251,11 @@ class MangaTranslationTab(QObject):
                     shape = None
                 use_ellipse = bool(shape == 'ellipse' or getattr(self, '_use_circle_shapes', False))
                 
-                if use_ellipse:
+                if shape == 'polygon' and isinstance(region.get('polygon'), list) and len(region.get('polygon')) >= 3:
+                    import numpy as _np
+                    pts = _np.array(region['polygon'], dtype=_np.int32).reshape((-1, 1, 2))
+                    cv2.fillPoly(mask, [pts], 255)
+                elif use_ellipse:
                     # Draw filled ellipse that fits the bbox
                     cx = int((x1 + x2) / 2)
                     cy = int((y1 + y2) / 2)
@@ -9687,7 +9701,11 @@ class MangaTranslationTab(QObject):
                     shape = None
                 use_ellipse = bool(shape == 'ellipse' or getattr(self, '_use_circle_shapes', False))
                 
-                if use_ellipse:
+                if shape == 'polygon' and isinstance(region.get('polygon'), list) and len(region.get('polygon')) >= 3:
+                    import numpy as _np
+                    pts = _np.array(region['polygon'], dtype=_np.int32).reshape((-1, 1, 2))
+                    cv2.fillPoly(mask, [pts], 255)
+                elif use_ellipse:
                     # Draw filled ellipse that fits the bbox
                     cx = int((x1 + x2) / 2)
                     cy = int((y1 + y2) / 2)

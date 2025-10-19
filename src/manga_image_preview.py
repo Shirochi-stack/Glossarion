@@ -9,10 +9,10 @@ import threading
 from typing import List, Dict, Optional
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGraphicsView, 
                                QGraphicsScene, QGraphicsPixmapItem, QToolButton, 
-                               QLabel, QSlider, QFrame, QPushButton, QGraphicsRectItem, QGraphicsEllipseItem,
+                               QLabel, QSlider, QFrame, QPushButton, QGraphicsRectItem, QGraphicsEllipseItem, QGraphicsPathItem,
                                QSizePolicy, QListWidget, QListWidgetItem, QTabWidget)
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QSize, QThread, QObject, Slot
-from PySide6.QtGui import QPixmap, QImage, QPainter, QColor, QPen, QBrush, QCursor, QIcon
+from PySide6.QtGui import QPixmap, QImage, QPainter, QColor, QPen, QBrush, QCursor, QIcon, QPainterPath
 import numpy as np
 
 
@@ -158,6 +158,65 @@ class MoveableEllipseItem(QGraphicsEllipseItem):
             super().paint(painter, option, widget)
 
 
+class MoveablePathItem(QGraphicsPathItem):
+    """Moveable freehand path (lasso) for arbitrary-shaped regions"""
+    def __init__(self, path=None, parent=None, pen=None, brush=None):
+        super().__init__(parent)
+        if path is not None:
+            self.setPath(path)
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.setFlag(QGraphicsPathItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.setFlag(QGraphicsPathItem.GraphicsItemFlag.ItemIsSelectable, True)
+        self.setAcceptHoverEvents(True)
+        try:
+            self.setCacheMode(QGraphicsPathItem.CacheMode.NoCache)
+        except Exception:
+            pass
+        if brush is not None:
+            self.setBrush(brush)
+        else:
+            self.setBrush(QBrush(QColor(255, 192, 203, 125)))
+        if pen is not None:
+            self.setPen(pen)
+        else:
+            self.setPen(QPen(QColor(255, 0, 0), 2))
+        self.setZValue(1)
+        self.selected = False
+        self.shape_type = 'polygon'
+    def hoverEnterEvent(self, event):
+        self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
+        super().hoverEnterEvent(event)
+    def hoverLeaveEvent(self, event):
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        super().hoverLeaveEvent(event)
+    def mouseReleaseEvent(self, event):
+        try:
+            super().mouseReleaseEvent(event)
+        finally:
+            try:
+                if hasattr(self, '_viewer') and self._viewer:
+                    r = self.sceneBoundingRect()
+                    self._viewer.rectangle_moved.emit(r)
+            except Exception:
+                pass
+    def mousePressEvent(self, event):
+        try:
+            if event.button() == Qt.MouseButton.LeftButton:
+                sc = self.scene()
+                if sc is not None:
+                    sc.clearSelection()
+                self.setSelected(True)
+        except Exception:
+            pass
+        super().mousePressEvent(event)
+    def paint(self, painter, option, widget=None):
+        try:
+            painter.setPen(self.pen())
+            painter.setBrush(self.brush())
+            painter.drawPath(self.path())
+        except Exception:
+            super().paint(painter, option, widget)
+
 class ImageLoaderWorker(QObject):
     """Worker for loading images in background thread"""
     
@@ -256,6 +315,11 @@ class CompactImageViewer(QGraphicsView):
         self.drawing = False
         self.last_pos = None
         self.brush_strokes = []
+        
+        # Lasso state
+        self.lasso_path: Optional[QPainterPath] = None
+        self.lasso_item: Optional[MoveablePathItem] = None
+        self.lasso_active = False
         
         # Background image loading
         self._loader_thread = None
@@ -367,7 +431,7 @@ class CompactImageViewer(QGraphicsView):
             self.user_zoomed = False
     
     def set_tool(self, tool: str):
-        """Set current tool (box_draw, circle_draw, pan, brush, eraser)"""
+        """Set current tool (box_draw, circle_draw, lasso_draw, pan, brush, eraser)"""
         self.current_tool = tool
         if tool == 'pan':
             self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
@@ -378,7 +442,7 @@ class CompactImageViewer(QGraphicsView):
             self.setDragMode(QGraphicsView.DragMode.NoDrag)
             self.setCursor(Qt.CursorShape.CrossCursor)
         else:
-            # box_draw or circle_draw
+            # box_draw, circle_draw, lasso_draw
             self.setDragMode(QGraphicsView.DragMode.NoDrag)
             self.setCursor(Qt.CursorShape.ArrowCursor)
     
@@ -412,6 +476,16 @@ class CompactImageViewer(QGraphicsView):
             except Exception:
                 pass
             self._scene.addItem(self.current_rect)
+        elif self.current_tool == 'lasso_draw' and event.button() == Qt.MouseButton.LeftButton:
+            self.lasso_active = True
+            scene_pos = self.mapToScene(event.pos())
+            self.lasso_path = QPainterPath(scene_pos)
+            self.lasso_item = MoveablePathItem(self.lasso_path)
+            try:
+                self.lasso_item._viewer = self
+            except Exception:
+                pass
+            self._scene.addItem(self.lasso_item)
         elif self.current_tool in ['brush', 'eraser'] and event.button() == Qt.MouseButton.LeftButton:
             self.drawing = True
             self.last_pos = self.mapToScene(event.pos())
@@ -420,7 +494,7 @@ class CompactImageViewer(QGraphicsView):
             item = self.itemAt(event.pos())
             print(f"[SELECTION] Pan click - item at pos: {type(item).__name__ if item else 'None'}")
             
-            if isinstance(item, (MoveableRectItem, MoveableEllipseItem)):
+            if isinstance(item, (MoveableRectItem, MoveableEllipseItem, MoveablePathItem)):
                 print(f"[SELECTION] Selecting rectangle directly")
                 self._select_rectangle(item)
             elif hasattr(item, 'region_index'):
@@ -447,6 +521,10 @@ class CompactImageViewer(QGraphicsView):
             scene_pos = self.mapToScene(event.pos())
             rect = QRectF(self.start_point, scene_pos).normalized()
             self.current_rect.setRect(rect)
+        elif self.current_tool == 'lasso_draw' and self.lasso_active and self.lasso_item is not None and self.lasso_path is not None:
+            scene_pos = self.mapToScene(event.pos())
+            self.lasso_path.lineTo(scene_pos)
+            self.lasso_item.setPath(self.lasso_path)
         elif self.current_tool in ['brush', 'eraser'] and self.drawing:
             current_pos = self.mapToScene(event.pos())
             if self.last_pos:
@@ -475,6 +553,21 @@ class CompactImageViewer(QGraphicsView):
                 self._scene.removeItem(self.current_rect)
             self.current_rect = None
             self.start_point = None
+        elif self.current_tool == 'lasso_draw' and self.lasso_active and self.lasso_item is not None and self.lasso_path is not None:
+            # Close and validate polygon
+            self.lasso_path.closeSubpath()
+            self.lasso_item.setPath(self.lasso_path)
+            br = self.lasso_item.boundingRect()
+            if br.width() > 10 and br.height() > 10:
+                self.rectangles.append(self.lasso_item)
+                # Emit bounding rect
+                self.rectangle_created.emit(self.lasso_item.sceneBoundingRect())
+            else:
+                self._scene.removeItem(self.lasso_item)
+            # Reset lasso state
+            self.lasso_active = False
+            self.lasso_item = None
+            self.lasso_path = None
         elif self.current_tool in ['brush', 'eraser']:
             self.drawing = False
             self.last_pos = None
@@ -992,7 +1085,7 @@ class MangaImagePreviewWidget(QWidget):
         # Add a stretch spacer after zoom and toggle controls
         tools_layout.addStretch()
         
-# MANUAL EDITING TOOLS (hidden when manual editing is off)
+        # MANUAL EDITING TOOLS (hidden when manual editing is off)
         self.box_draw_btn = self._create_tool_button("◭", "Draw Box")
         self.box_draw_btn.setCheckable(True)
         self.box_draw_btn.clicked.connect(lambda: self._set_tool('box_draw'))
@@ -1006,6 +1099,12 @@ class MangaImagePreviewWidget(QWidget):
             self._set_use_circle_shapes(True)
         self.circle_draw_btn.clicked.connect(on_circle_clicked)
         tools_layout.addWidget(self.circle_draw_btn)
+        
+        # Lasso draw button
+        self.lasso_btn = self._create_tool_button("L", "Lasso (free shape)")
+        self.lasso_btn.setCheckable(True)
+        self.lasso_btn.clicked.connect(lambda: self._set_tool('lasso_draw'))
+        tools_layout.addWidget(self.lasso_btn)
         
         self.save_overlay_btn = self._create_tool_button("💾", "Save & Update Overlay")
         self.save_overlay_btn.clicked.connect(self._on_save_overlay_clicked)
@@ -1337,6 +1436,8 @@ class MangaImagePreviewWidget(QWidget):
                 self._set_use_circle_shapes(tool == 'circle_draw')
             except Exception:
                 pass
+        if hasattr(self, 'lasso_btn') and self.lasso_btn is not None:
+            self.lasso_btn.setChecked(tool == 'lasso_draw')
         # Only update experimental tool buttons if they exist
         if self.brush_btn is not None:
             self.brush_btn.setChecked(tool == 'brush')
@@ -1975,6 +2076,8 @@ class MangaImagePreviewWidget(QWidget):
         self.box_draw_btn.setVisible(enabled)
         if hasattr(self, 'circle_draw_btn') and self.circle_draw_btn is not None:
             self.circle_draw_btn.setVisible(enabled)
+        if hasattr(self, 'lasso_btn') and self.lasso_btn is not None:
+            self.lasso_btn.setVisible(enabled)
         self.save_overlay_btn.setVisible(enabled)
         # Only set visibility for experimental tools if they exist
         if self.brush_btn is not None:
