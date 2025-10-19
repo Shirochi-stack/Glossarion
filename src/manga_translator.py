@@ -10254,12 +10254,16 @@ class MangaTranslator:
      
     def _pil_word_wrap(self, text: str, font_path: str, roi_width: int, roi_height: int,
                        init_font_size: int, min_font_size: int, draw: ImageDraw) -> Tuple[str, int]:
-        """Smart word wrap algorithm with median-based font sizing.
+        """Smart text wrapping with height-based font sizing.
         
-        Instead of sizing based on the longest word (outlier), this uses the median word length
-        to determine optimal font size, then allows outlier words to break/hyphenate naturally.
-        This results in better space utilization when a few long words would otherwise force
-        the entire text to shrink unnecessarily.
+        When strict_text_wrapping is disabled:
+        - Calculates font size based on HEIGHT to maximize readability
+        - Uses greedy word-based line breaking for natural grouping
+        - For narrow bubbles (aspect > 2), respects width to force line breaks
+        - For normal bubbles, allows generous width for natural word grouping
+        
+        When strict_text_wrapping is enabled:
+        - Falls back to original column-based algorithm (legacy behavior)
         """
         from hyphen_textwrap import wrap as hyphen_wrap
         import statistics
@@ -10378,8 +10382,44 @@ class MangaTranslator:
         except Exception:
             font = ImageFont.load_default()
         
-        # SMART SIZING: Use median word width for initial sizing (unless strict wrapping enabled)
+        # SIMPLE HEIGHT-BASED SIZING: When strict mode disabled, focus on height
         if not self.strict_text_wrapping:
+            # Check if this is a narrow vertical bubble
+            aspect_ratio = roi_height / max(roi_width, 1)
+            is_narrow = aspect_ratio > 2.0
+            
+            # Estimate lines based on word count
+            words = text.split()
+            if is_narrow:
+                # Narrow: 1-2 words per line
+                estimated_lines = max(len(words) // 1.5, 3)
+            else:
+                # Normal: 2-3 words per line  
+                estimated_lines = max(len(words) // 2.5, 2)
+            
+            # Calculate font from HEIGHT only
+            line_spacing = 1.3
+            font_size = int(roi_height / (estimated_lines * line_spacing))
+            font_size = max(min_font_size, min(init_font_size, font_size))
+            
+            # Load font
+            try:
+                font = ImageFont.truetype(font_path, font_size) if font_path else ImageFont.load_default()
+            except Exception:
+                font = ImageFont.load_default()
+            
+            # Wrap with appropriate width
+            if is_narrow:
+                # Narrow bubble: respect width to avoid extreme overflow
+                wrapped = greedy_word_wrap(text, font, roi_width)
+            else:
+                # Normal bubble: generous width for natural grouping
+                wrapped = greedy_word_wrap(text, font, roi_width * 2)
+            
+            return wrapped, int(font_size)
+        
+        # STRICT MODE: Original algorithm (unused code below, kept for fallback)
+        if False:
             # Calculate what font size would make the median word fit comfortably
             # We want median word to take ~70% of width, leaving room for longer words
             median_width = get_median_word_width(text, font)
