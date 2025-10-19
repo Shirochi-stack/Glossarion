@@ -5831,10 +5831,10 @@ class MangaTranslationTab(QObject):
                 self.bg_style_combo.setCurrentText(self.bg_style_value)
             
             # Update font mode
-            if hasattr(self, 'font_mode_group'):
-                for button in self.font_mode_group.buttons():
-                    button_text = button.text().lower().replace(' ', '_')
-                    if button_text == 'auto':
+            if hasattr(self, 'font_size_mode_group'):
+                for button in self.font_size_mode_group.buttons():
+                    btn_text = button.text().strip().lower()
+                    if btn_text.startswith('auto'):
                         button.setChecked(True)
                         break
             # Update font algorithm radio
