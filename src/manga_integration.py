@@ -19317,6 +19317,17 @@ class MangaTranslationTab(QObject):
                                     self.completed_files += 1
                                     self._log(f"✅ Translation completed: {filename}", "success")
                                     
+                                    # Save cleaned image path to state if available
+                                    if result.get('cleaned_image_path'):
+                                        try:
+                                            if hasattr(self, 'image_state_manager') and self.image_state_manager:
+                                                self.image_state_manager.update_state(filepath, {
+                                                    'cleaned_image_path': result.get('cleaned_image_path')
+                                                })
+                                                print(f"[CLEANED] Saved cleaned image path to state: {os.path.basename(result.get('cleaned_image_path'))}")
+                                        except Exception as e:
+                                            print(f"[CLEANED] Failed to save cleaned path to state: {e}")
+                                    
                                     # Update image preview to show translated output if this is the current file
                                     # Use thread-safe queue to update preview from parallel worker
                                     if hasattr(self, 'image_preview_widget'):
@@ -19507,6 +19518,17 @@ class MangaTranslationTab(QObject):
                             if output_exists and has_translations:
                                 self.completed_files += 1
                                 self._log(f"✅ Translation completed: {filename}", "success")
+                                
+                                # Save cleaned image path to state if available
+                                if result.get('cleaned_image_path'):
+                                    try:
+                                        if hasattr(self, 'image_state_manager') and self.image_state_manager:
+                                            self.image_state_manager.update_state(filepath, {
+                                                'cleaned_image_path': result.get('cleaned_image_path')
+                                            })
+                                            print(f"[CLEANED] Saved cleaned image path to state: {os.path.basename(result.get('cleaned_image_path'))}")
+                                    except Exception as e:
+                                        print(f"[CLEANED] Failed to save cleaned path to state: {e}")
                                 
                                 # Update image preview to show translated output if this is the current file  
                                 # Use thread-safe queue to update preview from sequential worker

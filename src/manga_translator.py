@@ -12843,6 +12843,31 @@ class MangaTranslator:
                 result['regions'] = [r.to_dict() for r in regions]
                 return result
             
+            # Save the cleaned/inpainted image separately before rendering translations
+            cleaned_image_path = None
+            try:
+                if inpainted is not None:
+                    # Generate cleaned image path in the same directory as output
+                    if output_path:
+                        base, ext = os.path.splitext(output_path)
+                    else:
+                        base, ext = os.path.splitext(image_path)
+                    cleaned_image_path = f"{base}_cleaned{ext}"
+                    
+                    # Save cleaned image
+                    success_cleaned = cv2.imwrite(cleaned_image_path, inpainted)
+                    if not success_cleaned:
+                        # Try with PIL for Unicode paths
+                        from PIL import Image as PILImage
+                        rgb_cleaned = cv2.cvtColor(inpainted, cv2.COLOR_BGR2RGB)
+                        pil_cleaned = PILImage.fromarray(rgb_cleaned)
+                        pil_cleaned.save(cleaned_image_path)
+                    
+                    self._log(f"💾 Saved cleaned image to: {os.path.basename(cleaned_image_path)}", "info")
+            except Exception as e:
+                self._log(f"⚠️ Failed to save cleaned image: {str(e)}", "warning")
+                cleaned_image_path = None
+            
             # Render translated text
             self._log(f"✍️ Rendering translated text...")
             self._log(f"   Using enhanced renderer with custom settings", "info")
@@ -12867,6 +12892,10 @@ class MangaTranslator:
                 
                 result['output_path'] = output_path
                 self._log(f"\n💾 Saved output to: {output_path}")
+                
+                # Also include cleaned image path if it was created
+                if cleaned_image_path:
+                    result['cleaned_image_path'] = cleaned_image_path
                 
             except Exception as e:
                 error_msg = f"Failed to save output image: {str(e)}"
