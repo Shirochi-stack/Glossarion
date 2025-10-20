@@ -784,7 +784,8 @@ class MangaImagePreviewWidget(QWidget):
         self.main_gui = main_gui  # Store reference to main GUI for config persistence
         self.manual_editing_enabled = False  # Manual editing is disabled by default (preview mode)
         self.translated_folder_path = None  # Path to translated images folder
-        self.cleaned_images_enabled = True  # Show cleaned images when available (enabled by default)
+        self.source_display_mode = 'translated'  # Source tab display: 'translated', 'cleaned', or 'original'
+        self.cleaned_images_enabled = True  # Deprecated: kept for compatibility, use source_display_mode instead
         self._build_ui()
     
     def _build_ui(self):
@@ -1052,11 +1053,11 @@ class MangaImagePreviewWidget(QWidget):
         self.zoom_out_btn.clicked.connect(self._zoom_out)
         tools_layout.addWidget(self.zoom_out_btn)
         
-        # Cleaned image toggle button
-        self.cleaned_toggle_btn = self._create_tool_button("🧽", "Show cleaned images when available")
-        self.cleaned_toggle_btn.setCheckable(True)
-        self.cleaned_toggle_btn.setChecked(True)  # Enabled by default
-        self.cleaned_toggle_btn.clicked.connect(self._toggle_cleaned_image_mode)
+        # Source tab display mode toggle button (3 states: translated output, cleaned, original)
+        self.source_display_mode = 'translated'  # Default to translated output
+        self.cleaned_toggle_btn = self._create_tool_button("✒️", "Show translated output (click to cycle)")
+        self.cleaned_toggle_btn.setCheckable(False)  # Not a checkbox, cycles through states
+        self.cleaned_toggle_btn.clicked.connect(self._cycle_source_display_mode)
         # Make this button slightly larger for better emoji display
         self.cleaned_toggle_btn.setStyleSheet("""
             QToolButton {
@@ -2140,16 +2141,44 @@ class MangaImagePreviewWidget(QWidget):
         except Exception:
             pass
     
-    def _toggle_cleaned_image_mode(self):
-        """Toggle between showing cleaned images vs original images"""
+    def _cycle_source_display_mode(self):
+        """Cycle through 3 source display modes: translated -> cleaned -> original -> translated"""
         try:
-            # Update the state
-            self.cleaned_images_enabled = self.cleaned_toggle_btn.isChecked()
+            # Cycle to next state
+            if self.source_display_mode == 'translated':
+                self.source_display_mode = 'cleaned'
+            elif self.source_display_mode == 'cleaned':
+                self.source_display_mode = 'original'
+            else:  # original
+                self.source_display_mode = 'translated'
             
-            # Update button appearance and tooltip
-            if self.cleaned_images_enabled:
-                self.cleaned_toggle_btn.setText("🧽")  # Sponge for enabled (cleaning)
-                self.cleaned_toggle_btn.setToolTip("Show cleaned images when available (enabled)")
+            # Update deprecated flag for compatibility
+            self.cleaned_images_enabled = (self.source_display_mode != 'original')
+            
+            # Update button appearance and tooltip based on mode
+            if self.source_display_mode == 'translated':
+                self.cleaned_toggle_btn.setText("✒️")  # Pen for translated output (default)
+                self.cleaned_toggle_btn.setToolTip("Showing translated output (click to cycle)")
+                self.cleaned_toggle_btn.setStyleSheet("""
+                    QToolButton {
+                        background-color: #28a745;
+                        border: 2px solid #34ce57;
+                        font-size: 12pt;
+                        min-width: 32px;
+                        min-height: 32px;
+                        max-width: 36px;
+                        max-height: 36px;
+                        padding: 3px;
+                        border-radius: 3px;
+                        color: white;
+                    }
+                    QToolButton:hover {
+                        background-color: #34ce57;
+                    }
+                """)
+            elif self.source_display_mode == 'cleaned':
+                self.cleaned_toggle_btn.setText("🧽")  # Sponge for cleaned
+                self.cleaned_toggle_btn.setToolTip("Showing cleaned images (click to cycle)")
                 self.cleaned_toggle_btn.setStyleSheet("""
                     QToolButton {
                         background-color: #4a7ba7;
@@ -2167,9 +2196,9 @@ class MangaImagePreviewWidget(QWidget):
                         background-color: #5a9fd4;
                     }
                 """)
-            else:
-                self.cleaned_toggle_btn.setText("📄")  # Document for disabled (original)
-                self.cleaned_toggle_btn.setToolTip("Show original images only (cleaned images disabled)")
+            else:  # original
+                self.cleaned_toggle_btn.setText("📄")  # Document for original
+                self.cleaned_toggle_btn.setToolTip("Showing original images (click to cycle)")
                 self.cleaned_toggle_btn.setStyleSheet("""
                     QToolButton {
                         background-color: #6c757d;
@@ -2188,13 +2217,13 @@ class MangaImagePreviewWidget(QWidget):
                     }
                 """)
             
-            # If we have a current image, reload it to apply the toggle
+            # If we have a current image, reload it to apply the new mode
             if self.current_image_path and os.path.exists(self.current_image_path):
-                print(f"[CLEANED_TOGGLE] Reloading image with cleaned mode: {self.cleaned_images_enabled}")
+                print(f"[DISPLAY_MODE] Reloading image with mode: {self.source_display_mode}")
                 self.load_image(self.current_image_path, preserve_rectangles=True, preserve_text_overlays=True)
             
         except Exception as e:
-            print(f"[ERROR] Failed to toggle cleaned image mode: {e}")
+            print(f"[ERROR] Failed to cycle source display mode: {e}")
     
     def _on_download_images_clicked(self):
         """Handle download images button - consolidate isolated images into structured folder"""
@@ -2451,28 +2480,54 @@ class MangaImagePreviewWidget(QWidget):
             pass
     
     def _check_for_cleaned_image(self, source_image_path: str) -> str:
-        """Check for cleaned version of source image and return it if available, otherwise return original.
+        """Check for appropriate image based on source display mode.
         
         Args:
             source_image_path: Path to the original source image
             
         Returns:
-            Path to cleaned image if available (and toggle enabled), otherwise original source path
+            Path based on current display mode: translated output, cleaned, or original
         """
         try:
-            # Check if cleaned images are enabled via toggle
-            if not getattr(self, 'cleaned_images_enabled', True):
-                print(f"[SRC] Cleaned images disabled by toggle, using original: {os.path.basename(source_image_path)}")
+            # Get current display mode (translated, cleaned, or original)
+            mode = getattr(self, 'source_display_mode', 'translated')
+            
+            # If mode is 'original', return original immediately
+            if mode == 'original':
+                print(f"[SRC] Display mode is 'original', using: {os.path.basename(source_image_path)}")
                 return source_image_path
             
-            # Build paths to check for cleaned images
+            # Build paths to check
             source_dir = os.path.dirname(source_image_path)
             source_filename = os.path.basename(source_image_path)
             source_name_no_ext = os.path.splitext(source_filename)[0]
             source_ext = os.path.splitext(source_filename)[1]
             
-            # Look for cleaned image in isolated folder first
+            # Isolated folder path
             translated_folder = os.path.join(source_dir, f"{source_name_no_ext}_translated")
+            
+            # If mode is 'translated', check for translated output first
+            if mode == 'translated':
+                # Check for translated output (non-cleaned file in isolated folder)
+                translated_path = None
+                if os.path.exists(translated_folder):
+                    image_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
+                    for filename in os.listdir(translated_folder):
+                        name_lower = filename.lower()
+                        # Find files that match the source name but NOT cleaned files
+                        if (name_lower.startswith(source_name_no_ext.lower()) and 
+                            name_lower.endswith(image_extensions) and
+                            '_cleaned' not in name_lower):
+                            translated_path = os.path.join(translated_folder, filename)
+                            print(f"[SRC] Found translated output: {os.path.basename(translated_path)}")
+                            return translated_path
+                
+                # Fall back to cleaned if no translated output found
+                print(f"[SRC] No translated output found, falling back to cleaned image check")
+            
+            # For 'translated' (fallback) and 'cleaned' modes, look for cleaned image
+            if mode == 'cleaned':
+                print(f"[SRC] Display mode is 'cleaned', looking for cleaned image")
             
             # 1) Check state manager for saved cleaned image path (but only if it's actually a cleaned image)
             cleaned_path = None
@@ -2533,12 +2588,12 @@ class MangaImagePreviewWidget(QWidget):
             
             # Return cleaned image if found, otherwise original
             if cleaned_path and os.path.exists(cleaned_path):
-                print(f"[SRC] Using cleaned image for src tab: {os.path.basename(cleaned_path)}")
+                print(f"[SRC] Mode '{mode}': Using cleaned image: {os.path.basename(cleaned_path)}")
                 return cleaned_path
             else:
-                print(f"[SRC] No cleaned image found, using original: {os.path.basename(source_image_path)}")
+                print(f"[SRC] Mode '{mode}': No cleaned/translated found, using original: {os.path.basename(source_image_path)}")
                 return source_image_path
                 
         except Exception as e:
-            print(f"[SRC] Error checking for cleaned image: {e}")
+            print(f"[SRC] Error in display mode '{mode}': {e}")
             return source_image_path
