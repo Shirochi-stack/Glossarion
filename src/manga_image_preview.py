@@ -2130,7 +2130,15 @@ class MangaImagePreviewWidget(QWidget):
             
             if moved_index >= 0:
                 print(f"[DEBUG] Rectangle {moved_index} moved, auto-applying save position")
-                # Auto-trigger save position for the moved rectangle
+                # IMMEDIATE REFRESH: Reload current translated image first (optimistic update)
+                try:
+                    if self.current_image_path:
+                        print(f"[INSTANT] Reloading current preview immediately for instant feedback")
+                        self.load_image(self.current_image_path, preserve_rectangles=True, preserve_text_overlays=True)
+                except Exception as e:
+                    print(f"[INSTANT] Immediate refresh failed: {e}")
+                
+                # THEN trigger background re-render
                 if hasattr(self, 'manga_integration') and self.manga_integration:
                     # Use a small delay to ensure rectangle position is fully updated
                     from PySide6.QtCore import QTimer

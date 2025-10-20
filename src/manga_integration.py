@@ -13986,10 +13986,11 @@ class MangaTranslationTab(QObject):
                     print(f"[REFRESH] Source preview refresh failed: {_e}")
                     import traceback
                     traceback.print_exc()
-            # Schedule TWO refreshes to catch async renders (match Save & Update Overlay behavior)
-            print(f"[REFRESH] Scheduling double source refresh at 1200ms and 3000ms")
-            QTimer.singleShot(1200, _refresh_source)
-            QTimer.singleShot(3000, _refresh_source)
+            # Schedule TWO refreshes to catch async renders
+            # Reduced delays since immediate preview is already shown
+            print(f"[REFRESH] Scheduling double source refresh at 500ms and 1500ms")
+            QTimer.singleShot(500, _refresh_source)  # Quick first refresh
+            QTimer.singleShot(1500, _refresh_source)  # Catch slower renders
         except Exception as e:
             print(f"[REFRESH] Failed to schedule source refresh: {e}")
             import traceback
