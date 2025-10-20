@@ -1016,6 +1016,35 @@ class CompactImageViewer(QGraphicsView):
     
     def mousePressEvent(self, event):
         """Handle mouse press for drawing boxes or inpainting"""
+        # Handle right-clicks on rectangles first to ensure proper context menu routing
+        if event.button() == Qt.MouseButton.RightButton:
+            item = self.itemAt(event.pos())
+            print(f"[CONTEXT_MENU] Right-click - item at pos: {type(item).__name__ if item else 'None'}")
+            
+            # If right-clicking on a rectangle, route the event to that rectangle
+            if isinstance(item, (MoveableRectItem, MoveableEllipseItem, MoveablePathItem)):
+                print(f"[CONTEXT_MENU] Routing right-click to rectangle with region_index: {getattr(item, 'region_index', 'None')}")
+                # Let the item handle the right-click event
+                scene_pos = self.mapToScene(event.pos())
+                # Convert to item coordinates and deliver the event
+                item_pos = item.mapFromScene(scene_pos)
+                from PySide6.QtGui import QMouseEvent
+                from PySide6.QtCore import QPointF
+                # Create a new mouse event in item coordinates
+                item_event = QMouseEvent(
+                    event.type(),
+                    item_pos,
+                    event.button(),
+                    event.buttons(),
+                    event.modifiers()
+                )
+                item.mousePressEvent(item_event)
+                event.accept()
+                return
+            # If right-clicking on something else, let default handling occur
+            super().mousePressEvent(event)
+            return
+        
         if self.current_tool in ['box_draw', 'circle_draw'] and event.button() == Qt.MouseButton.LeftButton:
             scene_pos = self.mapToScene(event.pos())
             self.start_point = scene_pos
