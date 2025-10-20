@@ -1484,6 +1484,31 @@ class MangaImagePreviewWidget(QWidget):
                         print(f"[CLEAR] Cleared in-memory translation and recognition data")
                     except Exception:
                         pass
+                    # Delete translated output image file
+                    try:
+                        if self.current_image_path:
+                            source_dir = os.path.dirname(self.current_image_path)
+                            source_filename = os.path.basename(self.current_image_path)
+                            source_name_no_ext = os.path.splitext(source_filename)[0]
+                            translated_folder = os.path.join(source_dir, f"{source_name_no_ext}_translated")
+                            
+                            # Delete translated output file (non-cleaned file) from isolated folder
+                            if os.path.exists(translated_folder):
+                                image_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
+                                for filename in os.listdir(translated_folder):
+                                    name_lower = filename.lower()
+                                    # Find and delete files that match the source name but NOT cleaned files
+                                    if (name_lower.startswith(source_name_no_ext.lower()) and 
+                                        name_lower.endswith(image_extensions) and
+                                        '_cleaned' not in name_lower):
+                                        translated_path = os.path.join(translated_folder, filename)
+                                        try:
+                                            os.remove(translated_path)
+                                            print(f"[CLEAR] Deleted translated output: {os.path.basename(translated_path)}")
+                                        except Exception as e:
+                                            print(f"[CLEAR] Failed to delete translated output: {e}")
+                    except Exception as e:
+                        print(f"[CLEAR] Error deleting translated output: {e}")
                     try:
                         if hasattr(self.manga_integration, 'image_state_manager') and self.manga_integration.image_state_manager and self.current_image_path:
                             st = self.manga_integration.image_state_manager.get_state(self.current_image_path) or {}
@@ -1501,6 +1526,12 @@ class MangaImagePreviewWidget(QWidget):
                 pass
             # Persist empty state (viewer_rectangles/detection_regions)
             self._persist_rectangles_state()
+            # Reload the image to reflect the deletion (will fallback to cleaned or original)
+            try:
+                if self.current_image_path and os.path.exists(self.current_image_path):
+                    self.load_image(self.current_image_path, preserve_rectangles=False, preserve_text_overlays=False)
+            except Exception:
+                pass
         except Exception:
             pass
     
