@@ -5109,7 +5109,10 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     
     self.openai_clear_button = QPushButton("Clear")
     self.openai_clear_button.setFixedWidth(80)
-    self.openai_clear_button.clicked.connect(lambda: setattr(self, 'openai_base_url_var', ""))
+    def _clear_openai_url():
+        self.openai_base_url_var = ""
+        self.openai_base_url_entry.setText("")
+    self.openai_clear_button.clicked.connect(_clear_openai_url)
     openai_h.addWidget(self.openai_clear_button)
     section_v.addWidget(openai_row)
     
@@ -5206,7 +5209,10 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     
     groq_clear_btn = QPushButton("Clear")
     groq_clear_btn.setFixedWidth(80)
-    groq_clear_btn.clicked.connect(lambda: setattr(self, 'groq_base_url_var', ""))
+    def _clear_groq_url():
+        self.groq_base_url_var = ""
+        self.groq_base_url_entry.setText("")
+    groq_clear_btn.clicked.connect(_clear_groq_url)
     groq_h.addWidget(groq_clear_btn)
     additional_v.addWidget(groq_row)
     
@@ -5237,7 +5243,10 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     
     fireworks_clear_btn = QPushButton("Clear")
     fireworks_clear_btn.setFixedWidth(80)
-    fireworks_clear_btn.clicked.connect(lambda: setattr(self, 'fireworks_base_url_var', ""))
+    def _clear_fireworks_url():
+        self.fireworks_base_url_var = ""
+        self.fireworks_base_url_entry.setText("")
+    fireworks_clear_btn.clicked.connect(_clear_fireworks_url)
     fireworks_h.addWidget(fireworks_clear_btn)
     additional_v.addWidget(fireworks_row)
     
@@ -5285,7 +5294,10 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     
     self.gemini_clear_button = QPushButton("Clear")
     self.gemini_clear_button.setFixedWidth(80)
-    self.gemini_clear_button.clicked.connect(lambda: setattr(self, 'gemini_openai_endpoint_var', ""))
+    def _clear_gemini_url():
+        self.gemini_openai_endpoint_var = ""
+        self.gemini_endpoint_entry.setText("")
+    self.gemini_clear_button.clicked.connect(_clear_gemini_url)
     gemini_h.addWidget(self.gemini_clear_button)
     additional_v.addWidget(gemini_row)
     
