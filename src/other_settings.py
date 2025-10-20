@@ -6141,14 +6141,21 @@ def on_profile_select(self, event=None):
     # Get the current profile name from the combobox
     name = self.profile_menu.currentText() if hasattr(self, 'profile_menu') else self.profile_var
     
+    # Skip if this is the same profile already selected (avoids unnecessary text replacement)
+    if hasattr(self, 'profile_var') and self.profile_var == name:
+        return
+    
     # Update profile_var to match
     self.profile_var = name
     
     prompt = self.prompt_profiles.get(name, "")
     
-    # PySide6: Clear and set QTextEdit content
-    self.prompt_text.clear()
-    self.prompt_text.setPlainText(prompt)
+    # Only update the text if it's actually different from what's currently in the text area
+    current_text = self.prompt_text.toPlainText().strip()
+    if current_text != prompt.strip():
+        # PySide6: Clear and set QTextEdit content
+        self.prompt_text.clear()
+        self.prompt_text.setPlainText(prompt)
     
     self.config['active_profile'] = name
 
@@ -6170,9 +6177,13 @@ def save_profile(self):
     self.config['prompt_profiles'] = self.prompt_profiles
     self.config['active_profile'] = name
     
-    # Update combobox items
-    self.profile_menu.clear()
-    self.profile_menu.addItems(list(self.prompt_profiles.keys()))
+    # Update combobox items only if the profile is new
+    current_items = [self.profile_menu.itemText(i) for i in range(self.profile_menu.count())]
+    if name not in current_items:
+        # Only rebuild if it's a new profile
+        self.profile_menu.addItem(name)
+    
+    # Ensure the current selection is set to the saved profile
     self.profile_menu.setCurrentText(name)
     
     # Show save confirmation with Halgakos icon

@@ -1832,7 +1832,11 @@ Recent translations to summarize:
             self.toggle_token_btn.setText("Enable Input Token Limit")
             self.toggle_token_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")  # success-outline
         
-        self.on_profile_select()
+        # Initialize prompt text with the active profile's content
+        if hasattr(self, 'profile_var') and self.profile_var in self.prompt_profiles:
+            initial_prompt = self.prompt_profiles[self.profile_var]
+            self.prompt_text.setPlainText(initial_prompt)
+        
         self.append_log("🚀 Glossarion v6.1.5 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
