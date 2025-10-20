@@ -1292,6 +1292,14 @@ Text to analyze:
             if hasattr(self, '_manga_dialog') and self._manga_dialog:
                 try:
                     print("[CLEANUP] Closing manga dialog...")
+                    # Flush manga state before closing
+                    if hasattr(self, 'manga_translator') and hasattr(self.manga_translator, 'image_state_manager'):
+                        try:
+                            print("[CLEANUP] Flushing manga image state...")
+                            self.manga_translator.image_state_manager.flush()
+                            print("[CLEANUP] Manga state flushed successfully")
+                        except Exception as e:
+                            print(f"[CLEANUP] Failed to flush manga state: {e}")
                     self._manga_dialog.close()
                 except:
                     pass
@@ -1591,6 +1599,15 @@ Text to analyze:
         # Intercept window close: hide instead of destroy to preserve state
         def _handle_close(event):
             try:
+                # Flush image state before hiding to persist OCR data
+                if hasattr(self, 'manga_translator') and hasattr(self.manga_translator, 'image_state_manager'):
+                    try:
+                        print("[MANGA_CLOSE] Flushing image state...")
+                        self.manga_translator.image_state_manager.flush()
+                        print("[MANGA_CLOSE] State flushed successfully")
+                    except Exception as e:
+                        print(f"[MANGA_CLOSE] Failed to flush state: {e}")
+                
                 event.ignore()
                 dialog.hide()
             except Exception:

@@ -197,7 +197,7 @@ def _state_manager_worker_process(task_queue, result_queue, state_file_path):
                 result_queue.put({'type': 'all_states_cleared'})
             
             elif task_type == 'save_now':
-                # Save to disk
+                # Save to disk (legacy - kept for compatibility)
                 try:
                     os.makedirs(os.path.dirname(state_file_path), exist_ok=True)
                     temp_path = state_file_path + '.tmp'
@@ -206,6 +206,23 @@ def _state_manager_worker_process(task_queue, result_queue, state_file_path):
                     if os.path.exists(state_file_path):
                         os.remove(state_file_path)
                     os.rename(temp_path, state_file_path)
+                    result_queue.put({'type': 'saved', 'count': len(states)})
+                except Exception as e:
+                    result_queue.put({'type': 'save_error', 'error': str(e)})
+            
+            elif task_type == 'save_state_snapshot':
+                # Save a state snapshot from main thread
+                state_snapshot = task.get('state', {})
+                try:
+                    os.makedirs(os.path.dirname(state_file_path), exist_ok=True)
+                    temp_path = state_file_path + '.tmp'
+                    with open(temp_path, 'w', encoding='utf-8') as f:
+                        json.dump(state_snapshot, f, indent=2)
+                    if os.path.exists(state_file_path):
+                        os.remove(state_file_path)
+                    os.rename(temp_path, state_file_path)
+                    # Update worker's own state to match
+                    states = state_snapshot
                     result_queue.put({'type': 'saved', 'count': len(states)})
                 except Exception as e:
                     result_queue.put({'type': 'save_error', 'error': str(e)})
@@ -237,7 +254,7 @@ class ImageStateManager:
         self._dirty = False
         self._save_timer: Optional[threading.Timer] = None
         self._timer_lock = threading.Lock()
-        
+
         # Worker process for async state operations
         self._mp_enabled = True
         self._mp_ctx = None
@@ -245,14 +262,18 @@ class ImageStateManager:
         self._mp_result_q = None
         self._mp_worker = None
         self._mp_receiver_thread = None
-        
+
         # Start worker
         if self._mp_enabled:
             self._start_worker()
-        
+
         # Load initial state synchronously
         self._load_state()
     
+    @staticmethod
+    def _normalize_path(path: str) -> str:
+        """Normalize path to forward slashes to avoid duplicates from mixed separators"""
+        return path.replace('\\', '/')
     def _start_worker(self):
         """Start worker process for async state operations"""
         try:
@@ -312,34 +333,49 @@ class ImageStateManager:
         if os.path.exists(self.state_file_path):
             try:
                 with open(self.state_file_path, 'r', encoding='utf-8') as f:
-                    self._states = json.load(f)
+                    raw_states = json.load(f)
+                
+                # Normalize all paths and merge duplicates
+                self._states = {}
+                duplicates_merged = 0
+                for img_path, state in raw_states.items():
+                    normalized = self._normalize_path(img_path)
+                    if normalized in self._states:
+                        # Merge: prefer state with OCR data
+                        existing = self._states[normalized]
+                        if 'recognized_texts' not in existing or not existing.get('recognized_texts'):
+                            # Existing has no OCR, use new state
+                            self._states[normalized] = state
+                            duplicates_merged += 1
+                        elif 'recognized_texts' in state and state.get('recognized_texts'):
+                            # Both have OCR, keep the one with more data
+                            if len(state.get('recognized_texts', [])) > len(existing.get('recognized_texts', [])):
+                                self._states[normalized] = state
+                                duplicates_merged += 1
+                        # Otherwise keep existing
+                    else:
+                        self._states[normalized] = state
+                
                 print(f"[STATE] Loaded state for {len(self._states)} images from {self.state_file_path}")
+                if duplicates_merged > 0:
+                    print(f"[STATE] Merged {duplicates_merged} duplicate path entries")
+                    self._dirty = True  # Mark for save to clean up duplicates
+                
+                # Debug: print first image's keys
+                if self._states:
+                    first_img = next(iter(self._states.keys()))
+                    print(f"[STATE DEBUG] First image keys: {list(self._states[first_img].keys())}")
             except Exception as e:
                 print(f"[STATE] Failed to load state: {e}")
                 self._states = {}
+        else:
+            print(f"[STATE DEBUG] No state file found at {self.state_file_path}")
     
     def _save_state_now(self):
-        """Request worker to save state to disk"""
-        if self._mp_enabled and self._mp_task_q:
-            try:
-                self._mp_task_q.put({'type': 'save_now'})
-                self._dirty = False
-            except Exception as e:
-                print(f"[STATE] Failed to queue save: {e}")
-        else:
-            # Fallback to synchronous save
-            try:
-                os.makedirs(os.path.dirname(self.state_file_path), exist_ok=True)
-                temp_path = self.state_file_path + '.tmp'
-                with open(temp_path, 'w', encoding='utf-8') as f:
-                    json.dump(self._states, f, indent=2)
-                if os.path.exists(self.state_file_path):
-                    os.remove(self.state_file_path)
-                os.rename(temp_path, self.state_file_path)
-                self._dirty = False
-                print(f"[STATE] Saved state for {len(self._states)} images")
-            except Exception as e:
-                print(f"[STATE] Failed to save state: {e}")
+        """Debounced save - does nothing. Only flush() saves to avoid race conditions."""
+        # DO NOT SAVE HERE - race conditions with worker updates
+        # Only flush() does synchronous save to guarantee consistency
+        pass
     
     def _schedule_save(self):
         """Schedule a debounced save (wait 2 seconds after last change)"""
@@ -357,6 +393,7 @@ class ImageStateManager:
     
     def get_state(self, image_path: str) -> Dict[str, Any]:
         """Get state for an image (returns empty dict if not found)"""
+        image_path = self._normalize_path(image_path)
         state = self._states.get(image_path, {})
         
         # EXCLUSION PERSISTENCE REMOVAL: Always start with no exclusions across new sessions
@@ -372,8 +409,9 @@ class ImageStateManager:
     
     def set_state(self, image_path: str, state: Dict[str, Any], save: bool = True):
         """Set state for an image and optionally schedule save"""
+        image_path = self._normalize_path(image_path)
         self._states[image_path] = state
-        if self._mp_enabled and self._mp_task_q and save:
+        if getattr(self, '_mp_enabled', False) and self._mp_task_q and save:
             try:
                 self._mp_task_q.put({'type': 'set_state', 'image_path': image_path, 'state': state})
             except Exception:
@@ -383,10 +421,12 @@ class ImageStateManager:
     
     def update_state(self, image_path: str, updates: Dict[str, Any], save: bool = True):
         """Update specific fields in image state"""
+        image_path = self._normalize_path(image_path)
         if image_path not in self._states:
             self._states[image_path] = {}
         self._states[image_path].update(updates)
-        if self._mp_enabled and self._mp_task_q and save:
+        print(f"[STATE DEBUG] update_state: {image_path} keys={list(updates.keys())}")
+        if getattr(self, '_mp_enabled', False) and self._mp_task_q and save:
             try:
                 self._mp_task_q.put({'type': 'update_state', 'image_path': image_path, 'updates': updates})
             except Exception:
@@ -396,9 +436,10 @@ class ImageStateManager:
     
     def clear_state(self, image_path: str, save: bool = True):
         """Clear state for an image"""
+        image_path = self._normalize_path(image_path)
         if image_path in self._states:
             del self._states[image_path]
-            if self._mp_enabled and self._mp_task_q:
+            if getattr(self, '_mp_enabled', False) and self._mp_task_q:
                 try:
                     self._mp_task_q.put({'type': 'clear_state', 'image_path': image_path})
                 except Exception:
@@ -409,7 +450,7 @@ class ImageStateManager:
     def clear_all_states(self, save: bool = True):
         """Clear all saved states for all images"""
         self._states.clear()
-        if self._mp_enabled and self._mp_task_q:
+        if getattr(self, '_mp_enabled', False) and self._mp_task_q:
             try:
                 self._mp_task_q.put({'type': 'clear_all_states'})
             except Exception:
@@ -419,14 +460,60 @@ class ImageStateManager:
             self._schedule_save()
     
     def flush(self):
-        """Force immediate save if dirty"""
+        """Force immediate save if dirty - saves synchronously to guarantee persistence"""
+        print(f"[STATE DEBUG] flush() called, dirty={self._dirty}, images={len(self._states)}")
+        
+        # Debug: Show ALL images with recognized_texts
+        if self._states:
+            images_with_ocr = []
+            for img_path, state in self._states.items():
+                if 'recognized_texts' in state and state['recognized_texts']:
+                    ocr_count = len(state['recognized_texts'])
+                    # Show last 60 chars of path to distinguish different directories
+                    display_path = img_path if len(img_path) <= 60 else '...' + img_path[-57:]
+                    images_with_ocr.append((display_path, ocr_count))
+            
+            if images_with_ocr:
+                print(f"[STATE DEBUG] Found {len(images_with_ocr)} images with OCR data:")
+                for path, count in images_with_ocr:  # Show all
+                    print(f"[STATE DEBUG]   - {path}: {count} recognized texts")
+            else:
+                print(f"[STATE DEBUG] NO images have OCR data!")
+            
+            # Also show first 3 images for context
+            print(f"[STATE DEBUG] First 3 images in state:")
+            for idx, (img_path, state) in enumerate(list(self._states.items())[:3]):
+                keys = list(state.keys())
+                has_ocr = 'recognized_texts' in state
+                ocr_count = len(state.get('recognized_texts', [])) if has_ocr else 0
+                print(f"[STATE DEBUG] Image {idx+1}: {os.path.basename(img_path)}")
+                print(f"[STATE DEBUG]   Keys: {keys}")
+                print(f"[STATE DEBUG]   Has recognized_texts: {has_ocr}, count: {ocr_count}")
+        
         if self._dirty:
-            # Cancel pending timer and save immediately
+            # Cancel pending timer
             with self._timer_lock:
                 if self._save_timer is not None:
                     self._save_timer.cancel()
                     self._save_timer = None
-            self._save_state_now()
+            
+            # Save synchronously from main thread to guarantee data persistence
+            # Don't rely on worker queue during shutdown
+            try:
+                os.makedirs(os.path.dirname(self.state_file_path), exist_ok=True)
+                temp_path = self.state_file_path + '.tmp'
+                print(f"[STATE DEBUG] Writing {len(self._states)} states to {temp_path}")
+                with open(temp_path, 'w', encoding='utf-8') as f:
+                    json.dump(self._states, f, indent=2)
+                if os.path.exists(self.state_file_path):
+                    os.remove(self.state_file_path)
+                os.rename(temp_path, self.state_file_path)
+                self._dirty = False
+                print(f"[STATE] Flushed state for {len(self._states)} images to {self.state_file_path}")
+            except Exception as e:
+                print(f"[STATE] Failed to flush state: {e}")
+        else:
+            print(f"[STATE DEBUG] flush() skipped - not dirty")
     
     def __del__(self):
         """Cleanup: flush state, stop worker, and cancel timer on deletion"""
@@ -8726,12 +8813,32 @@ class MangaTranslationTab(QObject):
                 from PySide6.QtCore import QRectF, Qt
                 from PySide6.QtGui import QPen, QBrush, QColor, QPainterPath
                 from manga_image_preview import MoveableRectItem, MoveableEllipseItem, MoveablePathItem
-                for rect_data in state['viewer_rectangles']:
+
+                # Determine coloring based on recognized/translated texts
+                recognized_texts = state.get('recognized_texts', [])
+                translated_texts = state.get('translated_texts', [])
+                has_any_text = bool([t for t in (recognized_texts or []) if not (isinstance(t, dict) and t.get('deleted'))]) or \
+                               bool([t for t in (translated_texts or []) if not (isinstance(t, dict) and t.get('deleted'))])
+
+                for idx, rect_data in enumerate(state['viewer_rectangles']):
                     shape = rect_data.get('shape', 'rect')
                     rect = QRectF(rect_data['x'], rect_data['y'], rect_data['width'], rect_data['height'])
-                    pen = QPen(QColor(0, 255, 0), 1)
+
+                    # Blue if this rectangle has recognized/translated text, else green
+                    has_text_for_this_rect = False
+                    if has_any_text:
+                        has_recognized = (idx < len(recognized_texts) and not (isinstance(recognized_texts[idx], dict) and recognized_texts[idx].get('deleted')))
+                        has_translation = (idx < len(translated_texts) and not (isinstance(translated_texts[idx], dict) and translated_texts[idx].get('deleted')))
+                        has_text_for_this_rect = has_recognized or has_translation
+
+                    if has_text_for_this_rect:
+                        pen = QPen(QColor(0, 150, 255), 2)
+                        brush = QBrush(QColor(0, 150, 255, 50))
+                    else:
+                        pen = QPen(QColor(0, 255, 0), 1)
+                        brush = QBrush(QColor(0, 255, 0, 50))
                     pen.setCosmetic(True)
-                    brush = QBrush(QColor(0, 255, 0, 50))
+
                     if shape == 'ellipse':
                         item = MoveableEllipseItem(rect, pen=pen, brush=brush)
                     elif shape == 'polygon' and rect_data.get('polygon'):
@@ -8745,11 +8852,19 @@ class MangaTranslationTab(QObject):
                         item = MoveablePathItem(path, pen=pen, brush=brush)
                     else:
                         item = MoveableRectItem(rect, pen=pen, brush=brush)
-                    # Attach viewer for move signal
+
+                    # Attach viewer and metadata
                     try:
                         item._viewer = viewer
+                        item.region_index = idx
+                        if has_text_for_this_rect:
+                            item.is_recognized = True
+                        # Attach move sync and context menu
+                        self._attach_move_sync_to_rectangle(item, idx)
+                        self._add_context_menu_to_rectangle(item, idx)
                     except Exception:
                         pass
+
                     viewer._scene.addItem(item)
                     viewer.rectangles.append(item)
                 print(f"[STATE] Restored {len(state['viewer_rectangles'])} viewer shapes (preferred)")
@@ -8762,6 +8877,55 @@ class MangaTranslationTab(QObject):
                 if hasattr(self.image_preview_widget.viewer, 'clear_rectangles'):
                     self.image_preview_widget.viewer.clear_rectangles()
                 self._draw_detection_boxes_on_preview()
+
+                # If recognized/translated texts exist, promote matching rectangles to BLUE and attach metadata
+                try:
+                    viewer = self.image_preview_widget.viewer
+                    rects = getattr(viewer, 'rectangles', []) or []
+                    recognized_texts = state.get('recognized_texts') or []
+                    translated_texts = state.get('translated_texts') or []
+                    max_len = max(len(recognized_texts), len(translated_texts))
+                    if max_len and rects:
+                        from PySide6.QtGui import QPen, QBrush, QColor
+                        for idx, rect_item in enumerate(rects):
+                            has_recognized = (idx < len(recognized_texts) and not (isinstance(recognized_texts[idx], dict) and recognized_texts[idx].get('deleted')))
+                            has_translation = (idx < len(translated_texts) and not (isinstance(translated_texts[idx], dict) and translated_texts[idx].get('deleted')))
+                            if has_recognized or has_translation:
+                                # Make blue and mark recognized
+                                try:
+                                    rect_item.setPen(QPen(QColor(0, 150, 255), 2))
+                                    rect_item.setBrush(QBrush(QColor(0, 150, 255, 50)))
+                                    rect_item.is_recognized = True
+                                except Exception:
+                                    pass
+                            # Always ensure region_index and context menu are attached
+                            try:
+                                rect_item.region_index = idx
+                                self._attach_move_sync_to_rectangle(rect_item, idx)
+                                self._add_context_menu_to_rectangle(rect_item, idx)
+                            except Exception:
+                                pass
+                        print(f"[STATE] Promoted {sum(1 for i in range(min(len(rects), max_len)) if (i < len(recognized_texts) and not (isinstance(recognized_texts[i], dict) and recognized_texts[i].get('deleted'))) or (i < len(translated_texts) and not (isinstance(translated_texts[i], dict) and translated_texts[i].get('deleted'))))} rectangles to BLUE from recognized/translated texts")
+                    # Populate _recognition_data so Edit OCR tooltips work
+                    if recognized_texts:
+                        try:
+                            self._recognition_data = {}
+                            for i, result in enumerate(recognized_texts):
+                                if isinstance(result, dict) and result.get('deleted'):
+                                    continue
+                                if isinstance(result, str):
+                                    self._recognition_data[int(i)] = {'text': result, 'bbox': [0, 0, 100, 100]}
+                                elif isinstance(result, dict) and 'text' in result:
+                                    idx = result.get('region_index', i)
+                                    self._recognition_data[int(idx)] = {
+                                        'text': result.get('text', ''),
+                                        'bbox': result.get('bbox', [0, 0, 100, 100])
+                                    }
+                            print(f"[STATE] Restored recognition_data for {len(self._recognition_data)} regions (detection branch)")
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
             
             # Restore exclusion status after rectangles are drawn
             try:
@@ -9252,10 +9416,15 @@ class MangaTranslationTab(QObject):
             regions = results['regions']
             preserve_rectangles = results.get('preserve_rectangles', False)
             
-            # Always persist regions for this image
+            # Persist regions for this image ONLY if no OCR data exists yet
             if hasattr(self, 'image_state_manager'):
                 try:
-                    self.image_state_manager.update_state(image_path, {'detection_regions': regions})
+                    current_state = self.image_state_manager.get_state(image_path)
+                    # Don't overwrite OCR data with just detection regions
+                    if not current_state.get('recognized_texts') and not current_state.get('translated_texts'):
+                        self.image_state_manager.update_state(image_path, {'detection_regions': regions})
+                    else:
+                        print(f"[STATE] Skipping detection_regions save - OCR/translation data exists")
                 except Exception:
                     pass
             
@@ -9396,9 +9565,13 @@ class MangaTranslationTab(QObject):
                         'regions': regions,
                         'preserve_rectangles': True  # Don't clear existing rectangles during clean operation
                     }))
-                    # Persist detection state
+                    # Persist detection state ONLY if no OCR data exists yet
                     if hasattr(self, 'image_state_manager'):
-                        self.image_state_manager.update_state(image_path, {'detection_regions': regions})
+                        current_state = self.image_state_manager.get_state(image_path)
+                        if not current_state.get('recognized_texts') and not current_state.get('translated_texts'):
+                            self.image_state_manager.update_state(image_path, {'detection_regions': regions})
+                        else:
+                            print(f"[STATE] Skipping detection_regions save - OCR/translation data exists")
                 except Exception:
                     pass
 
@@ -10633,10 +10806,14 @@ class MangaTranslationTab(QObject):
                     self._draw_detection_boxes_on_preview()
                 except Exception:
                     pass
-                # Persist merged regions to state
+                # Persist merged regions to state ONLY if no OCR data exists yet
                 try:
                     if hasattr(self, 'image_state_manager'):
-                        self.image_state_manager.update_state(image_path, {'detection_regions': regions})
+                        current_state = self.image_state_manager.get_state(image_path)
+                        if not current_state.get('recognized_texts') and not current_state.get('translated_texts'):
+                            self.image_state_manager.update_state(image_path, {'detection_regions': regions})
+                        else:
+                            print(f"[STATE] Skipping detection_regions save - OCR/translation data exists")
                 except Exception:
                     pass
                 self._log(f"📝 Starting text recognition on {len(regions)} existing regions using {ocr_config['provider']}", "info")
@@ -10810,10 +10987,14 @@ class MangaTranslationTab(QObject):
                     self._draw_detection_boxes_on_preview()
                 except Exception:
                     pass
-                # Persist merged regions to state
+                # Persist merged regions to state ONLY if no OCR data exists yet
                 try:
                     if hasattr(self, 'image_state_manager'):
-                        self.image_state_manager.update_state(image_path, {'detection_regions': regions_for_recognition})
+                        current_state = self.image_state_manager.get_state(image_path)
+                        if not current_state.get('recognized_texts') and not current_state.get('translated_texts'):
+                            self.image_state_manager.update_state(image_path, {'detection_regions': regions_for_recognition})
+                        else:
+                            print(f"[STATE] Skipping detection_regions save - OCR/translation data exists")
                 except Exception:
                     pass
             elif not has_rectangles:
@@ -17450,9 +17631,12 @@ class MangaTranslationTab(QObject):
             # Persist recognized texts to state for this image
             if hasattr(self, 'image_state_manager') and image_path:
                 try:
+                    print(f"[STATE DEBUG] Saving recognized_texts for {os.path.basename(image_path)}: count={len(recognized_texts)}")
+                    if recognized_texts:
+                        print(f"[STATE DEBUG] First OCR result: {recognized_texts[0]}")
                     self.image_state_manager.update_state(image_path, {'recognized_texts': recognized_texts})
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[STATE DEBUG] Failed to save recognized_texts: {e}")
             
             # Suppress UI overlays while batch is active
             if getattr(self, '_batch_mode_active', False):

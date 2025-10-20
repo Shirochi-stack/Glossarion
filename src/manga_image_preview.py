@@ -232,7 +232,8 @@ class MoveableRectItem(QGraphicsRectItem):
         was_actually_moved_or_resized = False
         
         # Check if we actually moved or resized (not just clicked)
-        if hasattr(self, '_initial_pos') and hasattr(self, '_initial_rect'):
+        if (hasattr(self, '_initial_pos') and self._initial_pos is not None and 
+            hasattr(self, '_initial_rect') and self._initial_rect is not None):
             current_pos = self.pos()
             current_rect = self.rect()
             # Consider it moved/resized if position changed by more than 1 pixel or rect changed
@@ -506,7 +507,8 @@ class MoveableEllipseItem(QGraphicsEllipseItem):
         was_actually_moved_or_resized = False
         
         # Check if we actually moved or resized (not just clicked)
-        if hasattr(self, '_initial_pos') and hasattr(self, '_initial_rect'):
+        if (hasattr(self, '_initial_pos') and self._initial_pos is not None and 
+            hasattr(self, '_initial_rect') and self._initial_rect is not None):
             current_pos = self.pos()
             current_rect = self.rect()
             # Consider it moved/resized if position changed by more than 1 pixel or rect changed
@@ -796,7 +798,8 @@ class MoveablePathItem(QGraphicsPathItem):
         was_actually_moved_or_resized = False
         
         # Check if we actually moved or resized (not just clicked)
-        if hasattr(self, '_initial_pos') and hasattr(self, '_initial_rect'):
+        if (hasattr(self, '_initial_pos') and self._initial_pos is not None and 
+            hasattr(self, '_initial_rect') and self._initial_rect is not None):
             current_pos = self.pos()
             current_rect = self.boundingRect()
             # Consider it moved/resized if position changed by more than 1 pixel or rect changed
