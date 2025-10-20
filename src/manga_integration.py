@@ -8812,6 +8812,54 @@ class MangaTranslationTab(QObject):
             import traceback
             traceback.print_exc()
     
+    def _rehydrate_text_state_from_persisted(self, image_path: str):
+        """Rebuild in-memory recognition/translation data from persisted state without redrawing.
+        Returns (ocr_count, trans_count).
+        """
+        try:
+            if not hasattr(self, 'image_state_manager'):
+                return (0, 0)
+            state = self.image_state_manager.get_state(image_path) or {}
+            # Recognized texts
+            rec = state.get('recognized_texts') or []
+            active_rec = []
+            recognition_data = {}
+            for i, r in enumerate(rec):
+                if isinstance(r, dict) and r.get('deleted'):
+                    continue
+                if isinstance(r, str):
+                    active_rec.append({'text': r, 'bbox': [0, 0, 100, 100], 'region_index': i})
+                    recognition_data[int(i)] = {'text': r, 'bbox': [0, 0, 100, 100]}
+                elif isinstance(r, dict) and 'text' in r:
+                    idx = r.get('region_index', i)
+                    active_rec.append({'text': r.get('text', ''), 'bbox': r.get('bbox', [0, 0, 100, 100]), 'region_index': idx})
+                    recognition_data[int(idx)] = {'text': r.get('text', ''), 'bbox': r.get('bbox', [0, 0, 100, 100])}
+            self._recognized_texts = active_rec
+            try:
+                self._recognized_texts_image_path = image_path
+            except Exception:
+                pass
+            self._recognition_data = recognition_data
+            # Translated texts
+            trans = state.get('translated_texts') or []
+            active_trans = []
+            translation_data = {}
+            for i, t in enumerate(trans):
+                if isinstance(t, dict) and t.get('deleted'):
+                    continue
+                idx = t.get('original', {}).get('region_index', i) if isinstance(t, dict) else i
+                if isinstance(t, dict):
+                    translation_data[int(idx)] = {
+                        'original': t.get('original', {}).get('text', ''),
+                        'translation': t.get('translation', '')
+                    }
+                active_trans.append(t)
+            self._translated_texts = active_trans
+            self._translation_data = translation_data
+            return (len(active_rec), len(active_trans))
+        except Exception:
+            return (0, 0)
+
     def _restore_image_state(self, image_path: str):
         """Restore persisted state for an image (rectangles, overlays, paths)"""
         try:
@@ -8928,22 +8976,12 @@ class MangaTranslationTab(QObject):
                             except Exception:
                                 pass
                         print(f"[STATE] Promoted {sum(1 for i in range(min(len(rects), max_len)) if (i < len(recognized_texts) and not (isinstance(recognized_texts[i], dict) and recognized_texts[i].get('deleted'))) or (i < len(translated_texts) and not (isinstance(translated_texts[i], dict) and translated_texts[i].get('deleted'))))} rectangles to BLUE from recognized/translated texts")
-                    # Populate _recognition_data so Edit OCR tooltips work
-                    if recognized_texts:
+                    # Populate in-memory text state and add OCR tooltips
+                    ocr_count, trans_count = self._rehydrate_text_state_from_persisted(image_path)
+                    if ocr_count and hasattr(self, '_update_rectangles_with_recognition'):
                         try:
-                            self._recognition_data = {}
-                            for i, result in enumerate(recognized_texts):
-                                if isinstance(result, dict) and result.get('deleted'):
-                                    continue
-                                if isinstance(result, str):
-                                    self._recognition_data[int(i)] = {'text': result, 'bbox': [0, 0, 100, 100]}
-                                elif isinstance(result, dict) and 'text' in result:
-                                    idx = result.get('region_index', i)
-                                    self._recognition_data[int(idx)] = {
-                                        'text': result.get('text', ''),
-                                        'bbox': result.get('bbox', [0, 0, 100, 100])
-                                    }
-                            print(f"[STATE] Restored recognition_data for {len(self._recognition_data)} regions (detection branch)")
+                            self._update_rectangles_with_recognition(self._recognized_texts)
+                            print(f"[STATE] Attached OCR tooltips to {ocr_count} rectangles (detection branch)")
                         except Exception:
                             pass
                 except Exception:
@@ -9169,6 +9207,14 @@ class MangaTranslationTab(QObject):
                         pass
                         
                 print(f"[STATE] Restored {len(state['viewer_rectangles'])} viewer shapes (preferred)")
+                # Populate in-memory text state and add OCR tooltips
+                try:
+                    ocr_count, trans_count = self._rehydrate_text_state_from_persisted(image_path)
+                    if ocr_count and hasattr(self, '_update_rectangles_with_recognition'):
+                        self._update_rectangles_with_recognition(self._recognized_texts)
+                        print(f"[STATE] Attached OCR tooltips to {ocr_count} rectangles (viewer_rectangles branch)")
+                except Exception:
+                    pass
                 used_boxes = True
             
             if not used_boxes and 'detection_regions' in state:
@@ -14384,6 +14430,13 @@ class MangaTranslationTab(QObject):
                     if ipw and getattr(ipw, 'current_image_path', None):
                         print(f"[REFRESH] Executing source preview refresh for: {os.path.basename(ipw.current_image_path)}")
                         ipw.load_image(ipw.current_image_path, preserve_rectangles=True, preserve_text_overlays=True)
+                        # Rehydrate text state so auto-save position has translation/OCR available
+                        try:
+                            ocr_count, trans_count = self._rehydrate_text_state_from_persisted(ipw.current_image_path)
+                            if ocr_count and hasattr(self, '_update_rectangles_with_recognition'):
+                                self._update_rectangles_with_recognition(self._recognized_texts)
+                        except Exception:
+                            pass
                         print(f"[REFRESH] Source preview refresh completed")
                 except Exception as _e:
                     print(f"[REFRESH] Source preview refresh failed: {_e}")
