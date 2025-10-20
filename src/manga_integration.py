@@ -9837,9 +9837,6 @@ class MangaTranslationTab(QObject):
                 # Use local inpainter with the same method as manga_translator
                 print(f"[INPAINT_SYNC] Using local inpainter: {local_model}")
                 
-                # Create local inpainter
-                inpainter = LocalInpainter()
-                
                 # Get model path from config (same way as manga_translator)
                 model_path = self.main_gui.config.get(f'manga_{local_model}_model_path', '')
                 
@@ -9847,23 +9844,19 @@ class MangaTranslationTab(QObject):
                 resolved_model_path = model_path
                 if not resolved_model_path or not os.path.exists(resolved_model_path):
                     try:
+                        from local_inpainter import LocalInpainter
                         print(f"[INPAINT_SYNC] Downloading {local_model} model...")
-                        resolved_model_path = inpainter.download_jit_model(local_model)
+                        temp_inpainter = LocalInpainter()
+                        resolved_model_path = temp_inpainter.download_jit_model(local_model)
                     except Exception as e:
                         print(f"[INPAINT_SYNC] Model download failed: {e}")
                         resolved_model_path = None
                 
-                # Load the model using the same method as manga_translator
+                # Use shared inpainter to avoid reloading model every time
                 if resolved_model_path and os.path.exists(resolved_model_path):
-                    try:
-                        print(f"[INPAINT_SYNC] Loading {local_model} model from: {os.path.basename(resolved_model_path)}")
-                        # Use load_model_with_retry like manga_translator does
-                        success = inpainter.load_model_with_retry(local_model, resolved_model_path, force_reload=False)
-                        if not success:
-                            print(f"[INPAINT_SYNC] Failed to load model with retry")
-                            return None
-                    except Exception as e:
-                        print(f"[INPAINT_SYNC] Model loading error: {str(e)}")
+                    inpainter = self._get_or_create_shared_inpainter(local_model, resolved_model_path)
+                    if not inpainter:
+                        print(f"[INPAINT_SYNC] Failed to get/create shared inpainter")
                         return None
                 else:
                     print(f"[INPAINT_SYNC] No valid model path for {local_model}")
