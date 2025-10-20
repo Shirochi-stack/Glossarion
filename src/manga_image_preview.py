@@ -1602,9 +1602,9 @@ class MangaImagePreviewWidget(QWidget):
                         self.load_image(self.current_image_path, preserve_rectangles=True, preserve_text_overlays=True)
                 except Exception as _e:
                     print(f"[DEBUG] Source refresh failed: {_e}")
-            # Try twice to catch async renders
-            QTimer.singleShot(1200, _refresh_source)
-            QTimer.singleShot(3000, _refresh_source)
+            # Fast refresh timings to catch async renders
+            QTimer.singleShot(200, _refresh_source)
+            QTimer.singleShot(1000, _refresh_source)
         
         except Exception as e:
             print(f"[DEBUG] _on_save_overlay_clicked: Exception caught: {e}")
@@ -2138,11 +2138,9 @@ class MangaImagePreviewWidget(QWidget):
                 except Exception as e:
                     print(f"[INSTANT] Immediate refresh failed: {e}")
                 
-                # THEN trigger background re-render
+                # THEN trigger background re-render IMMEDIATELY (no delay)
                 if hasattr(self, 'manga_integration') and self.manga_integration:
-                    # Use a small delay to ensure rectangle position is fully updated
-                    from PySide6.QtCore import QTimer
-                    QTimer.singleShot(100, lambda: self.manga_integration._save_position_async(moved_index))
+                    self.manga_integration._save_position_async(moved_index)
         except Exception as e:
             print(f"[DEBUG] Error in _on_rectangle_moved: {e}")
     
