@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGraphicsView,
                                QGraphicsScene, QGraphicsPixmapItem, QToolButton, 
                                QLabel, QSlider, QFrame, QPushButton, QGraphicsRectItem, QGraphicsEllipseItem, QGraphicsPathItem,
                                QSizePolicy, QListWidget, QListWidgetItem, QTabWidget)
-from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QSize, QThread, QObject, Slot
+from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QSize, QTimer, Slot
 from PySide6.QtGui import QPixmap, QImage, QPainter, QColor, QPen, QBrush, QCursor, QIcon, QPainterPath
 import numpy as np
 
@@ -849,51 +849,6 @@ class MoveablePathItem(QGraphicsPathItem):
         except Exception:
             super().paint(painter, option, widget)
 
-class ImageLoaderWorker(QObject):
-    """Worker for loading images in background thread"""
-    
-    finished = Signal(QPixmap, str)  # pixmap, file_path
-    error = Signal(str)  # error message
-    
-    def __init__(self):
-        super().__init__()
-        self.image_path = None
-        self.cancelled = False
-    
-    @Slot()
-    def load_image(self, image_path: str):
-        """Load image in background thread"""
-        self.image_path = image_path
-        self.cancelled = False
-        
-        try:
-            if not os.path.exists(image_path):
-                self.error.emit(f"File not found: {image_path}")
-                return
-            
-            if self.cancelled:
-                return
-            
-            # Load pixmap (this can be slow for large images)
-            pixmap = QPixmap(image_path)
-            
-            if self.cancelled:
-                return
-            
-            if pixmap.isNull():
-                self.error.emit(f"Failed to load: {image_path}")
-                return
-            
-            # Emit the loaded pixmap
-            self.finished.emit(pixmap, image_path)
-            
-        except Exception as e:
-            if not self.cancelled:
-                self.error.emit(str(e))
-    
-    def cancel(self):
-        """Cancel the current load operation"""
-        self.cancelled = True
 
 
 class CompactImageViewer(QGraphicsView):
@@ -953,9 +908,7 @@ class CompactImageViewer(QGraphicsView):
         self.lasso_item: Optional[MoveablePathItem] = None
         self.lasso_active = False
         
-        # Background image loading
-        self._loader_thread = None
-        self._loader_worker = None
+        # Image loading state
         self._loading = False
     
     def resizeEvent(self, event):
@@ -968,66 +921,32 @@ class CompactImageViewer(QGraphicsView):
         return not self.empty
     
     def load_image(self, image_path: str) -> bool:
-        """Load an image from file path in background thread"""
+        """Load an image from file path (synchronous on main thread)"""
         if not os.path.exists(image_path):
             return False
-        
-        # Cancel any existing load operation
-        if self._loader_worker:
-            self._loader_worker.cancel()
-        
-        # Clean up old thread if it exists
-        if self._loader_thread and self._loader_thread.isRunning():
-            self._loader_thread.quit()
-            self._loader_thread.wait(100)  # Wait up to 100ms
         
         # Emit loading signal
         self._loading = True
         self.image_loading.emit(image_path)
         
-        # Create new thread and worker
-        self._loader_thread = QThread()
-        self._loader_worker = ImageLoaderWorker()
-        self._loader_worker.moveToThread(self._loader_thread)
-        
-        # Connect signals
-        self._loader_worker.finished.connect(self._on_image_loaded)
-        self._loader_worker.error.connect(self._on_image_error)
-        self._loader_thread.started.connect(lambda: self._loader_worker.load_image(image_path))
-        
-        # Start the thread
-        self._loader_thread.start()
-        
-        return True
-    
-    @Slot(QPixmap, str)
-    def _on_image_loaded(self, pixmap: QPixmap, image_path: str):
-        """Handle image loaded from background thread"""
-        self._loading = False
-        self.setPhoto(pixmap)
-        
-        # Emit success signal
-        self.image_loaded.emit(image_path)
-        
-        # Clean up thread
-        if self._loader_thread:
-            self._loader_thread.quit()
-            self._loader_thread.wait()
-            self._loader_thread = None
-        self._loader_worker = None
-    
-    @Slot(str)
-    def _on_image_error(self, error_msg: str):
-        """Handle image load error"""
-        self._loading = False
-        print(f"Image load error: {error_msg}")
-        
-        # Clean up thread
-        if self._loader_thread:
-            self._loader_thread.quit()
-            self._loader_thread.wait()
-            self._loader_thread = None
-        self._loader_worker = None
+        try:
+            # Load directly with QPixmap on main thread
+            pixmap = QPixmap(image_path)
+            
+            if pixmap.isNull():
+                print(f"Failed to load: {image_path}")
+                self._loading = False
+                return False
+            
+            self._loading = False
+            self.setPhoto(pixmap)
+            self.image_loaded.emit(image_path)
+            return True
+            
+        except Exception as e:
+            print(f"Error loading image: {e}")
+            self._loading = False
+            return False
     
     def setPhoto(self, pixmap: QPixmap = None):
         """Set the photo to display with high quality rendering"""
@@ -1383,13 +1302,6 @@ class CompactImageViewer(QGraphicsView):
     
     def clear_scene(self):
         """Clear entire scene"""
-        # Cancel any pending load
-        if self._loader_worker:
-            self._loader_worker.cancel()
-        if self._loader_thread and self._loader_thread.isRunning():
-            self._loader_thread.quit()
-            self._loader_thread.wait(100)
-        
         self._scene.clear()
         self.rectangles.clear()
         self.selected_rect = None
@@ -2294,19 +2206,6 @@ class MangaImagePreviewWidget(QWidget):
         from PySide6.QtCore import Qt, QSize
         import threading
         
-        # Load thumbnails in background to avoid blocking
-        def load_thumb(path, index):
-            try:
-                pixmap = QPixmap(path)
-                if not pixmap.isNull():
-                    # Scale to thumbnail size
-                    thumb = pixmap.scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatio, 
-                                         Qt.TransformationMode.SmoothTransformation)
-                    return (index, path, thumb)
-            except:
-                pass
-            return None
-        
         # Add items with loading placeholders first
         for i, path in enumerate(self.image_paths):
             item = QListWidgetItem()
@@ -2315,36 +2214,36 @@ class MangaImagePreviewWidget(QWidget):
             item.setSizeHint(QSize(110, 110))
             self.thumbnail_list.addItem(item)
         
-        # Load thumbnails asynchronously
-        def load_all_thumbs():
-            for i, path in enumerate(self.image_paths):
-                result = load_thumb(path, i)
-                if result:
-                    idx, img_path, thumb = result
-                    # Update items on main thread
-                    try:
-                        from PySide6.QtCore import QMetaObject, Q_ARG
-                        QMetaObject.invokeMethod(self, "_update_thumbnail_item",
-                                                Qt.ConnectionType.QueuedConnection,
-                                                Q_ARG(int, idx),
-                                                Q_ARG(QPixmap, thumb),
-                                                Q_ARG(str, img_path))
-                    except:
-                        pass
+        # Load thumbnails in background thread
+        def load_thumb(path):
+            try:
+                pixmap = QPixmap(path)
+                if not pixmap.isNull():
+                    thumb = pixmap.scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatio, 
+                                         Qt.TransformationMode.SmoothTransformation)
+                    QTimer.singleShot(0, lambda p=path, t=thumb: self._on_thumbnail_loaded(p, t))
+            except Exception as e:
+                print(f"Failed to load thumbnail: {e}")
         
-        # Start background loading
+        def load_all_thumbs():
+            for path in self.image_paths:
+                load_thumb(path)
+        
         thread = threading.Thread(target=load_all_thumbs, daemon=True)
         thread.start()
     
-    @Slot(int, QPixmap, str)
-    def _update_thumbnail_item(self, index: int, pixmap: QPixmap, path: str):
-        """Update thumbnail item with loaded pixmap (called from background thread)"""
+    def _on_thumbnail_loaded(self, path: str, pixmap: QPixmap):
+        """Handle loaded thumbnail and update the list item"""
         try:
-            if index < self.thumbnail_list.count():
-                item = self.thumbnail_list.item(index)
-                icon = QIcon(pixmap)
-                item.setIcon(icon)
-                item.setText("")  # Remove text once icon is loaded
+            # Find the item with matching path
+            for i in range(self.thumbnail_list.count()):
+                item = self.thumbnail_list.item(i)
+                item_path = item.data(Qt.ItemDataRole.UserRole)
+                if item_path == path:
+                    icon = QIcon(pixmap)
+                    item.setIcon(icon)
+                    item.setText("")  # Remove text once icon is loaded
+                    break
         except Exception as e:
             print(f"Error updating thumbnail: {e}")
     

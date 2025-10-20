@@ -131,22 +131,184 @@ except ImportError:
     UnifiedClient = None
 
 
+# Module-level worker function for state management (must be picklable)
+def _state_manager_worker_process(task_queue, result_queue, state_file_path):
+    """Worker process for async state persistence operations.
+    
+    Runs in separate process to avoid blocking UI during JSON I/O.
+    """
+    import os
+    import json
+    from queue import Empty
+    
+    # Load initial state
+    states = {}
+    if os.path.exists(state_file_path):
+        try:
+            with open(state_file_path, 'r', encoding='utf-8') as f:
+                states = json.load(f)
+        except Exception:
+            states = {}
+    
+    while True:
+        try:
+            task = task_queue.get(timeout=0.5)
+            
+            if task is None or task.get('type') == 'shutdown':
+                # Final save before shutdown
+                try:
+                    os.makedirs(os.path.dirname(state_file_path), exist_ok=True)
+                    temp_path = state_file_path + '.tmp'
+                    with open(temp_path, 'w', encoding='utf-8') as f:
+                        json.dump(states, f, indent=2)
+                    if os.path.exists(state_file_path):
+                        os.remove(state_file_path)
+                    os.rename(temp_path, state_file_path)
+                except Exception:
+                    pass
+                break
+            
+            task_type = task.get('type')
+            
+            if task_type == 'update_state':
+                image_path = task.get('image_path')
+                updates = task.get('updates', {})
+                if image_path:
+                    if image_path not in states:
+                        states[image_path] = {}
+                    states[image_path].update(updates)
+                    result_queue.put({'type': 'state_updated', 'image_path': image_path})
+            
+            elif task_type == 'set_state':
+                image_path = task.get('image_path')
+                state = task.get('state', {})
+                if image_path:
+                    states[image_path] = state
+                    result_queue.put({'type': 'state_set', 'image_path': image_path})
+            
+            elif task_type == 'clear_state':
+                image_path = task.get('image_path')
+                if image_path and image_path in states:
+                    del states[image_path]
+                    result_queue.put({'type': 'state_cleared', 'image_path': image_path})
+            
+            elif task_type == 'clear_all_states':
+                states.clear()
+                result_queue.put({'type': 'all_states_cleared'})
+            
+            elif task_type == 'save_now':
+                # Save to disk
+                try:
+                    os.makedirs(os.path.dirname(state_file_path), exist_ok=True)
+                    temp_path = state_file_path + '.tmp'
+                    with open(temp_path, 'w', encoding='utf-8') as f:
+                        json.dump(states, f, indent=2)
+                    if os.path.exists(state_file_path):
+                        os.remove(state_file_path)
+                    os.rename(temp_path, state_file_path)
+                    result_queue.put({'type': 'saved', 'count': len(states)})
+                except Exception as e:
+                    result_queue.put({'type': 'save_error', 'error': str(e)})
+            
+            elif task_type == 'get_state':
+                image_path = task.get('image_path')
+                state = states.get(image_path, {})
+                # Remove exclusions on read
+                if 'excluded_from_clean' in state:
+                    state = dict(state)
+                    del state['excluded_from_clean']
+                    states[image_path] = state
+                result_queue.put({'type': 'state_result', 'image_path': image_path, 'state': state})
+        
+        except Empty:
+            continue
+        except Exception:
+            continue
+
+
 class ImageStateManager:
     """
     Manages per-image state persistence (detection rects, recognition overlays, paths, status).
-    Saves state to JSON with debounced writes to avoid excessive I/O.
-    Uses threading.Timer instead of QTimer to work from any thread.
+    Saves state to JSON with debounced writes using worker process to avoid UI blocking.
     """
     def __init__(self, state_file_path: str):
         self.state_file_path = state_file_path
-        self._states: Dict[str, Dict[str, Any]] = {}  # Keyed by original image path
+        self._states: Dict[str, Dict[str, Any]] = {}  # Local cache
         self._dirty = False
         self._save_timer: Optional[threading.Timer] = None
         self._timer_lock = threading.Lock()
+        
+        # Worker process for async state operations
+        self._mp_enabled = True
+        self._mp_ctx = None
+        self._mp_task_q = None
+        self._mp_result_q = None
+        self._mp_worker = None
+        self._mp_receiver_thread = None
+        
+        # Start worker
+        if self._mp_enabled:
+            self._start_worker()
+        
+        # Load initial state synchronously
         self._load_state()
     
+    def _start_worker(self):
+        """Start worker process for async state operations"""
+        try:
+            import multiprocessing as mp
+            try:
+                self._mp_ctx = mp.get_context('spawn')
+            except Exception:
+                self._mp_ctx = mp
+            
+            self._mp_task_q = self._mp_ctx.Queue()
+            self._mp_result_q = self._mp_ctx.Queue()
+            
+            self._mp_worker = self._mp_ctx.Process(
+                target=_state_manager_worker_process,
+                args=(self._mp_task_q, self._mp_result_q, self.state_file_path),
+                daemon=True
+            )
+            self._mp_worker.start()
+            
+            # Receiver thread
+            def _receiver():
+                while True:
+                    try:
+                        from queue import Empty
+                        msg = self._mp_result_q.get(timeout=0.1)
+                        # Process results if needed
+                        if msg.get('type') == 'saved':
+                            print(f"[STATE] Worker saved {msg.get('count', 0)} states")
+                    except Empty:
+                        continue
+                    except Exception:
+                        break
+            
+            self._mp_receiver_thread = threading.Thread(target=_receiver, daemon=True)
+            self._mp_receiver_thread.start()
+            
+        except Exception as e:
+            print(f"[STATE] Failed to start worker: {e}")
+            self._mp_enabled = False
+    
+    def _stop_worker(self):
+        """Stop worker process"""
+        try:
+            if self._mp_enabled and self._mp_task_q:
+                self._mp_task_q.put({'type': 'shutdown'})
+            if self._mp_worker:
+                self._mp_worker.join(timeout=2.0)
+                if self._mp_worker.is_alive():
+                    self._mp_worker.terminate()
+        except Exception:
+            pass
+        finally:
+            self._mp_enabled = False
+    
     def _load_state(self):
-        """Load state from JSON file if it exists"""
+        """Load state from JSON file if it exists (synchronous on startup)"""
         if os.path.exists(self.state_file_path):
             try:
                 with open(self.state_file_path, 'r', encoding='utf-8') as f:
@@ -157,25 +319,27 @@ class ImageStateManager:
                 self._states = {}
     
     def _save_state_now(self):
-        """Immediately save state to JSON file"""
-        try:
-            # Ensure directory exists
-            os.makedirs(os.path.dirname(self.state_file_path), exist_ok=True)
-            
-            # Write to temp file first, then rename (atomic on most systems)
-            temp_path = self.state_file_path + '.tmp'
-            with open(temp_path, 'w', encoding='utf-8') as f:
-                json.dump(self._states, f, indent=2)
-            
-            # Atomic rename
-            if os.path.exists(self.state_file_path):
-                os.remove(self.state_file_path)
-            os.rename(temp_path, self.state_file_path)
-            
-            self._dirty = False
-            print(f"[STATE] Saved state for {len(self._states)} images")
-        except Exception as e:
-            print(f"[STATE] Failed to save state: {e}")
+        """Request worker to save state to disk"""
+        if self._mp_enabled and self._mp_task_q:
+            try:
+                self._mp_task_q.put({'type': 'save_now'})
+                self._dirty = False
+            except Exception as e:
+                print(f"[STATE] Failed to queue save: {e}")
+        else:
+            # Fallback to synchronous save
+            try:
+                os.makedirs(os.path.dirname(self.state_file_path), exist_ok=True)
+                temp_path = self.state_file_path + '.tmp'
+                with open(temp_path, 'w', encoding='utf-8') as f:
+                    json.dump(self._states, f, indent=2)
+                if os.path.exists(self.state_file_path):
+                    os.remove(self.state_file_path)
+                os.rename(temp_path, self.state_file_path)
+                self._dirty = False
+                print(f"[STATE] Saved state for {len(self._states)} images")
+            except Exception as e:
+                print(f"[STATE] Failed to save state: {e}")
     
     def _schedule_save(self):
         """Schedule a debounced save (wait 2 seconds after last change)"""
@@ -209,6 +373,11 @@ class ImageStateManager:
     def set_state(self, image_path: str, state: Dict[str, Any], save: bool = True):
         """Set state for an image and optionally schedule save"""
         self._states[image_path] = state
+        if self._mp_enabled and self._mp_task_q and save:
+            try:
+                self._mp_task_q.put({'type': 'set_state', 'image_path': image_path, 'state': state})
+            except Exception:
+                pass
         if save:
             self._schedule_save()
     
@@ -217,6 +386,11 @@ class ImageStateManager:
         if image_path not in self._states:
             self._states[image_path] = {}
         self._states[image_path].update(updates)
+        if self._mp_enabled and self._mp_task_q and save:
+            try:
+                self._mp_task_q.put({'type': 'update_state', 'image_path': image_path, 'updates': updates})
+            except Exception:
+                pass
         if save:
             self._schedule_save()
     
@@ -224,12 +398,22 @@ class ImageStateManager:
         """Clear state for an image"""
         if image_path in self._states:
             del self._states[image_path]
+            if self._mp_enabled and self._mp_task_q:
+                try:
+                    self._mp_task_q.put({'type': 'clear_state', 'image_path': image_path})
+                except Exception:
+                    pass
             if save:
                 self._schedule_save()
     
     def clear_all_states(self, save: bool = True):
         """Clear all saved states for all images"""
         self._states.clear()
+        if self._mp_enabled and self._mp_task_q:
+            try:
+                self._mp_task_q.put({'type': 'clear_all_states'})
+            except Exception:
+                pass
         print(f"[STATE] Cleared all saved states")
         if save:
             self._schedule_save()
@@ -245,9 +429,10 @@ class ImageStateManager:
             self._save_state_now()
     
     def __del__(self):
-        """Cleanup: flush state and cancel timer on deletion"""
+        """Cleanup: flush state, stop worker, and cancel timer on deletion"""
         try:
             self.flush()
+            self._stop_worker()
         except:
             pass
 
