@@ -709,14 +709,13 @@ class LocalInpainter:
         self._stopped = False
         self.log_callback = None
         
-        # Initialize bubble detector if available
+        # Defer bubble detector initialization to avoid UI lag; load lazily on first use
+        self.bubble_detector = None
+        self.bubble_model_loaded = False
         if BUBBLE_DETECTOR_AVAILABLE:
-            try:
-                self.bubble_detector = BubbleDetector()
-                logger.info("🗨️ Bubble detection available")
-            except:
-                self.bubble_detector = None
-                logger.info("🗨️ Bubble detection not available")
+            logger.info("🗨️ Bubble detection: lazy init enabled (will load on first use)")
+        else:
+            logger.info("🗨️ Bubble detection module not available")
     
     def _load_config(self):
         try:
