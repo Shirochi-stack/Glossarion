@@ -14688,15 +14688,37 @@ class MangaTranslationTab(QObject):
                 future = self.main_gui.executor.submit(_save_overlay_task)
                 print(f"[DEBUG] Task submitted to executor (fire-and-forget for responsiveness)")
                 # Don't wait for completion - fire and forget for responsiveness
-                # Start periodic check for output update after a short delay
                 from PySide6.QtCore import QTimer
-                QTimer.singleShot(1000, self._start_output_refresh_check)  # Wait 1 second before starting periodic refresh
+                
+                # If output_viewer exists, keep legacy periodic output refresh; otherwise refresh source preview
+                if hasattr(self.image_preview_widget, 'output_viewer') and getattr(self.image_preview_widget, 'output_viewer') is not None:
+                    QTimer.singleShot(1000, self._start_output_refresh_check)  # legacy behavior
+                else:
+                    def _refresh_source_preview():
+                        try:
+                            ipw = getattr(self, 'image_preview_widget', None)
+                            if ipw and getattr(ipw, 'current_image_path', None):
+                                ipw.load_image(ipw.current_image_path, preserve_rectangles=True, preserve_text_overlays=True)
+                        except Exception as _e:
+                            print(f"[DEBUG] Source preview refresh failed: {_e}")
+                    QTimer.singleShot(1200, _refresh_source_preview)
+                    QTimer.singleShot(3000, _refresh_source_preview)
             else:
                 print(f"[DEBUG] No executor available, running save overlay synchronously")
                 _save_overlay_task()
-                # Immediately refresh output since it was synchronous
+                # Immediately refresh view since it was synchronous
                 from PySide6.QtCore import QTimer
-                QTimer.singleShot(500, self._refresh_output_tab)
+                if hasattr(self.image_preview_widget, 'output_viewer') and getattr(self.image_preview_widget, 'output_viewer') is not None:
+                    QTimer.singleShot(500, self._refresh_output_tab)
+                else:
+                    def _refresh_source_preview_sync():
+                        try:
+                            ipw = getattr(self, 'image_preview_widget', None)
+                            if ipw and getattr(ipw, 'current_image_path', None):
+                                ipw.load_image(ipw.current_image_path, preserve_rectangles=True, preserve_text_overlays=True)
+                        except Exception as _e:
+                            print(f"[DEBUG] Source preview refresh (sync) failed: {_e}")
+                    QTimer.singleShot(600, _refresh_source_preview_sync)
             
             print(f"[DEBUG] _save_overlay_async: METHOD COMPLETION")
             
@@ -15693,9 +15715,9 @@ class MangaTranslationTab(QObject):
                         except Exception:
                             pass
                         
-                        # Determine visibility based on overlap with original translated region (IoU)
+                        # Determine visibility based on ANY overlap with original translated region (more aggressive)
                         try:
-                            def _iou_xywh(a, b):
+                            def _intersects_xywh(a, b):
                                 try:
                                     ax, ay, aw, ah = int(a[0]), int(a[1]), int(a[2]), int(a[3])
                                     bx, by, bw, bh = int(b[0]), int(b[1]), int(b[2]), int(b[3])
@@ -15703,25 +15725,20 @@ class MangaTranslationTab(QObject):
                                     bx2, by2 = bx + bw, by + bh
                                     x1 = max(ax, bx); y1 = max(ay, by)
                                     x2 = min(ax2, bx2); y2 = min(ay2, by2)
-                                    inter = max(0, x2 - x1) * max(0, y2 - y1)
-                                    area_a = max(0, aw) * max(0, ah)
-                                    area_b = max(0, bw) * max(0, bh)
-                                    den = area_a + area_b - inter
-                                    return (inter / den) if den > 0 else 0.0
+                                    return (x2 - x1) > 0 and (y2 - y1) > 0
                                 except Exception:
-                                    return 0.0
+                                    return False
                             br = group.sceneBoundingRect()
                             cur = [int(br.x()), int(br.y()), int(br.width()), int(br.height())]
                             ob = group._overlay_original_bbox if getattr(group, '_overlay_original_bbox', None) else None
                             if ob and len(ob) >= 4:
-                                overlap = _iou_xywh(cur, ob)
-                                # Hide if overlapping significantly with original (rendered output area)
-                                should_hide = overlap >= 0.5
+                                # Hide if there is ANY intersection with the original rendered output area
+                                should_hide = _intersects_xywh(cur, ob)
                             else:
                                 should_hide = False  # No original bbox info; show by default
                             group.setVisible(not should_hide)
                             if should_hide:
-                                print(f"[DEBUG] Hiding overlay for region {region_index} - overlaps rendered output (IoU>=0.5)")
+                                print(f"[DEBUG] Hiding overlay for region {region_index} - overlaps rendered output (aggressive)")
                             else:
                                 print(f"[DEBUG] Showing overlay for region {region_index} - moved/does not overlap")
                         except Exception as hide_err:

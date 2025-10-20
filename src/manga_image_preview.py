@@ -1577,7 +1577,7 @@ class MangaImagePreviewWidget(QWidget):
         self.translate_all_clicked.emit()
     
     def _on_save_overlay_clicked(self):
-        """Re-render overlay using async executor"""
+        """Re-render overlay and refresh the source preview"""
         print("[DEBUG] _on_save_overlay_clicked: Button handler called!")
         
         try:
@@ -1588,11 +1588,23 @@ class MangaImagePreviewWidget(QWidget):
             
             print("[DEBUG] _on_save_overlay_clicked: Calling _save_overlay_async with region_index=0")
             
-            # Use the new async method that utilizes ThreadPoolExecutor
-            # This re-renders the overlay without changing positions
+            # Use the async method to re-render overlay
             self.manga_integration._save_overlay_async(0, "")
             
-            print("[DEBUG] _on_save_overlay_clicked: _save_overlay_async call completed")
+            print("[DEBUG] _on_save_overlay_clicked: _save_overlay_async call completed; scheduling source refresh")
+            
+            # After a short delay, refresh the source preview to reflect any updated translated/cleaned/original image
+            from PySide6.QtCore import QTimer
+            def _refresh_source():
+                try:
+                    if getattr(self, 'current_image_path', None):
+                        # Preserve rectangles and overlays while reloading the image based on current display mode
+                        self.load_image(self.current_image_path, preserve_rectangles=True, preserve_text_overlays=True)
+                except Exception as _e:
+                    print(f"[DEBUG] Source refresh failed: {_e}")
+            # Try twice to catch async renders
+            QTimer.singleShot(1200, _refresh_source)
+            QTimer.singleShot(3000, _refresh_source)
         
         except Exception as e:
             print(f"[DEBUG] _on_save_overlay_clicked: Exception caught: {e}")
