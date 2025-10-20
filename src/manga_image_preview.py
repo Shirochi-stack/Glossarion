@@ -900,33 +900,6 @@ class MangaImagePreviewWidget(QWidget):
         title_layout.addStretch()
         layout.addWidget(title_container)
         
-        # Create tabbed viewer for source/output switching
-        self.viewer_tabs = QTabWidget()
-        self.viewer_tabs.setTabPosition(QTabWidget.TabPosition.North)
-        self.viewer_tabs.setStyleSheet("""
-            QTabWidget::pane {
-                border: 1px solid #3a3a3a;
-                border-radius: 3px;
-            }
-            QTabBar::tab {
-                background-color: #2d2d2d;
-                color: white;
-                padding: 6px 12px;
-                border: 1px solid #3a3a3a;
-                border-bottom: none;
-                border-top-left-radius: 3px;
-                border-top-right-radius: 3px;
-                margin-right: 2px;
-            }
-            QTabBar::tab:selected {
-                background-color: #5a9fd4;
-                border-color: #7bb3e0;
-            }
-            QTabBar::tab:hover:!selected {
-                background-color: #3a3a3a;
-            }
-        """)
-        
         # Create horizontal layout for viewer + thumbnails
         viewer_container = QWidget()
         viewer_layout = QHBoxLayout(viewer_container)
@@ -938,24 +911,7 @@ class MangaImagePreviewWidget(QWidget):
         self.viewer.setMinimumHeight(300)
         viewer_layout.addWidget(self.viewer, stretch=1)
         
-        # Add source tab
-        self.viewer_tabs.addTab(viewer_container, "📄 Source")
-        
-        # Create output viewer container
-        output_container = QWidget()
-        output_layout = QHBoxLayout(output_container)
-        output_layout.setContentsMargins(0, 0, 0, 0)
-        output_layout.setSpacing(5)
-        
-        # Output image viewer
-        self.output_viewer = CompactImageViewer()
-        self.output_viewer.setMinimumHeight(300)
-        output_layout.addWidget(self.output_viewer, stretch=1)
-        
-        # Add output tab
-        self.viewer_tabs.addTab(output_container, "✨ Translated Output")
-        
-        # Thumbnail list (right side) - shared across tabs
+        # Thumbnail list (right side)
         from PySide6.QtWidgets import QListWidget, QListWidgetItem, QScrollArea
         self.thumbnail_list = QListWidget()
         self.thumbnail_list.setMaximumWidth(150)
@@ -992,41 +948,20 @@ class MangaImagePreviewWidget(QWidget):
         self.thumbnail_list.itemClicked.connect(self._on_thumbnail_clicked)
         viewer_layout.addWidget(self.thumbnail_list)
         
-        # Create a second thumbnail list for output tab (can't share same widget)
-        self.output_thumbnail_list = QListWidget()
-        self.output_thumbnail_list.setMaximumWidth(150)
-        self.output_thumbnail_list.setMinimumWidth(120)
-        self.output_thumbnail_list.setIconSize(QSize(100, 100))
-        self.output_thumbnail_list.setResizeMode(QListWidget.ResizeMode.Adjust)
-        self.output_thumbnail_list.setViewMode(QListWidget.ViewMode.IconMode)
-        self.output_thumbnail_list.setMovement(QListWidget.Movement.Static)
-        self.output_thumbnail_list.setFlow(QListWidget.Flow.TopToBottom)
-        self.output_thumbnail_list.setWrapping(False)
-        self.output_thumbnail_list.setSpacing(5)
-        self.output_thumbnail_list.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
-        self.output_thumbnail_list.setStyleSheet(self.thumbnail_list.styleSheet())
-        self.output_thumbnail_list.itemClicked.connect(self._on_thumbnail_clicked)
-        output_layout.addWidget(self.output_thumbnail_list)
-        
-        # Both thumbnail lists start hidden
+        # Thumbnail list starts hidden
         self.thumbnail_list.setVisible(False)
-        self.output_thumbnail_list.setVisible(False)
         
         # Store image paths for thumbnails
         self.image_paths = []
         
-        layout.addWidget(self.viewer_tabs, stretch=1)
+        layout.addWidget(viewer_container, stretch=1)
         
         # Connect loading signals to show status
         self.viewer.image_loading.connect(self._on_image_loading_started)
         self.viewer.image_loaded.connect(self._on_image_loaded_success)
         
-        # Refitting on tab change ensures current image fills the available space
-        self.viewer_tabs.currentChanged.connect(self._on_tab_changed)
-        
         # Display placeholder icon when no image is loaded
         self._show_placeholder_icon()
-        self._show_output_placeholder()
         
         # Manual Tools - Row 1: Box Drawing & Inpainting
         self.tools_frame = self._create_tool_frame("Manual Tools")
@@ -1400,11 +1335,8 @@ class MangaImagePreviewWidget(QWidget):
         return frame
     
     def _active_viewer(self) -> CompactImageViewer:
-        """Return the viewer for the active tab (source or output)."""
-        try:
-            return self.output_viewer if (self.viewer_tabs.currentIndex() == 1) else self.viewer
-        except Exception:
-            return self.viewer
+        """Return the active viewer (always source viewer now)."""
+        return self.viewer
     
     def _set_use_circle_shapes(self, enabled: bool):
         """Toggle using circle shapes across pipeline (detect/clean/recognize/translate)."""
@@ -1418,14 +1350,7 @@ class MangaImagePreviewWidget(QWidget):
     
     def _set_tool(self, tool: str):
         """Set active tool and update button states"""
-        # Always set on source viewer
         self.viewer.set_tool(tool)
-        # For pan tool, also apply to output viewer so panning works there
-        try:
-            if tool == 'pan' and hasattr(self, 'output_viewer') and self.output_viewer:
-                self.output_viewer.set_tool('pan')
-        except Exception:
-            pass
         
         # Update button states
         self.hand_tool_btn.setChecked(tool == 'pan')
@@ -1636,9 +1561,6 @@ class MangaImagePreviewWidget(QWidget):
         self.viewer.load_image(src_image_path)
         self.current_image_path = image_path  # Still track original path for state management
         
-        # Check for translated output and load if available
-        self._check_and_load_translated_output(image_path)
-        
         # Update thumbnail selection
         self._update_thumbnail_selection(image_path)
     
@@ -1655,7 +1577,7 @@ class MangaImagePreviewWidget(QWidget):
         self.translate_all_clicked.emit()
     
     def _on_save_overlay_clicked(self):
-        """Re-render overlay and switch to translated output tab using async executor"""
+        """Re-render overlay using async executor"""
         print("[DEBUG] _on_save_overlay_clicked: Button handler called!")
         
         try:
@@ -1671,84 +1593,27 @@ class MangaImagePreviewWidget(QWidget):
             self.manga_integration._save_overlay_async(0, "")
             
             print("[DEBUG] _on_save_overlay_clicked: _save_overlay_async call completed")
-            
-            # TEST: Try to manually load any existing rendered image into output tab
-            print("[DEBUG] _on_save_overlay_clicked: Testing direct output loading...")
-            self._test_load_rendered_output()
-            
-            # Also schedule a delayed check to catch newly rendered files
-            from PySide6.QtCore import QTimer
-            print("[DEBUG] _on_save_overlay_clicked: Scheduling delayed output check...")
-            QTimer.singleShot(1500, self._test_load_rendered_output)  # Check again after 1.5 seconds
-            QTimer.singleShot(3000, self._test_load_rendered_output)  # Check again after 3 seconds
-            
-            # Switch to translated output tab
-            if hasattr(self, 'viewer_tabs'):
-                print("[DEBUG] _on_save_overlay_clicked: Switching to output tab")
-                self.viewer_tabs.setCurrentIndex(1)  # Switch to output tab
-            else:
-                print("[DEBUG] _on_save_overlay_clicked: No viewer_tabs available")
         
         except Exception as e:
             print(f"[DEBUG] _on_save_overlay_clicked: Exception caught: {e}")
             import traceback
             print(f"[DEBUG] _on_save_overlay_clicked: Traceback:\n{traceback.format_exc()}")
     
-    def _test_load_rendered_output(self):
-        """Test method to find and load any rendered image directly"""
-        try:
-            if not self.current_image_path:
-                print("[TEST] No current image path")
-                return
-            
-            # Look for rendered image in the expected location
-            source_dir = os.path.dirname(self.current_image_path)
-            source_filename = os.path.basename(self.current_image_path)
-            
-            # Check various possible locations for translated images
-            possible_paths = [
-                # 3_translated folder
-                os.path.join(source_dir, "3_translated", source_filename),
-                # isolated folder
-                os.path.join(source_dir, f"{os.path.splitext(source_filename)[0]}_translated", source_filename),
-                # same directory with _translated suffix
-                os.path.join(source_dir, f"{os.path.splitext(source_filename)[0]}_translated{os.path.splitext(source_filename)[1]}")
-            ]
-            
-            print(f"[TEST] Looking for rendered images at:")
-            for path in possible_paths:
-                print(f"[TEST]   {path} - exists: {os.path.exists(path)}")
-                if os.path.exists(path):
-                    print(f"[TEST] Found rendered image, loading into output viewer...")
-                    self.output_viewer.load_image(path)
-                    self.current_translated_path = path
-                    print(f"[TEST] Successfully loaded {os.path.basename(path)} into output viewer")
-                    return
-            
-            print(f"[TEST] No rendered image found in expected locations")
-            
-        except Exception as e:
-            print(f"[TEST] Error in _test_load_rendered_output: {e}")
-            import traceback
-            traceback.print_exc()
     
     def set_image_list(self, image_paths: list):
         """Set the list of images and populate thumbnails"""
         self.image_paths = image_paths
         self._populate_thumbnails()
         
-        # Show/hide thumbnail lists based on image count
+        # Show/hide thumbnail list based on image count
         if len(image_paths) <= 1:
             self.thumbnail_list.setVisible(False)
-            self.output_thumbnail_list.setVisible(False)
         else:
             self.thumbnail_list.setVisible(True)
-            self.output_thumbnail_list.setVisible(True)
     
     def _populate_thumbnails(self):
         """Populate thumbnail list with images"""
         self.thumbnail_list.clear()
-        self.output_thumbnail_list.clear()
         
         from PySide6.QtWidgets import QListWidgetItem
         from PySide6.QtCore import Qt, QSize
@@ -1769,19 +1634,11 @@ class MangaImagePreviewWidget(QWidget):
         
         # Add items with loading placeholders first
         for i, path in enumerate(self.image_paths):
-            # Add to source thumbnail list
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, path)  # Store path
             item.setText(os.path.basename(path))
             item.setSizeHint(QSize(110, 110))
             self.thumbnail_list.addItem(item)
-            
-            # Add to output thumbnail list
-            output_item = QListWidgetItem()
-            output_item.setData(Qt.ItemDataRole.UserRole, path)
-            output_item.setText(os.path.basename(path))
-            output_item.setSizeHint(QSize(110, 110))
-            self.output_thumbnail_list.addItem(output_item)
         
         # Load thumbnails asynchronously
         def load_all_thumbs():
@@ -1789,15 +1646,10 @@ class MangaImagePreviewWidget(QWidget):
                 result = load_thumb(path, i)
                 if result:
                     idx, img_path, thumb = result
-                    # Update items on main thread (both lists)
+                    # Update items on main thread
                     try:
                         from PySide6.QtCore import QMetaObject, Q_ARG
                         QMetaObject.invokeMethod(self, "_update_thumbnail_item",
-                                                Qt.ConnectionType.QueuedConnection,
-                                                Q_ARG(int, idx),
-                                                Q_ARG(QPixmap, thumb),
-                                                Q_ARG(str, img_path))
-                        QMetaObject.invokeMethod(self, "_update_output_thumbnail_item",
                                                 Qt.ConnectionType.QueuedConnection,
                                                 Q_ARG(int, idx),
                                                 Q_ARG(QPixmap, thumb),
@@ -1821,33 +1673,14 @@ class MangaImagePreviewWidget(QWidget):
         except Exception as e:
             print(f"Error updating thumbnail: {e}")
     
-    @Slot(int, QPixmap, str)
-    def _update_output_thumbnail_item(self, index: int, pixmap: QPixmap, path: str):
-        """Update output thumbnail item with loaded pixmap (called from background thread)"""
-        try:
-            if index < self.output_thumbnail_list.count():
-                item = self.output_thumbnail_list.item(index)
-                icon = QIcon(pixmap)
-                item.setIcon(icon)
-                item.setText("")  # Remove text once icon is loaded
-        except Exception as e:
-            print(f"Error updating output thumbnail: {e}")
     
     def _update_thumbnail_selection(self, image_path: str):
         """Update which thumbnail is selected based on current image"""
-        # Update both thumbnail lists
         for i in range(self.thumbnail_list.count()):
             item = self.thumbnail_list.item(i)
             item_path = item.data(Qt.ItemDataRole.UserRole)
             if item_path == image_path:
                 self.thumbnail_list.setCurrentItem(item)
-                break
-        
-        for i in range(self.output_thumbnail_list.count()):
-            item = self.output_thumbnail_list.item(i)
-            item_path = item.data(Qt.ItemDataRole.UserRole)
-            if item_path == image_path:
-                self.output_thumbnail_list.setCurrentItem(item)
                 break
     
     def _on_rectangle_created(self, _rect: QRectF):
@@ -1957,8 +1790,6 @@ class MangaImagePreviewWidget(QWidget):
                 else:
                     # Preserve mode - don't restore from state, keep current rectangles/overlays
                     print(f"[LOADED] Preserve mode - skipping state restoration for: {os.path.basename(self.current_image_path)}")
-                    # Just ensure translated output is still loaded
-                    self._check_and_load_translated_output(self.current_image_path)
         except Exception:
             pass
         
@@ -1966,15 +1797,6 @@ class MangaImagePreviewWidget(QWidget):
         self._preserve_rectangles_after_load = False
         self._preserve_text_overlays_after_load = False
         
-    def _on_tab_changed(self, index: int):
-        """Refit only if user hasn't manually zoomed, to avoid resetting zoom."""
-        try:
-            if index == 0 and self.viewer.hasPhoto() and not getattr(self.viewer, 'user_zoomed', False):
-                self.viewer.fitInView()
-            elif index == 1 and self.output_viewer.hasPhoto() and not getattr(self.output_viewer, 'user_zoomed', False):
-                self.output_viewer.fitInView()
-        except Exception:
-            pass
     
     def clear(self):
         """Clear the preview"""
@@ -2007,15 +1829,6 @@ class MangaImagePreviewWidget(QWidget):
         self.file_label.setText("No image loaded")
         self._update_box_count()
         self._show_placeholder_icon()
-        
-        # Clear translated output viewer as well (cosmetic reset)
-        try:
-            if hasattr(self, 'output_viewer') and self.output_viewer:
-                self.output_viewer.clear_scene()
-                self.current_translated_path = None
-                self._show_output_placeholder()
-        except Exception:
-            pass
     
     def _show_placeholder_icon(self):
         """Display Halgakos_NoChibi.png as placeholder when no image is loaded"""
@@ -2054,20 +1867,6 @@ class MangaImagePreviewWidget(QWidget):
                 # Silently fail if icon can't be loaded
                 pass
     
-    def _show_output_placeholder(self):
-        """Display WhereIsMyOutput.png as placeholder for no output, scaled to fill like Halgakos_NoChibi."""
-        placeholder_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'WhereIsMyOutput.png')
-        
-        if os.path.exists(placeholder_path):
-            try:
-                # Load at full size (no pre-scaling)
-                placeholder_pixmap = QPixmap(placeholder_path)
-                
-                if not placeholder_pixmap.isNull():
-                    # Set and fit; resizeEvent and tab change will keep it filling the area
-                    self.output_viewer.setPhoto(placeholder_pixmap)
-            except Exception as e:
-                print(f"Error loading output placeholder: {e}")
     
     def _update_toggle_label(self, state):
         """Update the toggle label to show visual feedback"""
@@ -2358,126 +2157,6 @@ class MangaImagePreviewWidget(QWidget):
         else:
             self.download_btn.setEnabled(False)
     
-    def _check_and_load_translated_output(self, source_image_path: str):
-        """Check for translated output and load into output tab if available.
-        If none found, fall back to cleaned image if present."""
-        try:
-            # Build the expected translated path based on isolated folder structure
-            source_dir = os.path.dirname(source_image_path)
-            source_filename = os.path.basename(source_image_path)
-            source_name_no_ext = os.path.splitext(source_filename)[0]
-
-            # Look for translated version in isolated folder
-            translated_folder = os.path.join(source_dir, f"{source_name_no_ext}_translated")
-
-            # Helper to load an output image
-            def _load_output(path: str):
-                if path and os.path.exists(path):
-                    self.output_viewer.load_image(path)
-                    self.current_translated_path = path
-                    return True
-                return False
-
-            # 1) Prefer the translated image that matches the source filename in the isolated folder
-            if os.path.exists(translated_folder) and os.path.isdir(translated_folder):
-                expected_translated = os.path.join(translated_folder, source_filename)
-                if _load_output(expected_translated):
-                    return
-
-            # 2) No translated image found — try cleaned image from state or naming convention
-            cleaned_path = None
-            try:
-                if hasattr(self, 'manga_integration') and self.manga_integration and \
-                   hasattr(self.manga_integration, 'image_state_manager') and self.manga_integration.image_state_manager:
-                    state = self.manga_integration.image_state_manager.get_state(source_image_path) or {}
-                    cand = state.get('cleaned_image_path')
-                    if cand and os.path.exists(cand):
-                        cleaned_path = cand
-            except Exception:
-                pass
-
-            if not cleaned_path and os.path.exists(translated_folder):
-                # Look for files matching *_cleaned.* inside the isolated folder
-                image_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')
-                for filename in os.listdir(translated_folder):
-                    name_lower = filename.lower()
-                    if name_lower.startswith(f"{source_name_no_ext.lower()}_cleaned") and name_lower.endswith(image_extensions):
-                        cleaned_path = os.path.join(translated_folder, filename)
-                        break
-
-            if cleaned_path and _load_output(cleaned_path):
-                return
-
-            # 3) Check for rendered/translated images from state as last resort for output tab
-            rendered_path = None
-            try:
-                if hasattr(self, 'manga_integration') and self.manga_integration and \
-                   hasattr(self.manga_integration, 'image_state_manager') and self.manga_integration.image_state_manager:
-                    state = self.manga_integration.image_state_manager.get_state(source_image_path) or {}
-                    cand = state.get('rendered_image_path')
-                    if cand and os.path.exists(cand):
-                        rendered_path = cand
-                        print(f"[OUTPUT] Found rendered image from state: {os.path.basename(rendered_path)}")
-                # Also check _rendered_images_map
-                if not rendered_path and hasattr(self, 'manga_integration') and self.manga_integration and \
-                   hasattr(self.manga_integration, '_rendered_images_map'):
-                    cand = self.manga_integration._rendered_images_map.get(source_image_path)
-                    if cand and os.path.exists(cand):
-                        rendered_path = cand
-                        print(f"[OUTPUT] Found rendered image from map: {os.path.basename(rendered_path)}")
-                # Also check current_translated_path
-                if not rendered_path and hasattr(self, 'current_translated_path') and self.current_translated_path and os.path.exists(self.current_translated_path):
-                    rendered_path = self.current_translated_path
-                    print(f"[OUTPUT] Using current translated path: {os.path.basename(rendered_path)}")
-            except Exception:
-                pass
-            
-            if rendered_path and _load_output(rendered_path):
-                return
-
-            # 4) Nothing found — show placeholder
-            self._show_output_placeholder()
-            self.current_translated_path = None
-
-            # Only auto-clear rectangles if not in preserve mode (e.g., loading a completely new image)
-            # Check if we're in preserve mode by looking for the preserve flags
-            preserve_mode = (getattr(self, '_preserve_rectangles_after_load', False) or 
-                           getattr(self, '_preserve_text_overlays_after_load', False))
-            
-            if not preserve_mode:
-                # Auto-clear blue rectangles and related state when no output exists (normal mode)
-                try:
-                    # Clear rectangles from viewer and update count
-                    if hasattr(self, 'viewer') and hasattr(self.viewer, 'clear_rectangles'):
-                        self.viewer.clear_rectangles()
-                        try:
-                            self._update_box_count()
-                        except Exception:
-                            pass
-                    # Clear persisted detection/recognition state and overlays for this image
-                    if hasattr(self, 'manga_integration') and self.manga_integration:
-                        try:
-                            if hasattr(self.manga_integration, '_clear_detection_state_for_image'):
-                                self.manga_integration._clear_detection_state_for_image(source_image_path)
-                        except Exception:
-                            pass
-                        try:
-                            if hasattr(self.manga_integration, 'clear_text_overlays_for_image'):
-                                self.manga_integration.clear_text_overlays_for_image(source_image_path)
-                        except Exception:
-                            pass
-                    # Persist empty rectangles to state (viewer_rectangles)
-                    try:
-                        self._persist_rectangles_state()
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
-            else:
-                print(f"[OUTPUT] Preserve mode - not clearing rectangles for: {os.path.basename(source_image_path)}")
-
-        except Exception:
-            pass
     
     def _check_for_cleaned_image(self, source_image_path: str) -> str:
         """Check for appropriate image based on source display mode.
