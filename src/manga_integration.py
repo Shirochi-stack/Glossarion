@@ -524,75 +524,6 @@ class ImageStateManager:
             pass
 
 
-# Module-level function for multiprocessing (must be picklable)
-def _preload_models_worker(models_list, progress_queue):
-    """Worker function to preload models in separate process (module-level for pickling)"""
-    try:
-        total_steps = len(models_list)
-        
-        for idx, (model_type, model_key, model_name, model_path) in enumerate(models_list):
-            try:
-                # Send start progress
-                base_progress = int((idx / total_steps) * 100)
-                progress_queue.put(('progress', base_progress, model_name))
-                
-                if model_type == 'detector':
-                    from bubble_detector import BubbleDetector
-                    from manga_translator import MangaTranslator
-                    
-                    # Progress: 0-25% of this model's portion
-                    progress_queue.put(('progress', base_progress + int(25 / total_steps), f"{model_name} - Initializing"))
-                    bd = BubbleDetector()
-                    
-                    # Progress: 25-75% - loading model
-                    progress_queue.put(('progress', base_progress + int(50 / total_steps), f"{model_name} - Downloading/Loading"))
-                    if model_key == 'rtdetr_onnx':
-                        model_repo = model_path if model_path else 'ogkalu/comic-text-and-bubble-detector'
-                        bd.load_rtdetr_onnx_model(model_repo)
-                    elif model_key == 'rtdetr':
-                        bd.load_rtdetr_model()
-                    elif model_key == 'yolo':
-                        if model_path:
-                            bd.load_model(model_path)
-                    
-                    # Progress: 75-100% - finalizing
-                    progress_queue.put(('progress', base_progress + int(75 / total_steps), f"{model_name} - Finalizing"))
-                    progress_queue.put(('loaded', model_type, model_name))
-                    
-                elif model_type == 'inpainter':
-                    from local_inpainter import LocalInpainter
-                    
-                    # Progress: 0-25%
-                    progress_queue.put(('progress', base_progress + int(25 / total_steps), f"{model_name} - Initializing"))
-                    inp = LocalInpainter()
-                    resolved_path = model_path
-                    
-                    if not resolved_path or not os.path.exists(resolved_path):
-                        # Progress: 25-50% - downloading
-                        progress_queue.put(('progress', base_progress + int(40 / total_steps), f"{model_name} - Downloading"))
-                        try:
-                            resolved_path = inp.download_jit_model(model_key)
-                        except:
-                            resolved_path = None
-                    
-                    if resolved_path and os.path.exists(resolved_path):
-                        # Progress: 50-90% - loading
-                        progress_queue.put(('progress', base_progress + int(60 / total_steps), f"{model_name} - Loading model"))
-                        success = inp.load_model_with_retry(model_key, resolved_path)
-                        
-                        # Progress: 90-100% - finalizing
-                        progress_queue.put(('progress', base_progress + int(85 / total_steps), f"{model_name} - Finalizing"))
-                        if success:
-                            progress_queue.put(('loaded', model_type, model_name))
-            
-            except Exception as e:
-                progress_queue.put(('error', model_name, str(e)))
-        
-        # Send completion signal
-        progress_queue.put(('complete', None, None))
-        
-    except Exception as e:
-        progress_queue.put(('error', 'Process', str(e)))
 
 class _MangaGuiLogHandler(logging.Handler):
     """Forward logging records into MangaTranslationTab._log.
@@ -1222,8 +1153,7 @@ class MangaTranslationTab(QObject):
             return False
     
     def _start_model_preloading(self):
-        """Start preloading models in separate process for true background loading"""
-        from multiprocessing import Process, Queue as MPQueue
+        """Start preloading models in background thread for efficient loading"""
         import queue
         
         # Check if preload is already in progress
@@ -1289,16 +1219,6 @@ class MangaTranslationTab(QObject):
         with MangaTranslationTab._preload_lock:
             MangaTranslationTab._preload_in_progress = True
         
-        # Show progress bar
-        self.preload_progress_frame.setVisible(True)
-        
-        # Create queue for IPC
-        progress_queue = MPQueue()
-        
-        # Start loading in separate process using module-level function
-        load_process = Process(target=_preload_models_worker, args=(models_to_load, progress_queue), daemon=True)
-        load_process.start()
-        
         # Store models being loaded for tracking
         models_being_loaded = []
         for model_type, model_key, model_name, model_path in models_to_load:
@@ -1307,88 +1227,119 @@ class MangaTranslationTab(QObject):
             elif model_type == 'inpainter':
                 models_being_loaded.append(f"inpainter_{model_key}_{model_path}")
         
-        # Monitor progress with QTimer
-        def check_progress():
+        print(f"🔄 Preloading {len(models_to_load)} model(s) in background...")
+        
+        # Load models directly in background thread (no multiprocessing overhead)
+        def load_models_bg():
             try:
-                while True:
-                    try:
-                        msg = progress_queue.get_nowait()
-                        msg_type = msg[0]
-                        
-                        if msg_type == 'progress':
-                            _, progress, model_name = msg
-                            self.preload_progress_bar.setValue(progress)
-                            self.preload_status_label.setText(f"Loading {model_name}...")
-                        
-                        elif msg_type == 'loaded':
-                            _, model_type, model_name = msg
-                            print(f"✓ Loaded {model_name}")
-                        
-                        elif msg_type == 'error':
-                            _, model_name, error = msg
-                            print(f"✗ Failed to load {model_name}: {error}")
-                        
-                        elif msg_type == 'complete':
-                            # Child process cached models
-                            self.preload_progress_bar.setValue(100)
-                            self.preload_status_label.setText("✓ Models ready")
-                            
-                            # Mark all models as completed
-                            with MangaTranslationTab._preload_lock:
-                                MangaTranslationTab._preload_completed_models.update(models_being_loaded)
-                                MangaTranslationTab._preload_in_progress = False
-                            
-                            # Load RT-DETR into pool in background (doesn't block GUI)
-                            def load_rtdetr_bg():
-                                try:
-                                    from manga_translator import MangaTranslator
-                                    from bubble_detector import BubbleDetector
-                                    
-                                    for model_type, model_key, model_name, model_path in models_to_load:
-                                        if model_type == 'detector' and model_key == 'rtdetr_onnx':
-                                            key = (model_key, model_path)
-                                            
-                                            # Check if already loaded
-                                            with MangaTranslator._detector_pool_lock:
-                                                rec = MangaTranslator._detector_pool.get(key)
-                                                if rec and rec.get('spares'):
-                                                    print(f"⏭️  {model_name} already in pool")
-                                                    continue
-                                            
-                                            # Load into pool
-                                            bd = BubbleDetector()
-                                            model_repo = model_path if model_path else 'ogkalu/comic-text-and-bubble-detector'
-                                            bd.load_rtdetr_onnx_model(model_repo)
-                                            
-                                            with MangaTranslator._detector_pool_lock:
-                                                rec = MangaTranslator._detector_pool.get(key)
-                                                if not rec:
-                                                    rec = {'spares': []}
-                                                    MangaTranslator._detector_pool[key] = rec
-                                                rec['spares'].append(bd)
-                                                print(f"✓ Loaded {model_name} into pool (background)")
-                                except Exception as e:
-                                    print(f"✗ Background RT-DETR loading error: {e}")
-                            
-                            # Start background loading
-                            threading.Thread(target=load_rtdetr_bg, daemon=True).start()
-                            
-                            QTimer.singleShot(2000, lambda: self.preload_progress_frame.setVisible(False))
-                            return
-                    
-                    except queue.Empty:
-                        break
+                import os
+                from manga_translator import MangaTranslator
+                from bubble_detector import BubbleDetector
+                from local_inpainter import LocalInpainter
                 
-                QTimer.singleShot(100, check_progress)
-            
+                loaded_count = 0
+                
+                for model_type, model_key, model_name, model_path in models_to_load:
+                    try:
+                        
+                        if model_type == 'detector':
+                            key = (model_key, model_path or '')
+                            
+                            # Check if already in pool
+                            with MangaTranslator._detector_pool_lock:
+                                rec = MangaTranslator._detector_pool.get(key)
+                                if rec and rec.get('spares'):
+                                    print(f"  ⏭️ {model_name} already in pool")
+                                    loaded_count += 1
+                                    continue
+                            
+                            # Load into pool
+                            print(f"  🔄 Loading {model_name}...")
+                            bd = BubbleDetector()
+                            if model_key == 'rtdetr_onnx':
+                                model_repo = model_path if model_path else 'ogkalu/comic-text-and-bubble-detector'
+                                bd.load_rtdetr_onnx_model(model_repo)
+                            elif model_key == 'rtdetr':
+                                bd.load_rtdetr_model()
+                            elif model_key == 'yolo':
+                                if model_path:
+                                    bd.load_model(model_path)
+                            
+                            # Store in pool
+                            with MangaTranslator._detector_pool_lock:
+                                rec = MangaTranslator._detector_pool.get(key)
+                                if not rec:
+                                    rec = {'spares': [], 'loaded': True}
+                                    MangaTranslator._detector_pool[key] = rec
+                                rec['spares'].append(bd)
+                                rec['loaded'] = True
+                            print(f"  ✓ {model_name} loaded")
+                            loaded_count += 1
+                            
+                        elif model_type == 'inpainter':
+                            key = (model_key, model_path or '')
+                            
+                            # Check if already in pool
+                            with MangaTranslator._inpaint_pool_lock:
+                                rec = MangaTranslator._inpaint_pool.get(key)
+                                if rec and rec.get('spares'):
+                                    print(f"  ⏭️ {model_name} already in pool")
+                                    loaded_count += 1
+                                    continue
+                            
+                            # Load into pool
+                            print(f"  🔄 Loading {model_name}...")
+                            inp = LocalInpainter()
+                            
+                            # Ensure model file exists or download it
+                            resolved_path = model_path
+                            if not resolved_path or not os.path.exists(resolved_path):
+                                try:
+                                    resolved_path = inp.download_jit_model(model_key)
+                                except:
+                                    resolved_path = None
+                            
+                            if resolved_path and os.path.exists(resolved_path):
+                                success = inp.load_model_with_retry(model_key, resolved_path)
+                                if success:
+                                    # Store in pool
+                                    with MangaTranslator._inpaint_pool_lock:
+                                        rec = MangaTranslator._inpaint_pool.get(key)
+                                        if not rec:
+                                            rec = {'spares': [], 'loaded': True}
+                                            MangaTranslator._inpaint_pool[key] = rec
+                                        rec['spares'].append(inp)
+                                        rec['loaded'] = True
+                                    print(f"  ✓ {model_name} loaded")
+                                    loaded_count += 1
+                                else:
+                                    print(f"  ✗ Failed to load {model_name}")
+                                    
+                    except Exception as e:
+                        print(f"  ✗ Error loading {model_name}: {e}")
+                
+                # Mark completion
+                if loaded_count > 0:
+                    print(f"✅ Preloaded {loaded_count} model(s) into memory")
+                else:
+                    print("⚠️ No models were successfully preloaded")
+                
+                # Mark all models as completed
+                with MangaTranslationTab._preload_lock:
+                    MangaTranslationTab._preload_completed_models.update(models_being_loaded)
+                    MangaTranslationTab._preload_in_progress = False
+                
             except Exception as e:
-                print(f"Progress check error: {e}")
-                self.preload_progress_frame.setVisible(False)
+                print(f"✗ Error during model preloading: {e}")
+                
                 # Reset flag on error
                 with MangaTranslationTab._preload_lock:
                     MangaTranslationTab._preload_in_progress = False
         
-        QTimer.singleShot(100, check_progress)
+        # Start loading in background thread (non-daemon to allow child processes)
+        import threading
+        loading_thread = threading.Thread(target=load_models_bg, daemon=False)
+        loading_thread.start()
     
     def _disable_spinbox_mousewheel(self, spinbox):
         """Disable mousewheel scrolling on a spinbox (PySide6)"""
@@ -15110,20 +15061,21 @@ class MangaTranslationTab(QObject):
             # Always remove processing overlay
             self._remove_processing_overlay()
 
-    def _save_overlay_async(self, region_index: int = 0, new_translation: str = ""):
+    def _save_overlay_async(self, region_index: int = 0, new_translation: str = "", update_all_regions: bool = False):
         """Save & Update Overlay functionality using ThreadPoolExecutor on main thread.
         
         Args:
             region_index: Region index to update (default 0 for full re-render)
             new_translation: Specific translation text to use (empty string for original behavior)
+            update_all_regions: If True, update all regions with current settings (not just one)
         """
         print(f"\n{'='*80}")
         print(f"[DEBUG] _save_overlay_async: METHOD ENTRY")
-        print(f"[DEBUG] Args: region_index={region_index}, new_translation='{new_translation}'")
+        print(f"[DEBUG] Args: region_index={region_index}, new_translation='{new_translation}', update_all_regions={update_all_regions}")
         print(f"{'='*80}\n")
         
         try:
-            print(f"[DEBUG] Save & Update Overlay triggered for region {region_index}, translation='{new_translation}'")
+            print(f"[DEBUG] Save & Update Overlay triggered for region {region_index}, translation='{new_translation}', update_all={update_all_regions}")
             
             # Show processing overlay immediately on main thread
             self._add_processing_overlay()
@@ -15147,8 +15099,8 @@ class MangaTranslationTab(QObject):
                     
                     # Call _update_single_text_overlay directly with the provided parameters
                     # This matches the original behavior exactly
-                    print(f"[DEBUG] Calling _update_single_text_overlay({region_index}, '{new_translation}')")
-                    self._update_single_text_overlay(int(region_index), new_translation)
+                    print(f"[DEBUG] Calling _update_single_text_overlay({region_index}, '{new_translation}', update_all={update_all_regions})")
+                    self._update_single_text_overlay(region_index, new_translation, update_all_regions=update_all_regions)
                     print(f"[DEBUG] _update_single_text_overlay call completed successfully")
                     print(f"[DEBUG] Save & Update Overlay task completed for region {region_index}")
                     return True
@@ -15307,11 +15259,17 @@ class MangaTranslationTab(QObject):
         except Exception:
             return True  # Assume newer on error
 
-    def _update_single_text_overlay(self, region_index: int, new_translation: str):
-        """Update overlay after editing by rendering with MangaTranslator (same as regular pipeline)"""
+    def _update_single_text_overlay(self, region_index: int, new_translation: str, update_all_regions: bool = False):
+        """Update overlay after editing by rendering with MangaTranslator (same as regular pipeline)
+        
+        Args:
+            region_index: Region index to update (ignored if update_all_regions=True)
+            new_translation: Specific translation text to use (empty string for original behavior)
+            update_all_regions: If True, update all regions with current rectangle positions and rendering settings
+        """
         print(f"\n{'='*60}")
-        print(f"[DEBUG] _update_single_text_overlay called for region {region_index}")
-        print(f"[DEBUG] new_translation: '{new_translation[:50]}...'")
+        print(f"[DEBUG] _update_single_text_overlay called for region {region_index}, update_all={update_all_regions}")
+        print(f"[DEBUG] new_translation: '{new_translation[:50] if new_translation else ''}...'")
         print(f"{'='*60}\n")
         
         try:
@@ -15354,7 +15312,20 @@ class MangaTranslationTab(QObject):
                 # Build TextRegion objects for ALL regions
                 for idx_key in sorted(self._translation_data.keys()):
                     trans_data = self._translation_data[idx_key]
-                    if region_index is not None and int(idx_key) == int(region_index):
+                    
+                    # Determine which position to use based on update_all_regions flag
+                    if update_all_regions:
+                        # Update all regions - use current rectangle positions for ALL
+                        if int(idx_key) < len(rectangles):
+                            rect = rectangles[int(idx_key)].sceneBoundingRect()
+                            sx, sy, sw, sh = int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height())
+                        else:
+                            # Fall back to last position if rectangle doesn't exist
+                            lp = last_pos.get(str(int(idx_key)))
+                            if not lp:
+                                continue
+                            sx, sy, sw, sh = map(int, lp)
+                    elif region_index is not None and int(idx_key) == int(region_index):
                         # Edited region — use current rectangle
                         if int(idx_key) < len(rectangles):
                             rect = rectangles[int(idx_key)].sceneBoundingRect()

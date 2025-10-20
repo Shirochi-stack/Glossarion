@@ -2184,39 +2184,65 @@ class MangaImagePreviewWidget(QWidget):
         self.translate_all_clicked.emit()
     
     def _on_save_overlay_clicked(self):
-        """Re-render overlay and refresh the source preview"""
-        print("[DEBUG] _on_save_overlay_clicked: Button handler called!")
+        """Re-render overlay with current rectangle positions and rendering settings"""
+        print("[SAVE_OVERLAY] Button clicked - scheduling background render")
         
         try:
             # Check if we have manga integration available
             if not hasattr(self, 'manga_integration') or not self.manga_integration:
-                print("[DEBUG] _on_save_overlay_clicked: No manga_integration available")
+                print("[SAVE_OVERLAY] No manga_integration available")
                 return
             
-            print("[DEBUG] _on_save_overlay_clicked: Calling _save_overlay_async with region_index=0")
+            # Persist current rectangle positions first
+            try:
+                if hasattr(self, '_persist_rectangles_state'):
+                    self._persist_rectangles_state()
+                    print("[SAVE_OVERLAY] Rectangle positions persisted")
+            except Exception as e:
+                print(f"[SAVE_OVERLAY] Failed to persist rectangles: {e}")
             
-            # Use the async method to re-render overlay
-            self.manga_integration._save_overlay_async(0, "")
-            
-            print("[DEBUG] _on_save_overlay_clicked: _save_overlay_async call completed; scheduling source refresh")
-            
-            # After a short delay, refresh the source preview to reflect any updated translated/cleaned/original image
             from PySide6.QtCore import QTimer
-            def _refresh_source():
-                try:
-                    if getattr(self, 'current_image_path', None):
-                        # Preserve rectangles and overlays while reloading the image based on current display mode
-                        self.load_image(self.current_image_path, preserve_rectangles=True, preserve_text_overlays=True)
-                except Exception as _e:
-                    print(f"[DEBUG] Source refresh failed: {_e}")
-            # Fast refresh timings to catch async renders
-            QTimer.singleShot(200, _refresh_source)
-            QTimer.singleShot(1000, _refresh_source)
+            
+            # Run save_positions_and_rerender in background thread using executor
+            if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'executor') and self.main_gui.executor:
+                print("[SAVE_OVERLAY] Submitting to background thread executor")
+                future = self.main_gui.executor.submit(self.manga_integration.save_positions_and_rerender)
+                
+                # Schedule refreshes after rendering completes
+                def _refresh_source():
+                    try:
+                        if getattr(self, 'current_image_path', None):
+                            # Preserve rectangles and overlays while reloading to show updated render
+                            self.load_image(self.current_image_path, preserve_rectangles=True, preserve_text_overlays=True)
+                            print("[SAVE_OVERLAY] Source preview refreshed")
+                    except Exception as _e:
+                        print(f"[SAVE_OVERLAY] Source refresh failed: {_e}")
+                
+                # Refresh after rendering completes
+                QTimer.singleShot(500, _refresh_source)
+                QTimer.singleShot(1500, _refresh_source)
+                QTimer.singleShot(3000, _refresh_source)
+            else:
+                print("[SAVE_OVERLAY] No executor available, falling back to main thread")
+                # Fallback to QTimer if no executor (shouldn't happen)
+                QTimer.singleShot(0, self.manga_integration.save_positions_and_rerender)
+                
+                def _refresh_source():
+                    try:
+                        if getattr(self, 'current_image_path', None):
+                            self.load_image(self.current_image_path, preserve_rectangles=True, preserve_text_overlays=True)
+                            print("[SAVE_OVERLAY] Source preview refreshed")
+                    except Exception as _e:
+                        print(f"[SAVE_OVERLAY] Source refresh failed: {_e}")
+                
+                QTimer.singleShot(500, _refresh_source)
+                QTimer.singleShot(1500, _refresh_source)
+                QTimer.singleShot(3000, _refresh_source)
         
         except Exception as e:
-            print(f"[DEBUG] _on_save_overlay_clicked: Exception caught: {e}")
+            print(f"[SAVE_OVERLAY] Exception: {e}")
             import traceback
-            print(f"[DEBUG] _on_save_overlay_clicked: Traceback:\n{traceback.format_exc()}")
+            print(f"[SAVE_OVERLAY] Traceback:\n{traceback.format_exc()}")
     
     
     def set_image_list(self, image_paths: list):
