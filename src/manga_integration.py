@@ -17410,6 +17410,16 @@ class MangaTranslationTab(QObject):
                             switch_tab=False  # Don't auto-switch tabs - let user manually switch
                         )
                         print(f"[TRANSLATE] Returned from _render_with_manga_translator")
+                        
+                        # Refresh image preview to show translated output
+                        try:
+                            if not getattr(self, '_batch_mode_active', False):
+                                current_image = getattr(self.image_preview_widget, 'current_image_path', None)
+                                if current_image and original_image_path and os.path.normpath(current_image) == os.path.normpath(original_image_path):
+                                    print(f"[TRANSLATE] Refreshing preview to show translated output")
+                                    self.image_preview_widget.load_image(original_image_path, preserve_rectangles=True, preserve_text_overlays=True)
+                        except Exception as e:
+                            print(f"[TRANSLATE] Preview refresh failed: {e}")
                     else:
                         print(f"[TRANSLATE] ERROR: No image path available for rendering or image doesn't exist")
                         print(f"[TRANSLATE]   render_image={render_image}")
