@@ -2162,11 +2162,11 @@ class MangaImagePreviewWidget(QWidget):
             if moved_index >= 0:
                 print(f"[DEBUG] Rectangle {moved_index} moved, auto-applying save position")
                 
-                # Add purple pulse effect to show processing
+                # Add purple pulse effect to show processing (auto-remove after 0.75s for save position)
                 try:
                     rect_item = self.viewer.rectangles[moved_index]
                     if hasattr(self, 'manga_integration') and self.manga_integration:
-                        self.manga_integration._add_rectangle_pulse_effect(rect_item, moved_index)
+                        self.manga_integration._add_rectangle_pulse_effect(rect_item, moved_index, auto_remove=True)
                 except Exception as e:
                     print(f"[PULSE] Failed to add pulse effect: {e}")
                 

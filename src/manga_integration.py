@@ -12484,14 +12484,22 @@ class MangaTranslationTab(QObject):
         except Exception as e:
             print(f"[UPDATE_PREVIEW] Error updating preview: {e}")
     
-    def _add_rectangle_pulse_effect(self, rect_item, region_index):
-        """Add a blue pulse effect to a specific rectangle during cleaning"""
+    def _add_rectangle_pulse_effect(self, rect_item, region_index, auto_remove=False):
+        """Add a purple pulse effect to a specific rectangle during operations
+        
+        Args:
+            rect_item: The rectangle item to pulse
+            region_index: Index of the region
+            auto_remove: If True, auto-remove after 0.75s (for save position). 
+                        If False, loop indefinitely until manually removed (for OCR/clean/translate)
+        """
         try:
             from PySide6.QtWidgets import QGraphicsRectItem
             from PySide6.QtCore import QRectF, QPropertyAnimation, QEasingCurve, Qt, QObject, Property
             from PySide6.QtGui import QPen, QBrush, QColor
             
-            print(f"[RECT_PULSE] Adding pulse effect to rectangle {region_index}")
+            mode = "auto-remove" if auto_remove else "loop until complete"
+            print(f"[RECT_PULSE] Adding pulse effect to rectangle {region_index} (mode: {mode})")
             
             # Store original pen for restoration
             original_pen = rect_item.pen()
@@ -12520,21 +12528,26 @@ class MangaTranslationTab(QObject):
             pulse_wrapper = PulsingRectangle(rect_item)
             setattr(rect_item, '_pulse_wrapper', pulse_wrapper)
             
-            # Create the animation - short 0.1 second pulse
+            # Create the animation
             pulse_animation = QPropertyAnimation(pulse_wrapper, b"intensity")
             pulse_animation.setDuration(750)  # 0.75 seconds (750ms)
             pulse_animation.setStartValue(80)
             pulse_animation.setEndValue(255)
-            pulse_animation.setEasingCurve(QEasingCurve.OutQuad)
-            pulse_animation.setLoopCount(1)  # Run once
+            pulse_animation.setEasingCurve(QEasingCurve.InOutQuad)
             
-            # Auto-remove pulse effect when animation finishes
-            def on_animation_finished():
-                try:
-                    self._remove_rectangle_pulse_effect(rect_item, region_index)
-                except Exception as e:
-                    print(f"[RECT_PULSE] Error removing pulse on finish: {e}")
-            pulse_animation.finished.connect(on_animation_finished)
+            if auto_remove:
+                # For save position: run once and auto-remove
+                pulse_animation.setLoopCount(1)
+                # Auto-remove pulse effect when animation finishes
+                def on_animation_finished():
+                    try:
+                        self._remove_rectangle_pulse_effect(rect_item, region_index)
+                    except Exception as e:
+                        print(f"[RECT_PULSE] Error removing pulse on finish: {e}")
+                pulse_animation.finished.connect(on_animation_finished)
+            else:
+                # For other operations: loop indefinitely until manually removed
+                pulse_animation.setLoopCount(-1)  # Loop forever
             
             pulse_animation.start()
             
