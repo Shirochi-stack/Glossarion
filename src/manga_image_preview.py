@@ -51,13 +51,17 @@ class MoveableRectItem(QGraphicsRectItem):
         self._resize_handle_size = 8
         self._is_resizing = False
         
+        # Movement/resize tracking
+        self._initial_pos = None
+        self._initial_rect = None
+        
     def _get_resize_mode(self, pos):
         """Determine resize mode based on position relative to rectangle"""
         rect = self.rect()
         handle_size = self._resize_handle_size
         
-        # Convert scene position to local position
-        local_pos = self.mapFromScene(pos) if hasattr(pos, 'x') else pos
+        # Always use pos as-is since it's already in item coordinates
+        local_pos = pos
         
         # Check corners first (priority over edges)
         if (abs(local_pos.x() - rect.left()) <= handle_size and 
@@ -109,6 +113,19 @@ class MoveableRectItem(QGraphicsRectItem):
                 self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
         super().hoverMoveEvent(event)
     
+    def itemChange(self, change, value):
+        """Handle item changes - ensure hover works after position changes"""
+        result = super().itemChange(change, value)
+        
+        # When position changes, ensure we can still detect resize after the move
+        from PySide6.QtWidgets import QGraphicsItem
+        if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
+            # Reset cursor to allow proper hover detection
+            if not self._is_resizing:
+                self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        
+        return result
+    
     def hoverEnterEvent(self, event):
         self.hoverMoveEvent(event)  # Use the same logic
         super().hoverEnterEvent(event)
@@ -121,13 +138,19 @@ class MoveableRectItem(QGraphicsRectItem):
         """Handle mouse press for resize or move operations"""
         try:
             if event.button() == Qt.MouseButton.LeftButton:
+                # Store initial state for change detection
+                self._initial_pos = self.pos()
+                self._initial_rect = self.rect()
+                
+                # Check for resize mode BEFORE clearing selection
+                resize_mode = self._get_resize_mode(event.pos())
+                
+                # Clear other selections and select this item
                 sc = self.scene()
                 if sc is not None:
                     sc.clearSelection()
                 self.setSelected(True)
                 
-                # Check for resize mode
-                resize_mode = self._get_resize_mode(event.pos())
                 if resize_mode:
                     self._resize_mode = resize_mode
                     self._resize_start_pos = event.pos()
@@ -135,13 +158,17 @@ class MoveableRectItem(QGraphicsRectItem):
                     self._is_resizing = True
                     # Disable item movement during resize
                     self.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable, False)
+                    # Don't call super() for resize - handle it ourselves
                     event.accept()
                     return
                 else:
                     self._resize_mode = None
                     self._is_resizing = False
-                    # Enable item movement
-                    self.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable, True)
+                    # Disable Qt's automatic movement and handle it manually
+                    self.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable, False)
+                    # Set up manual movement tracking
+                    self._manual_move_start = event.scenePos()
+                    self._manual_move_initial_pos = self.pos()
         except Exception:
             pass
         super().mousePressEvent(event)
@@ -187,11 +214,36 @@ class MoveableRectItem(QGraphicsRectItem):
                 return
             except Exception as e:
                 print(f"Error during resize: {e}")
+        elif not self._is_resizing:
+            # Handle manual movement to avoid Qt's movement system interfering
+            if hasattr(self, '_manual_move_start'):
+                current_pos = event.scenePos()
+                start_pos = self._manual_move_start
+                delta = current_pos - start_pos
+                new_pos = self._manual_move_initial_pos + delta
+                self.setPos(new_pos)
+                event.accept()
+                return
         
         super().mouseMoveEvent(event)
     
     def mouseReleaseEvent(self, event):
         was_resizing = self._is_resizing
+        was_actually_moved_or_resized = False
+        
+        # Check if we actually moved or resized (not just clicked)
+        if hasattr(self, '_initial_pos') and hasattr(self, '_initial_rect'):
+            current_pos = self.pos()
+            current_rect = self.rect()
+            # Consider it moved/resized if position changed by more than 1 pixel or rect changed
+            pos_changed = (abs(current_pos.x() - self._initial_pos.x()) > 1 or 
+                          abs(current_pos.y() - self._initial_pos.y()) > 1)
+            rect_changed = (abs(current_rect.x() - self._initial_rect.x()) > 1 or
+                           abs(current_rect.y() - self._initial_rect.y()) > 1 or
+                           abs(current_rect.width() - self._initial_rect.width()) > 1 or
+                           abs(current_rect.height() - self._initial_rect.height()) > 1)
+            was_actually_moved_or_resized = pos_changed or rect_changed or was_resizing
+        
         try:
             if self._is_resizing:
                 self._is_resizing = False
@@ -202,13 +254,28 @@ class MoveableRectItem(QGraphicsRectItem):
             super().mouseReleaseEvent(event)
         finally:
             try:
-                # Notify viewer about move or resize completion
-                if hasattr(self, '_viewer') and self._viewer:
+                # Only notify viewer if we actually moved or resized (not just clicked)
+                if was_actually_moved_or_resized and hasattr(self, '_viewer') and self._viewer:
                     r = self.sceneBoundingRect()
                     # Emit moved signal with SCENE coordinates (for both move and resize)
                     self._viewer.rectangle_moved.emit(r)
             except Exception:
                 pass
+            
+            # Clean up tracking variables
+            self._initial_pos = None
+            self._initial_rect = None
+            
+            # Clean up manual movement tracking
+            if hasattr(self, '_manual_move_start'):
+                delattr(self, '_manual_move_start')
+            if hasattr(self, '_manual_move_initial_pos'):
+                delattr(self, '_manual_move_initial_pos')
+            
+            # Re-enable hover events and reset cursor after move/resize
+            self.setAcceptHoverEvents(True)
+            if not self._is_resizing:
+                self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
 
     def paint(self, painter, option, widget=None):
         """Custom paint to avoid Qt's default dashed selection rectangle; draw only our pen/brush."""
@@ -258,13 +325,17 @@ class MoveableEllipseItem(QGraphicsEllipseItem):
         self._resize_handle_size = 8
         self._is_resizing = False
         
+        # Movement/resize tracking
+        self._initial_pos = None
+        self._initial_rect = None
+        
     def _get_resize_mode(self, pos):
         """Determine resize mode based on position relative to ellipse bounding rectangle"""
         rect = self.rect()
         handle_size = self._resize_handle_size
         
-        # Convert scene position to local position
-        local_pos = self.mapFromScene(pos) if hasattr(pos, 'x') else pos
+        # Always use pos as-is since it's already in item coordinates
+        local_pos = pos
         
         # Check corners of bounding rectangle first (priority over edges)
         if (abs(local_pos.x() - rect.left()) <= handle_size and 
@@ -316,6 +387,19 @@ class MoveableEllipseItem(QGraphicsEllipseItem):
                 self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
         super().hoverMoveEvent(event)
     
+    def itemChange(self, change, value):
+        """Handle item changes - ensure hover works after position changes"""
+        result = super().itemChange(change, value)
+        
+        # When position changes, ensure we can still detect resize after the move
+        from PySide6.QtWidgets import QGraphicsItem
+        if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
+            # Reset cursor to allow proper hover detection
+            if not self._is_resizing:
+                self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        
+        return result
+    
     def hoverEnterEvent(self, event):
         self.hoverMoveEvent(event)  # Use the same logic
         super().hoverEnterEvent(event)
@@ -328,13 +412,19 @@ class MoveableEllipseItem(QGraphicsEllipseItem):
         """Handle mouse press for resize or move operations"""
         try:
             if event.button() == Qt.MouseButton.LeftButton:
+                # Store initial state for change detection
+                self._initial_pos = self.pos()
+                self._initial_rect = self.rect()
+                
+                # Check for resize mode BEFORE clearing selection
+                resize_mode = self._get_resize_mode(event.pos())
+                
+                # Clear other selections and select this item
                 sc = self.scene()
                 if sc is not None:
                     sc.clearSelection()
                 self.setSelected(True)
                 
-                # Check for resize mode
-                resize_mode = self._get_resize_mode(event.pos())
                 if resize_mode:
                     self._resize_mode = resize_mode
                     self._resize_start_pos = event.pos()
@@ -342,13 +432,17 @@ class MoveableEllipseItem(QGraphicsEllipseItem):
                     self._is_resizing = True
                     # Disable item movement during resize
                     self.setFlag(QGraphicsEllipseItem.GraphicsItemFlag.ItemIsMovable, False)
+                    # Don't call super() for resize - handle it ourselves
                     event.accept()
                     return
                 else:
                     self._resize_mode = None
                     self._is_resizing = False
-                    # Enable item movement
-                    self.setFlag(QGraphicsEllipseItem.GraphicsItemFlag.ItemIsMovable, True)
+                    # Disable Qt's automatic movement and handle it manually
+                    self.setFlag(QGraphicsEllipseItem.GraphicsItemFlag.ItemIsMovable, False)
+                    # Set up manual movement tracking
+                    self._manual_move_start = event.scenePos()
+                    self._manual_move_initial_pos = self.pos()
         except Exception:
             pass
         super().mousePressEvent(event)
@@ -394,11 +488,36 @@ class MoveableEllipseItem(QGraphicsEllipseItem):
                 return
             except Exception as e:
                 print(f"Error during ellipse resize: {e}")
+        elif not self._is_resizing:
+            # Handle manual movement to avoid Qt's movement system interfering
+            if hasattr(self, '_manual_move_start'):
+                current_pos = event.scenePos()
+                start_pos = self._manual_move_start
+                delta = current_pos - start_pos
+                new_pos = self._manual_move_initial_pos + delta
+                self.setPos(new_pos)
+                event.accept()
+                return
         
         super().mouseMoveEvent(event)
     
     def mouseReleaseEvent(self, event):
         was_resizing = self._is_resizing
+        was_actually_moved_or_resized = False
+        
+        # Check if we actually moved or resized (not just clicked)
+        if hasattr(self, '_initial_pos') and hasattr(self, '_initial_rect'):
+            current_pos = self.pos()
+            current_rect = self.rect()
+            # Consider it moved/resized if position changed by more than 1 pixel or rect changed
+            pos_changed = (abs(current_pos.x() - self._initial_pos.x()) > 1 or 
+                          abs(current_pos.y() - self._initial_pos.y()) > 1)
+            rect_changed = (abs(current_rect.x() - self._initial_rect.x()) > 1 or
+                           abs(current_rect.y() - self._initial_rect.y()) > 1 or
+                           abs(current_rect.width() - self._initial_rect.width()) > 1 or
+                           abs(current_rect.height() - self._initial_rect.height()) > 1)
+            was_actually_moved_or_resized = pos_changed or rect_changed or was_resizing
+        
         try:
             if self._is_resizing:
                 self._is_resizing = False
@@ -409,13 +528,28 @@ class MoveableEllipseItem(QGraphicsEllipseItem):
             super().mouseReleaseEvent(event)
         finally:
             try:
-                # Notify viewer about move or resize completion
-                if hasattr(self, '_viewer') and self._viewer:
+                # Only notify viewer if we actually moved or resized (not just clicked)
+                if was_actually_moved_or_resized and hasattr(self, '_viewer') and self._viewer:
                     r = self.sceneBoundingRect()
                     # Emit moved signal with SCENE coordinates (for both move and resize)
                     self._viewer.rectangle_moved.emit(r)
             except Exception:
                 pass
+            
+            # Clean up tracking variables
+            self._initial_pos = None
+            self._initial_rect = None
+            
+            # Clean up manual movement tracking
+            if hasattr(self, '_manual_move_start'):
+                delattr(self, '_manual_move_start')
+            if hasattr(self, '_manual_move_initial_pos'):
+                delattr(self, '_manual_move_initial_pos')
+            
+            # Re-enable hover events and reset cursor after move/resize
+            self.setAcceptHoverEvents(True)
+            if not self._is_resizing:
+                self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
 
     def paint(self, painter, option, widget=None):
         """Custom paint to avoid Qt's default dashed selection rectangle; draw only our pen/brush."""
@@ -460,13 +594,17 @@ class MoveablePathItem(QGraphicsPathItem):
         self._resize_handle_size = 8
         self._is_resizing = False
         self._original_path = None
+        
+        # Movement/resize tracking
+        self._initial_pos = None
+        self._initial_rect = None
     def _get_resize_mode(self, pos):
         """Determine resize mode based on position relative to path bounding rectangle"""
         rect = self.boundingRect()
         handle_size = self._resize_handle_size
         
-        # Convert scene position to local position
-        local_pos = self.mapFromScene(pos) if hasattr(pos, 'x') else pos
+        # Always use pos as-is since it's already in item coordinates
+        local_pos = pos
         
         # Check corners of bounding rectangle first (priority over edges)
         if (abs(local_pos.x() - rect.left()) <= handle_size and 
@@ -518,6 +656,19 @@ class MoveablePathItem(QGraphicsPathItem):
                 self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
         super().hoverMoveEvent(event)
     
+    def itemChange(self, change, value):
+        """Handle item changes - ensure hover works after position changes"""
+        result = super().itemChange(change, value)
+        
+        # When position changes, ensure we can still detect resize after the move
+        from PySide6.QtWidgets import QGraphicsItem
+        if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
+            # Reset cursor to allow proper hover detection
+            if not self._is_resizing:
+                self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        
+        return result
+    
     def hoverEnterEvent(self, event):
         self.hoverMoveEvent(event)  # Use the same logic
         super().hoverEnterEvent(event)
@@ -548,13 +699,19 @@ class MoveablePathItem(QGraphicsPathItem):
         """Handle mouse press for resize or move operations"""
         try:
             if event.button() == Qt.MouseButton.LeftButton:
+                # Store initial state for change detection
+                self._initial_pos = self.pos()
+                self._initial_rect = self.boundingRect()
+                
+                # Check for resize mode BEFORE clearing selection
+                resize_mode = self._get_resize_mode(event.pos())
+                
+                # Clear other selections and select this item
                 sc = self.scene()
                 if sc is not None:
                     sc.clearSelection()
                 self.setSelected(True)
                 
-                # Check for resize mode
-                resize_mode = self._get_resize_mode(event.pos())
                 if resize_mode:
                     self._resize_mode = resize_mode
                     self._resize_start_pos = event.pos()
@@ -563,13 +720,17 @@ class MoveablePathItem(QGraphicsPathItem):
                     self._is_resizing = True
                     # Disable item movement during resize
                     self.setFlag(QGraphicsPathItem.GraphicsItemFlag.ItemIsMovable, False)
+                    # Don't call super() for resize - handle it ourselves
                     event.accept()
                     return
                 else:
                     self._resize_mode = None
                     self._is_resizing = False
-                    # Enable item movement
-                    self.setFlag(QGraphicsPathItem.GraphicsItemFlag.ItemIsMovable, True)
+                    # Disable Qt's automatic movement and handle it manually
+                    self.setFlag(QGraphicsPathItem.GraphicsItemFlag.ItemIsMovable, False)
+                    # Set up manual movement tracking
+                    self._manual_move_start = event.scenePos()
+                    self._manual_move_initial_pos = self.pos()
         except Exception:
             pass
         super().mousePressEvent(event)
@@ -617,11 +778,36 @@ class MoveablePathItem(QGraphicsPathItem):
                 return
             except Exception as e:
                 print(f"Error during path resize: {e}")
+        elif not self._is_resizing:
+            # Handle manual movement to avoid Qt's movement system interfering
+            if hasattr(self, '_manual_move_start'):
+                current_pos = event.scenePos()
+                start_pos = self._manual_move_start
+                delta = current_pos - start_pos
+                new_pos = self._manual_move_initial_pos + delta
+                self.setPos(new_pos)
+                event.accept()
+                return
         
         super().mouseMoveEvent(event)
     
     def mouseReleaseEvent(self, event):
         was_resizing = self._is_resizing
+        was_actually_moved_or_resized = False
+        
+        # Check if we actually moved or resized (not just clicked)
+        if hasattr(self, '_initial_pos') and hasattr(self, '_initial_rect'):
+            current_pos = self.pos()
+            current_rect = self.boundingRect()
+            # Consider it moved/resized if position changed by more than 1 pixel or rect changed
+            pos_changed = (abs(current_pos.x() - self._initial_pos.x()) > 1 or 
+                          abs(current_pos.y() - self._initial_pos.y()) > 1)
+            rect_changed = (abs(current_rect.x() - self._initial_rect.x()) > 1 or
+                           abs(current_rect.y() - self._initial_rect.y()) > 1 or
+                           abs(current_rect.width() - self._initial_rect.width()) > 1 or
+                           abs(current_rect.height() - self._initial_rect.height()) > 1)
+            was_actually_moved_or_resized = pos_changed or rect_changed or was_resizing
+        
         try:
             if self._is_resizing:
                 self._is_resizing = False
@@ -633,13 +819,28 @@ class MoveablePathItem(QGraphicsPathItem):
             super().mouseReleaseEvent(event)
         finally:
             try:
-                # Notify viewer about move or resize completion
-                if hasattr(self, '_viewer') and self._viewer:
+                # Only notify viewer if we actually moved or resized (not just clicked)
+                if was_actually_moved_or_resized and hasattr(self, '_viewer') and self._viewer:
                     r = self.sceneBoundingRect()
                     # Emit moved signal with SCENE coordinates (for both move and resize)
                     self._viewer.rectangle_moved.emit(r)
             except Exception:
                 pass
+            
+            # Clean up tracking variables
+            self._initial_pos = None
+            self._initial_rect = None
+            
+            # Clean up manual movement tracking
+            if hasattr(self, '_manual_move_start'):
+                delattr(self, '_manual_move_start')
+            if hasattr(self, '_manual_move_initial_pos'):
+                delattr(self, '_manual_move_initial_pos')
+            
+            # Re-enable hover events and reset cursor after move/resize
+            self.setAcceptHoverEvents(True)
+            if not self._is_resizing:
+                self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
     def paint(self, painter, option, widget=None):
         try:
             painter.setPen(self.pen())
