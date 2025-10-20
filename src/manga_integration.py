@@ -8275,11 +8275,20 @@ class MangaTranslationTab(QObject):
             self.image_preview_widget.set_image_list(self.selected_files)
     
     def _remove_selected(self):
-        """Remove selected files from the list and clear preview if the current image was removed."""
+        """Remove selected files from the list and clear preview if the current image was removed.
+        Before removing, persist the current image state to avoid losing OCR/rectangles.
+        """
         selected_items = self.file_listbox.selectedItems()
         
         if not selected_items:
             return
+        
+        # Persist current image state before mutating the list
+        try:
+            if hasattr(self, '_current_image_path') and self._current_image_path:
+                self._persist_current_image_state()
+        except Exception:
+            pass
         
         # Track current image and removed paths
         current_path = getattr(self, '_current_image_path', None)
@@ -8301,7 +8310,16 @@ class MangaTranslationTab(QObject):
             self._current_image_path = None
     
     def _clear_all(self):
-        """Clear all files from the list"""
+        """Clear all files from the list.
+        Persist current image state first to preserve OCR/rectangles.
+        """
+        # Persist current image state before clearing
+        try:
+            if hasattr(self, '_current_image_path') and self._current_image_path:
+                self._persist_current_image_state()
+        except Exception:
+            pass
+        
         self.file_listbox.clear()
         self.selected_files.clear()
         # Clear image preview when list is cleared
@@ -8716,7 +8734,9 @@ class MangaTranslationTab(QObject):
             print(f"[STATE_ISOLATION] Failed to clear cross-image state: {e}")
     
     def _persist_current_image_state(self):
-        """Persist the current image's state (rectangles, overlays, paths) before switching"""
+        """Persist the current image's state (rectangles, overlays, paths) before switching.
+        IMPORTANT: Merge into existing state to avoid wiping recognized/translated texts.
+        """
         try:
             if not hasattr(self, '_current_image_path') or not self._current_image_path:
                 return
@@ -8726,28 +8746,28 @@ class MangaTranslationTab(QObject):
             
             image_path = self._current_image_path
             
-            # Collect current state
-            state = {}
+            # Collect current state (partial)
+            partial = {}
             
             # Store detection rectangles
             if hasattr(self, '_current_regions') and self._current_regions:
-                state['detection_regions'] = self._current_regions
+                partial['detection_regions'] = self._current_regions
                 print(f"[STATE] Persisting {len(self._current_regions)} detection regions for {os.path.basename(image_path)}")
             
             # Store recognition overlays (if any)
             if hasattr(self.image_preview_widget.viewer, 'overlay_rects'):
-                state['overlay_rects'] = self.image_preview_widget.viewer.overlay_rects.copy()
-                if state['overlay_rects']:
-                    print(f"[STATE] Persisting {len(state['overlay_rects'])} overlay rects for {os.path.basename(image_path)}")
+                partial['overlay_rects'] = self.image_preview_widget.viewer.overlay_rects.copy()
+                if partial['overlay_rects']:
+                    print(f"[STATE] Persisting {len(partial['overlay_rects'])} overlay rects for {os.path.basename(image_path)}")
             
             # Store cleaned image path
             if hasattr(self, '_cleaned_image_path') and self._cleaned_image_path:
-                state['cleaned_image_path'] = self._cleaned_image_path
+                partial['cleaned_image_path'] = self._cleaned_image_path
                 print(f"[STATE] Persisting cleaned image path: {os.path.basename(self._cleaned_image_path)}")
             
             # Store rendered image path (if exists)
             if hasattr(self, '_rendered_images_map') and image_path in self._rendered_images_map:
-                state['rendered_image_path'] = self._rendered_images_map[image_path]
+                partial['rendered_image_path'] = self._rendered_images_map[image_path]
                 print(f"[STATE] Persisting rendered image path: {os.path.basename(self._rendered_images_map[image_path])}")
             
             # Store viewer rectangles for visual state
@@ -8778,12 +8798,14 @@ class MangaTranslationTab(QObject):
                     except Exception:
                         pass
                     rect_data.append(entry)
-                state['viewer_rectangles'] = rect_data
+                partial['viewer_rectangles'] = rect_data
                 print(f"[STATE] Persisting {len(rect_data)} viewer shapes for {os.path.basename(image_path)}")
             
-            # Save state to manager
-            self.image_state_manager.set_state(image_path, state, save=True)
-            print(f"[STATE] Saved state for {os.path.basename(image_path)}")
+            # Merge with existing state to preserve recognized/translated texts and other keys
+            prev = self.image_state_manager.get_state(image_path) or {}
+            merged = {**prev, **partial}
+            self.image_state_manager.set_state(image_path, merged, save=True)
+            print(f"[STATE] Saved merged state for {os.path.basename(image_path)} (preserved OCR/translation)")
             
         except Exception as e:
             print(f"[STATE] Failed to persist state: {e}")
