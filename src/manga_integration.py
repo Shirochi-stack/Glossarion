@@ -13979,13 +13979,21 @@ class MangaTranslationTab(QObject):
                 try:
                     ipw = getattr(self, 'image_preview_widget', None)
                     if ipw and getattr(ipw, 'current_image_path', None):
+                        print(f"[REFRESH] Executing source preview refresh for: {os.path.basename(ipw.current_image_path)}")
                         ipw.load_image(ipw.current_image_path, preserve_rectangles=True, preserve_text_overlays=True)
+                        print(f"[REFRESH] Source preview refresh completed")
                 except Exception as _e:
                     print(f"[REFRESH] Source preview refresh failed: {_e}")
-            # Delay to allow file write to complete
+                    import traceback
+                    traceback.print_exc()
+            # Schedule TWO refreshes to catch async renders (match Save & Update Overlay behavior)
+            print(f"[REFRESH] Scheduling double source refresh at 1200ms and 3000ms")
             QTimer.singleShot(1200, _refresh_source)
+            QTimer.singleShot(3000, _refresh_source)
         except Exception as e:
             print(f"[REFRESH] Failed to schedule source refresh: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _init_parallel_save_system(self):
         """Initialize the parallel save processing system with microsecond locks."""
@@ -14176,13 +14184,7 @@ class MangaTranslationTab(QObject):
                         if success:
                             try:
                                 from PySide6.QtCore import QTimer, QMetaObject, Qt
-                                def _refresh_source_preview():
-                                    try:
-                                        ipw = getattr(self.parent, 'image_preview_widget', None)
-                                        if ipw and getattr(ipw, 'current_image_path', None):
-                                            ipw.load_image(ipw.current_image_path, preserve_rectangles=True, preserve_text_overlays=True)
-                                    except Exception as _e:
-                                        print(f"[PARALLEL] Source preview refresh failed: {_e}")
+                                print(f"[PARALLEL] Region {region_index} saved successfully - scheduling source refresh")
                                 # Schedule refresh on main thread with delay to allow file write to complete
                                 QMetaObject.invokeMethod(self.parent, "_schedule_source_refresh", Qt.ConnectionType.QueuedConnection)
                             except Exception as refresh_err:
@@ -14310,6 +14312,18 @@ class MangaTranslationTab(QObject):
             def render_task():
                 try:
                     self._update_single_text_overlay(region_index, trans_text)
+                    print(f"[FALLBACK] Region {region_index} saved successfully - scheduling source refresh")
+                    # Schedule source preview refresh on the main thread (match parallel path behavior)
+                    try:
+                        from PySide6.QtCore import QMetaObject, Qt
+                        QMetaObject.invokeMethod(self, "_schedule_source_refresh", Qt.ConnectionType.QueuedConnection)
+                    except Exception as e1:
+                        print(f"[FALLBACK] QMetaObject.invokeMethod failed: {e1}, trying direct call")
+                        try:
+                            # Fallback: call directly (safe if already on main thread)
+                            self._schedule_source_refresh()
+                        except Exception as e2:
+                            print(f"[FALLBACK] Direct call also failed: {e2}")
                     return True
                 except Exception:
                     return False
@@ -14846,7 +14860,7 @@ class MangaTranslationTab(QObject):
             if not current_image:
                 print(f"[DEBUG] ERROR: No current image path, cannot update overlay")
                 self._log("❌ No image loaded", "error")
-                return
+                return False
             
             print(f"[DEBUG] Current image: {current_image}")
             print(f"[DEBUG] Manual edit complete for region {region_index}. Rendering with MangaTranslator...")
@@ -14978,12 +14992,15 @@ class MangaTranslationTab(QObject):
                         print(f"[DEBUG] Failed to generate output path: {e}")
                         output_path = None
                     self._render_with_manga_translator(base_image, regions, output_path=output_path, original_image_path=current_image, switch_tab=False)
+                    return True  # Success!
                 else:
                     print(f"[DEBUG] ❌ No regions to render")
                     self._log("⚠️ No regions to render", "warning")
+                    return False
             else:
                 print(f"[DEBUG] ❌ No translation data available")
                 self._log("⚠️ No translation data", "warning")
+                return False
             
         except Exception as e:
             print(f"[DEBUG] ❌ ERROR in _update_single_text_overlay: {str(e)}")
@@ -14991,6 +15008,7 @@ class MangaTranslationTab(QObject):
             traceback_str = traceback.format_exc()
             print(f"[DEBUG] Traceback:\n{traceback_str}")
             self._log(f"❌ Rendering failed: {str(e)}", "error")
+            return False
     
     def save_positions_and_rerender(self):
         """Persist current positions and re-render entire output using locked positions for stability.
