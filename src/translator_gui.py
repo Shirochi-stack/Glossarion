@@ -602,7 +602,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "6.1.6"
+        __version__ = "6.1.7"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -1837,7 +1837,7 @@ Recent translations to summarize:
             initial_prompt = self.prompt_profiles[self.profile_var]
             self.prompt_text.setPlainText(initial_prompt)
         
-        self.append_log("🚀 Glossarion v6.1.6 - Ready to use!")
+        self.append_log("🚀 Glossarion v6.1.7 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Restore last selected input files if available
@@ -9389,7 +9389,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v6.1.6...")
+    print("🚀 Starting Glossarion v6.1.7...")
     
     # Initialize splash screen
     splash_manager = None

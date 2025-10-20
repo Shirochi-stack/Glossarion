@@ -8076,10 +8076,9 @@ class MangaTranslationTab(QObject):
                 # Load the image into the preview (always visible) - ALWAYS USE SOURCE
                 if hasattr(self, 'image_preview_widget'):
                     if os.path.exists(image_path):
-                        # Proactively clear the output viewer to avoid showing a previous session's image
+                        # Clear translated path reference when loading new image
                         try:
-                            if hasattr(self.image_preview_widget, 'output_viewer') and self.image_preview_widget.output_viewer:
-                                self.image_preview_widget.output_viewer.clear_scene()
+                            if hasattr(self.image_preview_widget, 'current_translated_path'):
                                 self.image_preview_widget.current_translated_path = None
                         except Exception:
                             pass
@@ -8603,14 +8602,14 @@ class MangaTranslationTab(QObject):
                 self._cleaned_image_path = state['cleaned_image_path']
                 print(f"[STATE] Restored cleaned image path: {os.path.basename(self._cleaned_image_path)}")
             
-            # Restore rendered image path and load it if available
+            # Restore rendered image path mapping if available
             if 'rendered_image_path' in state:
                 rendered_path = state['rendered_image_path']
                 if os.path.exists(rendered_path):
-                    # Load the rendered image into the OUTPUT viewer (do not replace source)
-                    self.image_preview_widget.output_viewer.load_image(rendered_path)
-                    self.image_preview_widget.current_translated_path = rendered_path
-                    print(f"[STATE] Loaded rendered image into output tab: {os.path.basename(rendered_path)}")
+                    # Store the translated path for reference
+                    if hasattr(self.image_preview_widget, 'current_translated_path'):
+                        self.image_preview_widget.current_translated_path = rendered_path
+                    print(f"[STATE] Restored rendered image path reference: {os.path.basename(rendered_path)}")
                     
                     # Store mapping
                     if not hasattr(self, '_rendered_images_map'):
@@ -11425,17 +11424,8 @@ class MangaTranslationTab(QObject):
             from PySide6.QtCore import QRectF, QPropertyAnimation, QEasingCurve, Qt
             from PySide6.QtGui import QBrush, QColor
             
-            # Choose target viewer based on active tab; default to source viewer
-            viewer = None
-            try:
-                if hasattr(self.image_preview_widget, 'viewer_tabs') and \
-                   self.image_preview_widget.viewer_tabs.currentIndex() == 1 and \
-                   hasattr(self.image_preview_widget, 'output_viewer'):
-                    viewer = self.image_preview_widget.output_viewer
-            except Exception:
-                viewer = None
-            if viewer is None:
-                viewer = getattr(self.image_preview_widget, 'viewer', None)
+            # Use source viewer (no more separate output viewer)
+            viewer = getattr(self.image_preview_widget, 'viewer', None)
             if viewer is None:
                 return
             
@@ -13162,30 +13152,9 @@ class MangaTranslationTab(QObject):
             dx = int(br_g.x() - br_r.x())
             dy = int(br_g.y() - br_r.y())
             
-            # Update overlay visibility based on overlap with original bbox (IoU)
+            # Always keep overlay hidden
             try:
-                def _iou_xywh(a, b):
-                    try:
-                        ax, ay, aw, ah = int(a[0]), int(a[1]), int(a[2]), int(a[3])
-                        bx, by, bw, bh = int(b[0]), int(b[1]), int(b[2]), int(b[3])
-                        ax2, ay2 = ax + aw, ay + ah
-                        bx2, by2 = bx + bw, by + bh
-                        x1 = max(ax, bx); y1 = max(ay, by)
-                        x2 = min(ax2, bx2); y2 = min(ay2, by2)
-                        inter = max(0, x2 - x1) * max(0, y2 - y1)
-                        area_a = max(0, aw) * max(0, ah)
-                        area_b = max(0, bw) * max(0, bh)
-                        den = area_a + area_b - inter
-                        return (inter / den) if den > 0 else 0.0
-                    except Exception:
-                        return 0.0
-                cur = [int(br_g.x()), int(br_g.y()), int(br_g.width()), int(br_g.height())]
-                ob = getattr(group, '_overlay_original_bbox', None)
-                if ob and len(ob) >= 4:
-                    overlap = _iou_xywh(cur, ob)
-                    group.setVisible(overlap < 0.5)
-                else:
-                    group.setVisible(True)
+                group.setVisible(False)
             except Exception as vis_err:
                 print(f"[STATE] Error updating overlay visibility: {vis_err}")
             
@@ -13290,9 +13259,9 @@ class MangaTranslationTab(QObject):
                                 except Exception as e:
                                     print(f"[SYNC] Failed to move overlay for region {region_index}: {e}")
                         
-                        # Ensure group is visible
+                        # Always keep overlay hidden
                         if hasattr(group, 'setVisible'):
-                            group.setVisible(True)
+                            group.setVisible(False)
                         
                         # Update the region index on the group if not set
                         if not hasattr(group, '_overlay_region_index'):
@@ -13944,7 +13913,7 @@ class MangaTranslationTab(QObject):
             print(f"[DEBUG] Error clearing text overlays: {e}")
     
     def show_text_overlays_for_image(self, image_path: str):
-        """Show text overlays for a specific image (restore from memory)"""
+        """Keep text overlays for a specific image (but always hidden)"""
         try:
             viewer = self.image_preview_widget.viewer
             
@@ -13952,24 +13921,25 @@ class MangaTranslationTab(QObject):
             if not hasattr(self, '_text_overlays_by_image'):
                 self._text_overlays_by_image = {}
             
-            # First, hide all visible overlays
+            # Always hide all overlays (overlays exist but are invisible)
             for overlays in self._text_overlays_by_image.values():
                 for overlay in overlays:
                     overlay.setVisible(False)
             
-            # Show overlays for the requested image
+            # Keep overlays for the requested image (but hidden)
             if image_path in self._text_overlays_by_image:
+                # Don't show them - keep them hidden
                 for overlay in self._text_overlays_by_image[image_path]:
-                    overlay.setVisible(True)
-                # Force scene update to ensure overlays are visible
+                    overlay.setVisible(False)
+                # Force scene update
                 viewer._scene.update()
                 viewer.update()
-                print(f"[DEBUG] Restored {len(self._text_overlays_by_image[image_path])} overlays for image: {os.path.basename(image_path)}")
+                print(f"[DEBUG] Kept {len(self._text_overlays_by_image[image_path])} overlays hidden for image: {os.path.basename(image_path)}")
             else:
                 #print(f"[DEBUG] No overlays found for image: {os.path.basename(image_path)}")
                 pass
         except Exception as e:
-            print(f"[DEBUG] Error showing text overlays: {str(e)}")
+            print(f"[DEBUG] Error hiding text overlays: {str(e)}")
     
     def _alias_text_overlays_for_image(self, from_path: str, to_path: str):
         """Alias the overlays list from one image path to another (e.g., original -> cleaned)"""
@@ -13999,6 +13969,23 @@ class MangaTranslationTab(QObject):
             print(f"[PARALLEL] Error in _save_position_async: {e}")
             # Fallback to single region processing
             self._fallback_single_save(region_index)
+    
+    @Slot()
+    def _schedule_source_refresh(self):
+        """Schedule source preview refresh on main thread (called from worker threads)."""
+        try:
+            from PySide6.QtCore import QTimer
+            def _refresh_source():
+                try:
+                    ipw = getattr(self, 'image_preview_widget', None)
+                    if ipw and getattr(ipw, 'current_image_path', None):
+                        ipw.load_image(ipw.current_image_path, preserve_rectangles=True, preserve_text_overlays=True)
+                except Exception as _e:
+                    print(f"[REFRESH] Source preview refresh failed: {_e}")
+            # Delay to allow file write to complete
+            QTimer.singleShot(1200, _refresh_source)
+        except Exception as e:
+            print(f"[REFRESH] Failed to schedule source refresh: {e}")
     
     def _init_parallel_save_system(self):
         """Initialize the parallel save processing system with microsecond locks."""
@@ -14146,6 +14133,7 @@ class MangaTranslationTab(QObject):
                     """Process a single save task in a worker thread."""
                     region_index = task['region_index']
                     start_time = time.time_ns()
+                    success = False
                     
                     try:
                         print(f"[PARALLEL] Worker processing region {region_index}")
@@ -14183,6 +14171,22 @@ class MangaTranslationTab(QObject):
                                 
                                 # Update button state
                                 self.parent._update_parallel_save_button_state(self.processing_count)
+                        
+                        # If successful, schedule source preview refresh on main thread
+                        if success:
+                            try:
+                                from PySide6.QtCore import QTimer, QMetaObject, Qt
+                                def _refresh_source_preview():
+                                    try:
+                                        ipw = getattr(self.parent, 'image_preview_widget', None)
+                                        if ipw and getattr(ipw, 'current_image_path', None):
+                                            ipw.load_image(ipw.current_image_path, preserve_rectangles=True, preserve_text_overlays=True)
+                                    except Exception as _e:
+                                        print(f"[PARALLEL] Source preview refresh failed: {_e}")
+                                # Schedule refresh on main thread with delay to allow file write to complete
+                                QMetaObject.invokeMethod(self.parent, "_schedule_source_refresh", Qt.ConnectionType.QueuedConnection)
+                            except Exception as refresh_err:
+                                print(f"[PARALLEL] Failed to schedule source refresh: {refresh_err}")
                 
                 def get_active_count(self):
                     """Get the number of currently active processing tasks."""
@@ -14605,17 +14609,22 @@ class MangaTranslationTab(QObject):
             print(f"[DEBUG] Save position finished - success: {success}, region: {region_index}")
             
             if success and rendered_path:
-                # Load the rendered image (main thread GUI operation)
+                # Store the rendered image path for reference and refresh the source preview
                 try:
-                    print(f"[DEBUG] Loading rendered image: {os.path.basename(rendered_path)}")
-                    self.image_preview_widget.output_viewer.load_image(rendered_path)
-                    self.image_preview_widget.current_translated_path = rendered_path
-                    # NO auto tab switch on save position - keep user on current tab
-                    # if hasattr(self.image_preview_widget, 'viewer_tabs'):
-                    #     self.image_preview_widget.viewer_tabs.setCurrentIndex(1)
-                    print(f"[DEBUG] Successfully loaded rendered image (no tab switch)")
+                    print(f"[DEBUG] Rendered image saved: {os.path.basename(rendered_path)}")
+                    if hasattr(self.image_preview_widget, 'current_translated_path'):
+                        self.image_preview_widget.current_translated_path = rendered_path
+                    # Refresh source preview to show the newly rendered image
+                    if hasattr(self.image_preview_widget, 'current_image_path'):
+                        from PySide6.QtCore import QTimer
+                        QTimer.singleShot(500, lambda: self.image_preview_widget.load_image(
+                            self.image_preview_widget.current_image_path, 
+                            preserve_rectangles=True, 
+                            preserve_text_overlays=True
+                        ))
+                    print(f"[DEBUG] Source preview refresh scheduled")
                 except Exception as e:
-                    print(f"[DEBUG] Error loading rendered output: {e}")
+                    print(f"[DEBUG] Error handling rendered output: {e}")
             
             print(f"[DEBUG] Save Position completed for region {region_index}")
             
@@ -14690,35 +14699,29 @@ class MangaTranslationTab(QObject):
                 # Don't wait for completion - fire and forget for responsiveness
                 from PySide6.QtCore import QTimer
                 
-                # If output_viewer exists, keep legacy periodic output refresh; otherwise refresh source preview
-                if hasattr(self.image_preview_widget, 'output_viewer') and getattr(self.image_preview_widget, 'output_viewer') is not None:
-                    QTimer.singleShot(1000, self._start_output_refresh_check)  # legacy behavior
-                else:
-                    def _refresh_source_preview():
-                        try:
-                            ipw = getattr(self, 'image_preview_widget', None)
-                            if ipw and getattr(ipw, 'current_image_path', None):
-                                ipw.load_image(ipw.current_image_path, preserve_rectangles=True, preserve_text_overlays=True)
-                        except Exception as _e:
-                            print(f"[DEBUG] Source preview refresh failed: {_e}")
-                    QTimer.singleShot(1200, _refresh_source_preview)
-                    QTimer.singleShot(3000, _refresh_source_preview)
+                # Refresh source preview to show updated translated/cleaned image
+                def _refresh_source_preview():
+                    try:
+                        ipw = getattr(self, 'image_preview_widget', None)
+                        if ipw and getattr(ipw, 'current_image_path', None):
+                            ipw.load_image(ipw.current_image_path, preserve_rectangles=True, preserve_text_overlays=True)
+                    except Exception as _e:
+                        print(f"[DEBUG] Source preview refresh failed: {_e}")
+                QTimer.singleShot(1200, _refresh_source_preview)
+                QTimer.singleShot(3000, _refresh_source_preview)
             else:
                 print(f"[DEBUG] No executor available, running save overlay synchronously")
                 _save_overlay_task()
                 # Immediately refresh view since it was synchronous
                 from PySide6.QtCore import QTimer
-                if hasattr(self.image_preview_widget, 'output_viewer') and getattr(self.image_preview_widget, 'output_viewer') is not None:
-                    QTimer.singleShot(500, self._refresh_output_tab)
-                else:
-                    def _refresh_source_preview_sync():
-                        try:
-                            ipw = getattr(self, 'image_preview_widget', None)
-                            if ipw and getattr(ipw, 'current_image_path', None):
-                                ipw.load_image(ipw.current_image_path, preserve_rectangles=True, preserve_text_overlays=True)
-                        except Exception as _e:
-                            print(f"[DEBUG] Source preview refresh (sync) failed: {_e}")
-                    QTimer.singleShot(600, _refresh_source_preview_sync)
+                def _refresh_source_preview_sync():
+                    try:
+                        ipw = getattr(self, 'image_preview_widget', None)
+                        if ipw and getattr(ipw, 'current_image_path', None):
+                            ipw.load_image(ipw.current_image_path, preserve_rectangles=True, preserve_text_overlays=True)
+                    except Exception as _e:
+                        print(f"[DEBUG] Source preview refresh (sync) failed: {_e}")
+                QTimer.singleShot(600, _refresh_source_preview_sync)
             
             print(f"[DEBUG] _save_overlay_async: METHOD COMPLETION")
             
@@ -15715,32 +15718,10 @@ class MangaTranslationTab(QObject):
                         except Exception:
                             pass
                         
-                        # Determine visibility based on ANY overlap with original translated region (more aggressive)
+                        # Always hide text overlays (keep them hidden)
                         try:
-                            def _intersects_xywh(a, b):
-                                try:
-                                    ax, ay, aw, ah = int(a[0]), int(a[1]), int(a[2]), int(a[3])
-                                    bx, by, bw, bh = int(b[0]), int(b[1]), int(b[2]), int(b[3])
-                                    ax2, ay2 = ax + aw, ay + ah
-                                    bx2, by2 = bx + bw, by + bh
-                                    x1 = max(ax, bx); y1 = max(ay, by)
-                                    x2 = min(ax2, bx2); y2 = min(ay2, by2)
-                                    return (x2 - x1) > 0 and (y2 - y1) > 0
-                                except Exception:
-                                    return False
-                            br = group.sceneBoundingRect()
-                            cur = [int(br.x()), int(br.y()), int(br.width()), int(br.height())]
-                            ob = group._overlay_original_bbox if getattr(group, '_overlay_original_bbox', None) else None
-                            if ob and len(ob) >= 4:
-                                # Hide if there is ANY intersection with the original rendered output area
-                                should_hide = _intersects_xywh(cur, ob)
-                            else:
-                                should_hide = False  # No original bbox info; show by default
-                            group.setVisible(not should_hide)
-                            if should_hide:
-                                print(f"[DEBUG] Hiding overlay for region {region_index} - overlaps rendered output (aggressive)")
-                            else:
-                                print(f"[DEBUG] Showing overlay for region {region_index} - moved/does not overlap")
+                            group.setVisible(False)
+                            print(f"[DEBUG] Hiding overlay for region {region_index} - text overlays kept hidden")
                         except Exception as hide_err:
                             print(f"[DEBUG] Error setting overlay visibility: {hide_err}")
                         
@@ -18257,31 +18238,24 @@ class MangaTranslationTab(QObject):
                             return
                         
                         if hasattr(self, 'image_preview_widget') and os.path.exists(translated_path):
-                            print(f"[PREVIEW_UPDATE] Loading translated image into output tab: {translated_path}")
-                            self.image_preview_widget.output_viewer.load_image(translated_path)
-                            self.image_preview_widget.current_translated_path = translated_path
+                            print(f"[PREVIEW_UPDATE] New translated/cleaned image available: {translated_path}")
                             
-                            # If sponge button is enabled and this is a cleaned image, also refresh source tab
-                            # to immediately show the cleaned version without requiring toggle
+                            # Store the translated path for potential use
+                            if hasattr(self.image_preview_widget, 'current_translated_path'):
+                                self.image_preview_widget.current_translated_path = translated_path
+                            
+                            # Refresh the source viewer to pick up the new translated/cleaned image
+                            # based on current display mode (translated/cleaned/original)
                             try:
-                                if (hasattr(self.image_preview_widget, 'cleaned_images_enabled') and 
-                                    self.image_preview_widget.cleaned_images_enabled and
-                                    '_cleaned' in translated_path and
-                                    source_path):
-                                    print(f"[PREVIEW_UPDATE] Refreshing source tab with cleaned image due to sponge button being enabled")
-                                    # Reload the source image which will automatically pick up the cleaned version
-                                    # due to the sponge button being enabled
-                                    self.image_preview_widget.viewer.load_image(self.image_preview_widget._check_for_cleaned_image(source_path))
+                                current_img = getattr(self.image_preview_widget, 'current_image_path', source_path)
+                                if current_img:
+                                    print(f"[PREVIEW_UPDATE] Refreshing source viewer with current display mode")
+                                    # Preserve rectangles and overlays while refreshing
+                                    self.image_preview_widget.load_image(current_img, preserve_rectangles=True, preserve_text_overlays=True)
                             except Exception as refresh_err:
-                                print(f"[PREVIEW_UPDATE] Failed to refresh source tab: {refresh_err}")
+                                print(f"[PREVIEW_UPDATE] Failed to refresh source viewer: {refresh_err}")
                             
-                            # REMOVED: Don't auto-switch tabs - let user manually switch
-                            # try:
-                            #     if switch_to_output and hasattr(self.image_preview_widget, 'viewer_tabs'):
-                            #         self.image_preview_widget.viewer_tabs.setCurrentIndex(1)
-                            # except Exception:
-                            #     pass
-                            print(f"[PREVIEW_UPDATE] ✅ Output tab updated successfully")
+                            print(f"[PREVIEW_UPDATE] ✅ Preview updated successfully")
                     except Exception as e:
                         print(f"[PREVIEW_UPDATE] ❌ Error updating preview: {e}")
                         import traceback
