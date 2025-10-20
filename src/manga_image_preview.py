@@ -2130,6 +2130,15 @@ class MangaImagePreviewWidget(QWidget):
             
             if moved_index >= 0:
                 print(f"[DEBUG] Rectangle {moved_index} moved, auto-applying save position")
+                
+                # Add purple pulse effect to show processing
+                try:
+                    rect_item = self.viewer.rectangles[moved_index]
+                    if hasattr(self, 'manga_integration') and self.manga_integration:
+                        self.manga_integration._add_rectangle_pulse_effect(rect_item, moved_index)
+                except Exception as e:
+                    print(f"[PULSE] Failed to add pulse effect: {e}")
+                
                 # IMMEDIATE REFRESH: Reload current translated image first (optimistic update)
                 try:
                     if self.current_image_path:

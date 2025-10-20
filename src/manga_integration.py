@@ -12527,13 +12527,22 @@ class MangaTranslationTab(QObject):
             pulse_wrapper = PulsingRectangle(rect_item)
             setattr(rect_item, '_pulse_wrapper', pulse_wrapper)
             
-            # Create the animation
+            # Create the animation - short 0.1 second pulse
             pulse_animation = QPropertyAnimation(pulse_wrapper, b"intensity")
-            pulse_animation.setDuration(1000)  # 1 second
+            pulse_animation.setDuration(750)  # 0.75 seconds (750ms)
             pulse_animation.setStartValue(80)
             pulse_animation.setEndValue(255)
-            pulse_animation.setEasingCurve(QEasingCurve.InOutQuad)
-            pulse_animation.setLoopCount(-1)  # Infinite loop
+            pulse_animation.setEasingCurve(QEasingCurve.OutQuad)
+            pulse_animation.setLoopCount(1)  # Run once
+            
+            # Auto-remove pulse effect when animation finishes
+            def on_animation_finished():
+                try:
+                    self._remove_rectangle_pulse_effect(rect_item, region_index)
+                except Exception as e:
+                    print(f"[RECT_PULSE] Error removing pulse on finish: {e}")
+            pulse_animation.finished.connect(on_animation_finished)
+            
             pulse_animation.start()
             
             # Store animation on the rectangle item
@@ -14181,6 +14190,8 @@ class MangaTranslationTab(QObject):
                                 # Update button state
                                 self.parent._update_parallel_save_button_state(self.processing_count)
                         
+                        # Note: Pulse effect auto-removes after 0.1s via animation finished callback
+                        
                         # If successful, schedule source preview refresh on main thread
                         if success:
                             try:
@@ -14331,6 +14342,7 @@ class MangaTranslationTab(QObject):
                 finally:
                     self._auto_save_in_progress = False
                     self._update_save_overlay_button_state()
+                    # Note: Pulse effect auto-removes after 0.1s via animation finished callback
             
             # Submit to executor if available
             if hasattr(self.main_gui, 'executor') and self.main_gui.executor:
