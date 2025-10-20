@@ -960,8 +960,9 @@ class MangaTranslationTab(QObject):
         # This fixes cases where bubble detection settings aren't reflected immediately
         QTimer.singleShot(500, self._check_provider_status)
         
-        # Start model preloading in background
-        QTimer.singleShot(200, self._start_model_preloading)
+        # DISABLED BY DEFAULT: Model preloading causes RAM spikes and 'event' errors
+        # Users can enable via Advanced Settings > preload_local_models_on_open
+        # QTimer.singleShot(200, self._start_model_preloading)
         
         # Now that everything is initialized, allow saving
         self._initializing = False
@@ -1290,6 +1291,15 @@ class MangaTranslationTab(QObject):
                             # Load into pool
                             print(f"  🔄 Loading {model_name}...")
                             inp = LocalInpainter()
+                            
+                            # CRITICAL: Disable worker processes during preload to save RAM
+                            # Workers would load duplicate model copies
+                            inp.use_workers = False
+                            if hasattr(inp, '_stop_workers'):
+                                try:
+                                    inp._stop_workers()
+                                except:
+                                    pass
                             
                             # Ensure model file exists or download it
                             resolved_path = model_path
