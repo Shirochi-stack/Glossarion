@@ -1600,8 +1600,22 @@ class MangaImagePreviewWidget(QWidget):
         self.recognize_text_clicked.emit()
     
     def _emit_translate_signal(self):
-        """Emit translate text signal"""
+        """Emit translate text signal and schedule preview refresh"""
         self.translate_text_clicked.emit()
+        
+        # Schedule preview refresh after translation completes (same timing as save overlay)
+        from PySide6.QtCore import QTimer
+        def _refresh_source():
+            try:
+                if getattr(self, 'current_image_path', None):
+                    # Preserve rectangles and overlays while reloading the image based on current display mode
+                    self.load_image(self.current_image_path, preserve_rectangles=True, preserve_text_overlays=True)
+            except Exception as e:
+                print(f"[DEBUG] Translate refresh failed: {e}")
+        # Multiple refresh timings to catch async translation render
+        QTimer.singleShot(500, _refresh_source)
+        QTimer.singleShot(2000, _refresh_source)
+        QTimer.singleShot(5000, _refresh_source)
     
     def _emit_translate_all_signal(self):
         """Emit translate all signal"""
