@@ -16,6 +16,8 @@ import urllib.request
 from pathlib import Path
 import threading
 import time
+import multiprocessing as mp
+from queue import Queue, Empty
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -573,7 +575,7 @@ class LocalInpainter:
         'lama_official': ('Official LaMa', FFCInpaintModel),
     }
     
-    def __init__(self, config_path="config.json"):
+    def __init__(self, config_path="config.json", enable_worker_process=None):
         # Enable CUDA debugging
         os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
         os.environ['TORCH_USE_CUDA_DSA'] = '1'  # Enable device-side assertions
@@ -606,6 +608,23 @@ class LocalInpainter:
         self.use_onnx = False
         self.is_jit_model = False
         self.pad_mod = 8
+        
+        # Multiprocessing worker (to avoid UI freeze on init/inference)
+        try:
+            if enable_worker_process is None:
+                # Default: enable on Windows to avoid spawn/GIL freezes on first use
+                enable_worker_process = (os.name == 'nt' or sys.platform.startswith('win'))
+        except Exception:
+            enable_worker_process = False
+        self._mp_enabled = bool(enable_worker_process)
+        self._mp_ctx = None
+        self._mp_task_q = None
+        self._mp_result_q = None
+        self._mp_worker = None
+        self._mp_receiver_thread = None
+        self._mp_pending = {}
+        if self._mp_enabled:
+            self._start_worker()
         
         # Default tiling settings - OFF by default for most models
         self.tiling_enabled = False
@@ -717,6 +736,147 @@ class LocalInpainter:
         else:
             logger.info("🗨️ Bubble detection module not available")
     
+    def _start_worker(self):
+        try:
+            self._mp_ctx = mp.get_context('spawn')
+        except Exception:
+            self._mp_ctx = mp
+        try:
+            self._mp_task_q = self._mp_ctx.Queue()
+            self._mp_result_q = self._mp_ctx.Queue()
+            # Lazy import of worker class defined below
+            self._mp_worker = _LocalInpainterWorker(self.config_path, self._mp_task_q, self._mp_result_q)
+            self._mp_worker.daemon = True
+            self._mp_worker.start()
+            # Start receiver thread to demultiplex responses by id
+            def _receiver():
+                while True:
+                    try:
+                        msg = self._mp_result_q.get()
+                    except Exception:
+                        break
+                    if not isinstance(msg, dict):
+                        continue
+                    msg_id = msg.get('id')
+                    if msg_id is None:
+                        # Ignore broadcast messages for now
+                        continue
+                    q = None
+                    try:
+                        q = self._mp_pending.get(msg_id)
+                    except Exception:
+                        q = None
+                    if q is not None:
+                        try:
+                            q.put(msg)
+                        except Exception:
+                            pass
+            self._mp_receiver_thread = threading.Thread(target=_receiver, daemon=True)
+            self._mp_receiver_thread.start()
+            logger.debug("Started LocalInpainter worker process")
+        except Exception as e:
+            logger.warning(f"Failed to start worker process; falling back to in-process mode: {e}")
+            self._mp_enabled = False
+            self._mp_ctx = None
+            self._mp_task_q = None
+            self._mp_result_q = None
+            self._mp_worker = None
+            self._mp_receiver_thread = None
+            self._mp_pending = {}
+
+    def _stop_worker(self):
+        try:
+            if self._mp_enabled and self._mp_task_q is not None:
+                try:
+                    self._mp_task_q.put({'type': 'shutdown'})
+                except Exception:
+                    pass
+            if self._mp_worker is not None:
+                try:
+                    self._mp_worker.join(timeout=1.0)
+                except Exception:
+                    pass
+        finally:
+            self._mp_enabled = False
+            self._mp_ctx = None
+            self._mp_task_q = None
+            self._mp_result_q = None
+            self._mp_worker = None
+            self._mp_receiver_thread = None
+            self._mp_pending = {}
+
+    def _mp_call(self, payload: dict, expect_type: str, timeout: float = 60.0) -> dict:
+        if not self._mp_enabled or self._mp_task_q is None:
+            raise RuntimeError("Worker process not available")
+        # Assign unique id
+        try:
+            call_id = int(time.time() * 1e6) ^ (os.getpid() & 0xFFFF)
+        except Exception:
+            call_id = int(time.time() * 1e6)
+        payload = dict(payload)
+        payload['id'] = call_id
+        # Create per-call queue and register
+        local_q = Queue()
+        self._mp_pending[call_id] = local_q
+        # Send task
+        self._mp_task_q.put(payload)
+        # Wait for response
+        try:
+            resp = local_q.get(timeout=max(0.1, float(timeout)))
+        except Empty:
+            # Timeout - cleanup and raise
+            try:
+                del self._mp_pending[call_id]
+            except Exception:
+                pass
+            raise TimeoutError(f"Timeout waiting for {expect_type} from worker")
+        finally:
+            # Best-effort cleanup of pending map
+            try:
+                self._mp_pending.pop(call_id, None)
+            except Exception:
+                pass
+        # Validate
+        if not isinstance(resp, dict) or resp.get('type') != expect_type:
+            raise RuntimeError(f"Unexpected response from worker: {resp}")
+        return resp
+
+    def _mp_load_model(self, method, model_path, force_reload=False) -> bool:
+        try:
+            resp = self._mp_call({'type': 'load_model', 'method': method, 'model_path': model_path, 'force_reload': bool(force_reload)}, 'load_model_done', timeout=180.0)
+            ok = bool(resp.get('success'))
+            # Mirror minimal state for compatibility
+            self.model_loaded = ok
+            self.use_onnx = bool(resp.get('use_onnx', False))
+            try:
+                self.current_method = resp.get('current_method') or method
+            except Exception:
+                self.current_method = method
+            return ok
+        except Exception as e:
+            logger.error(f"Worker load_model failed: {e}")
+            self.model_loaded = False
+            return False
+
+    def _mp_inpaint(self, image, mask, refinement='normal', iterations=None):
+        # Respect stop flag
+        if self._check_stop():
+            self._log("⏹️ Inpainting stopped by user", "warning")
+            return image
+        if not self.model_loaded:
+            self._log("No model loaded (worker)", "error")
+            return image
+        try:
+            resp = self._mp_call({'type': 'inpaint', 'image': image, 'mask': mask, 'refinement': refinement, 'iterations': iterations}, 'inpaint_result', timeout=600.0)
+            if resp.get('success') and resp.get('result') is not None:
+                return resp['result']
+            else:
+                self._log(f"Worker inpaint failed: {resp.get('error')}", "error")
+                return image
+        except Exception as e:
+            logger.error(f"Worker inpaint exception: {e}")
+            return image
+
     def _load_config(self):
         try:
             if self.config_path and os.path.exists(self.config_path):
@@ -1720,6 +1880,9 @@ class LocalInpainter:
     def load_model(self, method, model_path, force_reload=False):
         """Load model - supports both JIT and checkpoint files with ONNX conversion"""
         try:
+            # Offload to worker process if enabled
+            if getattr(self, '_mp_enabled', False):
+                return self._mp_load_model(method, model_path, force_reload=force_reload)
             if not TORCH_AVAILABLE:
                 logger.warning("PyTorch not available in this build")
                 logger.info("Inpainting features will be disabled - this is normal for lightweight builds")
@@ -2145,6 +2308,11 @@ class LocalInpainter:
     def unload(self):
         """Release all heavy resources held by this inpainter instance."""
         try:
+            # Stop worker first if running
+            try:
+                self._stop_worker()
+            except Exception:
+                pass
             # Release ONNX session and metadata
             try:
                 if self.onnx_session is not None:
@@ -2408,6 +2576,10 @@ class LocalInpainter:
             _skip_hd: Skip HD processing
             _skip_tiling: Skip tiling
         """
+        # If worker process is enabled, delegate to it (handles stop flag internally)
+        if getattr(self, '_mp_enabled', False):
+            return self._mp_inpaint(image, mask, refinement=refinement, iterations=iterations)
+        
         # Check for stop at start
         if self._check_stop():
             self._log("⏹️ Inpainting stopped by user", "warning")
@@ -3055,6 +3227,64 @@ def setup_inpainter_for_manga(auto_download=True):
     
     return inpainter
 
+
+class _LocalInpainterWorker(mp.Process):
+    """Separate worker process to initialize models and run inpainting to avoid UI blocking."""
+    def __init__(self, config_path: str, task_q, result_q):
+        super().__init__()
+        self.config_path = config_path
+        self.task_q = task_q
+        self.result_q = result_q
+
+    def run(self):
+        try:
+            # Create core inpainter in worker without spawning another worker
+            core = LocalInpainter(config_path=self.config_path, enable_worker_process=False)
+        except Exception as e:
+            try:
+                self.result_q.put({'type': 'worker_error', 'error': str(e)})
+            except Exception:
+                pass
+            return
+        while True:
+            try:
+                task = self.task_q.get()
+            except Exception:
+                continue
+            if not isinstance(task, dict):
+                continue
+            t = task.get('type')
+            task_id = task.get('id')
+            if t == 'shutdown':
+                break
+            elif t == 'load_model':
+                ok = False
+                err = None
+                try:
+                    ok = core.load_model_with_retry(task.get('method'), task.get('model_path'), force_reload=bool(task.get('force_reload', False)))
+                except Exception as e:
+                    err = str(e)
+                try:
+                    self.result_q.put({'type': 'load_model_done', 'id': task_id, 'success': bool(ok), 'use_onnx': bool(getattr(core, 'use_onnx', False)), 'current_method': getattr(core, 'current_method', None), 'error': err})
+                except Exception:
+                    pass
+            elif t == 'inpaint':
+                try:
+                    img = task.get('image')
+                    m = task.get('mask')
+                    res = core.inpaint(img, m, refinement=task.get('refinement', 'normal'), iterations=task.get('iterations'))
+                    self.result_q.put({'type': 'inpaint_result', 'id': task_id, 'success': True, 'result': res})
+                except Exception as e:
+                    try:
+                        self.result_q.put({'type': 'inpaint_result', 'id': task_id, 'success': False, 'error': str(e)})
+                    except Exception:
+                        pass
+            else:
+                # Unknown task; acknowledge to prevent deadlock
+                try:
+                    self.result_q.put({'type': 'unknown', 'id': task_id, 'task': t})
+                except Exception:
+                    pass
 
 if __name__ == "__main__":
     import sys

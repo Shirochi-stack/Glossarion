@@ -17,7 +17,7 @@ import numpy as np
 
 
 class MoveableRectItem(QGraphicsRectItem):
-    """Simple moveable rectangle for text box selection"""
+    """Simple moveable and resizable rectangle for text box selection"""
     
     def __init__(self, rect=None, parent=None, pen=None, brush=None):
         super().__init__(rect, parent)
@@ -44,38 +44,171 @@ class MoveableRectItem(QGraphicsRectItem):
         self.selected = False
         self.shape_type = 'rect'
         
+        # Resize functionality
+        self._resize_mode = None  # None, 'corner', 'edge'
+        self._resize_start_pos = None
+        self._resize_start_rect = None
+        self._resize_handle_size = 8
+        self._is_resizing = False
+        
+    def _get_resize_mode(self, pos):
+        """Determine resize mode based on position relative to rectangle"""
+        rect = self.rect()
+        handle_size = self._resize_handle_size
+        
+        # Convert scene position to local position
+        local_pos = self.mapFromScene(pos) if hasattr(pos, 'x') else pos
+        
+        # Check corners first (priority over edges)
+        if (abs(local_pos.x() - rect.left()) <= handle_size and 
+            abs(local_pos.y() - rect.top()) <= handle_size):
+            return 'top_left'
+        elif (abs(local_pos.x() - rect.right()) <= handle_size and 
+              abs(local_pos.y() - rect.top()) <= handle_size):
+            return 'top_right'
+        elif (abs(local_pos.x() - rect.left()) <= handle_size and 
+              abs(local_pos.y() - rect.bottom()) <= handle_size):
+            return 'bottom_left'
+        elif (abs(local_pos.x() - rect.right()) <= handle_size and 
+              abs(local_pos.y() - rect.bottom()) <= handle_size):
+            return 'bottom_right'
+        
+        # Check edges
+        elif abs(local_pos.y() - rect.top()) <= handle_size and rect.left() <= local_pos.x() <= rect.right():
+            return 'top'
+        elif abs(local_pos.y() - rect.bottom()) <= handle_size and rect.left() <= local_pos.x() <= rect.right():
+            return 'bottom'
+        elif abs(local_pos.x() - rect.left()) <= handle_size and rect.top() <= local_pos.y() <= rect.bottom():
+            return 'left'
+        elif abs(local_pos.x() - rect.right()) <= handle_size and rect.top() <= local_pos.y() <= rect.bottom():
+            return 'right'
+        
+        return None
+    
+    def _get_cursor_for_resize_mode(self, mode):
+        """Get appropriate cursor for resize mode"""
+        cursor_map = {
+            'top_left': Qt.CursorShape.SizeFDiagCursor,
+            'top_right': Qt.CursorShape.SizeBDiagCursor,
+            'bottom_left': Qt.CursorShape.SizeBDiagCursor,
+            'bottom_right': Qt.CursorShape.SizeFDiagCursor,
+            'top': Qt.CursorShape.SizeVerCursor,
+            'bottom': Qt.CursorShape.SizeVerCursor,
+            'left': Qt.CursorShape.SizeHorCursor,
+            'right': Qt.CursorShape.SizeHorCursor,
+        }
+        return cursor_map.get(mode, Qt.CursorShape.PointingHandCursor)
+    
+    def hoverMoveEvent(self, event):
+        """Update cursor based on position for resize handles"""
+        if not self._is_resizing:
+            resize_mode = self._get_resize_mode(event.pos())
+            if resize_mode:
+                self.setCursor(QCursor(self._get_cursor_for_resize_mode(resize_mode)))
+            else:
+                self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
+        super().hoverMoveEvent(event)
+    
     def hoverEnterEvent(self, event):
-        self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
+        self.hoverMoveEvent(event)  # Use the same logic
         super().hoverEnterEvent(event)
         
     def hoverLeaveEvent(self, event):
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         super().hoverLeaveEvent(event)
         
-    def mouseReleaseEvent(self, event):
-        try:
-            super().mouseReleaseEvent(event)
-        finally:
-            try:
-                # Notify viewer about move completion
-                if hasattr(self, '_viewer') and self._viewer:
-                    r = self.sceneBoundingRect()
-                    # Emit moved signal with SCENE coordinates
-                    self._viewer.rectangle_moved.emit(r)
-            except Exception:
-                pass
-        
     def mousePressEvent(self, event):
-        """Ensure only this rectangle is selected to avoid multi-move of multiple items."""
+        """Handle mouse press for resize or move operations"""
         try:
             if event.button() == Qt.MouseButton.LeftButton:
                 sc = self.scene()
                 if sc is not None:
                     sc.clearSelection()
                 self.setSelected(True)
+                
+                # Check for resize mode
+                resize_mode = self._get_resize_mode(event.pos())
+                if resize_mode:
+                    self._resize_mode = resize_mode
+                    self._resize_start_pos = event.pos()
+                    self._resize_start_rect = self.rect()
+                    self._is_resizing = True
+                    # Disable item movement during resize
+                    self.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable, False)
+                    event.accept()
+                    return
+                else:
+                    self._resize_mode = None
+                    self._is_resizing = False
+                    # Enable item movement
+                    self.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable, True)
         except Exception:
             pass
         super().mousePressEvent(event)
+    
+    def mouseMoveEvent(self, event):
+        """Handle mouse move for resize operations"""
+        if self._is_resizing and self._resize_mode:
+            try:
+                current_pos = event.pos()
+                start_pos = self._resize_start_pos
+                start_rect = self._resize_start_rect
+                
+                dx = current_pos.x() - start_pos.x()
+                dy = current_pos.y() - start_pos.y()
+                
+                new_rect = QRectF(start_rect)
+                
+                # Apply resize based on mode
+                if 'left' in self._resize_mode:
+                    new_rect.setLeft(start_rect.left() + dx)
+                if 'right' in self._resize_mode:
+                    new_rect.setRight(start_rect.right() + dx)
+                if 'top' in self._resize_mode:
+                    new_rect.setTop(start_rect.top() + dy)
+                if 'bottom' in self._resize_mode:
+                    new_rect.setBottom(start_rect.bottom() + dy)
+                
+                # Ensure minimum size
+                min_size = 10
+                if new_rect.width() < min_size:
+                    if 'left' in self._resize_mode:
+                        new_rect.setLeft(new_rect.right() - min_size)
+                    else:
+                        new_rect.setRight(new_rect.left() + min_size)
+                if new_rect.height() < min_size:
+                    if 'top' in self._resize_mode:
+                        new_rect.setTop(new_rect.bottom() - min_size)
+                    else:
+                        new_rect.setBottom(new_rect.top() + min_size)
+                
+                self.setRect(new_rect)
+                event.accept()
+                return
+            except Exception as e:
+                print(f"Error during resize: {e}")
+        
+        super().mouseMoveEvent(event)
+    
+    def mouseReleaseEvent(self, event):
+        was_resizing = self._is_resizing
+        try:
+            if self._is_resizing:
+                self._is_resizing = False
+                self._resize_mode = None
+                # Re-enable movement
+                self.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable, True)
+            
+            super().mouseReleaseEvent(event)
+        finally:
+            try:
+                # Notify viewer about move or resize completion
+                if hasattr(self, '_viewer') and self._viewer:
+                    r = self.sceneBoundingRect()
+                    # Emit moved signal with SCENE coordinates (for both move and resize)
+                    self._viewer.rectangle_moved.emit(r)
+            except Exception:
+                pass
 
     def paint(self, painter, option, widget=None):
         """Custom paint to avoid Qt's default dashed selection rectangle; draw only our pen/brush."""
@@ -89,7 +222,7 @@ class MoveableRectItem(QGraphicsRectItem):
 
 
 class MoveableEllipseItem(QGraphicsEllipseItem):
-    """Moveable ellipse for circular text region selection"""
+    """Moveable and resizable ellipse for circular text region selection"""
     
     def __init__(self, rect=None, parent=None, pen=None, brush=None):
         super().__init__(rect, parent)
@@ -118,35 +251,171 @@ class MoveableEllipseItem(QGraphicsEllipseItem):
         self.selected = False
         self.shape_type = 'ellipse'
         
+        # Resize functionality
+        self._resize_mode = None  # None, 'corner', 'edge'
+        self._resize_start_pos = None
+        self._resize_start_rect = None
+        self._resize_handle_size = 8
+        self._is_resizing = False
+        
+    def _get_resize_mode(self, pos):
+        """Determine resize mode based on position relative to ellipse bounding rectangle"""
+        rect = self.rect()
+        handle_size = self._resize_handle_size
+        
+        # Convert scene position to local position
+        local_pos = self.mapFromScene(pos) if hasattr(pos, 'x') else pos
+        
+        # Check corners of bounding rectangle first (priority over edges)
+        if (abs(local_pos.x() - rect.left()) <= handle_size and 
+            abs(local_pos.y() - rect.top()) <= handle_size):
+            return 'top_left'
+        elif (abs(local_pos.x() - rect.right()) <= handle_size and 
+              abs(local_pos.y() - rect.top()) <= handle_size):
+            return 'top_right'
+        elif (abs(local_pos.x() - rect.left()) <= handle_size and 
+              abs(local_pos.y() - rect.bottom()) <= handle_size):
+            return 'bottom_left'
+        elif (abs(local_pos.x() - rect.right()) <= handle_size and 
+              abs(local_pos.y() - rect.bottom()) <= handle_size):
+            return 'bottom_right'
+        
+        # Check edges
+        elif abs(local_pos.y() - rect.top()) <= handle_size and rect.left() <= local_pos.x() <= rect.right():
+            return 'top'
+        elif abs(local_pos.y() - rect.bottom()) <= handle_size and rect.left() <= local_pos.x() <= rect.right():
+            return 'bottom'
+        elif abs(local_pos.x() - rect.left()) <= handle_size and rect.top() <= local_pos.y() <= rect.bottom():
+            return 'left'
+        elif abs(local_pos.x() - rect.right()) <= handle_size and rect.top() <= local_pos.y() <= rect.bottom():
+            return 'right'
+        
+        return None
+    
+    def _get_cursor_for_resize_mode(self, mode):
+        """Get appropriate cursor for resize mode"""
+        cursor_map = {
+            'top_left': Qt.CursorShape.SizeFDiagCursor,
+            'top_right': Qt.CursorShape.SizeBDiagCursor,
+            'bottom_left': Qt.CursorShape.SizeBDiagCursor,
+            'bottom_right': Qt.CursorShape.SizeFDiagCursor,
+            'top': Qt.CursorShape.SizeVerCursor,
+            'bottom': Qt.CursorShape.SizeVerCursor,
+            'left': Qt.CursorShape.SizeHorCursor,
+            'right': Qt.CursorShape.SizeHorCursor,
+        }
+        return cursor_map.get(mode, Qt.CursorShape.PointingHandCursor)
+    
+    def hoverMoveEvent(self, event):
+        """Update cursor based on position for resize handles"""
+        if not self._is_resizing:
+            resize_mode = self._get_resize_mode(event.pos())
+            if resize_mode:
+                self.setCursor(QCursor(self._get_cursor_for_resize_mode(resize_mode)))
+            else:
+                self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
+        super().hoverMoveEvent(event)
+    
     def hoverEnterEvent(self, event):
-        self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
+        self.hoverMoveEvent(event)  # Use the same logic
         super().hoverEnterEvent(event)
         
     def hoverLeaveEvent(self, event):
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         super().hoverLeaveEvent(event)
         
-    def mouseReleaseEvent(self, event):
-        try:
-            super().mouseReleaseEvent(event)
-        finally:
-            try:
-                if hasattr(self, '_viewer') and self._viewer:
-                    r = self.sceneBoundingRect()
-                    self._viewer.rectangle_moved.emit(r)
-            except Exception:
-                pass
-        
     def mousePressEvent(self, event):
+        """Handle mouse press for resize or move operations"""
         try:
             if event.button() == Qt.MouseButton.LeftButton:
                 sc = self.scene()
                 if sc is not None:
                     sc.clearSelection()
                 self.setSelected(True)
+                
+                # Check for resize mode
+                resize_mode = self._get_resize_mode(event.pos())
+                if resize_mode:
+                    self._resize_mode = resize_mode
+                    self._resize_start_pos = event.pos()
+                    self._resize_start_rect = self.rect()
+                    self._is_resizing = True
+                    # Disable item movement during resize
+                    self.setFlag(QGraphicsEllipseItem.GraphicsItemFlag.ItemIsMovable, False)
+                    event.accept()
+                    return
+                else:
+                    self._resize_mode = None
+                    self._is_resizing = False
+                    # Enable item movement
+                    self.setFlag(QGraphicsEllipseItem.GraphicsItemFlag.ItemIsMovable, True)
         except Exception:
             pass
         super().mousePressEvent(event)
+    
+    def mouseMoveEvent(self, event):
+        """Handle mouse move for resize operations"""
+        if self._is_resizing and self._resize_mode:
+            try:
+                current_pos = event.pos()
+                start_pos = self._resize_start_pos
+                start_rect = self._resize_start_rect
+                
+                dx = current_pos.x() - start_pos.x()
+                dy = current_pos.y() - start_pos.y()
+                
+                new_rect = QRectF(start_rect)
+                
+                # Apply resize based on mode
+                if 'left' in self._resize_mode:
+                    new_rect.setLeft(start_rect.left() + dx)
+                if 'right' in self._resize_mode:
+                    new_rect.setRight(start_rect.right() + dx)
+                if 'top' in self._resize_mode:
+                    new_rect.setTop(start_rect.top() + dy)
+                if 'bottom' in self._resize_mode:
+                    new_rect.setBottom(start_rect.bottom() + dy)
+                
+                # Ensure minimum size
+                min_size = 10
+                if new_rect.width() < min_size:
+                    if 'left' in self._resize_mode:
+                        new_rect.setLeft(new_rect.right() - min_size)
+                    else:
+                        new_rect.setRight(new_rect.left() + min_size)
+                if new_rect.height() < min_size:
+                    if 'top' in self._resize_mode:
+                        new_rect.setTop(new_rect.bottom() - min_size)
+                    else:
+                        new_rect.setBottom(new_rect.top() + min_size)
+                
+                self.setRect(new_rect)
+                event.accept()
+                return
+            except Exception as e:
+                print(f"Error during ellipse resize: {e}")
+        
+        super().mouseMoveEvent(event)
+    
+    def mouseReleaseEvent(self, event):
+        was_resizing = self._is_resizing
+        try:
+            if self._is_resizing:
+                self._is_resizing = False
+                self._resize_mode = None
+                # Re-enable movement
+                self.setFlag(QGraphicsEllipseItem.GraphicsItemFlag.ItemIsMovable, True)
+            
+            super().mouseReleaseEvent(event)
+        finally:
+            try:
+                # Notify viewer about move or resize completion
+                if hasattr(self, '_viewer') and self._viewer:
+                    r = self.sceneBoundingRect()
+                    # Emit moved signal with SCENE coordinates (for both move and resize)
+                    self._viewer.rectangle_moved.emit(r)
+            except Exception:
+                pass
 
     def paint(self, painter, option, widget=None):
         """Custom paint to avoid Qt's default dashed selection rectangle; draw only our pen/brush."""
@@ -159,7 +428,7 @@ class MoveableEllipseItem(QGraphicsEllipseItem):
 
 
 class MoveablePathItem(QGraphicsPathItem):
-    """Moveable freehand path (lasso) for arbitrary-shaped regions"""
+    """Moveable and resizable freehand path (lasso) for arbitrary-shaped regions"""
     def __init__(self, path=None, parent=None, pen=None, brush=None):
         super().__init__(parent)
         if path is not None:
@@ -183,32 +452,194 @@ class MoveablePathItem(QGraphicsPathItem):
         self.setZValue(1)
         self.selected = False
         self.shape_type = 'polygon'
+        
+        # Resize functionality
+        self._resize_mode = None
+        self._resize_start_pos = None
+        self._resize_start_rect = None
+        self._resize_handle_size = 8
+        self._is_resizing = False
+        self._original_path = None
+    def _get_resize_mode(self, pos):
+        """Determine resize mode based on position relative to path bounding rectangle"""
+        rect = self.boundingRect()
+        handle_size = self._resize_handle_size
+        
+        # Convert scene position to local position
+        local_pos = self.mapFromScene(pos) if hasattr(pos, 'x') else pos
+        
+        # Check corners of bounding rectangle first (priority over edges)
+        if (abs(local_pos.x() - rect.left()) <= handle_size and 
+            abs(local_pos.y() - rect.top()) <= handle_size):
+            return 'top_left'
+        elif (abs(local_pos.x() - rect.right()) <= handle_size and 
+              abs(local_pos.y() - rect.top()) <= handle_size):
+            return 'top_right'
+        elif (abs(local_pos.x() - rect.left()) <= handle_size and 
+              abs(local_pos.y() - rect.bottom()) <= handle_size):
+            return 'bottom_left'
+        elif (abs(local_pos.x() - rect.right()) <= handle_size and 
+              abs(local_pos.y() - rect.bottom()) <= handle_size):
+            return 'bottom_right'
+        
+        # Check edges
+        elif abs(local_pos.y() - rect.top()) <= handle_size and rect.left() <= local_pos.x() <= rect.right():
+            return 'top'
+        elif abs(local_pos.y() - rect.bottom()) <= handle_size and rect.left() <= local_pos.x() <= rect.right():
+            return 'bottom'
+        elif abs(local_pos.x() - rect.left()) <= handle_size and rect.top() <= local_pos.y() <= rect.bottom():
+            return 'left'
+        elif abs(local_pos.x() - rect.right()) <= handle_size and rect.top() <= local_pos.y() <= rect.bottom():
+            return 'right'
+        
+        return None
+    
+    def _get_cursor_for_resize_mode(self, mode):
+        """Get appropriate cursor for resize mode"""
+        cursor_map = {
+            'top_left': Qt.CursorShape.SizeFDiagCursor,
+            'top_right': Qt.CursorShape.SizeBDiagCursor,
+            'bottom_left': Qt.CursorShape.SizeBDiagCursor,
+            'bottom_right': Qt.CursorShape.SizeFDiagCursor,
+            'top': Qt.CursorShape.SizeVerCursor,
+            'bottom': Qt.CursorShape.SizeVerCursor,
+            'left': Qt.CursorShape.SizeHorCursor,
+            'right': Qt.CursorShape.SizeHorCursor,
+        }
+        return cursor_map.get(mode, Qt.CursorShape.PointingHandCursor)
+    
+    def hoverMoveEvent(self, event):
+        """Update cursor based on position for resize handles"""
+        if not self._is_resizing:
+            resize_mode = self._get_resize_mode(event.pos())
+            if resize_mode:
+                self.setCursor(QCursor(self._get_cursor_for_resize_mode(resize_mode)))
+            else:
+                self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
+        super().hoverMoveEvent(event)
+    
     def hoverEnterEvent(self, event):
-        self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
+        self.hoverMoveEvent(event)  # Use the same logic
         super().hoverEnterEvent(event)
+        
     def hoverLeaveEvent(self, event):
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         super().hoverLeaveEvent(event)
-    def mouseReleaseEvent(self, event):
-        try:
-            super().mouseReleaseEvent(event)
-        finally:
-            try:
-                if hasattr(self, '_viewer') and self._viewer:
-                    r = self.sceneBoundingRect()
-                    self._viewer.rectangle_moved.emit(r)
-            except Exception:
-                pass
+    def _scale_path(self, path, old_rect, new_rect):
+        """Scale a path from old_rect to new_rect"""
+        from PySide6.QtGui import QTransform
+        
+        if old_rect.width() == 0 or old_rect.height() == 0:
+            return path
+        
+        # Calculate scale factors
+        sx = new_rect.width() / old_rect.width()
+        sy = new_rect.height() / old_rect.height()
+        
+        # Create transform to scale from old rect to new rect
+        transform = QTransform()
+        transform.translate(new_rect.left(), new_rect.top())
+        transform.scale(sx, sy)
+        transform.translate(-old_rect.left(), -old_rect.top())
+        
+        return transform.map(path)
+    
     def mousePressEvent(self, event):
+        """Handle mouse press for resize or move operations"""
         try:
             if event.button() == Qt.MouseButton.LeftButton:
                 sc = self.scene()
                 if sc is not None:
                     sc.clearSelection()
                 self.setSelected(True)
+                
+                # Check for resize mode
+                resize_mode = self._get_resize_mode(event.pos())
+                if resize_mode:
+                    self._resize_mode = resize_mode
+                    self._resize_start_pos = event.pos()
+                    self._resize_start_rect = self.boundingRect()
+                    self._original_path = QPainterPath(self.path())  # Store original path
+                    self._is_resizing = True
+                    # Disable item movement during resize
+                    self.setFlag(QGraphicsPathItem.GraphicsItemFlag.ItemIsMovable, False)
+                    event.accept()
+                    return
+                else:
+                    self._resize_mode = None
+                    self._is_resizing = False
+                    # Enable item movement
+                    self.setFlag(QGraphicsPathItem.GraphicsItemFlag.ItemIsMovable, True)
         except Exception:
             pass
         super().mousePressEvent(event)
+    
+    def mouseMoveEvent(self, event):
+        """Handle mouse move for resize operations"""
+        if self._is_resizing and self._resize_mode and self._original_path:
+            try:
+                current_pos = event.pos()
+                start_pos = self._resize_start_pos
+                start_rect = self._resize_start_rect
+                
+                dx = current_pos.x() - start_pos.x()
+                dy = current_pos.y() - start_pos.y()
+                
+                new_rect = QRectF(start_rect)
+                
+                # Apply resize based on mode
+                if 'left' in self._resize_mode:
+                    new_rect.setLeft(start_rect.left() + dx)
+                if 'right' in self._resize_mode:
+                    new_rect.setRight(start_rect.right() + dx)
+                if 'top' in self._resize_mode:
+                    new_rect.setTop(start_rect.top() + dy)
+                if 'bottom' in self._resize_mode:
+                    new_rect.setBottom(start_rect.bottom() + dy)
+                
+                # Ensure minimum size
+                min_size = 10
+                if new_rect.width() < min_size:
+                    if 'left' in self._resize_mode:
+                        new_rect.setLeft(new_rect.right() - min_size)
+                    else:
+                        new_rect.setRight(new_rect.left() + min_size)
+                if new_rect.height() < min_size:
+                    if 'top' in self._resize_mode:
+                        new_rect.setTop(new_rect.bottom() - min_size)
+                    else:
+                        new_rect.setBottom(new_rect.top() + min_size)
+                
+                # Scale the path to fit the new rect
+                scaled_path = self._scale_path(self._original_path, start_rect, new_rect)
+                self.setPath(scaled_path)
+                event.accept()
+                return
+            except Exception as e:
+                print(f"Error during path resize: {e}")
+        
+        super().mouseMoveEvent(event)
+    
+    def mouseReleaseEvent(self, event):
+        was_resizing = self._is_resizing
+        try:
+            if self._is_resizing:
+                self._is_resizing = False
+                self._resize_mode = None
+                self._original_path = None
+                # Re-enable movement
+                self.setFlag(QGraphicsPathItem.GraphicsItemFlag.ItemIsMovable, True)
+            
+            super().mouseReleaseEvent(event)
+        finally:
+            try:
+                # Notify viewer about move or resize completion
+                if hasattr(self, '_viewer') and self._viewer:
+                    r = self.sceneBoundingRect()
+                    # Emit moved signal with SCENE coordinates (for both move and resize)
+                    self._viewer.rectangle_moved.emit(r)
+            except Exception:
+                pass
     def paint(self, painter, option, widget=None):
         try:
             painter.setPen(self.pen())
