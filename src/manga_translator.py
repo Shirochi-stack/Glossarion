@@ -8343,6 +8343,9 @@ class MangaTranslator:
                 is_loader = True
             else:
                 is_loader = False
+                # Ensure event exists in legacy records
+                if 'event' not in rec:
+                    rec['event'] = threading.Event()
             event = rec['event']
         # Loader performs heavy work without holding the lock
         if is_loader:
@@ -8398,14 +8401,16 @@ class MangaTranslator:
                     rec = MangaTranslator._inpaint_pool.get(key) or rec
                     rec['inpainter'] = inp
                     rec['loaded'] = bool(loaded_ok)
-                    rec['event'].set()
+                    if 'event' in rec and rec['event']:
+                        rec['event'].set()
                 return inp
             except Exception as e:
                 with MangaTranslator._inpaint_pool_lock:
                     rec = MangaTranslator._inpaint_pool.get(key) or rec
                     rec['inpainter'] = None
                     rec['loaded'] = False
-                    rec['event'].set()
+                    if 'event' in rec and rec['event']:
+                        rec['event'].set()
                 self._log(f"⚠️ Shared inpainter setup failed: {e}", "warning")
                 return None
         else:
@@ -12255,7 +12260,10 @@ class MangaTranslator:
                             # Mark that we have a loaded instance available
                             MangaTranslator._inpaint_pool[key]['loaded'] = True
                             MangaTranslator._inpaint_pool[key]['inpainter'] = inp  # Store reference
-                            if MangaTranslator._inpaint_pool[key].get('event'):
+                            # Ensure event exists and set it
+                            if 'event' not in MangaTranslator._inpaint_pool[key]:
+                                MangaTranslator._inpaint_pool[key]['event'] = threading.Event()
+                            if MangaTranslator._inpaint_pool[key]['event']:
                                 MangaTranslator._inpaint_pool[key]['event'].set()
                     except Exception:
                         pass

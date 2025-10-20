@@ -1306,10 +1306,14 @@ class MangaTranslationTab(QObject):
                                     with MangaTranslator._inpaint_pool_lock:
                                         rec = MangaTranslator._inpaint_pool.get(key)
                                         if not rec:
-                                            rec = {'spares': [], 'loaded': True}
+                                            import threading
+                                            rec = {'spares': [], 'loaded': True, 'event': threading.Event(), 'inpainter': None, 'checked_out': []}
                                             MangaTranslator._inpaint_pool[key] = rec
                                         rec['spares'].append(inp)
                                         rec['loaded'] = True
+                                        # Ensure event exists and is set
+                                        if 'event' in rec and rec['event']:
+                                            rec['event'].set()
                                     print(f"  ✓ {model_name} loaded")
                                     loaded_count += 1
                                 else:
