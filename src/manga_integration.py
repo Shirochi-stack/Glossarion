@@ -8790,6 +8790,9 @@ class MangaTranslationTab(QObject):
                     # Add context menu to restored rectangles
                     try:
                         rect_item.region_index = idx
+                        # Mark as recognized when blue so selection keeps it blue
+                        if has_text_for_this_rect:
+                            rect_item.is_recognized = True
                         self._attach_move_sync_to_rectangle(rect_item, idx)
                         self._add_context_menu_to_rectangle(rect_item, idx)
                     except Exception:
@@ -8940,6 +8943,9 @@ class MangaTranslationTab(QObject):
                     # Attach region index and move-sync handler for ALL rectangles
                     try:
                         rect_item.region_index = idx
+                        # Mark as recognized when blue so selection keeps it blue
+                        if has_text_for_this_rect:
+                            rect_item.is_recognized = True
                         self._attach_move_sync_to_rectangle(rect_item, idx)
                         # CRITICAL: Add context menu to ALL rectangles (both blue and green)
                         self._add_context_menu_to_rectangle(rect_item, idx)
@@ -11350,6 +11356,11 @@ class MangaTranslationTab(QObject):
                     from PySide6.QtGui import QPen, QBrush, QColor
                     rect_item.setPen(QPen(QColor(0, 150, 255), 2))  # Blue border
                     rect_item.setBrush(QBrush(QColor(0, 150, 255, 50)))  # Semi-transparent blue fill
+                    # Mark as recognized so selection restore keeps it blue
+                    try:
+                        rect_item.is_recognized = True
+                    except Exception:
+                        pass
                     
                     # Add context menu support to rectangle
                     self._add_context_menu_to_rectangle(rect_item, region_index)
@@ -13021,6 +13032,35 @@ class MangaTranslationTab(QObject):
                                     target.setPos(target.pos() + QPointF(dx, dy))
                                 except Exception:
                                     pass
+                            
+                            # Toggle overlay visibility based on overlap IoU with original bbox
+                            try:
+                                def _iou_xywh(a, b):
+                                    try:
+                                        ax, ay, aw, ah = int(a[0]), int(a[1]), int(a[2]), int(a[3])
+                                        bx, by, bw, bh = int(b[0]), int(b[1]), int(b[2]), int(b[3])
+                                        ax2, ay2 = ax + aw, ay + ah
+                                        bx2, by2 = bx + bw, by + bh
+                                        x1 = max(ax, bx); y1 = max(ay, by)
+                                        x2 = min(ax2, bx2); y2 = min(ay2, by2)
+                                        inter = max(0, x2 - x1) * max(0, y2 - y1)
+                                        area_a = max(0, aw) * max(0, ah)
+                                        area_b = max(0, bw) * max(0, bh)
+                                        den = area_a + area_b - inter
+                                        return (inter / den) if den > 0 else 0.0
+                                    except Exception:
+                                        return 0.0
+                                brg = target.sceneBoundingRect()
+                                cur = [int(brg.x()), int(brg.y()), int(brg.width()), int(brg.height())]
+                                ob = getattr(target, '_overlay_original_bbox', None)
+                                if ob and len(ob) >= 4:
+                                    overlap = _iou_xywh(cur, ob)
+                                    target.setVisible(overlap < 0.5)
+                                else:
+                                    target.setVisible(True)
+                            except Exception as vis_err:
+                                print(f"[DEBUG] Error setting overlay visibility on move: {vis_err}")
+                            
                             # Force scene update
                             try:
                                 self.image_preview_widget.viewer._scene.update()
@@ -13121,6 +13161,34 @@ class MangaTranslationTab(QObject):
             br_r = rects[int(rect_index)].sceneBoundingRect()
             dx = int(br_g.x() - br_r.x())
             dy = int(br_g.y() - br_r.y())
+            
+            # Update overlay visibility based on overlap with original bbox (IoU)
+            try:
+                def _iou_xywh(a, b):
+                    try:
+                        ax, ay, aw, ah = int(a[0]), int(a[1]), int(a[2]), int(a[3])
+                        bx, by, bw, bh = int(b[0]), int(b[1]), int(b[2]), int(b[3])
+                        ax2, ay2 = ax + aw, ay + ah
+                        bx2, by2 = bx + bw, by + bh
+                        x1 = max(ax, bx); y1 = max(ay, by)
+                        x2 = min(ax2, bx2); y2 = min(ay2, by2)
+                        inter = max(0, x2 - x1) * max(0, y2 - y1)
+                        area_a = max(0, aw) * max(0, ah)
+                        area_b = max(0, bw) * max(0, bh)
+                        den = area_a + area_b - inter
+                        return (inter / den) if den > 0 else 0.0
+                    except Exception:
+                        return 0.0
+                cur = [int(br_g.x()), int(br_g.y()), int(br_g.width()), int(br_g.height())]
+                ob = getattr(group, '_overlay_original_bbox', None)
+                if ob and len(ob) >= 4:
+                    overlap = _iou_xywh(cur, ob)
+                    group.setVisible(overlap < 0.5)
+                else:
+                    group.setVisible(True)
+            except Exception as vis_err:
+                print(f"[STATE] Error updating overlay visibility: {vis_err}")
+            
             if hasattr(self, 'image_state_manager'):
                 state = self.image_state_manager.get_state(image_path) or {}
                 off = state.get('overlay_offsets') or {}
@@ -15315,26 +15383,26 @@ class MangaTranslationTab(QObject):
                 import traceback
                 traceback.print_exc()
             
-            # Switch to output tab if requested (correct widget reference)
-            if switch_tab:
-                try:
-                    if hasattr(self.image_preview_widget, 'viewer_tabs') and self.image_preview_widget.viewer_tabs:
-                        # Find the output tab index by looking for the tab with "Output" or "Translated" in the name
-                        tab_widget = self.image_preview_widget.viewer_tabs
-                        for i in range(tab_widget.count()):
-                            tab_text = tab_widget.tabText(i).lower()
-                            if 'output' in tab_text or 'translated' in tab_text:
-                                tab_widget.setCurrentIndex(i)
-                                print(f"[GUI] Switched to output tab (index {i}, text: '{tab_widget.tabText(i)}')")
-                                break
-                        else:
-                            print(f"[GUI] Could not find output tab. Available tabs: {[tab_widget.tabText(i) for i in range(tab_widget.count())]}")
-                    else:
-                        print(f"[GUI] No viewer_tabs available for switching")
-                except Exception as tab_err:
-                    print(f"[GUI] Error switching to output tab: {tab_err}")
-                    import traceback
-                    traceback.print_exc()
+            # REMOVED: Don't auto-switch tabs - let user manually switch
+            # if switch_tab:
+            #     try:
+            #         if hasattr(self.image_preview_widget, 'viewer_tabs') and self.image_preview_widget.viewer_tabs:
+            #             # Find the output tab index by looking for the tab with "Output" or "Translated" in the name
+            #             tab_widget = self.image_preview_widget.viewer_tabs
+            #             for i in range(tab_widget.count()):
+            #                 tab_text = tab_widget.tabText(i).lower()
+            #                 if 'output' in tab_text or 'translated' in tab_text:
+            #                     tab_widget.setCurrentIndex(i)
+            #                     print(f"[GUI] Switched to output tab (index {i}, text: '{tab_widget.tabText(i)}')")
+            #                     break
+            #             else:
+            #                 print(f"[GUI] Could not find output tab. Available tabs: {[tab_widget.tabText(i) for i in range(tab_widget.count())]}")
+            #         else:
+            #             print(f"[GUI] No viewer_tabs available for switching")
+            #     except Exception as tab_err:
+            #         print(f"[GUI] Error switching to output tab: {tab_err}")
+            #         import traceback
+            #         traceback.print_exc()
             
         except Exception as e:
             print(f"[GUI] Error in _load_rendered_image_to_output_tab: {e}")
@@ -15370,9 +15438,9 @@ class MangaTranslationTab(QObject):
                     print(f"[DEBUG] Save Position Output: Found rendered image, loading into output viewer...")
                     self.image_preview_widget.output_viewer.load_image(path)
                     self.image_preview_widget.current_translated_path = path
-                    # Switch to output tab
-                    if hasattr(self.image_preview_widget, 'viewer_tabs'):
-                        self.image_preview_widget.viewer_tabs.setCurrentIndex(1)  # Switch to output tab
+                    # REMOVED: Don't auto-switch tabs - let user manually switch
+                    # if hasattr(self.image_preview_widget, 'viewer_tabs'):
+                    #     self.image_preview_widget.viewer_tabs.setCurrentIndex(1)  # Switch to output tab
                     print(f"[DEBUG] Save Position Output: Successfully loaded {os.path.basename(path)} into output viewer")
                     return
             
@@ -15413,9 +15481,9 @@ class MangaTranslationTab(QObject):
                     print(f"[DIRECT] Found rendered image, loading into output viewer...")
                     self.image_preview_widget.output_viewer.load_image(path)
                     self.image_preview_widget.current_translated_path = path
-                    # Switch to output tab
-                    if hasattr(self.image_preview_widget, 'viewer_tabs'):
-                        self.image_preview_widget.viewer_tabs.setCurrentIndex(1)  # Switch to output tab
+                    # REMOVED: Don't auto-switch tabs - let user manually switch
+                    # if hasattr(self.image_preview_widget, 'viewer_tabs'):
+                    #     self.image_preview_widget.viewer_tabs.setCurrentIndex(1)  # Switch to output tab
                     print(f"[DIRECT] Successfully loaded {os.path.basename(path)} into output viewer")
                     return
             
@@ -15427,7 +15495,11 @@ class MangaTranslationTab(QObject):
             traceback.print_exc()
     
     def _add_text_overlay_to_viewer(self, translated_texts: list):
-        """Add translated text as graphics items overlay on the viewer"""
+        """Add translated text as graphics items overlay on the viewer
+        
+        Overlays are hidden by default if at original position (overlaps with rendered output).
+        When user moves blue rectangles (auto-save position), overlays move with them and become visible.
+        """
         try:
             from PySide6.QtWidgets import QGraphicsTextItem, QGraphicsRectItem
             from PySide6.QtCore import QRectF
@@ -15482,6 +15554,7 @@ class MangaTranslationTab(QObject):
                     
                     # Prefer current BLUE rectangle geometry if available; fallback to bbox
                     x = y = w = h = None
+                    original_bbox = bbox  # Store original bbox for overlap detection
                     try:
                         rects = getattr(self.image_preview_widget.viewer, 'rectangles', []) or []
                         if 0 <= int(region_index) < len(rects):
@@ -15600,7 +15673,11 @@ class MangaTranslationTab(QObject):
                         group._overlay_bbox_size = (w, h)
                         group._overlay_image_path = current_image
                         
+                        # Store original bbox for overlap detection
+                        group._overlay_original_bbox = original_bbox
+                        
                         # Apply saved offset for this region if present
+                        has_offset = False
                         try:
                             off = None
                             # support str and int keys
@@ -15612,8 +15689,43 @@ class MangaTranslationTab(QObject):
                                 dx_off, dy_off = int(off[0]), int(off[1])
                                 if dx_off != 0 or dy_off != 0:
                                     group.moveBy(dx_off, dy_off)
+                                    has_offset = True
                         except Exception:
                             pass
+                        
+                        # Determine visibility based on overlap with original translated region (IoU)
+                        try:
+                            def _iou_xywh(a, b):
+                                try:
+                                    ax, ay, aw, ah = int(a[0]), int(a[1]), int(a[2]), int(a[3])
+                                    bx, by, bw, bh = int(b[0]), int(b[1]), int(b[2]), int(b[3])
+                                    ax2, ay2 = ax + aw, ay + ah
+                                    bx2, by2 = bx + bw, by + bh
+                                    x1 = max(ax, bx); y1 = max(ay, by)
+                                    x2 = min(ax2, bx2); y2 = min(ay2, by2)
+                                    inter = max(0, x2 - x1) * max(0, y2 - y1)
+                                    area_a = max(0, aw) * max(0, ah)
+                                    area_b = max(0, bw) * max(0, bh)
+                                    den = area_a + area_b - inter
+                                    return (inter / den) if den > 0 else 0.0
+                                except Exception:
+                                    return 0.0
+                            br = group.sceneBoundingRect()
+                            cur = [int(br.x()), int(br.y()), int(br.width()), int(br.height())]
+                            ob = group._overlay_original_bbox if getattr(group, '_overlay_original_bbox', None) else None
+                            if ob and len(ob) >= 4:
+                                overlap = _iou_xywh(cur, ob)
+                                # Hide if overlapping significantly with original (rendered output area)
+                                should_hide = overlap >= 0.5
+                            else:
+                                should_hide = False  # No original bbox info; show by default
+                            group.setVisible(not should_hide)
+                            if should_hide:
+                                print(f"[DEBUG] Hiding overlay for region {region_index} - overlaps rendered output (IoU>=0.5)")
+                            else:
+                                print(f"[DEBUG] Showing overlay for region {region_index} - moved/does not overlap")
+                        except Exception as hide_err:
+                            print(f"[DEBUG] Error setting overlay visibility: {hide_err}")
                         
                         # Monkey-patch mouse release remains (harmless since overlays are not movable)
                         original_release = group.mouseReleaseEvent
@@ -17266,7 +17378,7 @@ class MangaTranslationTab(QObject):
                             output_path=target_output_path,
                             image_bgr=image_bgr,
                             original_image_path=original_image_path,
-                            switch_tab=not getattr(self, '_batch_mode_active', False)
+                            switch_tab=False  # Don't auto-switch tabs - let user manually switch
                         )
                         print(f"[TRANSLATE] Returned from _render_with_manga_translator")
                     else:
@@ -17962,12 +18074,12 @@ class MangaTranslationTab(QObject):
                         try:
                             # Reset UI to ready state when translation completes
                             self._reset_ui_state()
-                            # Auto-switch to Translated Output tab on completion
-                            try:
-                                if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'viewer_tabs'):
-                                    self.image_preview_widget.viewer_tabs.setCurrentIndex(1)
-                            except Exception:
-                                pass
+                            # REMOVED: Don't auto-switch tabs - let user manually switch
+                            # try:
+                            #     if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'viewer_tabs'):
+                            #         self.image_preview_widget.viewer_tabs.setCurrentIndex(1)
+                            # except Exception:
+                            #     pass
                         except Exception as e:
                             import traceback
                             print(f"Error resetting UI state: {e}")
@@ -18146,12 +18258,12 @@ class MangaTranslationTab(QObject):
                             except Exception as refresh_err:
                                 print(f"[PREVIEW_UPDATE] Failed to refresh source tab: {refresh_err}")
                             
-                            # Auto-switch to the Translated Output tab if requested (e.g., after cleaning)
-                            try:
-                                if switch_to_output and hasattr(self.image_preview_widget, 'viewer_tabs'):
-                                    self.image_preview_widget.viewer_tabs.setCurrentIndex(1)
-                            except Exception:
-                                pass
+                            # REMOVED: Don't auto-switch tabs - let user manually switch
+                            # try:
+                            #     if switch_to_output and hasattr(self.image_preview_widget, 'viewer_tabs'):
+                            #         self.image_preview_widget.viewer_tabs.setCurrentIndex(1)
+                            # except Exception:
+                            #     pass
                             print(f"[PREVIEW_UPDATE] ✅ Output tab updated successfully")
                     except Exception as e:
                         print(f"[PREVIEW_UPDATE] ❌ Error updating preview: {e}")
