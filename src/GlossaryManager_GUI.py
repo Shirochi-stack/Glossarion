@@ -432,6 +432,10 @@ class GlossaryManagerMixin:
                 if hasattr(self, 'custom_entry_types') and not enabled_types:
                     QMessageBox.warning(dialog, "Warning", "No entry types selected! The glossary extraction will not find any entries.")
                 
+                # Update the main GUI's append_glossary_var to match the checkbox
+                if hasattr(self, 'append_glossary_checkbox'):
+                    self.append_glossary_var = self.append_glossary_checkbox.isChecked()
+                
                 # Call main save_config - it will:
                 # 1. Update custom_entry_types from checkboxes
                 # 2. Read from all UI widgets and instance variables
