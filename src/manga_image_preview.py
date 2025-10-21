@@ -1539,6 +1539,9 @@ class MangaImagePreviewWidget(QWidget):
         self.viewer.image_loading.connect(self._on_image_loading_started)
         self.viewer.image_loaded.connect(self._on_image_loaded_success)
         
+        # Connect thumbnail loading signal
+        self._thumbnail_loaded_signal.connect(self._on_thumbnail_loaded)
+        
         # Display placeholder icon when no image is loaded
         self._show_placeholder_icon()
         
@@ -2272,7 +2275,6 @@ class MangaImagePreviewWidget(QWidget):
     
     def _populate_thumbnails(self):
         """Populate thumbnail list with images"""
-        print(f"[THUMBNAIL] _populate_thumbnails called with {len(self.image_paths)} images")
         self.thumbnail_list.clear()
         
         from PySide6.QtWidgets import QListWidgetItem
@@ -2286,7 +2288,6 @@ class MangaImagePreviewWidget(QWidget):
             item.setText(os.path.basename(path))
             item.setSizeHint(QSize(110, 110))
             self.thumbnail_list.addItem(item)
-            print(f"[THUMBNAIL] Added placeholder item {i}: {os.path.basename(path)}")
         
         # Load thumbnails in background thread
         def load_thumb(path):
@@ -2294,59 +2295,41 @@ class MangaImagePreviewWidget(QWidget):
                 # Use QImage in background thread (thread-safe), not QPixmap
                 image = QImage(path)
                 if not image.isNull():
-                    print(f"[THUMBNAIL] Loaded QImage for: {os.path.basename(path)} - Size: {image.width()}x{image.height()}")
                     # Scale the QImage in background thread
                     scaled_image = image.scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatio, 
                                                Qt.TransformationMode.SmoothTransformation)
                     # Make a deep copy to ensure it survives thread transition
                     img_copy = QImage(scaled_image)
-                    print(f"[THUMBNAIL] Scaled copy created: {img_copy.width()}x{img_copy.height()}, isNull: {img_copy.isNull()}")
-                    # Call on main thread using QMetaObject (thread-safe cross-thread invocation)
-                    from PySide6.QtCore import QMetaObject, Qt as QtCore, Q_ARG
-                    QMetaObject.invokeMethod(self, "_on_thumbnail_loaded",
-                                            QtCore.ConnectionType.QueuedConnection,
-                                            Q_ARG(str, path), Q_ARG(QImage, img_copy))
-                else:
-                    print(f"[THUMBNAIL] Failed to load QImage for: {os.path.basename(path)} - isNull")
+                    # Emit signal to update thumbnail on main thread (thread-safe)
+                    self._thumbnail_loaded_signal.emit(path, img_copy)
             except Exception as e:
-                print(f"[THUMBNAIL] Exception loading thumbnail: {e}")
+                print(f"Failed to load thumbnail: {e}")
         
         def load_all_thumbs():
-            print(f"[THUMBNAIL] Background thread started, loading {len(self.image_paths)} thumbnails")
             for path in self.image_paths:
                 load_thumb(path)
-            print(f"[THUMBNAIL] Background thread finished loading all thumbnails")
         
         thread = threading.Thread(target=load_all_thumbs, daemon=True)
         thread.start()
-        print(f"[THUMBNAIL] Background thread spawned")
     
     @Slot(str, QImage)
     def _on_thumbnail_loaded(self, path: str, image: QImage):
         """Handle loaded thumbnail and update the list item"""
         try:
-            print(f"[THUMBNAIL] _on_thumbnail_loaded called for: {os.path.basename(path)}")
-            print(f"[THUMBNAIL] Image isNull: {image.isNull()}, size: {image.width()}x{image.height()}")
-            
             # Convert QImage to QPixmap on main thread (thread-safe)
             pixmap = QPixmap.fromImage(image)
-            print(f"[THUMBNAIL] Pixmap created - isNull: {pixmap.isNull()}, size: {pixmap.width()}x{pixmap.height()}")
             
             # Find the item with matching path
             for i in range(self.thumbnail_list.count()):
                 item = self.thumbnail_list.item(i)
                 item_path = item.data(Qt.ItemDataRole.UserRole)
                 if item_path == path:
-                    print(f"[THUMBNAIL] Found matching item at index {i}")
                     icon = QIcon(pixmap)
                     item.setIcon(icon)
                     item.setText("")  # Remove text once icon is loaded
-                    print(f"[THUMBNAIL] Icon set successfully for: {os.path.basename(path)}")
                     break
         except Exception as e:
-            print(f"[THUMBNAIL] Error updating thumbnail: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"Error updating thumbnail: {e}")
     
     
     def _update_thumbnail_selection(self, image_path: str):
