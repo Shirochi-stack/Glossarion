@@ -265,8 +265,28 @@ class BubbleDetector:
         os.makedirs(self.cache_dir, exist_ok=True)
         
         # RT-DETR concurrency setting from config
+        # PRIORITY: Use parallel panel translation settings if enabled, else use ocr-specific setting
         try:
-            rtdetr_max_conc = int(ocr_cfg.get('rtdetr_max_concurrency', 2))
+            adv_cfg = self.config.get('manga_settings', {}).get('advanced', {}) if isinstance(self.config, dict) else {}
+            
+            # Check if parallel panel translation is enabled
+            if adv_cfg.get('parallel_panel_translation', False):
+                # Use panel_max_workers for concurrency
+                try:
+                    rtdetr_max_conc = max(1, int(adv_cfg.get('panel_max_workers', 2)))
+                    logger.info(f"RT-DETR concurrency tied to parallel panel translation: {rtdetr_max_conc}")
+                except Exception:
+                    rtdetr_max_conc = 2
+            else:
+                # Fall back to OCR-specific setting or environment variable
+                rtdetr_max_conc = int(ocr_cfg.get('rtdetr_max_concurrency', 0))
+                if rtdetr_max_conc <= 0:
+                    # Check environment variable DML_MAX_CONCURRENT
+                    try:
+                        rtdetr_max_conc = int(os.environ.get('DML_MAX_CONCURRENT', '2'))
+                    except Exception:
+                        rtdetr_max_conc = 2
+            
             # Update class-level semaphore if not yet initialized or if value changed
             if not BubbleDetector._rtdetr_onnx_sema_initialized or rtdetr_max_conc != BubbleDetector._rtdetr_onnx_max_concurrent:
                 BubbleDetector._rtdetr_onnx_max_concurrent = max(1, rtdetr_max_conc)
