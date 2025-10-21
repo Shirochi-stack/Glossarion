@@ -71,6 +71,7 @@ def _render_single_region_overlay(region_data: dict, image_size: tuple, render_s
         outline_color = tuple(render_settings.get('outline_color', (255, 255, 255))) + (255,)
         outline_width = render_settings.get('outline_width', 2)
         force_caps = render_settings.get('force_caps_lock', False)
+        strict_wrapping = render_settings.get('strict_text_wrapping', True)
         
         if force_caps:
             text = text.upper()
@@ -84,8 +85,46 @@ def _render_single_region_overlay(region_data: dict, image_size: tuple, render_s
         except Exception:
             font = ImageFont.load_default()
         
-        # Simple text wrapping
-        lines = text.split('\n')
+        # Use the EXACT same wrapping logic as _render_one in MangaTranslator
+        # This must match _pil_word_wrap when called with custom_font_size OR _fit_text_to_region
+        # For parallel rendering, we need to replicate the same text fitting behavior
+        
+        # Simple greedy wrapping that matches the instance method behavior
+        words = text.split()
+        lines = []
+        current_line = []
+        
+        for word in words:
+            # Try adding word to current line
+            test_line = current_line + [word]
+            test_text = ' '.join(test_line)
+            try:
+                bbox = draw.textbbox((0, 0), test_text, font=font)
+                text_width = bbox[2] - bbox[0]
+            except Exception:
+                text_width = len(test_text) * font_size * 0.6
+            
+            if text_width <= w:
+                # Fits, add to current line
+                current_line.append(word)
+            else:
+                # Doesn't fit
+                if current_line:
+                    # Save current line and start new
+                    lines.append(' '.join(current_line))
+                    current_line = [word]
+                else:
+                    # Single word too long
+                    if not strict_wrapping:
+                        # Allow overflow (non-strict mode)
+                        current_line = [word]
+                    else:
+                        # Force break in strict mode
+                        lines.append(word)
+        
+        # Add last line
+        if current_line:
+            lines.append(' '.join(current_line))
         line_height = int(font_size * 1.2)
         total_height = len(lines) * line_height
         start_y = y + (h - total_height) // 2
