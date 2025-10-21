@@ -462,6 +462,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
     thread_complete_signal = Signal()
     # Qt Signal for triggering QA scan from background thread
     trigger_qa_scan_signal = Signal()
+    # Qt Signal for triggering image preview refresh from background thread
+    refresh_preview_signal = Signal()
     
     def __init__(self, parent=None):
         # Initialize QMainWindow
@@ -473,6 +475,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.thread_complete_signal.connect(self.update_run_button)
         # Connect QA scan trigger signal
         self.trigger_qa_scan_signal.connect(self._trigger_qa_scan_on_main_thread)
+        # Connect refresh preview signal
+        self.refresh_preview_signal.connect(self._refresh_image_preview_on_main_thread)
         
         # Store master reference for compatibility (will be self now)
         self.master = self
@@ -6953,6 +6957,35 @@ Important rules:
             self.append_log(f"❌ Failed to start QA scan: {e}")
             import traceback
             self.append_log(traceback.format_exc())
+    
+    def _refresh_image_preview_on_main_thread(self):
+        """Handler called on main thread to reload rendered image after parallel save"""
+        try:
+            print(f"[PARALLEL REFRESH] ✓ Handler called on main thread")
+            
+            # Find the manga translator instance
+            if hasattr(self, 'manga_translator') and self.manga_translator:
+                manga = self.manga_translator
+                if hasattr(manga, 'image_preview_widget') and manga.image_preview_widget:
+                    ipw = manga.image_preview_widget
+                    if hasattr(ipw, 'current_image_path') and ipw.current_image_path:
+                        print(f"[PARALLEL REFRESH] Reloading image: {ipw.current_image_path}")
+                        ipw.load_image(
+                            ipw.current_image_path,
+                            preserve_rectangles=True,
+                            preserve_text_overlays=True
+                        )
+                        print(f"[PARALLEL REFRESH] ✓ Image preview refreshed successfully")
+                    else:
+                        print(f"[PARALLEL REFRESH] No current_image_path available")
+                else:
+                    print(f"[PARALLEL REFRESH] No image_preview_widget found")
+            else:
+                print(f"[PARALLEL REFRESH] No manga_translator instance found")
+        except Exception as e:
+            print(f"[PARALLEL REFRESH] Failed: {e}")
+            import traceback
+            traceback.print_exc()
 
     def stop_glossary_extraction(self):
        """Stop glossary extraction specifically"""

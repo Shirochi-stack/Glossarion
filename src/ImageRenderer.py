@@ -6331,59 +6331,76 @@ def _save_position_async(self, region_index: int):
         _fallback_single_save(self, region_index)
 
 def _schedule_source_refresh(self):
-    """Schedule source preview refresh on main thread (called from worker threads).
-    Thread-safe: uses a simple flag that's checked by the main GUI event loop.
-    """
+    """Instant refresh of source preview - called from completion callback."""
     try:
-        # Set a flag that the main GUI can check periodically
-        # This is the safest cross-thread approach without Qt signals
-        if not hasattr(self, '_pending_refresh_flag'):
-            import threading
-            self._pending_refresh_flag = threading.Event()
-        
-        self._pending_refresh_flag.set()
-        print(f"[REFRESH] Refresh flag set - will be handled by main GUI loop")
-        
-        # Try direct refresh if we're on main thread
-        try:
-            from PySide6.QtCore import QThread
-            from PySide6.QtWidgets import QApplication
-            import threading
-            
-            app = QApplication.instance()
-            if app and threading.current_thread() == threading.main_thread():
-                # On main thread - can refresh directly after a short delay
-                print(f"[REFRESH] On main thread - scheduling direct refresh")
-                import time
-                time.sleep(0.2)  # Brief delay
-                _do_source_refresh(self)
-            else:
-                print(f"[REFRESH] On worker thread - flagged for main thread processing")
-        except Exception:
-            pass
-            
+        print(f"[REFRESH] Starting instant preview refresh...")
+        _do_source_refresh(self)
+        print(f"[REFRESH] Instant refresh completed")
     except Exception as e:
-        print(f"[REFRESH] Failed to schedule source refresh: {e}")
+        print(f"[REFRESH] Refresh failed: {e}")
         import traceback
         traceback.print_exc()
 
 def _do_source_refresh(self):
-    """Actually perform the source refresh (must be called from main thread)"""
+    """Actually perform the source refresh (must be called from main thread)
+    
+    This reloads the rendered/translated image to show updates from auto-save position.
+    """
     try:
         ipw = getattr(self, 'image_preview_widget', None)
-        if ipw and getattr(ipw, 'current_image_path', None):
-            print(f"[REFRESH] Executing source preview refresh for: {os.path.basename(ipw.current_image_path)}")
-            ipw.load_image(ipw.current_image_path, preserve_rectangles=True, preserve_text_overlays=True)
-            # Rehydrate text state so auto-save position has translation/OCR available
-            try:
-                ocr_count, trans_count = _rehydrate_text_state_from_persisted(self, ipw.current_image_path)
-                if ocr_count and hasattr(self, '_update_rectangles_with_recognition'):
-                    _update_rectangles_with_recognition(self, self._recognized_texts)
-            except Exception:
-                pass
-            print(f"[REFRESH] Source preview refresh completed")
+        if not ipw:
+            print(f"[REFRESH] No image_preview_widget available")
+            return
+            
+        current_image = getattr(ipw, 'current_image_path', None)
+        if not current_image:
+            print(f"[REFRESH] No current_image_path available")
+            return
+        
+        print(f"[REFRESH] Executing preview refresh for: {os.path.basename(current_image)}")
+        
+        # Get the rendered image path from state
+        rendered_path = None
+        try:
+            if hasattr(self, 'image_state_manager') and self.image_state_manager:
+                state = self.image_state_manager.get_state(current_image) or {}
+                rendered_path = state.get('rendered_image_path')
+                if rendered_path and os.path.exists(rendered_path):
+                    print(f"[REFRESH] Found rendered image: {os.path.basename(rendered_path)}")
+                else:
+                    print(f"[REFRESH] No valid rendered image in state")
+                    rendered_path = None
+        except Exception as e:
+            print(f"[REFRESH] Error getting rendered path from state: {e}")
+        
+        # If no rendered path, check the rendered images map
+        if not rendered_path and hasattr(self, '_rendered_images_map'):
+            rendered_path = self._rendered_images_map.get(current_image)
+            if rendered_path and os.path.exists(rendered_path):
+                print(f"[REFRESH] Found rendered image in map: {os.path.basename(rendered_path)}")
+            else:
+                rendered_path = None
+        
+        # Reload the appropriate image
+        if rendered_path:
+            print(f"[REFRESH] Loading rendered image: {rendered_path}")
+            ipw.load_image(rendered_path, preserve_rectangles=True, preserve_text_overlays=False)
+        else:
+            print(f"[REFRESH] No rendered image found, reloading source: {current_image}")
+            ipw.load_image(current_image, preserve_rectangles=True, preserve_text_overlays=True)
+        
+        # Rehydrate text state
+        try:
+            ocr_count, trans_count = _rehydrate_text_state_from_persisted(self, current_image)
+            if ocr_count and hasattr(self, '_update_rectangles_with_recognition'):
+                _update_rectangles_with_recognition(self, self._recognized_texts)
+        except Exception as e:
+            print(f"[REFRESH] Error rehydrating state: {e}")
+        
+        print(f"[REFRESH] Preview refresh completed")
+        
     except Exception as _e:
-        print(f"[REFRESH] Source preview refresh failed: {_e}")
+        print(f"[REFRESH] Preview refresh failed: {_e}")
         import traceback
         traceback.print_exc()
 
@@ -6585,11 +6602,7 @@ def _init_parallel_save_system(self):
                                 success = _update_single_text_overlay_parallel(self.parent, region_index, trans_text)
                                 if success:
                                     print(f"[PARALLEL] Successfully updated region {region_index}")
-                                    # Schedule source refresh
-                                    try:
-                                        _schedule_source_refresh(self.parent)
-                                    except Exception as refresh_err:
-                                        print(f"[PARALLEL] Failed to schedule source refresh: {refresh_err}")
+                                    # Signal emission moved to after file save in _render_with_manga_translator
                             else:
                                 print(f"[PARALLEL] No translation text for region {region_index}")
                         except Exception as update_err:
@@ -7759,6 +7772,14 @@ def _render_with_manga_translator(self, image_path: str, regions, output_path: s
         print(f"[RENDER] Saving to: {output_path}\n")
         rendered_pil.save(output_path)
         print(f"[RENDER] Saved successfully, file exists: {os.path.exists(output_path)}")
+        
+        # Trigger instant preview refresh now that file is saved
+        try:
+            if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'refresh_preview_signal'):
+                self.main_gui.refresh_preview_signal.emit()
+                print(f"[RENDER] ✓ Triggered preview refresh signal after file save")
+        except Exception as e:
+            print(f"[RENDER] Failed to emit refresh signal: {e}")
         
         # Store rendered image path mapped to ORIGINAL source image (not cleaned)
         # This allows navigation to work properly
