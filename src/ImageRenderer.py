@@ -239,7 +239,7 @@ def _on_detect_text_clicked(self):
             self.image_preview_widget.detect_btn.setText("Detecting...")
         
         # Add processing overlay effect
-        self._add_processing_overlay()
+        _add_processing_overlay(self, )
         
         # Clear cleaned image path when starting new detection (new workflow)
         if hasattr(self, '_cleaned_image_path'):
@@ -249,7 +249,7 @@ def _on_detect_text_clicked(self):
         image_path = self.image_preview_widget.current_image_path
         
         # Get detection settings for the background thread
-        detection_config = self._get_detection_config()
+        detection_config = _get_detection_config(self, )
         
         # Manual detection should exclude EMPTY BUBBLES to avoid duplicate container boxes
         if detection_config.get('detect_empty_bubbles', True):
@@ -269,7 +269,7 @@ def _on_detect_text_clicked(self):
         import traceback
         self._log(f"❌ Detect setup failed: {str(e)}", "error")
         print(f"Detect setup error traceback: {traceback.format_exc()}")
-        self._restore_detect_button()
+        _restore_detect_button(self, )
 
 def _run_detect_background(self, image_path: str, detection_config: dict):
     """Run the actual detection process in background thread"""
@@ -483,7 +483,7 @@ def _restore_detect_button(self):
     """Restore the detect button to its original state"""
     try:
         # Remove processing overlay effect
-        self._remove_processing_overlay()
+        _remove_processing_overlay(self, )
         
         if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'detect_btn'):
             self.image_preview_widget.detect_btn.setEnabled(True)
@@ -772,8 +772,8 @@ def _restore_image_state(self, image_path: str):
                     if has_text_for_this_rect:
                         item.is_recognized = True
                     # Attach move sync and context menu
-                    self._attach_move_sync_to_rectangle(item, idx)
-                    self._add_context_menu_to_rectangle(item, idx)
+                    _attach_move_sync_to_rectangle(self, item, idx)
+                    _add_context_menu_to_rectangle(self, item, idx)
                 except Exception:
                     pass
 
@@ -788,7 +788,7 @@ def _restore_image_state(self, image_path: str):
             # Redraw detection boxes on preview
             if hasattr(self.image_preview_widget.viewer, 'clear_rectangles'):
                 self.image_preview_widget.viewer.clear_rectangles()
-            self._draw_detection_boxes_on_preview()
+            _draw_detection_boxes_on_preview(self, )
 
             # If recognized/translated texts exist, promote matching rectangles to BLUE and attach metadata
             try:
@@ -813,16 +813,16 @@ def _restore_image_state(self, image_path: str):
                         # Always ensure region_index and context menu are attached
                         try:
                             rect_item.region_index = idx
-                            self._attach_move_sync_to_rectangle(rect_item, idx)
-                            self._add_context_menu_to_rectangle(rect_item, idx)
+                            _attach_move_sync_to_rectangle(self, rect_item, idx)
+                            _add_context_menu_to_rectangle(self, rect_item, idx)
                         except Exception:
                             pass
                     print(f"[STATE] Promoted {sum(1 for i in range(min(len(rects), max_len)) if (i < len(recognized_texts) and not (isinstance(recognized_texts[i], dict) and recognized_texts[i].get('deleted'))) or (i < len(translated_texts) and not (isinstance(translated_texts[i], dict) and translated_texts[i].get('deleted'))))} rectangles to BLUE from recognized/translated texts")
                 # Populate in-memory text state and add OCR tooltips
-                ocr_count, trans_count = self._rehydrate_text_state_from_persisted(image_path)
+                ocr_count, trans_count = _rehydrate_text_state_from_persisted(self, image_path)
                 if ocr_count and hasattr(self, '_update_rectangles_with_recognition'):
                     try:
-                        self._update_rectangles_with_recognition(self._recognized_texts)
+                        _update_rectangles_with_recognition(self, self._recognized_texts)
                         print(f"[STATE] Attached OCR tooltips to {ocr_count} rectangles (detection branch)")
                     except Exception:
                         pass
@@ -832,13 +832,13 @@ def _restore_image_state(self, image_path: str):
         # Restore exclusion status after rectangles are drawn
         try:
             print(f"[RECT_0_DEBUG] About to call _restore_exclusion_status_from_state for: {image_path}")
-            self._restore_exclusion_status_from_state(image_path)
+            _restore_exclusion_status_from_state(self, image_path)
         except Exception as e:
             print(f"[STATE] Failed to restore exclusion status: {e}")
         
         # Restore custom inpainting iterations after rectangles are drawn
         try:
-            self._restore_inpainting_iterations_from_state(image_path)
+            _restore_inpainting_iterations_from_state(self, image_path)
         except Exception as e:
             print(f"[STATE] Failed to restore inpainting iterations: {e}")
         
@@ -906,9 +906,9 @@ def _restore_image_state(self, image_path: str):
                 # Attach region index and move-sync handler
                 try:
                     item.region_index = idx
-                    self._attach_move_sync_to_rectangle(item, idx)
+                    _attach_move_sync_to_rectangle(self, item, idx)
                     # Add context menu to restored rectangles
-                    self._add_context_menu_to_rectangle(item, idx)
+                    _add_context_menu_to_rectangle(self, item, idx)
                 except Exception:
                     pass
             
@@ -935,7 +935,7 @@ def _restore_image_state(self, image_path: str):
                     
                     # 3. Force overlay position synchronization with rectangles
                     try:
-                        self._synchronize_overlay_positions_with_rectangles(image_path)
+                        _synchronize_overlay_positions_with_rectangles(self, image_path)
                     except Exception:
                         pass
                     
@@ -1043,17 +1043,17 @@ def _restore_image_state_overlays_only(self, image_path: str):
                     # Mark as recognized when blue so selection keeps it blue
                     if has_text_for_this_rect:
                         rect_item.is_recognized = True
-                    self._attach_move_sync_to_rectangle(rect_item, idx)
-                    self._add_context_menu_to_rectangle(rect_item, idx)
+                    _attach_move_sync_to_rectangle(self, rect_item, idx)
+                    _add_context_menu_to_rectangle(self, rect_item, idx)
                 except Exception:
                     pass
                     
             print(f"[STATE] Restored {len(state['viewer_rectangles'])} viewer shapes (preferred)")
             # Populate in-memory text state and add OCR tooltips
             try:
-                ocr_count, trans_count = self._rehydrate_text_state_from_persisted(image_path)
+                ocr_count, trans_count = _rehydrate_text_state_from_persisted(self, image_path)
                 if ocr_count and hasattr(self, '_update_rectangles_with_recognition'):
-                    self._update_rectangles_with_recognition(self._recognized_texts)
+                    _update_rectangles_with_recognition(self, self._recognized_texts)
                     print(f"[STATE] Attached OCR tooltips to {ocr_count} rectangles (viewer_rectangles branch)")
             except Exception:
                 pass
@@ -1065,7 +1065,7 @@ def _restore_image_state_overlays_only(self, image_path: str):
             # Redraw detection boxes on preview
             if hasattr(self.image_preview_widget.viewer, 'clear_rectangles'):
                 self.image_preview_widget.viewer.clear_rectangles()
-            self._draw_detection_boxes_on_preview()
+            _draw_detection_boxes_on_preview(self, )
         
         # Restore overlay rectangles
         if 'overlay_rects' in state and state['overlay_rects']:
@@ -1130,7 +1130,7 @@ def _restore_image_state_overlays_only(self, image_path: str):
                     if not hasattr(rect_item, 'region_index'):
                         rect_item.region_index = idx
                     print(f"[STATE] Debug - Rectangle {idx} has region_index: {getattr(rect_item, 'region_index', 'None')}")
-                    self._add_context_menu_to_rectangle(rect_item, rect_item.region_index)
+                    _add_context_menu_to_rectangle(self, rect_item, rect_item.region_index)
                 except Exception as e:
                     print(f"[STATE] Error attaching context menu to rect {idx}: {e}")
             print(f"[STATE] Reattached context menus to {len(rects)} rectangles")
@@ -1204,9 +1204,9 @@ def _restore_image_state_overlays_only(self, image_path: str):
                     # Mark as recognized when blue so selection keeps it blue
                     if has_text_for_this_rect:
                         rect_item.is_recognized = True
-                    self._attach_move_sync_to_rectangle(rect_item, idx)
+                    _attach_move_sync_to_rectangle(self, rect_item, idx)
                     # CRITICAL: Add context menu to ALL rectangles (both blue and green)
-                    self._add_context_menu_to_rectangle(rect_item, idx)
+                    _add_context_menu_to_rectangle(self, rect_item, idx)
                 except Exception:
                     pass
             
@@ -1224,7 +1224,7 @@ def _restore_image_state_overlays_only(self, image_path: str):
                         active_translated_texts.append(result)
                 
                 if active_translated_texts:
-                    self._add_text_overlay_to_viewer(active_translated_texts)
+                    _add_text_overlay_to_viewer(self, active_translated_texts)
                     print(f"[STATE] Restored {len(active_translated_texts)} text overlays from persisted state (skipped {len(translated_texts) - len(active_translated_texts)} deleted)")
         except Exception as e2:
             print(f"[STATE] Failed to restore text overlays: {e2}")
@@ -1250,12 +1250,12 @@ def _restore_image_state_overlays_only(self, image_path: str):
                                 'original': result.get('original', {}).get('text', ''),
                                 'translation': result.get('translation', '')
                             }
-                    self._add_text_overlay_to_viewer(active_translated_texts)
+                    _add_text_overlay_to_viewer(self, active_translated_texts)
                     # Reattach context menus
                     rects = getattr(self.image_preview_widget.viewer, 'rectangles', []) or []
                     for idx, rect_item in enumerate(rects):
                         try:
-                            self._add_context_menu_to_rectangle(rect_item, idx)
+                            _add_context_menu_to_rectangle(self, rect_item, idx)
                         except Exception:
                             pass
                     print(f"[STATE] Restored {len(active_translated_texts)} text overlays from persisted state (skipped {len(translated_texts) - len(active_translated_texts)} deleted)")
@@ -1283,7 +1283,7 @@ def _restore_image_state_overlays_only(self, image_path: str):
                     
                     # 3. Force overlay position synchronization with rectangles
                     try:
-                        self._synchronize_overlay_positions_with_rectangles(image_path)
+                        _synchronize_overlay_positions_with_rectangles(self, image_path)
                     except Exception:
                         pass
                     
@@ -1292,9 +1292,9 @@ def _restore_image_state_overlays_only(self, image_path: str):
                         rectangles = getattr(viewer, 'rectangles', []) or []
                         for idx, rect_item in enumerate(rectangles):
                             if hasattr(rect_item, 'region_index'):
-                                self._attach_move_sync_to_rectangle(rect_item, rect_item.region_index)
+                                _attach_move_sync_to_rectangle(self, rect_item, rect_item.region_index)
                             else:
-                                self._attach_move_sync_to_rectangle(rect_item, idx)
+                                _attach_move_sync_to_rectangle(self, rect_item, idx)
                     except Exception:
                         pass
                     
@@ -1359,7 +1359,7 @@ def _process_detect_results(self, results: dict):
             rectangle_count = len(getattr(self.image_preview_widget.viewer, 'rectangles', []))
             print(f"[DETECT_RESULTS] Preserving {rectangle_count} existing rectangles during detection update")
         
-        self._draw_detection_boxes_on_preview()
+        _draw_detection_boxes_on_preview(self, )
         
     except Exception as e:
         self._log(f"❌ Failed to process detection results: {str(e)}", "error")
@@ -1418,9 +1418,9 @@ def _draw_detection_boxes_on_preview(self):
                 # Track region index on the item and attach move-sync handler
                 try:
                     item.region_index = i
-                    self._attach_move_sync_to_rectangle(item, i)
+                    _attach_move_sync_to_rectangle(self, item, i)
                     # Add context menu to green detection rectangles
-                    self._add_context_menu_to_rectangle(item, i)
+                    _add_context_menu_to_rectangle(self, item, i)
                 except Exception:
                     pass
         
@@ -1443,7 +1443,7 @@ def _on_clean_image_clicked(self):
             self.image_preview_widget.clean_btn.setText("Cleaning...")
 
         # Add processing overlay effect
-        self._add_processing_overlay()
+        _add_processing_overlay(self, )
 
         # Determine base image path
         image_path = self._original_image_path if hasattr(self, '_original_image_path') and self._original_image_path else self.image_preview_widget.current_image_path
@@ -1455,18 +1455,18 @@ def _on_clean_image_clicked(self):
 
         regions = None
         if has_rectangles:
-            regions = self._extract_regions_from_preview()
+            regions = _extract_regions_from_preview(self, )
         else:
             # Auto-run detection (equivalent to clicking Detect Text first)
             self._log("🔍 No regions found — running automatic detection before cleaning...", "info")
-            detection_config = self._get_detection_config() or {}
+            detection_config = _get_detection_config(self, ) or {}
             # Exclude empty container bubbles to avoid cleaning non-text areas
             if detection_config.get('detect_empty_bubbles', True):
                 detection_config['detect_empty_bubbles'] = False
-            regions = self._run_detection_sync(image_path, detection_config)
+            regions = _run_detection_sync(self, image_path, detection_config)
             if not regions or len(regions) == 0:
                 self._log("⚠️ No text regions detected to clean", "warning")
-                self._restore_clean_button()
+                _restore_clean_button(self, )
                 return
             # Draw detected boxes on preview for user feedback (preserve any existing rectangles during clean operation)
             try:
@@ -1498,7 +1498,7 @@ def _on_clean_image_clicked(self):
         import traceback
         self._log(f"❌ Clean setup failed: {str(e)}", "error")
         print(f"Clean setup error traceback: {traceback.format_exc()}")
-        self._restore_clean_button()
+        _restore_clean_button(self, )
 
 def _extract_regions_from_preview(self) -> list:
     """Extract regions from currently displayed rectangles in the preview widget,
@@ -1675,7 +1675,7 @@ def _run_clean_background(self, image_path: str, regions: list):
             # Use shared inpainter from pool
             if resolved_model_path and os.path.exists(resolved_model_path):
                 self._log(f"🎨 Using shared inpainter from pool: {os.path.basename(resolved_model_path)}", "info")
-                inpainter = self._get_or_create_shared_inpainter(local_model, resolved_model_path)
+                inpainter = _get_or_create_shared_inpainter(self, local_model, resolved_model_path)
                 if not inpainter:
                     self._log(f"❌ Failed to get shared inpainter", "error")
                     self.update_queue.put(('clean_button_restore', None))
@@ -1685,7 +1685,7 @@ def _run_clean_background(self, image_path: str, regions: list):
                 self.update_queue.put(('clean_button_restore', None))
                 return
             # Get custom iteration values from rectangles
-            custom_iterations = self._get_custom_iterations_for_regions(filtered_regions)
+            custom_iterations = _get_custom_iterations_for_regions(self, filtered_regions)
             
             if custom_iterations:
                 iterations_str = ', '.join([f"{region}:{iters}" for region, iters in custom_iterations.items()])
@@ -1768,7 +1768,7 @@ def _update_preview_after_clean(self, output_path: str):
         
         # Before switching image, alias overlays from original path to cleaned path
         if hasattr(self, '_original_image_path') and self._original_image_path:
-            self._alias_text_overlays_for_image(self._original_image_path, output_path)
+            _alias_text_overlays_for_image(self, self._original_image_path, output_path)
         
         # Load cleaned image while preserving rectangles and text overlays for workflow continuity
         self.image_preview_widget.load_image(output_path, preserve_rectangles=True, preserve_text_overlays=True)
@@ -1779,7 +1779,7 @@ def _restore_clean_button(self):
     """Restore the clean button to its original state"""
     try:
         # Remove processing overlay effect
-        self._remove_processing_overlay()
+        _remove_processing_overlay(self, )
         
         if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'clean_btn'):
             self.image_preview_widget.clean_btn.setEnabled(True)
@@ -1817,7 +1817,7 @@ def _get_inpaint_config(self) -> dict:
 def _extract_regions_for_background(self):
     """Helper to extract regions from preview and store for background thread"""
     try:
-        regions = self._extract_regions_from_preview()
+        regions = _extract_regions_from_preview(self, )
         self._temp_regions_extracted = regions
         print(f"[EXTRACT] Extracted {len(regions)} regions for background thread")
     except Exception as e:
@@ -2132,7 +2132,7 @@ def _run_inpainting_sync(self, image_path: str, regions: list) -> str:
             
             # Use shared inpainter to avoid reloading model every time
             if resolved_model_path and os.path.exists(resolved_model_path):
-                inpainter = self._get_or_create_shared_inpainter(local_model, resolved_model_path)
+                inpainter = _get_or_create_shared_inpainter(self, local_model, resolved_model_path)
                 if not inpainter:
                     print(f"[INPAINT_SYNC] Failed to get/create shared inpainter")
                     return None
@@ -2694,12 +2694,12 @@ def _on_recognize_text_clicked(self):
             print("[DEBUG] No recognize_btn found!")
         
         # Add processing overlay effect
-        self._add_processing_overlay()
+        _add_processing_overlay(self, )
         
         image_path = self.image_preview_widget.current_image_path
         
         # Get OCR settings
-        ocr_config = self._get_ocr_config()
+        ocr_config = _get_ocr_config(self, )
         print(f"[DEBUG] OCR config: {ocr_config}")
         self._log(f"🤖 Using OCR provider: {ocr_config['provider']}", "info")
         
@@ -2712,18 +2712,18 @@ def _on_recognize_text_clicked(self):
         regions = None
         if has_rectangles:
             print("[DEBUG] Rectangles exist - extracting regions now")
-            regions = self._extract_regions_from_preview()
+            regions = _extract_regions_from_preview(self, )
             print(f"[DEBUG] Extracted {len(regions)} regions from preview")
             if not regions or len(regions) == 0:
                 self._log("⚠️ No valid regions found in preview", "warning")
-                self._restore_recognize_button()
+                _restore_recognize_button(self, )
                 return
             # Replace viewer rectangles with merged regions so indices align with recognition
             try:
                 self._current_regions = regions
                 if hasattr(self.image_preview_widget, 'viewer') and hasattr(self.image_preview_widget.viewer, 'clear_rectangles'):
                     self.image_preview_widget.viewer.clear_rectangles()
-                self._draw_detection_boxes_on_preview()
+                _draw_detection_boxes_on_preview(self, )
             except Exception:
                 pass
             # Persist merged regions to state ONLY if no OCR data exists yet
@@ -2756,7 +2756,7 @@ def _on_recognize_text_clicked(self):
         self._log(error_msg, "error")
         print(f"[DEBUG] {error_msg}")
         print(f"[DEBUG] Recognize setup error traceback: {traceback_msg}")
-        self._restore_recognize_button()
+        _restore_recognize_button(self, )
 
 def _run_recognize_background(self, image_path: str, regions: list, ocr_config: dict):
     """Run text recognition in background thread
@@ -2775,12 +2775,12 @@ def _run_recognize_background(self, image_path: str, regions: list, ocr_config: 
             self._log("🔍 Running automatic text detection...", "info")
             
             # Run detection synchronously
-            detection_config = self._get_detection_config()
+            detection_config = _get_detection_config(self, )
             # Exclude empty bubble container rectangles in recognize pipeline to avoid doubles
             if detection_config.get('detect_empty_bubbles', True):
                 detection_config['detect_empty_bubbles'] = False
                 self._log("🚫 Recognize pipeline: Excluding empty bubble regions (container boxes)", "info")
-            regions = self._run_detection_sync(image_path, detection_config)
+            regions = _run_detection_sync(self, image_path, detection_config)
             
             if not regions or len(regions) == 0:
                 self._log("⚠️ No text regions detected in image", "warning")
@@ -2801,7 +2801,7 @@ def _run_recognize_background(self, image_path: str, regions: list, ocr_config: 
         
         # Run OCR on regions using the reusable helper method
         self._log(f"🔍 Running OCR on full image and matching to {len(regions)} regions...", "info")
-        recognized_texts = self._run_ocr_on_regions(image_path, regions, ocr_config)
+        recognized_texts = _run_ocr_on_regions(self, image_path, regions, ocr_config)
         
         if not recognized_texts or len(recognized_texts) == 0:
             self._log("⚠️ No text recognized in any regions", "warning")
@@ -2830,7 +2830,7 @@ def _restore_recognize_button(self):
     """Restore the recognize button to its original state"""
     try:
         # Remove processing overlay effect
-        self._remove_processing_overlay()
+        _remove_processing_overlay(self, )
         
         if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'recognize_btn'):
             self.image_preview_widget.recognize_btn.setEnabled(True)
@@ -2882,7 +2882,7 @@ def _on_translate_text_clicked(self):
             self.image_preview_widget.translate_btn.setText("Translating...")
         
         # Add processing overlay effect
-        self._add_processing_overlay()
+        _add_processing_overlay(self, )
         
         # Get current image path
         image_path = self.image_preview_widget.current_image_path
@@ -2898,13 +2898,13 @@ def _on_translate_text_clicked(self):
         regions_for_recognition = None
         if has_rectangles and not has_recognized_text:
             # Extract existing rectangles for recognition
-            regions_for_recognition = self._extract_regions_from_preview()
+            regions_for_recognition = _extract_regions_from_preview(self, )
             # Replace viewer rectangles with merged regions so indices align with recognition
             try:
                 self._current_regions = regions_for_recognition
                 if hasattr(self.image_preview_widget, 'viewer') and hasattr(self.image_preview_widget.viewer, 'clear_rectangles'):
                     self.image_preview_widget.viewer.clear_rectangles()
-                self._draw_detection_boxes_on_preview()
+                _draw_detection_boxes_on_preview(self, )
             except Exception:
                 pass
             # Persist merged regions to state ONLY if no OCR data exists yet
@@ -2945,7 +2945,7 @@ def _on_translate_text_clicked(self):
         import traceback
         self._log(f"❌ Translate setup failed: {str(e)}", "error")
         print(f"Translate setup error traceback: {traceback.format_exc()}")
-        self._restore_translate_button()
+        _restore_translate_button(self, )
 
 def _run_full_translate_pipeline(self, image_path: str, regions: list):
     """Run full translation pipeline: detect (if needed) -> recognize -> translate
@@ -2963,13 +2963,13 @@ def _run_full_translate_pipeline(self, image_path: str, regions: list):
             print("[FULL_PIPELINE] Running detection...")
             self._log("🔍 Step 1/3: Detecting text regions...", "info")
             
-            detection_config = self._get_detection_config()
+            detection_config = _get_detection_config(self, )
             # Exclude empty bubble container rectangles in translate pipeline to avoid doubles
             if detection_config.get('detect_empty_bubbles', True):
                 detection_config['detect_empty_bubbles'] = False
                 self._log("🚫 Translate pipeline: Excluding empty bubble regions (container boxes)", "info")
             
-            regions = self._run_detection_sync(image_path, detection_config)
+            regions = _run_detection_sync(self, image_path, detection_config)
             
             if not regions or len(regions) == 0:
                 self._log("⚠️ No text regions detected - cannot translate", "warning")
@@ -2992,11 +2992,11 @@ def _run_full_translate_pipeline(self, image_path: str, regions: list):
         self._log("📝 Step 2/3: Recognizing text in regions...", "info")
         
         # Get OCR config
-        ocr_config = self._get_ocr_config()
+        ocr_config = _get_ocr_config(self, )
         
         # Run OCR using the same robust method as _run_recognize_background
         # This will run OCR on full image and match to regions
-        recognized_texts = self._run_ocr_on_regions(image_path, regions, ocr_config)
+        recognized_texts = _run_ocr_on_regions(self, image_path, regions, ocr_config)
         
         if not recognized_texts or len(recognized_texts) == 0:
             self._log("⚠️ No text recognized - cannot translate", "warning")
@@ -3017,7 +3017,7 @@ def _run_full_translate_pipeline(self, image_path: str, regions: list):
         self._log("🌍 Step 3/3: Translating text...", "info")
         
         # Call the existing translation logic
-        self._run_translate_background(recognized_texts, image_path)
+        _run_translate_background(self, recognized_texts, image_path)
         
     except Exception as e:
         import traceback
@@ -3041,7 +3041,7 @@ def _run_translate_background(self, recognized_texts: list, image_path: str):
             }
             regions.append(region_dict)
 
-        cleaned_image_path = self._run_inpainting_sync(image_path, regions)
+        cleaned_image_path = _run_inpainting_sync(self, image_path, regions)
 
         if cleaned_image_path and os.path.exists(cleaned_image_path):
             print(f"[TRANSLATE] Inpainting successful: {os.path.basename(cleaned_image_path)}")
@@ -3071,10 +3071,10 @@ def _run_translate_background(self, recognized_texts: list, image_path: str):
 
         if full_page_context_enabled:
             self._log(f"📄 Using full page context translation for {len(recognized_texts)} regions", "info")
-            translated_texts = self._translate_with_full_page_context(recognized_texts, image_path)
+            translated_texts = _translate_with_full_page_context(self, recognized_texts, image_path)
         else:
             self._log(f"📝 Using individual translation for {len(recognized_texts)} regions", "info")
-            translated_texts = self._translate_individually(recognized_texts, image_path)
+            translated_texts = _translate_individually(self, recognized_texts, image_path)
 
         # Send results to main thread with render image path
         render_image_path = cleaned_image_path if cleaned_image_path else image_path
@@ -3124,7 +3124,7 @@ def _translate_with_full_page_context(self, recognized_texts: list, image_path: 
             import os, json, hashlib
             
             # Get OCR config (required by MangaTranslator)
-            ocr_config = self._get_ocr_config()
+            ocr_config = _get_ocr_config(self, )
             
             # Create UnifiedClient (required by MangaTranslator) - same method as regular translation
             # Get API key - support both PySide6 and Tkinter
@@ -3427,7 +3427,7 @@ def _translate_individually(self, recognized_texts: list, image_path: str) -> li
             print(f"[DEBUG] setup_multi_key_pool failed: {_pool_err}")
         
         # Get system prompt from GUI profile (same as regular pipeline)
-        system_prompt = self._get_system_prompt_from_gui()
+        system_prompt = _get_system_prompt_from_gui(self, )
         if not system_prompt:
             raise ValueError("No system prompt configured in GUI profile - translation cannot proceed")
         
@@ -3642,10 +3642,10 @@ def _update_rectangles_with_recognition(self, recognized_texts: list):
                     pass
                 
                 # Add context menu support to rectangle
-                self._add_context_menu_to_rectangle(rect_item, region_index)
+                _add_context_menu_to_rectangle(self, rect_item, region_index)
                 # Attach move-sync so moving the rectangle moves the overlay
                 try:
-                    self._attach_move_sync_to_rectangle(rect_item, region_index)
+                    _attach_move_sync_to_rectangle(self, rect_item, region_index)
                 except Exception:
                     pass
                 
@@ -3684,7 +3684,7 @@ def _update_rectangles_with_translations(self, translated_texts: list):
             }
         
         # Add text overlay to the viewer
-        self._add_text_overlay_to_viewer(translated_texts)
+        _add_text_overlay_to_viewer(self, translated_texts)
         
         self._log(f"✅ Added {len(translated_texts)} translation overlays to image preview", "success")
         
@@ -3725,7 +3725,7 @@ def _add_processing_overlay(self):
         from PySide6.QtCore import QObject
         
         class OpacityItem(QObject):
-            def __init__(self, item, parent=None):
+            def _init__(self, item, parent=None):
                 super().__init__(parent)
                 self._item = item
                 self._opacity = 30
@@ -3834,14 +3834,14 @@ def _handle_ocr_this_text(self, region_index: int, rect_item=None):
         }
         
         # Get OCR configuration
-        ocr_config = self._get_ocr_config()
+        ocr_config = _get_ocr_config(self, )
         print(f"[OCR_CONTEXT] Using OCR provider: {ocr_config['provider']}")
         
         # Add comprehensive logging for OCR operation
         self._log(f"🔍 Starting OCR on region using {ocr_config['provider']}", "info")
         
         # Start pulse effect on the rectangle
-        self._add_rectangle_pulse_effect(rect_item, region_index)
+        _add_rectangle_pulse_effect(self, rect_item, region_index)
         
         # Run OCR in background thread to avoid GUI lag
         import threading
@@ -3849,7 +3849,7 @@ def _handle_ocr_this_text(self, region_index: int, rect_item=None):
         def ocr_background():
             try:
                 # Reuse the existing _run_ocr_on_regions method with a single region
-                recognized_texts = self._run_ocr_on_regions(image_path, [region], ocr_config)
+                recognized_texts = _run_ocr_on_regions(self, image_path, [region], ocr_config)
                 
                 # Emit signal to process results on main thread
                 self.ocr_result_signal.emit(recognized_texts, rect_item, region_index, bbox, ocr_config['provider'])
@@ -3864,7 +3864,7 @@ def _handle_ocr_this_text(self, region_index: int, rect_item=None):
     except Exception as e:
         # Stop pulse effect on error
         if 'rect_item' in locals() and 'region_index' in locals():
-            self._remove_rectangle_pulse_effect(rect_item, region_index)
+            _remove_rectangle_pulse_effect(self, rect_item, region_index)
         print(f"[OCR_CONTEXT] Error in _handle_ocr_this_text: {e}")
         import traceback
         print(f"[OCR_CONTEXT] Traceback: {traceback.format_exc()}")
@@ -3874,7 +3874,7 @@ def _process_ocr_result(self, recognized_texts, rect_item, region_index, bbox, o
     """Process OCR result on main thread (called via signal)"""
     try:
         # Stop pulse effect regardless of outcome
-        self._remove_rectangle_pulse_effect(rect_item, region_index)
+        _remove_rectangle_pulse_effect(self, rect_item, region_index)
         
         # Log the results
         if recognized_texts and len(recognized_texts) > 0:
@@ -3904,7 +3904,7 @@ def _process_ocr_result(self, recognized_texts, rect_item, region_index, bbox, o
             rect_item.region_index = region_index
             
             # Add/update context menu for the now-blue rectangle
-            self._add_context_menu_to_rectangle(rect_item, region_index)
+            _add_context_menu_to_rectangle(self, rect_item, region_index)
             
             print(f"[OCR_CONTEXT] Successfully recognized text in region {region_index}")
             
@@ -3921,7 +3921,7 @@ def _handle_ocr_error(self, error, rect_item, region_index):
     """Handle OCR error on main thread (called via signal)"""
     try:
         # Stop pulse effect on error
-        self._remove_rectangle_pulse_effect(rect_item, region_index)
+        _remove_rectangle_pulse_effect(self, rect_item, region_index)
         print(f"[OCR_CONTEXT] Error in background OCR: {error}")
         import traceback
         print(f"[OCR_CONTEXT] Background OCR error traceback: {traceback.format_exc()}")
@@ -3958,7 +3958,7 @@ def _add_context_menu_to_rectangle(self, rect_item, region_index: int):
                     # ALWAYS add "OCR this text" option first - available for all rectangles
                     ocr_this_action = QAction("🔍 OCR This Text", menu)
                     def make_ocr_this_handler(idx, rect):
-                        return lambda: self._handle_ocr_this_text(idx, rect)
+                        return lambda: _handle_ocr_this_text(self, idx, rect)
                     ocr_this_action.triggered.connect(make_ocr_this_handler(actual_index, rect_item))
                     menu.addAction(ocr_this_action)
                     
@@ -3970,7 +3970,7 @@ def _add_context_menu_to_rectangle(self, rect_item, region_index: int):
                         ocr_action = QAction(f"📝 Edit OCR: \"{preview_text}\"", menu)
                         # Create a proper closure by defining a function that captures the current index
                         def make_ocr_handler(idx):
-                            return lambda: self._show_ocr_popup(self._recognition_data[idx]['text'], idx)
+                            return lambda: _show_ocr_popup(self, self._recognition_data[idx]['text'], idx)
                         ocr_action.triggered.connect(make_ocr_handler(actual_index))
                         menu.addAction(ocr_action)
                     
@@ -3981,7 +3981,7 @@ def _add_context_menu_to_rectangle(self, rect_item, region_index: int):
                         trans_action = QAction(f"🌍 Edit Translation: \"{preview_trans}\"", menu)
                         # Create a proper closure by defining a function that captures the current index
                         def make_trans_handler(idx):
-                            return lambda: self._show_translation_popup(self._translation_data[idx], idx)
+                            return lambda: _show_translation_popup(self, self._translation_data[idx], idx)
                         trans_action.triggered.connect(make_trans_handler(actual_index))
                         menu.addAction(trans_action)
                     
@@ -4006,7 +4006,7 @@ def _add_context_menu_to_rectangle(self, rect_item, region_index: int):
                         # Add the translate action
                         translate_action = QAction(f"📞 Translate This Text ({target_language})", menu)
                         def make_translate_handler(idx, prompt_text):
-                            return lambda: self._handle_translate_this_text(idx, prompt_text)
+                            return lambda: _handle_translate_this_text(self, idx, prompt_text)
                         translate_action.triggered.connect(make_translate_handler(actual_index, actual_prompt))
                         menu.addAction(translate_action)
                     
@@ -4021,7 +4021,7 @@ def _add_context_menu_to_rectangle(self, rect_item, region_index: int):
                     else:
                         exclude_action = QAction("✅ Exclude from Clean (OFF)", menu)
                     def make_exclude_handler(idx, rect):
-                        return lambda: self._handle_toggle_exclude_clean(idx, rect)
+                        return lambda: _handle_toggle_exclude_clean(self, idx, rect)
                     exclude_action.triggered.connect(make_exclude_handler(actual_index, rect_item))
                     menu.addAction(exclude_action)
                     
@@ -4033,21 +4033,21 @@ def _add_context_menu_to_rectangle(self, rect_item, region_index: int):
                         iterations_text = "🔧 Set Inpainting Iterations (Auto)"
                     iterations_action = QAction(iterations_text, menu)
                     def make_iterations_handler(idx, rect):
-                        return lambda: self._handle_set_inpainting_iterations(idx, rect)
+                        return lambda: _handle_set_inpainting_iterations(self, idx, rect)
                     iterations_action.triggered.connect(make_iterations_handler(actual_index, rect_item))
                     menu.addAction(iterations_action)
                     
                     # Add "Clean This Rectangle" option
                     clean_action = QAction("🧽 Clean This Rectangle", menu)
                     def make_clean_handler(idx, rect):
-                        return lambda: self._handle_clean_this_rectangle(idx, rect)
+                        return lambda: _handle_clean_this_rectangle(self, idx, rect)
                     clean_action.triggered.connect(make_clean_handler(actual_index, rect_item))
                     menu.addAction(clean_action)
                     
                     # Add "Delete Selected" option
                     delete_action = QAction("🗑️ Delete Selected", menu)
                     def make_delete_handler(idx, rect):
-                        return lambda: self._handle_delete_rectangle(idx, rect)
+                        return lambda: _handle_delete_rectangle(self, idx, rect)
                     delete_action.triggered.connect(make_delete_handler(actual_index, rect_item))
                     menu.addAction(delete_action)
                     
@@ -4408,7 +4408,7 @@ def _handle_clean_this_rectangle(self, region_index: int, rect_item):
         print(f"[CLEAN_RECT] Custom iterations for rectangle {region_index}: {custom_iterations}")
         
         # Start pulse effect on the rectangle
-        self._add_rectangle_pulse_effect(target_rect, region_index)
+        _add_rectangle_pulse_effect(self, target_rect, region_index)
         
         # Lazy preloading: if this is the first time using clean rectangle, preload the model
         # This happens in the background thread so it doesn't block the UI
@@ -4423,7 +4423,7 @@ def _handle_clean_this_rectangle(self, region_index: int, rect_item):
                 # Lazy preload inpainter if not already loaded (first use optimization)
                 if (self._shared_inpainter is None or not getattr(self._shared_inpainter, 'model_loaded', False)):
                     print(f"[CLEAN_RECT_THREAD] Preloading inpainter for first use...")
-                    self._preload_shared_inpainter()
+                    _preload_shared_inpainter(self, )
                 
                 # Determine which image to use as base - prefer output image if available
                 base_image_path = current_image_path
@@ -4505,7 +4505,7 @@ def _handle_clean_this_rectangle(self, region_index: int, rect_item):
                 print(f"[CLEAN_RECT_THREAD] Created mask with {np.sum(mask > 0)} white pixels")
                 
                 # Run inpainting
-                result = self._run_inpainting_on_region(
+                result = _run_inpainting_on_region(self, 
                     original_image, 
                     mask, 
                     region_index, 
@@ -4568,7 +4568,7 @@ def _get_or_create_shared_inpainter(self, method: str, model_path: str):
         
         # Otherwise, create a lightweight translator to initialize/access the pool
         try:
-            ocr_config = self._get_ocr_config()
+            ocr_config = _get_ocr_config(self, )
         except Exception:
             ocr_config = {}
         try:
@@ -4638,7 +4638,7 @@ def _preload_shared_inpainter(self):
         
         if model_path and os.path.exists(model_path):
             print(f"[PRELOAD_INPAINTER] Preloading {local_model} inpainter...")
-            inpainter = self._get_or_create_shared_inpainter(local_model, model_path)
+            inpainter = _get_or_create_shared_inpainter(self, local_model, model_path)
             if inpainter:
                 print(f"[PRELOAD_INPAINTER] Successfully preloaded {local_model} inpainter")
                 self._log(f"🎯 Preloaded {local_model.upper()} inpainting model", "info")
@@ -4687,7 +4687,7 @@ def _run_inpainting_on_region(self, image, mask, region_index, custom_iterations
             
             # Use shared inpainter instance instead of creating new one
             print(f"[INPAINT_REGION] Getting shared inpainter for {local_model}")
-            inpainter = self._get_or_create_shared_inpainter(local_model, resolved_model_path)
+            inpainter = _get_or_create_shared_inpainter(self, local_model, resolved_model_path)
             if inpainter is None:
                 print(f"[INPAINT_REGION] Failed to get shared inpainter")
                 return None
@@ -4801,7 +4801,7 @@ def _add_rectangle_pulse_effect(self, rect_item, region_index, auto_remove=False
         
         # Create pulsing animation using QObject wrapper
         class PulsingRectangle(QObject):
-            def __init__(self, rect_item, parent=None):
+            def _init__(self, rect_item, parent=None):
                 super().__init__(parent)
                 self._rect_item = rect_item
                 self._intensity = 100
@@ -4835,7 +4835,7 @@ def _add_rectangle_pulse_effect(self, rect_item, region_index, auto_remove=False
             # Auto-remove pulse effect when animation finishes
             def on_animation_finished():
                 try:
-                    self._remove_rectangle_pulse_effect(rect_item, region_index)
+                    _remove_rectangle_pulse_effect(self, rect_item, region_index)
                 except Exception as e:
                     print(f"[RECT_PULSE] Error removing pulse on finish: {e}")
             pulse_animation.finished.connect(on_animation_finished)
@@ -5175,14 +5175,14 @@ def _relayout_overlay_for_region(self, region_index: int):
         if text is None:
             text = ''
         # Settings with background forced off for source tab
-        settings = self._get_manga_rendering_settings()
+        settings = _get_manga_rendering_settings(self, )
         try:
             settings['show_background'] = False
             settings['bg_opacity'] = 0
         except Exception:
             pass
         # Create new text item sized to current rectangle
-        new_text_item, _ = self._create_manga_text_item(text, x, y, w, h, settings)
+        new_text_item, _ = _create_manga_text_item(self, text, x, y, w, h, settings)
         if new_text_item is None:
             return
         viewer = self.image_preview_widget.viewer
@@ -5243,7 +5243,7 @@ def _relayout_all_overlays_for_current_image(self):
             idx = getattr(g, '_overlay_region_index', None)
             if idx is not None:
                 try:
-                    self._relayout_overlay_for_region(int(idx))
+                    _relayout_overlay_for_region(self, int(idx))
                 except Exception:
                     continue
     except Exception:
@@ -5370,13 +5370,13 @@ def _attach_move_sync_to_rectangle(self, rect_item, region_index: int):
                     
                     # Persist only this region's overlay offset to avoid touching others
                     try:
-                        self._persist_single_overlay_offset(current_image, idx, target)
+                        _persist_single_overlay_offset(self, current_image, idx, target)
                     except Exception:
                         pass
 
                     # Re-layout overlay to fit the new rectangle size (auto-resize like pipeline)
                     try:
-                        self._relayout_overlay_for_region(idx)
+                        _relayout_overlay_for_region(self, idx)
                     except Exception:
                         pass
                 
@@ -5528,7 +5528,7 @@ def _synchronize_overlay_positions_with_rectangles(self, image_path: str):
                         rx, ry, rw, rh = int(rect_bounds.x()), int(rect_bounds.y()), int(rect_bounds.width()), int(rect_bounds.height())
                         
                         # Calculate IoU
-                        iou = self._calculate_iou([gx, gy, gw, gh], [rx, ry, rw, rh])
+                        iou = _calculate_iou(self, [gx, gy, gw, gh], [rx, ry, rw, rh])
                         if iou > best_iou:
                             best_iou = iou
                             target_rect = rect
@@ -5914,7 +5914,7 @@ def _show_translation_popup(self, translation_data: dict, region_index: int = No
                         
                         # Use the async method that utilizes ThreadPoolExecutor
                         # This handles processing overlay internally
-                        self._save_overlay_async(region_index, new_translation)
+                        _save_overlay_async(self, region_index, new_translation)
                     finally:
                         # Restore button state
                         try:
@@ -5966,7 +5966,7 @@ def _handle_translate_this_text(self, region_index: int, prompt: str):
                 rectangles = self.image_preview_widget.viewer.rectangles
                 if 0 <= region_index < len(rectangles):
                     rect_item = rectangles[region_index]
-                    self._add_rectangle_pulse_effect(rect_item, region_index)
+                    _add_rectangle_pulse_effect(self, rect_item, region_index)
         except Exception as pulse_err:
             print(f"[TRANSLATE] Error starting pulse effect: {pulse_err}")
         
@@ -5986,7 +5986,7 @@ def _handle_translate_this_text(self, region_index: int, prompt: str):
                 rectangles = self.image_preview_widget.viewer.rectangles
                 if 0 <= region_index < len(rectangles):
                     rect_item = rectangles[region_index]
-                    self._remove_rectangle_pulse_effect(rect_item, region_index)
+                    _remove_rectangle_pulse_effect(self, rect_item, region_index)
         except Exception as pulse_err:
             print(f"[TRANSLATE_HANDLER_ERROR] Error stopping pulse effect: {pulse_err}")
         
@@ -6110,7 +6110,7 @@ def _translate_this_text_background(self, message: str, region_index: int):
                 rectangles = self.image_preview_widget.viewer.rectangles
                 if 0 <= region_index < len(rectangles):
                     rect_item = rectangles[region_index]
-                    self._remove_rectangle_pulse_effect(rect_item, region_index)
+                    _remove_rectangle_pulse_effect(self, rect_item, region_index)
         except Exception as pulse_err:
             print(f"[TRANSLATE_ERROR] Error stopping pulse effect: {pulse_err}")
         
@@ -6297,7 +6297,7 @@ def _save_position_async(self, region_index: int):
     try:
         # Initialize parallel processing system if not exists
         if not hasattr(self, '_parallel_save_system'):
-            self._init_parallel_save_system()
+            _init_parallel_save_system(self, )
         
         # Submit to parallel processing queue
         self._parallel_save_system.queue_save_task(region_index)
@@ -6305,7 +6305,7 @@ def _save_position_async(self, region_index: int):
     except Exception as e:
         print(f"[PARALLEL] Error in _save_position_async: {e}")
         # Fallback to single region processing
-        self._fallback_single_save(region_index)
+        _fallback_single_save(self, region_index)
 
 @Slot()
 def _schedule_source_refresh(self):
@@ -6320,9 +6320,9 @@ def _schedule_source_refresh(self):
                     ipw.load_image(ipw.current_image_path, preserve_rectangles=True, preserve_text_overlays=True)
                     # Rehydrate text state so auto-save position has translation/OCR available
                     try:
-                        ocr_count, trans_count = self._rehydrate_text_state_from_persisted(ipw.current_image_path)
+                        ocr_count, trans_count = _rehydrate_text_state_from_persisted(self, ipw.current_image_path)
                         if ocr_count and hasattr(self, '_update_rectangles_with_recognition'):
-                            self._update_rectangles_with_recognition(self._recognized_texts)
+                            _update_rectangles_with_recognition(self, self._recognized_texts)
                     except Exception:
                         pass
                     print(f"[REFRESH] Source preview refresh completed")
@@ -6349,7 +6349,7 @@ def _init_parallel_save_system(self):
         from concurrent.futures import ThreadPoolExecutor
         
         class ParallelSaveSystem:
-            def __init__(self, parent):
+            def _init__(self, parent):
                 self.parent = parent
                 self.pending_tasks = Queue()
                 self.active_tasks = set()  # Track active region indices
@@ -6612,14 +6612,14 @@ def _save_positions_batch(self, region_indices: list) -> bool:
     try:
         # Initialize parallel save system if not already done
         if not hasattr(self, '_parallel_save_system') or not self._parallel_save_system:
-            self._init_parallel_save_system()
+            _init_parallel_save_system(self, )
         
         # Check if parallel system is available
         if not self._parallel_save_system:
             print(f"[PARALLEL] Parallel system unavailable, falling back to sequential saves")
             # Fall back to sequential single saves
             for region_index in region_indices:
-                self._fallback_single_save(region_index)
+                _fallback_single_save(self, region_index)
             return False
         
         # Queue batch save tasks
@@ -6632,14 +6632,14 @@ def _save_positions_batch(self, region_indices: list) -> bool:
             print(f"[PARALLEL] No tasks queued, using fallback")
             # Fall back to sequential saves
             for region_index in region_indices:
-                self._fallback_single_save(region_index)
+                _fallback_single_save(self, region_index)
             return False
             
     except Exception as e:
         print(f"[PARALLEL] Batch save failed: {e}, using fallback")
         # Fall back to sequential saves
         for region_index in region_indices:
-            self._fallback_single_save(region_index)
+            _fallback_single_save(self, region_index)
         return False
 
 def _fallback_single_save(self, region_index: int):
@@ -6649,25 +6649,25 @@ def _fallback_single_save(self, region_index: int):
         
         # Mark auto-save as in progress
         self._auto_save_in_progress = True
-        self._update_save_overlay_button_state()
+        _update_save_overlay_button_state(self, )
         
         # Get translation text first
-        trans_text = self._get_translation_text_for_region(region_index)
+        trans_text = _get_translation_text_for_region(self, region_index)
         if not trans_text:
             self._auto_save_in_progress = False
-            self._update_save_overlay_button_state()
+            _update_save_overlay_button_state(self, )
             return
         
         # Use thread pool executor for background processing
         def render_task():
             try:
                 # ⚡ FAST PATH: Try compositor first, fallback to full render
-                if self._fast_update_single_region(region_index):
+                if _fast_update_single_region(self, region_index):
                     print(f"[FAST] ⚡ Used fast compositor path")
                     return True
                 else:
                     print(f"[FAST] Compositor cache miss, using full render")
-                    self._update_single_text_overlay(region_index, trans_text)
+                    _update_single_text_overlay(self, region_index, trans_text)
                 
                 print(f"[FALLBACK] Region {region_index} saved successfully - scheduling source refresh")
                 # Schedule source preview refresh on the main thread (match parallel path behavior)
@@ -6678,7 +6678,7 @@ def _fallback_single_save(self, region_index: int):
                     print(f"[FALLBACK] QMetaObject.invokeMethod failed: {e1}, trying direct call")
                     try:
                         # Fallback: call directly (safe if already on main thread)
-                        self._schedule_source_refresh()
+                        _schedule_source_refresh(self, )
                     except Exception as e2:
                         print(f"[FALLBACK] Direct call also failed: {e2}")
                 return True
@@ -6686,7 +6686,7 @@ def _fallback_single_save(self, region_index: int):
                 return False
             finally:
                 self._auto_save_in_progress = False
-                self._update_save_overlay_button_state()
+                _update_save_overlay_button_state(self, )
                 # Note: Pulse effect auto-removes after 0.1s via animation finished callback
         
         # Submit to executor if available
@@ -6698,7 +6698,7 @@ def _fallback_single_save(self, region_index: int):
     except Exception as e:
         print(f"[PARALLEL] Fallback single save failed: {e}")
         self._auto_save_in_progress = False
-        self._update_save_overlay_button_state()
+        _update_save_overlay_button_state(self, )
 
 def _update_save_overlay_button_state(self):
     """Update the save overlay button enabled/disabled state based on auto-save progress"""
@@ -6779,7 +6779,7 @@ def _fast_update_single_region(self, region_index: int) -> bool:
             return False
         
         # Get translation text
-        trans_text = self._get_translation_text_for_region(region_index)
+        trans_text = _get_translation_text_for_region(self, region_index)
         if not trans_text:
             return False
         
@@ -6883,7 +6883,7 @@ def _update_single_text_overlay_parallel(self, region_index: int, trans_text: st
                     self.image_preview_widget._persist_rectangles_state()
                 
                 # Update the overlay using the existing method (main thread only)
-                return self._update_single_text_overlay(region_index, trans_text)
+                return _update_single_text_overlay(self, region_index, trans_text)
             except Exception as e:
                 print(f"[PARALLEL] GUI update error for region {region_index}: {e}")
                 return False
@@ -7114,7 +7114,7 @@ def _on_save_position_finished(self, success: bool, region_index: int, rendered_
         traceback.print_exc()
     finally:
         # Always remove processing overlay
-        self._remove_processing_overlay()
+        _remove_processing_overlay(self, )
 
 def _save_overlay_async(self, region_index: int = 0, new_translation: str = "", update_all_regions: bool = False):
     """Save & Update Overlay functionality using ThreadPoolExecutor on main thread.
@@ -7133,7 +7133,7 @@ def _save_overlay_async(self, region_index: int = 0, new_translation: str = "", 
         print(f"[DEBUG] Save & Update Overlay triggered for region {region_index}, translation='{new_translation}', update_all={update_all_regions}")
         
         # Show processing overlay immediately on main thread
-        self._add_processing_overlay()
+        _add_processing_overlay(self, )
         
         def _save_overlay_task():
             """The actual save overlay task - runs via executor but stays on the main thread"""
@@ -7155,7 +7155,7 @@ def _save_overlay_async(self, region_index: int = 0, new_translation: str = "", 
                 # Call _update_single_text_overlay directly with the provided parameters
                 # This matches the original behavior exactly
                 print(f"[DEBUG] Calling _update_single_text_overlay({region_index}, '{new_translation}', update_all={update_all_regions})")
-                self._update_single_text_overlay(region_index, new_translation, update_all_regions=update_all_regions)
+                _update_single_text_overlay(self, region_index, new_translation, update_all_regions=update_all_regions)
                 print(f"[DEBUG] _update_single_text_overlay call completed successfully")
                 print(f"[DEBUG] Save & Update Overlay task completed for region {region_index}")
                 return True
@@ -7214,7 +7214,7 @@ def _save_overlay_async(self, region_index: int = 0, new_translation: str = "", 
         # Always remove the processing overlay
         try:
             print(f"[DEBUG] Removing processing overlay...")
-            self._remove_processing_overlay()
+            _remove_processing_overlay(self, )
             print(f"[DEBUG] Processing overlay removed successfully")
         except Exception as e:
             print(f"[DEBUG] Failed to remove processing overlay: {e}")
@@ -7255,7 +7255,7 @@ def _check_and_refresh_output(self):
             return
         
         # Try to refresh the output
-        if self._refresh_output_tab():
+        if _refresh_output_tab(self, ):
             # Success - stop checking
             if hasattr(self, '_output_refresh_timer'):
                 self._output_refresh_timer.stop()
@@ -7289,7 +7289,7 @@ def _refresh_output_tab(self) -> bool:
             if os.path.exists(path):
                 # Check if this file is newer than what we currently have loaded
                 current_translated = getattr(self.image_preview_widget, 'current_translated_path', None)
-                if current_translated != path or self._is_file_newer(path, current_translated):
+                if current_translated != path or _is_file_newer(self, path, current_translated):
                     print(f"[DEBUG] Refreshing output tab with: {os.path.basename(path)}")
                     self.image_preview_widget.output_viewer.load_image(path)
                     self.image_preview_widget.current_translated_path = path
@@ -7481,7 +7481,7 @@ def _update_single_text_overlay(self, region_index: int, new_translation: str, u
                 except Exception as e:
                     print(f"[DEBUG] Failed to generate output path: {e}")
                     output_path = None
-                self._render_with_manga_translator(base_image, regions, output_path=output_path, original_image_path=current_image, switch_tab=False)
+                _render_with_manga_translator(self, base_image, regions, output_path=output_path, original_image_path=current_image, switch_tab=False)
                 return True  # Success!
             else:
                 print(f"[DEBUG] ❌ No regions to render")
@@ -7629,7 +7629,7 @@ def save_positions_and_rerender(self):
             output_path = None
         
         # Render
-        self._render_with_manga_translator(base_image, regions, output_path=output_path, original_image_path=current_image, switch_tab=False)
+        _render_with_manga_translator(self, base_image, regions, output_path=output_path, original_image_path=current_image, switch_tab=False)
     except Exception as e:
         print(f"[SAVE_POS] Error: {e}")
 
@@ -7662,7 +7662,7 @@ def _render_with_manga_translator(self, image_path: str, regions, output_path: s
         # Get or create MangaTranslator instance
         if not hasattr(self, '_manga_translator') or self._manga_translator is None:
             print(f"[RENDER] Creating new MangaTranslator instance...")
-            ocr_config = self._get_ocr_config()
+            ocr_config = _get_ocr_config(self, )
             api_key = self.main_gui.api_key_entry.text().strip() if hasattr(self.main_gui, 'api_key_entry') else ''
             model = self.main_gui.model_var if hasattr(self.main_gui, 'model_var') else 'gpt-4o-mini'
             
@@ -7971,7 +7971,7 @@ def _render_with_manga_translator(self, image_path: str, regions, output_path: s
         # The renderer itself completed, now handle the GUI update
         # Use QTimer to ensure this runs on the main thread
         from PySide6.QtCore import QTimer
-        QTimer.singleShot(0, lambda: self._load_rendered_image_to_output_tab(rendered_pil, output_path, switch_tab))
+        QTimer.singleShot(0, lambda: _load_rendered_image_to_output_tab(self, rendered_pil, output_path, switch_tab))
         
         print(f"[RENDER] GUI method call completed")
         
@@ -8168,7 +8168,7 @@ def _add_text_overlay_to_viewer(self, translated_texts: list):
             saved_offsets = {}
         
         # Get manga rendering settings
-        manga_settings = self._get_manga_rendering_settings()
+        manga_settings = _get_manga_rendering_settings(self, )
         
         # Source tab overlays should not force any background opacity
         try:
@@ -8203,7 +8203,7 @@ def _add_text_overlay_to_viewer(self, translated_texts: list):
                     # Create background rectangle if enabled in settings
                     bg_rect = None
                     if manga_settings.get('show_background', True):
-                        bg_rect = self._create_background_shape(x, y, w, h, manga_settings)
+                        bg_rect = _create_background_shape(self, x, y, w, h, manga_settings)
                         if bg_rect:
                             bg_rect.setZValue(10)  # Above image, below text
                             viewer._scene.addItem(bg_rect)
@@ -8212,7 +8212,7 @@ def _add_text_overlay_to_viewer(self, translated_texts: list):
                     text = translation.upper() if manga_settings.get('force_caps', False) else translation
                     
                     # Create text item with proper manga text rendering
-                    text_item, final_font_size = self._create_manga_text_item(text, x, y, w, h, manga_settings)
+                    text_item, final_font_size = _create_manga_text_item(self, text, x, y, w, h, manga_settings)
                     if text_item is None:
                         print(f"[DEBUG] Failed to create text item for: {text[:30]}...")
                         # Clean up orphan bg if created
@@ -8447,13 +8447,13 @@ def _add_text_overlay_for_region(self, region_index: int, original_text: str, tr
             return
         
         # Render text item using existing helper (uses current GUI settings)
-        settings = self._get_manga_rendering_settings() or {}
+        settings = _get_manga_rendering_settings(self, ) or {}
         try:
             settings['show_background'] = False
             settings['bg_opacity'] = 0
         except Exception:
             pass
-        text_item, _ = self._create_manga_text_item(translation, x, y, w, h, settings)
+        text_item, _ = _create_manga_text_item(self, translation, x, y, w, h, settings)
         if text_item is None:
             return
         viewer._scene.addItem(text_item)
@@ -8595,11 +8595,11 @@ def show_recognized_overlays_for_image(self, image_path: str):
                         self.image_preview_widget.viewer.clear_rectangles()
                 except Exception:
                     pass
-                self._draw_detection_boxes_on_preview()
+                _draw_detection_boxes_on_preview(self, )
         # Apply recognition data if available
         recognized_texts = state.get('recognized_texts') or []
         if recognized_texts:
-            self._update_rectangles_with_recognition(recognized_texts)
+            _update_rectangles_with_recognition(self, recognized_texts)
     except Exception as e:
         print(f"[DEBUG] Error restoring recognized overlays: {e}")
 
@@ -8681,7 +8681,7 @@ def _create_manga_text_item(self, text: str, x: int, y: int, w: int, h: int, set
                     font.setBold(True)
             text_item = QGraphicsTextItem()
             font.setKerning(True)
-            wrapped_text = self._wrap_text_for_bubble(src_text, available_width, font, settings)
+            wrapped_text = _wrap_text_for_bubble(self, src_text, available_width, font, settings)
             text_item.setPlainText(wrapped_text)
             text_item.setFont(font)
         else:
@@ -8781,7 +8781,7 @@ def _create_manga_text_item(self, text: str, x: int, y: int, w: int, h: int, set
                 used_translator_algo = True
             except Exception:
                 # Fallback to previous local auto-sizing
-                font_size = self._calculate_auto_font_size(src_text, available_width, available_height, settings)
+                font_size = _calculate_auto_font_size(self, src_text, available_width, available_height, settings)
                 min_size = settings.get('auto_min_size', 10)
                 max_size = settings.get('max_font_size', 48)
                 font_size = max(min_size, min(font_size, max_size))
@@ -8802,7 +8802,7 @@ def _create_manga_text_item(self, text: str, x: int, y: int, w: int, h: int, set
                         font.setBold(True)
                 text_item = QGraphicsTextItem()
                 font.setKerning(True)
-                wrapped_text = self._wrap_text_for_bubble(src_text, available_width, font, settings)
+                wrapped_text = _wrap_text_for_bubble(self, src_text, available_width, font, settings)
                 text_item.setPlainText(wrapped_text)
                 text_item.setFont(font)
         
@@ -8903,7 +8903,7 @@ def _create_manga_text_item(self, text: str, x: int, y: int, w: int, h: int, set
                     # Iteratively shrink if overflow
                     tries = 0
                     while tries < 25:
-                        test_wrapped = self._wrap_text_for_bubble(text, safe_w, test_font, settings)
+                        test_wrapped = _wrap_text_for_bubble(self, text, safe_w, test_font, settings)
                         # Measure bounds using a temp item
                         tmp_item = QGraphicsTextItem()
                         tmp_item.setFont(test_font)
@@ -8940,7 +8940,7 @@ def _create_manga_text_item(self, text: str, x: int, y: int, w: int, h: int, set
                     test_font = QFont(font.family())
                     test_font.setPointSize(current_size)
                     # Rewrap with Qt metrics at this size
-                    test_wrapped = self._wrap_text_for_bubble(src_text, safe_w, test_font, settings)
+                    test_wrapped = _wrap_text_for_bubble(self, src_text, safe_w, test_font, settings)
                     text_item.setFont(test_font)
                     text_item.setPlainText(test_wrapped)
                     wrapped_text = test_wrapped
@@ -9194,7 +9194,7 @@ def _text_fits_in_bounds(self, text: str, width: int, height: int, font: QFont, 
         line_height = metrics.height() * settings.get('line_spacing', 1.3)
         
         # Wrap text and count lines
-        wrapped_text = self._wrap_text_for_bubble(text, width, font, settings)
+        wrapped_text = _wrap_text_for_bubble(self, text, width, font, settings)
         lines = wrapped_text.split('\n')
         
         # Check total height
@@ -9432,7 +9432,7 @@ def _restore_translate_button(self):
     """Restore the translate button to its original state"""
     try:
         # Remove processing overlay effect
-        self._remove_processing_overlay()
+        _remove_processing_overlay(self, )
         
         # CRITICAL: Restore print hijacking if MangaTranslator exists
         if hasattr(self, '_manga_translator') and self._manga_translator:
@@ -9495,7 +9495,7 @@ def _on_translate_all_clicked(self):
             self.image_preview_widget.translate_all_btn.setText(f"Translating... (0/{total_images})")
         
         # Add blue pulse processing overlay
-        self._add_processing_overlay()
+        _add_processing_overlay(self, )
         
         # Run in background thread
         import threading
@@ -9508,7 +9508,7 @@ def _on_translate_all_clicked(self):
         import traceback
         self._log(f"❌ Translate all setup failed: {str(e)}", "error")
         print(f"Translate all error traceback: {traceback.format_exc()}")
-        self._restore_translate_all_button()
+        _restore_translate_all_button(self, )
 
 def _run_translate_all_background(self, image_paths: list):
     """Run translation for all images in background"""
@@ -9539,14 +9539,14 @@ def _run_translate_all_background(self, image_paths: list):
                 regions_for_recognition = None  # Will trigger auto-detection
                 
                 # Get OCR config
-                ocr_config = self._get_ocr_config()
+                ocr_config = _get_ocr_config(self, )
                 
                 # Step 1: Run detection
-                detection_config = self._get_detection_config()
+                detection_config = _get_detection_config(self, )
                 if detection_config.get('detect_empty_bubbles', True):
                     detection_config['detect_empty_bubbles'] = False
                 
-                regions = self._run_detection_sync(image_path, detection_config)
+                regions = _run_detection_sync(self, image_path, detection_config)
                 if not regions:
                     self._log(f"⚠️ [{idx}/{total}] No text regions detected", "warning")
                     failed_count += 1
@@ -9570,7 +9570,7 @@ def _run_translate_all_background(self, image_paths: list):
                 time.sleep(0.3)
                 
                 # Step 2: Run OCR
-                recognized_texts = self._run_ocr_on_regions(image_path, regions, ocr_config)
+                recognized_texts = _run_ocr_on_regions(self, image_path, regions, ocr_config)
                 if not recognized_texts:
                     self._log(f"⚠️ [{idx}/{total}] No text recognized", "warning")
                     failed_count += 1
@@ -9596,13 +9596,13 @@ def _run_translate_all_background(self, image_paths: list):
                 # Step 2.5: Run inpainting/cleaning if enabled (optional visual step)
                 cleaned_path = None
                 try:
-                    inpaint_config = self._get_inpaint_config()
+                    inpaint_config = _get_inpaint_config(self, )
                     inpaint_method = inpaint_config.get('method', 'none')
                     
                     # Only run inpainting if method is not 'none' and is 'local' or 'hybrid'
                     if inpaint_method in ['local', 'hybrid']:
                         self._log(f"🧹 [{idx}/{total}] Cleaning image...", "info")
-                        cleaned_path = self._run_inpainting_sync(image_path, regions)
+                        cleaned_path = _run_inpainting_sync(self, image_path, regions)
                         
                         if cleaned_path and os.path.exists(cleaned_path):
                             # Store cleaned image path for rendering
@@ -9655,11 +9655,11 @@ def _run_translate_all_background(self, image_paths: list):
                 if full_page_context_enabled:
                     print(f"[DEBUG] Using FULL PAGE CONTEXT translation mode (batch)")
                     self._log(f"📄 [{idx}/{total}] Using full page context translation for {len(recognized_texts)} regions", "info")
-                    translated_texts = self._translate_with_full_page_context(recognized_texts, image_path)
+                    translated_texts = _translate_with_full_page_context(self, recognized_texts, image_path)
                 else:
                     print(f"[DEBUG] Using INDIVIDUAL translation mode (batch)")
                     self._log(f"📝 [{idx}/{total}] Using individual translation for {len(recognized_texts)} regions", "info")
-                    translated_texts = self._translate_individually(recognized_texts, image_path)
+                    translated_texts = _translate_individually(self, recognized_texts, image_path)
                 
                 if not translated_texts:
                     self._log(f"⚠️ [{idx}/{total}] Translation failed", "warning")
@@ -9880,7 +9880,7 @@ def _process_recognize_results(self, results: dict):
                 self._log(f"  Region {i+1} at ({bbox[0]},{bbox[1]}) [{bbox[2]}x{bbox[3]}]: '{text}'", "info")
             
             # Update UI with recognition tooltips
-            self._update_rectangles_with_recognition(recognized_texts)
+            _update_rectangles_with_recognition(self, recognized_texts)
             self._log(f"📋 Ready for translation! Click 'Translate' to proceed.", "info")
         else:
             self._log("⚠️ No text was recognized in any regions", "warning")
@@ -9993,7 +9993,7 @@ def _process_translate_results(self, results: dict):
                     # Prefer in-memory cleaned image if provided in results
                     image_bgr = results.get('image_bgr') if isinstance(results, dict) else None
                     
-                    self._render_with_manga_translator(
+                    _render_with_manga_translator(self, 
                         render_image,
                         regions,
                         output_path=target_output_path,
@@ -10027,7 +10027,7 @@ def _process_translate_results(self, results: dict):
                 if getattr(self, '_batch_mode_active', False):
                     print(f"[TRANSLATE] Batch active — skipping overlay update for {os.path.basename(original_image_path) if original_image_path else 'unknown'}")
                 elif current_image and original_image_path and os.path.normpath(current_image) == os.path.normpath(original_image_path):
-                    self._add_text_overlay_to_viewer(translated_texts)
+                    _add_text_overlay_to_viewer(self, translated_texts)
                 else:
                     print(f"[TRANSLATE] Skipping overlay update; not current image: {os.path.basename(original_image_path) if original_image_path else 'unknown'}")
             except Exception as _ov_err:

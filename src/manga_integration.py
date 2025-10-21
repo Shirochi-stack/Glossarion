@@ -941,8 +941,8 @@ class MangaTranslationTab(QObject):
         self._attach_logging_bridge()
         
         # Connect OCR signals to handlers
-        self.ocr_result_signal.connect(self._process_ocr_result)
-        self.ocr_error_signal.connect(self._handle_ocr_error)
+        self.ocr_result_signal.connect(lambda data: ImageRenderer._process_ocr_result(self, data))
+        self.ocr_error_signal.connect(lambda error: ImageRenderer._handle_ocr_error(self, error))
 
         # Start update loop
         self._process_updates()
@@ -3164,7 +3164,7 @@ class MangaTranslationTab(QObject):
             """Execute GUI update on main thread for parallel processing (thread-safe)"""
             try:
                 # This runs on the main thread, so it's safe to call GUI methods
-                return self._update_single_text_overlay(region_index, trans_text)
+                return ImageRenderer._update_single_text_overlay(self, region_index, trans_text)
             except Exception as e:
                 print(f"[PARALLEL] GUI update failed: {e}")
                 return False
@@ -3264,9 +3264,9 @@ class MangaTranslationTab(QObject):
         # Connect image preview workflow signals to translation methods
         self.image_preview_widget.detect_text_clicked.connect(lambda: ImageRenderer._on_detect_text_clicked(self))
         self.image_preview_widget.clean_image_clicked.connect(lambda: ImageRenderer._on_clean_image_clicked(self))
-        self.image_preview_widget.recognize_text_clicked.connect(self._on_recognize_text_clicked)
-        self.image_preview_widget.translate_text_clicked.connect(self._on_translate_text_clicked)
-        self.image_preview_widget.translate_all_clicked.connect(self._on_translate_all_clicked)
+        self.image_preview_widget.recognize_text_clicked.connect(lambda: ImageRenderer._on_recognize_text_clicked(self))
+        self.image_preview_widget.translate_text_clicked.connect(lambda: ImageRenderer._on_translate_text_clicked(self))
+        self.image_preview_widget.translate_all_clicked.connect(lambda: ImageRenderer._on_translate_all_clicked(self))
         
         # Settings frame - GOES TO LEFT COLUMN
         settings_frame = QGroupBox("Translation Settings")
@@ -4707,7 +4707,7 @@ class MangaTranslationTab(QObject):
         # Shadow enabled checkbox
         self.shadow_enabled_checkbox = self._create_styled_checkbox("Enable Shadow")
         self.shadow_enabled_checkbox.setChecked(self.shadow_enabled_value)
-        self.shadow_enabled_checkbox.stateChanged.connect(lambda: (setattr(self, 'shadow_enabled_value', self.shadow_enabled_checkbox.isChecked()), self._toggle_shadow_controls(), self._save_rendering_settings(), self._apply_rendering_settings(), self._relayout_all_overlays_for_current_image()))
+        self.shadow_enabled_checkbox.stateChanged.connect(lambda: (setattr(self, 'shadow_enabled_value', self.shadow_enabled_checkbox.isChecked()), self._toggle_shadow_controls(), self._save_rendering_settings(), self._apply_rendering_settings(), ImageRenderer._relayout_all_overlays_for_current_image(self, )))
         shadow_header_layout.addWidget(self.shadow_enabled_checkbox)
         shadow_header_layout.addStretch()
         
@@ -4764,7 +4764,7 @@ class MangaTranslationTab(QObject):
                 self._save_rendering_settings()
                 self._apply_rendering_settings()
                 try:
-                    self._relayout_all_overlays_for_current_image()
+                    ImageRenderer._relayout_all_overlays_for_current_image(self, )
                 except Exception:
                     pass
                 try:
@@ -5409,7 +5409,7 @@ class MangaTranslationTab(QObject):
             pass
         # Reflow overlays to reflect new blur
         try:
-            self._relayout_all_overlays_for_current_image()
+            ImageRenderer._relayout_all_overlays_for_current_image(self, )
         except Exception:
             pass
     
@@ -5451,7 +5451,7 @@ class MangaTranslationTab(QObject):
             self._save_rendering_settings()
             self._apply_rendering_settings()
             try:
-                self._relayout_all_overlays_for_current_image()
+                ImageRenderer._relayout_all_overlays_for_current_image(self, )
             except Exception:
                 pass
     
@@ -5613,7 +5613,7 @@ class MangaTranslationTab(QObject):
             except Exception:
                 pass
             try:
-                self._relayout_all_overlays_for_current_image()
+                ImageRenderer._relayout_all_overlays_for_current_image(self, )
             except Exception:
                 pass
         except Exception as e:
@@ -7524,7 +7524,7 @@ class MangaTranslationTab(QObject):
             """Background thread for model loading"""
             try:
                 # Use the shared inpainter from pool instead of creating new instance
-                test_inpainter = self._get_or_create_shared_inpainter(method, model_path)
+                test_inpainter = ImageRenderer._get_or_create_shared_inpainter(self, method, model_path)
                 if not test_inpainter:
                     raise Exception("Failed to get shared inpainter from pool")
                 success = True  # Already loaded by _get_or_create_shared_inpainter
@@ -9066,7 +9066,7 @@ class MangaTranslationTab(QObject):
                 elif update[0] == 'clean_button_restore':
                     # Restore the clean button to its normal state
                     try:
-                        self._restore_clean_button()
+                        ImageRenderer._restore_clean_button(self, )
                     except Exception as e:
                         self._log(f"❌ Failed to restore clean button: {str(e)}", "error")
                 
@@ -9084,12 +9084,12 @@ class MangaTranslationTab(QObject):
                                 rectangles = self.image_preview_widget.viewer.rectangles
                                 if 0 <= region_index < len(rectangles):
                                     rect_item = rectangles[region_index]
-                                    self._remove_rectangle_pulse_effect(rect_item, region_index)
+                                    ImageRenderer._remove_rectangle_pulse_effect(self, rect_item, region_index)
                         except Exception as pulse_err:
                             print(f"[CLEAN_COMPLETE] Error stopping pulse effect: {pulse_err}")
                         
                         # Update the image preview with the result
-                        self._update_image_preview_with_result(result_image, original_path)
+                        ImageRenderer._update_image_preview_with_result(self, result_image, original_path)
                         self._log(f"✅ Successfully cleaned rectangle {region_index}", "success")
                         
                     except Exception as e:
@@ -9108,7 +9108,7 @@ class MangaTranslationTab(QObject):
                                 rectangles = self.image_preview_widget.viewer.rectangles
                                 if 0 <= region_index < len(rectangles):
                                     rect_item = rectangles[region_index]
-                                    self._remove_rectangle_pulse_effect(rect_item, region_index)
+                                    ImageRenderer._remove_rectangle_pulse_effect(self, rect_item, region_index)
                         except Exception as pulse_err:
                             print(f"[CLEAN_ERROR] Error stopping pulse effect: {pulse_err}")
                         
@@ -9136,14 +9136,14 @@ class MangaTranslationTab(QObject):
                     _, results = update
                     # Process recognition results
                     try:
-                        self._process_recognize_results(results)
+                        ImageRenderer._process_recognize_results(self, results)
                     except Exception as e:
                         self._log(f"❌ Failed to process recognition results: {str(e)}", "error")
                 
                 elif update[0] == 'recognize_button_restore':
                     # Restore the recognize button to its normal state
                     try:
-                        self._restore_recognize_button()
+                        ImageRenderer._restore_recognize_button(self, )
                     except Exception as e:
                         self._log(f"❌ Failed to restore recognize button: {str(e)}", "error")
                 
@@ -9151,14 +9151,14 @@ class MangaTranslationTab(QObject):
                     _, results = update
                     # Process translation results
                     try:
-                        self._process_translate_results(results)
+                        ImageRenderer._process_translate_results(self, results)
                     except Exception as e:
                         self._log(f"❌ Failed to process translation results: {str(e)}", "error")
                 
                 elif update[0] == 'translate_button_restore':
                     # Restore the translate button to its normal state
                     try:
-                        self._restore_translate_button()
+                        ImageRenderer._restore_translate_button(self, )
                     except Exception as e:
                         self._log(f"❌ Failed to restore translate button: {str(e)}", "error")
                 
@@ -9238,7 +9238,7 @@ class MangaTranslationTab(QObject):
                                 rectangles = self.image_preview_widget.viewer.rectangles
                                 if 0 <= region_index < len(rectangles):
                                     rect_item = rectangles[region_index]
-                                    self._remove_rectangle_pulse_effect(rect_item, region_index)
+                                    ImageRenderer._remove_rectangle_pulse_effect(self, rect_item, region_index)
                         except Exception as pulse_err:
                             print(f"[TRANSLATE_RESULT] Error stopping pulse effect: {pulse_err}")
                         
@@ -9251,7 +9251,7 @@ class MangaTranslationTab(QObject):
                         }
                         # Add or replace overlay for just this region
                         try:
-                            self._add_text_overlay_for_region(region_index, original_text, translation_result, bbox)
+                            ImageRenderer._add_text_overlay_for_region(self, region_index, original_text, translation_result, bbox)
                             #self._log(f"✅ Added text overlay for region {region_index}", "success")
                         except Exception as overlay_err:
                             self._log(f"⚠️ Failed to add overlay: {overlay_err}", "warning")
@@ -9286,7 +9286,7 @@ class MangaTranslationTab(QObject):
                                 # Use the same async overlay rendering as Save & Update Overlay
                                 # This will render all translations (including this new one) to the output file
                                 try:
-                                    self._save_overlay_async(region_index, translation_result)
+                                    ImageRenderer._save_overlay_async(self, region_index, translation_result)
                                 except Exception as render_err:
                                     print(f"[TRANSLATE_THIS_TEXT] Render error: {render_err}")
                                     self._log(f"⚠️ Failed to render to output file: {render_err}", "warning")
@@ -9378,21 +9378,21 @@ class MangaTranslationTab(QObject):
                 elif update[0] == 'translate_all_button_restore':
                     # Restore the translate all button to its normal state
                     try:
-                        self._restore_translate_all_button()
+                        ImageRenderer._restore_translate_all_button(self, )
                     except Exception as e:
                         self._log(f"❌ Failed to restore translate all button: {str(e)}", "error")
                 
                 elif update[0] == 'remove_processing_overlay':
                     # Remove the blue pulse overlay
                     try:
-                        self._remove_processing_overlay()
+                        ImageRenderer._remove_processing_overlay(self, )
                     except Exception as e:
                         print(f"Error removing processing overlay: {str(e)}")
                 
                 elif update[0] == 'update_preview_to_rendered':
                     # Update the preview to show all rendered images
                     try:
-                        self._update_preview_to_rendered_images()
+                        ImageRenderer._update_preview_to_rendered_images(self, )
                     except Exception as e:
                         self._log(f"❌ Failed to update preview to rendered images: {str(e)}", "error")
                 
@@ -10619,7 +10619,7 @@ class MangaTranslationTab(QObject):
         try:
             if hasattr(self, '_translated_texts') and self._translated_texts and hasattr(self, 'image_preview_widget'):
                 # Rebuild overlays with updated settings
-                self._add_text_overlay_to_viewer(self._translated_texts)
+                ImageRenderer._add_text_overlay_to_viewer(self, self._translated_texts)
         except Exception as e:
             # Don't fail if overlay refresh fails - just log it
             pass
