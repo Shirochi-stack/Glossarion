@@ -10122,22 +10122,64 @@ class MangaTranslator:
 
             overlays = []
             if render_parallel and len(adjusted_regions) > 1:
-                from concurrent.futures import ThreadPoolExecutor, as_completed
+                from concurrent.futures import ProcessPoolExecutor, as_completed
                 import multiprocessing as mp
+                from ImageRenderer import _render_single_region_overlay
+                
                 workers = max(1, min(max_workers, len(adjusted_regions), mp.cpu_count()))
-                self._log(f"  🚀 Parallel rendering: {workers} threads for {len(adjusted_regions)} regions (GIL-limited)", "info")
-                with ThreadPoolExecutor(max_workers=workers) as ex:
-                    fut_to_idx = {ex.submit(_render_one, r, i): i for i, r in enumerate(adjusted_regions) if r.translated_text}
-                    # Collect in order
-                    temp = {}
-                    for fut in as_completed(fut_to_idx):
-                        i = fut_to_idx[fut]
-                        try:
-                            temp[i] = fut.result()
-                        except Exception as e:
-                            self._log(f"  ⚠️ Region {i} render failed: {e}", "warning")
-                            temp[i] = None
-                    overlays = [temp.get(i) for i in range(len(adjusted_regions))]
+                self._log(f"  🚀 TRUE PARALLEL: {workers} CPU processes for {len(adjusted_regions)} regions", "info")
+                
+                # Prepare render settings (pickleable dict)
+                render_settings = {
+                    'font_size': self.custom_font_size or 24,
+                    'font_path': self.selected_font_style if self.selected_font_style and os.path.exists(self.selected_font_style) else None,
+                    'text_color': self.text_color,
+                    'outline_color': self.outline_color,
+                    'outline_width': max(1, (self.custom_font_size or 24) // self.outline_width_factor),
+                    'force_caps_lock': self.force_caps_lock
+                }
+                
+                # Prepare region data (pickleable dicts)
+                region_tasks = []
+                for i, r in enumerate(adjusted_regions):
+                    if r.translated_text:
+                        region_data = {
+                            'translated_text': r.translated_text,
+                            'bbox': r.bounding_box,
+                            'vertices': r.vertices
+                        }
+                        region_tasks.append((i, region_data))
+                
+                try:
+                    with ProcessPoolExecutor(max_workers=workers) as ex:
+                        # Submit all tasks
+                        fut_to_idx = {
+                            ex.submit(_render_single_region_overlay, region_data, pil_image.size, render_settings): idx
+                            for idx, region_data in region_tasks
+                        }
+                        
+                        # Collect results
+                        temp = {}
+                        for fut in as_completed(fut_to_idx):
+                            i = fut_to_idx[fut]
+                            try:
+                                temp[i] = fut.result()
+                            except Exception as e:
+                                self._log(f"  ⚠️ Region {i} render failed: {e}", "warning")
+                                temp[i] = None
+                        
+                        overlays = [temp.get(i) for i in range(len(adjusted_regions))]
+                        self._log(f"  ✅ Parallel render complete: {len([o for o in overlays if o])} overlays", "info")
+                except Exception as pool_err:
+                    self._log(f"  ⚠️ ProcessPool failed, falling back to sequential: {pool_err}", "warning")
+                    import traceback
+                    self._log(traceback.format_exc(), "debug")
+                    # Fallback to sequential
+                    for i, r in enumerate(adjusted_regions):
+                        if not r.translated_text:
+                            overlays.append(None)
+                            continue
+                        overlays.append(_render_one(r, i))
             else:
                 for i, r in enumerate(adjusted_regions):
                     if not r.translated_text:

@@ -6,6 +6,9 @@ import time
 import hashlib
 import traceback
 import concurrent.futures
+import numpy as np
+import cv2
+from PIL import Image, ImageDraw, ImageFont
 from PySide6.QtWidgets import (QWidget, QLabel, QFrame, QPushButton, QVBoxLayout, QHBoxLayout,
                                QGroupBox, QListWidget, QComboBox, QLineEdit, QCheckBox,
                                QRadioButton, QSlider, QSpinBox, QDoubleSpinBox, QTextEdit,
@@ -124,6 +127,98 @@ try:
     from unified_api_client import UnifiedClient
 except ImportError:
     UnifiedClient = None
+
+# MODULE-LEVEL RENDER FUNCTION (pickle-able for ProcessPoolExecutor)
+def _render_single_region_overlay(region_data: dict, image_size: tuple, render_settings: dict) -> Image.Image:
+    """
+    Render a single region overlay as RGBA PIL Image (pickle-able for multiprocessing)
+    
+    Args:
+        region_data: dict with 'text', 'bbox' (x,y,w,h), 'vertices'
+        image_size: (width, height)
+        render_settings: dict with font/color/outline settings
+    
+    Returns:
+        PIL RGBA Image of full size with transparent overlay
+    """
+    try:
+        # Create transparent overlay
+        overlay = Image.new('RGBA', image_size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+        
+        # Extract data
+        text = region_data.get('translated_text', '')
+        if not text:
+            return overlay
+        
+        x, y, w, h = region_data.get('bbox', (0, 0, 100, 100))
+        
+        # Get settings
+        font_size = render_settings.get('font_size', 24)
+        font_path = render_settings.get('font_path')
+        text_color = tuple(render_settings.get('text_color', (102, 0, 0))) + (255,)
+        outline_color = tuple(render_settings.get('outline_color', (255, 255, 255))) + (255,)
+        outline_width = render_settings.get('outline_width', 2)
+        force_caps = render_settings.get('force_caps_lock', False)
+        
+        if force_caps:
+            text = text.upper()
+        
+        # Load font
+        try:
+            if font_path and os.path.exists(font_path):
+                font = ImageFont.truetype(font_path, font_size)
+            else:
+                font = ImageFont.load_default()
+        except Exception:
+            font = ImageFont.load_default()
+        
+        # Simple text wrapping
+        lines = text.split('\n')
+        line_height = int(font_size * 1.2)
+        total_height = len(lines) * line_height
+        start_y = y + (h - total_height) // 2
+        
+        # Render each line
+        for i, line in enumerate(lines):
+            if not line.strip():
+                continue
+            
+            # Get text width
+            try:
+                bbox = draw.textbbox((0, 0), line, font=font)
+                text_width = bbox[2] - bbox[0]
+            except Exception:
+                text_width = len(line) * font_size * 0.6
+            
+            tx = x + (w - text_width) // 2
+            ty = start_y + i * line_height
+            
+            # Clamp to bounds
+            tx = max(0, min(tx, image_size[0] - 10))
+            ty = max(0, min(ty, image_size[1] - 10))
+            
+            # Render with outline using PIL stroke parameter
+            try:
+                draw.text(
+                    (tx, ty), line, font=font,
+                    fill=text_color,
+                    stroke_width=outline_width,
+                    stroke_fill=outline_color
+                )
+            except TypeError:
+                # Fallback for older PIL
+                if outline_width > 0:
+                    for dx in range(-outline_width, outline_width + 1):
+                        for dy in range(-outline_width, outline_width + 1):
+                            if dx != 0 or dy != 0:
+                                draw.text((tx + dx, ty + dy), line, font=font, fill=outline_color)
+                draw.text((tx, ty), line, font=font, fill=text_color)
+        
+        return overlay
+    except Exception as e:
+        print(f"[RENDER] Error rendering region: {e}")
+        return Image.new('RGBA', image_size, (0, 0, 0, 0))
     
 def _on_detect_text_clicked(self):
     """Detect text button - run detection in background thread"""
