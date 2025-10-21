@@ -2150,13 +2150,24 @@ class MangaImagePreviewWidget(QWidget):
         self._persist_rectangles_state()
     
     def load_image(self, image_path: str, preserve_rectangles: bool = False, preserve_text_overlays: bool = False):
-        """Load an image into the preview (async)
+        """Load an image into the preview (async) with explicit cleanup of previous image
         
         Args:
             image_path: Path to the image to load
             preserve_rectangles: If True, don't clear rectangles when loading (for workflow continuity)
             preserve_text_overlays: If True, keep text overlays visible (for cleaned images)
         """
+        # MEMORY OPTIMIZATION: Explicitly clear previous image before loading new one
+        try:
+            if hasattr(self.viewer, '_pixmap_item') and self.viewer._pixmap_item:
+                old_pixmap = self.viewer._pixmap_item.pixmap()
+                if old_pixmap and not old_pixmap.isNull():
+                    # Clear reference and schedule deletion
+                    self.viewer._pixmap_item.setPixmap(QPixmap())
+                    old_pixmap = None
+        except Exception:
+            pass
+        
         # Store the preserve flags for use in _on_image_loading_started
         self._preserve_rectangles_on_load = preserve_rectangles
         self._preserve_text_overlays_on_load = preserve_text_overlays

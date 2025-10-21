@@ -9664,7 +9664,9 @@ class MangaTranslationTab(QObject):
         
         return regions
     def _run_clean_background(self, image_path: str, regions: list):
-        """Run the actual cleaning process in background thread"""
+        """Run the actual cleaning process in background thread with explicit memory cleanup"""
+        image = None  # Initialize for cleanup in finally block
+        mask = None
         try:
             import cv2
             import numpy as np
@@ -9859,6 +9861,23 @@ class MangaTranslationTab(QObject):
             self._log(f"❌ Background cleaning failed: {str(e)}", "error")
             print(f"Background clean error traceback: {traceback.format_exc()}")
         finally:
+            # MEMORY CLEANUP: Explicitly delete numpy arrays to free RAM
+            try:
+                if 'image' in locals() and image is not None:
+                    del image
+                if 'mask' in locals() and mask is not None:
+                    del mask
+                if 'cleaned_image' in locals() and 'cleaned_image' in dir():
+                    try:
+                        del cleaned_image
+                    except:
+                        pass
+                # Force garbage collection to release memory immediately
+                import gc
+                gc.collect()
+            except Exception:
+                pass
+            
             # Always restore the button using thread-safe update queue
             self.update_queue.put(('clean_button_restore', None))
     
