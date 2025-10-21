@@ -1812,7 +1812,10 @@ class BubbleDetector:
                             BubbleDetector._rtdetr_onnx_loaded = True
                             BubbleDetector._rtdetr_onnx_model_path = onnx_fp
                             self.rtdetr_onnx_loaded = True
-                            logger.info("✅ RT-DETR C++ backend loaded (2x faster)")
+                            # Skip Python session entirely
+                            self.rtdetr_onnx_session = None
+                            BubbleDetector._rtdetr_onnx_shared_session = None
+                            logger.info("✅ RT-DETR C++ backend loaded (Python fallback disabled, memory saved)")
                             return True
                         else:
                             logger.warning("C++ backend load failed, using Python fallback")
@@ -1821,26 +1824,38 @@ class BubbleDetector:
                         BubbleDetector._rtdetr_onnx_cpp_backend = None
                         BubbleDetector._rtdetr_onnx_use_cpp = False
             
-            # Fallback to Python ONNX Runtime
-            # Create session (serialize creation in singleton mode to avoid device storms)
-            if singleton:
-                with BubbleDetector._rtdetr_onnx_init_lock:
-                    # Re-check after acquiring lock
-                    if BubbleDetector._rtdetr_onnx_loaded and BubbleDetector._rtdetr_onnx_shared_session is not None and not force_reload:
-                        self.rtdetr_onnx_session = BubbleDetector._rtdetr_onnx_shared_session
-                        self.rtdetr_onnx_loaded = True
-                        return True
-                    sess = ort.InferenceSession(onnx_fp, providers=providers, sess_options=so)
-                    BubbleDetector._rtdetr_onnx_shared_session = sess
-                    BubbleDetector._rtdetr_onnx_loaded = True
-                    BubbleDetector._rtdetr_onnx_providers = providers
-                    self.rtdetr_onnx_session = sess
-                    self.rtdetr_onnx_loaded = True
-            else:
-                self.rtdetr_onnx_session = ort.InferenceSession(onnx_fp, providers=providers, sess_options=so)
+            # Check if C++ backend is already loaded globally - skip Python entirely
+            if BubbleDetector._rtdetr_onnx_use_cpp and BubbleDetector._rtdetr_onnx_loaded:
+                logger.info("✅ RT-DETR using existing C++ backend (Python ONNX skipped)")
                 self.rtdetr_onnx_loaded = True
-            logger.info("✅ RT-DETR (ONNX Python) model ready")
-            return True
+                self.rtdetr_onnx_session = None  # No Python session needed
+                return True
+            
+            # Only load Python ONNX if C++ backend is not available
+            if not ONNX_CPP_AVAILABLE or not singleton:
+                # Fallback to Python ONNX Runtime
+                # Create session (serialize creation in singleton mode to avoid device storms)
+                if singleton:
+                    with BubbleDetector._rtdetr_onnx_init_lock:
+                        # Re-check after acquiring lock
+                        if BubbleDetector._rtdetr_onnx_loaded and BubbleDetector._rtdetr_onnx_shared_session is not None and not force_reload:
+                            self.rtdetr_onnx_session = BubbleDetector._rtdetr_onnx_shared_session
+                            self.rtdetr_onnx_loaded = True
+                            return True
+                        sess = ort.InferenceSession(onnx_fp, providers=providers, sess_options=so)
+                        BubbleDetector._rtdetr_onnx_shared_session = sess
+                        BubbleDetector._rtdetr_onnx_loaded = True
+                        BubbleDetector._rtdetr_onnx_providers = providers
+                        self.rtdetr_onnx_session = sess
+                        self.rtdetr_onnx_loaded = True
+                else:
+                    self.rtdetr_onnx_session = ort.InferenceSession(onnx_fp, providers=providers, sess_options=so)
+                    self.rtdetr_onnx_loaded = True
+                logger.info("✅ RT-DETR (ONNX Python) model ready")
+                return True
+            else:
+                logger.error("C++ backend failed and not available - cannot load RT-DETR")
+                return False
         except Exception as e:
             logger.error(f"Failed to load RT-DETR ONNX: {e}")
             self.rtdetr_onnx_session = None
@@ -1917,10 +1932,10 @@ class BubbleDetector:
                     return results_cpp
                     
                 except Exception as cpp_err:
-                    logger.warning(f"C++ backend detection failed: {cpp_err}, using Python fallback")
-                    # Fall through to Python ONNX
+                    logger.error(f"C++ backend RT-DETR detection failed: {cpp_err}")
+                    raise RuntimeError(f"C++ backend RT-DETR detection failed: {cpp_err}")
             
-            # Python ONNX Runtime fallback
+            # Python ONNX Runtime (only if C++ not available)
             # Run with a concurrency guard to prevent device hangs and limit memory usage
             # Apply semaphore for ALL providers (not just DML) to control concurrency
             providers = BubbleDetector._rtdetr_onnx_providers or []
