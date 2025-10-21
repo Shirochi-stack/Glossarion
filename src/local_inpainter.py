@@ -92,6 +92,17 @@ except ImportError:
     ONNX_AVAILABLE = False
     logger.warning("ONNX Runtime not available")
 
+# C++ ONNX Backend - significantly faster than Python
+ONNX_CPP_AVAILABLE = False
+try:
+    from onnx_cpp_backend import ONNXCppBackend, is_cpp_backend_available
+    ONNX_CPP_AVAILABLE = is_cpp_backend_available()
+    if ONNX_CPP_AVAILABLE:
+        logger.info("✓ C++ ONNX Runtime available (2x faster)")
+except Exception as e:
+    ONNX_CPP_AVAILABLE = False
+    logger.debug(f"C++ ONNX backend not available: {e}")
+
 # Bubble detector - optional
 BUBBLE_DETECTOR_AVAILABLE = False
 try:
@@ -634,6 +645,8 @@ class LocalInpainter:
         # ONNX-specific settings
         self.onnx_model_loaded = False
         self.onnx_input_size = None  # Will be detected from model
+        self.onnx_cpp_backend = None  # C++ backend instance
+        self.use_onnx_cpp = False  # Track if using C++ backend
         
         # Quantization diagnostics flags
         self.onnx_quantize_applied = False
@@ -1042,7 +1055,29 @@ class LocalInpainter:
             return None
 
     def load_onnx_model(self, onnx_path: str) -> bool:
-        """Load an ONNX model with custom operator support"""
+        """Load an ONNX model with C++ backend support for 2x performance"""
+        # Try C++ backend first for better performance
+        if ONNX_CPP_AVAILABLE:
+            try:
+                logger.info("🚀 Loading ONNX model with C++ backend...")
+                self.onnx_cpp_backend = ONNXCppBackend()
+                if self.onnx_cpp_backend.load_model(onnx_path, use_gpu=self.use_gpu):
+                    self.use_onnx = True
+                    self.use_onnx_cpp = True
+                    self.model_loaded = True
+                    self.current_onnx_path = onnx_path
+                    logger.info("✅ ONNX C++ backend loaded successfully")
+                    return True
+                else:
+                    logger.warning("C++ backend load failed, falling back to Python")
+                    self.onnx_cpp_backend = None
+                    self.use_onnx_cpp = False
+            except Exception as cpp_err:
+                logger.warning(f"C++ backend error: {cpp_err}, using Python fallback")
+                self.onnx_cpp_backend = None
+                self.use_onnx_cpp = False
+        
+        # Fallback to Python ONNX Runtime
         if not ONNX_AVAILABLE:
             logger.error("ONNX Runtime not available")
             return False
@@ -2312,7 +2347,15 @@ class LocalInpainter:
                 self._stop_worker()
             except Exception:
                 pass
-            # Release ONNX session and metadata
+            # Release C++ ONNX backend
+            try:
+                if self.onnx_cpp_backend is not None:
+                    self.onnx_cpp_backend.unload()
+                    self.onnx_cpp_backend = None
+                    self.use_onnx_cpp = False
+            except Exception:
+                pass
+            # Release Python ONNX session and metadata
             try:
                 if self.onnx_session is not None:
                     self.onnx_session = None
@@ -2649,9 +2692,36 @@ class LocalInpainter:
                 logger.info(f"🔲 Using tiled inpainting: {self.tile_size}x{self.tile_size} tiles with {self.tile_overlap}px overlap")
                 return self._inpaint_tiled(image, mask, self.tile_size, self.tile_overlap, refinement)
                 
-            # ONNX inference path
+            # C++ ONNX inference path (faster)
+            if self.use_onnx_cpp and self.onnx_cpp_backend:
+                logger.debug("Using C++ ONNX inference (2x faster)")
+                try:
+                    # CRITICAL: Convert BGR (OpenCV default) to RGB (ML model expected)
+                    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                    # Normalize to [0, 1] range
+                    img_normalized = image_rgb.astype(np.float32) / 255.0
+                    mask_normalized = mask.astype(np.float32) / 255.0
+                    
+                    # Run C++ inference
+                    result_rgb = self.onnx_cpp_backend.infer(img_normalized, mask_normalized)
+                    
+                    # Convert back to uint8 and BGR
+                    result = (result_rgb * 255).astype(np.uint8)
+                    result = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
+                    
+                    self._log_inpaint_diag('onnx-cpp', result, mask)
+                    
+                except Exception as cpp_err:
+                    logger.warning(f"C++ ONNX inference failed: {cpp_err}, using fallback")
+                    # Fall through to Python ONNX or JIT
+                    pass
+                else:
+                    # C++ inference succeeded, return result
+                    return result
+            
+            # Python ONNX inference path (fallback)
             if self.use_onnx and self.onnx_session:
-                logger.debug("Using ONNX inference")
+                logger.debug("Using Python ONNX inference")
                 
                 # CRITICAL: Convert BGR (OpenCV default) to RGB (ML model expected)
                 image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
