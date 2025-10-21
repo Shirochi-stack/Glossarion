@@ -633,87 +633,42 @@ class SavePositionWorker(QObject):
             self.finished.emit(False, self.region_index, "")
     
     def _render_with_manga_translator_thread_safe(self, base_image_path, regions, output_path, original_image_path):
-        """Thread-safe rendering that doesn't access GUI elements"""
+        """Thread-safe rendering using existing translator instance (no heavy initialization)"""
         try:
-            # Import here to avoid circular dependencies
-            from manga_translator import MangaTranslator
-            from unified_api_client import UnifiedClient
-            import os, json
-            
             import sys
+            import cv2
+            import os
+            
             sys.__stdout__.write(f"[WORKER] Starting render: base={os.path.basename(base_image_path)}\n")
             sys.__stdout__.write(f"[WORKER] Regions to render: {len(regions)}\n")
             sys.__stdout__.write(f"[WORKER] Output path: {output_path}\n")
             sys.__stdout__.flush()
             
-            # Create a temporary translator instance for this render
-            # Get settings from the main manga integration (thread-safe access to config)
-            config = self.manga_integration.main_gui.config
-            manga_settings = config.get('manga_settings', {})
-            
-            # Get OCR config (required by MangaTranslator)
-            ocr_config = self.manga_integration._get_ocr_config()
-            
-            # Get API key from config
-            api_key = config.get('api_key', '')
-            if not api_key:
-                sys.__stdout__.write("[WORKER] Warning: No API key found in config\n")
+            # Use existing translator instance from manga_integration (already has loaded models)
+            translator = self.manga_integration.translator
+            if not translator:
+                sys.__stdout__.write("[WORKER] ERROR: No translator instance available\n")
                 sys.__stdout__.flush()
-                api_key = 'dummy'  # Fallback for rendering-only operation
-            
-            # Get model from config
-            model = config.get('model', 'gpt-4o-mini')
-            
-            # Create UnifiedClient (required by MangaTranslator)
-            unified_client = UnifiedClient(model=model, api_key=api_key)
-            
-            # Create a non-recursive log callback that writes directly to stdout
-            def safe_log_callback(msg, level):
-                try:
-                    import sys
-                    # Write directly to stdout to avoid the print() redirection loop
-                    sys.__stdout__.write(f"[TRANSLATOR] {msg}\n")
-                    sys.__stdout__.flush()
-                except Exception:
-                    pass  # Silently ignore logging errors
-            
-            translator = MangaTranslator(
-                ocr_config=ocr_config,
-                unified_client=unified_client,
-                main_gui=self.manga_integration.main_gui,
-                log_callback=safe_log_callback,
-                skip_inpainter_init=True  # Rendering-only, no inpainting needed
-            )
+                return False
             
             # Load the base image for rendering
-            import cv2
             base_image_array = cv2.imread(base_image_path)
             if base_image_array is None:
                 raise ValueError(f"Failed to load base image: {base_image_path}")
             
-            # EXCLUSION PERSISTENCE REMOVAL: Worker thread no longer reads persisted exclusions
-            # Exclusions are now session-only and should be filtered before passing regions to worker
-            excluded_regions = []
-            sys.__stdout__.write(f"[WORKER] Exclusion filtering now happens before worker thread\n")
-            sys.__stdout__.flush()
-            
-            # Filter regions based on exclusion status
+            # Ensure all regions have translated_text set
             filtered_regions = []
-            for i, region in enumerate(regions):
+            for region in regions:
                 if not hasattr(region, 'translated_text') or not region.translated_text:
-                    # This should already be set, but fallback to original text if needed
+                    # Fallback to original text if translation missing
                     region.translated_text = region.text
-                
-                if i in excluded_regions:
-                    sys.__stdout__.write(f"[WORKER] EXCLUDING Region {i}: text='{region.text[:30] if region.text else 'None'}...' (marked as excluded)\n")
-                    sys.__stdout__.flush()
-                else:
-                    filtered_regions.append(region)
+                filtered_regions.append(region)
             
-            sys.__stdout__.write(f"[WORKER] Rendering {len(filtered_regions)} regions with translations (excluded {len(regions) - len(filtered_regions)} regions)\n")
+            sys.__stdout__.write(f"[WORKER] Rendering {len(filtered_regions)} regions with translations\n")
             sys.__stdout__.flush()
             
-            # Render the translated text onto the image
+            # Render using the existing translator's render method (thread-safe for rendering)
+            # The translator already has loaded models in the shared pool
             rendered_image_array = translator.render_translated_text(base_image_array, filtered_regions)
             
             # Save the rendered image
@@ -728,63 +683,12 @@ class SavePositionWorker(QObject):
                 result_success = cv2.imwrite(output_path, rendered_image_array)
                 result_path = output_path if result_success else None
             
-            # CRITICAL: Clean up heavy objects to prevent RAM leak
-            # Delete large arrays first
+            # Clean up only local resources (images)
+            # DO NOT clean up translator or models - they're shared and reused!
             del base_image_array
             del rendered_image_array
             
-            # CRITICAL: Clean up LocalInpainter instances BEFORE translator cleanup
-            # These are the main source of RAM leaks (100-500MB each)
-            try:
-                # Clean up thread-local inpainters
-                if hasattr(translator, '_thread_local'):
-                    tl = translator._thread_local
-                    if hasattr(tl, 'local_inpainters') and isinstance(tl.local_inpainters, dict):
-                        for key, inp in list(tl.local_inpainters.items()):
-                            if inp:
-                                try:
-                                    # Unload model and free CUDA memory
-                                    if hasattr(inp, 'unload'):
-                                        inp.unload()
-                                    # Delete the instance
-                                    del tl.local_inpainters[key]
-                                except Exception:
-                                    pass
-                        tl.local_inpainters.clear()
-                    sys.__stdout__.write(f"[WORKER] Cleaned up thread-local inpainters\n")
-                    sys.__stdout__.flush()
-                
-                # Also clean up any singleton inpainter reference
-                if hasattr(translator, 'local_inpainter') and translator.local_inpainter:
-                    translator.local_inpainter = None
-                if hasattr(translator, 'inpainter') and translator.inpainter:
-                    translator.inpainter = None
-            except Exception as e:
-                sys.__stdout__.write(f"[WORKER] Error cleaning inpainters: {e}\n")
-                sys.__stdout__.flush()
-            
-            # Clean up translator and its components
-            try:
-                if hasattr(translator, 'clear_internal_state'):
-                    translator.clear_internal_state()
-                del translator
-            except Exception:
-                pass
-            
-            # Clean up UnifiedClient
-            try:
-                del unified_client
-            except Exception:
-                pass
-            
-            # Force garbage collection to free memory immediately
-            try:
-                import gc
-                gc.collect()
-            except Exception:
-                pass
-            
-            sys.__stdout__.write(f"[WORKER] Render completed and cleaned up: {result_path}\n")
+            sys.__stdout__.write(f"[WORKER] Render completed: {result_path}\n")
             sys.__stdout__.flush()
             return result_path is not None
             
