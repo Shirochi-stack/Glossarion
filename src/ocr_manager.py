@@ -143,6 +143,27 @@ class OCRProvider:
         """Reset stop flags when starting new processing"""
         self._stopped = False
     
+    def _force_cleanup(self):
+        """Best-effort memory cleanup to reduce RAM/VRAM spikes after heavy ops."""
+        try:
+            import gc
+            gc.collect()
+            try:
+                import torch
+                if hasattr(torch, 'cuda') and torch.cuda.is_available():
+                    try:
+                        torch.cuda.synchronize()
+                    except Exception:
+                        pass
+                    try:
+                        torch.cuda.empty_cache()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        except Exception:
+            pass
+    
     def check_installation(self) -> bool:
         """Check if provider is installed"""
         raise NotImplementedError
@@ -310,27 +331,40 @@ class CustomAPIProvider(OCRProvider):
     
     def _encode_image(self, image: np.ndarray) -> str:
         """Encode numpy array to base64 string"""
-        # Convert BGR to RGB if needed
-        if len(image.shape) == 3 and image.shape[2] == 3:
-            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        else:
-            image_rgb = image
-        
-        # Convert to PIL Image
-        pil_image = Image.fromarray(image_rgb)
-        
-        # Save to bytes buffer
-        buffer = io.BytesIO()
-        if self.image_format.lower() == 'png':
-            pil_image.save(buffer, format='PNG')
-        else:
-            pil_image.save(buffer, format='JPEG', quality=self.image_quality)
-        
-        # Encode to base64
-        buffer.seek(0)
-        image_base64 = base64.b64encode(buffer.read()).decode('utf-8')
-        
-        return image_base64
+        pil_image = None
+        buffer = None
+        try:
+            # Convert BGR to RGB if needed
+            if len(image.shape) == 3 and image.shape[2] == 3:
+                image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            else:
+                image_rgb = image
+            
+            # Convert to PIL Image
+            pil_image = Image.fromarray(image_rgb)
+            
+            # Save to bytes buffer
+            buffer = io.BytesIO()
+            if self.image_format.lower() == 'png':
+                pil_image.save(buffer, format='PNG')
+            else:
+                pil_image.save(buffer, format='JPEG', quality=self.image_quality)
+            
+            # Encode to base64
+            buffer.seek(0)
+            image_base64 = base64.b64encode(buffer.read()).decode('utf-8')
+            return image_base64
+        finally:
+            try:
+                if pil_image is not None:
+                    pil_image.close()
+            except Exception:
+                pass
+            try:
+                if buffer is not None:
+                    buffer.close()
+            except Exception:
+                pass
     
     def _prepare_headers(self) -> dict:
         """Prepare request headers"""
@@ -496,18 +530,31 @@ class CustomAPIProvider(OCRProvider):
             # Convert numpy array to PIL Image
             image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             pil_image = Image.fromarray(image_rgb)
+            buffer = None
             
-            # Convert PIL Image to base64 string
-            buffer = io.BytesIO()
-            
-            # Use the image format from settings
-            if self.image_format.lower() == 'png':
-                pil_image.save(buffer, format='PNG')
-            else:
-                pil_image.save(buffer, format='JPEG', quality=self.image_quality)
-            
-            buffer.seek(0)
-            image_base64 = base64.b64encode(buffer.read()).decode('utf-8')
+            try:
+                # Convert PIL Image to base64 string
+                buffer = io.BytesIO()
+                
+                # Use the image format from settings
+                if self.image_format.lower() == 'png':
+                    pil_image.save(buffer, format='PNG')
+                else:
+                    pil_image.save(buffer, format='JPEG', quality=self.image_quality)
+                
+                buffer.seek(0)
+                image_base64 = base64.b64encode(buffer.read()).decode('utf-8')
+            finally:
+                try:
+                    if pil_image is not None:
+                        pil_image.close()
+                except Exception:
+                    pass
+                try:
+                    if buffer is not None:
+                        buffer.close()
+                except Exception:
+                    pass
             
             # For OpenAI vision models, we need BOTH:
             # 1. System prompt with instructions
@@ -866,26 +913,51 @@ class MangaOCRProvider(OCRProvider):
     def _run_ocr(self, pil_image):
         """Run OCR on a PIL image using the HuggingFace model"""
         import torch
-        
-        # Process image (keyword arg for broader compatibility across transformers versions)
-        inputs = self.processor(images=pil_image, return_tensors="pt")
-        pixel_values = inputs["pixel_values"]
-        
-        # Move to same device as model
+        inputs = None
+        pixel_values = None
+        generated_ids = None
         try:
-            model_device = next(self.model.parameters()).device
-        except StopIteration:
-            model_device = torch.device('cpu')
-        pixel_values = pixel_values.to(model_device)
-        
-        # Generate text
-        with torch.no_grad():
-            generated_ids = self.model.generate(pixel_values)
-        
-        # Decode
-        generated_text = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
-        
-        return generated_text
+            # Process image (keyword arg for broader compatibility across transformers versions)
+            inputs = self.processor(images=pil_image, return_tensors="pt")
+            pixel_values = inputs.get("pixel_values")
+            
+            # Move to same device as model
+            try:
+                model_device = next(self.model.parameters()).device
+            except StopIteration:
+                model_device = torch.device('cpu')
+            if pixel_values is not None:
+                pixel_values = pixel_values.to(model_device)
+            
+            # Generate text
+            with torch.no_grad():
+                generated_ids = self.model.generate(pixel_values)
+                # Ensure GPU work completes before freeing
+                if hasattr(torch, 'cuda') and torch.cuda.is_available() and getattr(model_device, 'type', '') == 'cuda':
+                    try:
+                        torch.cuda.synchronize(model_device)
+                    except Exception:
+                        pass
+            
+            # Decode
+            generated_text = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+            return generated_text
+        finally:
+            # Explicitly dereference large tensors
+            try:
+                del generated_ids
+            except Exception:
+                pass
+            try:
+                del pixel_values
+            except Exception:
+                pass
+            try:
+                del inputs
+            except Exception:
+                pass
+            # Best-effort cleanup
+            self._force_cleanup()
     
     def detect_text(self, image: np.ndarray, **kwargs) -> List[OCRResult]:
         """
@@ -899,6 +971,8 @@ class MangaOCRProvider(OCRProvider):
             self._log("⏹️ Manga-OCR processing stopped by user", "warning")
             return results
         
+        pil_image = None
+        image_rgb = None
         try:
             if not self.is_loaded:
                 if not self.load_model():
@@ -937,6 +1011,17 @@ class MangaOCRProvider(OCRProvider):
             
         except Exception as e:
             self._log(f"❌ Error in manga-ocr: {str(e)}", "error")
+        finally:
+            try:
+                if pil_image is not None:
+                    pil_image.close()
+            except Exception:
+                pass
+            try:
+                del image_rgb
+            except Exception:
+                pass
+            self._force_cleanup()
             
         return results
 
@@ -1145,6 +1230,11 @@ class Qwen2VL(OCRProvider):
         if 'ocr_prompt' in kwargs:
             self.ocr_prompt = kwargs['ocr_prompt']
         
+        pil_image = None
+        image_rgb = None
+        inputs = None
+        generated_ids = None
+        generated_ids_trimmed = None
         try:
             if not self.is_loaded:
                 if not self.load_model():
@@ -1327,6 +1417,30 @@ class Qwen2VL(OCRProvider):
             self._log(f"❌ Error: {str(e)}", "error")
             import traceback
             self._log(traceback.format_exc(), "debug")
+        finally:
+            # Explicitly free large tensors and images
+            try:
+                del generated_ids_trimmed
+            except Exception:
+                pass
+            try:
+                del generated_ids
+            except Exception:
+                pass
+            try:
+                del inputs
+            except Exception:
+                pass
+            try:
+                if pil_image is not None:
+                    pil_image.close()
+            except Exception:
+                pass
+            try:
+                del image_rgb
+            except Exception:
+                pass
+            self._force_cleanup()
         
         return results
     
@@ -1401,6 +1515,7 @@ class EasyOCRProvider(OCRProvider):
     def detect_text(self, image: np.ndarray, **kwargs) -> List[OCRResult]:
         """Detect text using easyocr"""
         results = []
+        ocr_results = None
         
         try:
             if not self.is_loaded:
@@ -1429,6 +1544,12 @@ class EasyOCRProvider(OCRProvider):
             
         except Exception as e:
             self._log(f"❌ Error in easyocr detection: {str(e)}", "error")
+        finally:
+            try:
+                del ocr_results
+            except Exception:
+                pass
+            self._force_cleanup()
         
         return results
 
@@ -1527,6 +1648,8 @@ class PaddleOCRProvider(OCRProvider):
     def detect_text(self, image: np.ndarray, **kwargs) -> List[OCRResult]:
         """Detect text with memory safety measures"""
         results = []
+        image_copy = None
+        ocr_results = None
         
         try:
             if not self.is_loaded:
@@ -1574,7 +1697,6 @@ class PaddleOCRProvider(OCRProvider):
             import signal
             import threading
             
-            ocr_results = None
             ocr_error = None
             
             def run_ocr():
@@ -1614,10 +1736,6 @@ class PaddleOCRProvider(OCRProvider):
             else:
                 self._log("No text regions found", "debug")
             
-            # Clean up
-            del image_copy
-            gc.collect()
-            
         except Exception as e:
             error_msg = str(e) if str(e) else type(e).__name__
             
@@ -1633,6 +1751,17 @@ class PaddleOCRProvider(OCRProvider):
             
             import traceback
             self._log(traceback.format_exc(), "debug")
+        finally:
+            # Clean up
+            try:
+                del image_copy
+            except Exception:
+                pass
+            try:
+                del ocr_results
+            except Exception:
+                pass
+            self._force_cleanup()
         
         return results
     
