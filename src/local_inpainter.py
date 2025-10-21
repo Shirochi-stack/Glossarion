@@ -2109,8 +2109,6 @@ class LocalInpainter:
                     self.model_loaded = True
                     self.current_method = method
                     logger.info("✅ JIT model loaded successfully!")
-                    time.sleep(0.1)  # Brief pause for stability
-                    logger.debug("💤 JIT model loading pausing briefly for stability")
                     
                     # Optional FP16 precision on GPU to reduce VRAM
                     if self.quantize_enabled and self.use_gpu:
@@ -2453,8 +2451,6 @@ class LocalInpainter:
                     result[y:y_end, x:x_end] = processed_tile
         
         logger.info(f"✅ Tiled inpainting complete ({orig_w}x{orig_h} in {tile_size}x{tile_size} tiles)")
-        time.sleep(0.1)  # Brief pause for stability
-        logger.debug("💤 Tiled inpainting completion pausing briefly for stability")
         return result
 
     def _process_single_tile(self, tile_img, tile_mask, tile_size, refinement):
@@ -3099,18 +3095,23 @@ class LocalInpainter:
             
             logger.info("✅ Inpainted successfully!")
             
-            # Force garbage collection to reduce memory spikes
+            # Optional cleanup - only if auto_cleanup_models is enabled
             try:
-                import gc
-                gc.collect()
-                # Clear CUDA cache if using GPU
-                if torch is not None and hasattr(torch, 'cuda') and torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+                should_cleanup = False
+                if hasattr(self, 'config') and isinstance(self.config, dict):
+                    manga_settings = self.config.get('manga_settings', {})
+                    advanced = manga_settings.get('advanced', {})
+                    should_cleanup = advanced.get('auto_cleanup_models', False)
+                
+                if should_cleanup:
+                    import gc
+                    gc.collect()
+                    # Clear CUDA cache if using GPU
+                    if torch is not None and hasattr(torch, 'cuda') and torch.cuda.is_available():
+                        torch.cuda.empty_cache()
             except Exception:
                 pass
             
-            time.sleep(0.1)  # Brief pause for stability
-            logger.debug("💤 Inpainting completion pausing briefly for stability")
             return result
             
         except Exception as e:

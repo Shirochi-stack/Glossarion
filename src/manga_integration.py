@@ -5009,7 +5009,7 @@ class MangaTranslationTab(QObject):
         
         # Create animations
         self.start_icon_spin_animation = QPropertyAnimation(self.start_button_icon, b"rotation")
-        self.start_icon_spin_animation.setDuration(2400)  # Even slower for smoother feel (2.4 seconds per rotation)
+        self.start_icon_spin_animation.setDuration(800)  # Faster spin: 0.8 seconds per rotation
         self.start_icon_spin_animation.setStartValue(0)
         self.start_icon_spin_animation.setEndValue(360)
         self.start_icon_spin_animation.setLoopCount(-1)
@@ -19212,17 +19212,13 @@ class MangaTranslationTab(QObject):
                 # Force immediate GUI update
                 from PySide6.QtWidgets import QApplication
                 QApplication.processEvents()
-                # Start spinning animation after 6 second delay
+                # Start spinning animation immediately
                 if hasattr(self, 'start_icon_spin_animation') and hasattr(self, 'start_button_icon'):
                     if self.start_icon_spin_animation.state() != QPropertyAnimation.Running:
-                        def start_spinning():
-                            if hasattr(self, 'start_icon_spin_animation') and self.is_running:
-                                self.start_icon_spin_animation.start()
-                                # Start refresh timer to keep animation smooth
-                                if hasattr(self, '_animation_refresh_timer'):
-                                    self._animation_refresh_timer.start()
-                        from PySide6.QtCore import QTimer
-                        QTimer.singleShot(6000, start_spinning)  # 6 second delay
+                        self.start_icon_spin_animation.start()
+                        # Start refresh timer to keep animation smooth
+                        if hasattr(self, '_animation_refresh_timer'):
+                            self._animation_refresh_timer.start()
         except Exception:
             pass
         
@@ -20616,9 +20612,7 @@ class MangaTranslationTab(QObject):
                                             }))
                                             self._log(f"🖼️ Queued preview update to show translated image", "debug")
                                     
-                                    # Memory barrier: ensure resources are released before next completion
-                                    time.sleep(0.15)  # Slightly longer pause for stability
-                                    self._log("💤 Panel completion pausing for resource cleanup", "debug")
+                                    # Memory barrier removed - no artificial delays needed
                                 else:
                                     self.failed_files += 1
                                     # Log the specific reason for failure
@@ -20675,8 +20669,6 @@ class MangaTranslationTab(QObject):
                         futures.append(executor.submit(process_single, idx, filepath))
                         if stagger_ms > 0:
                             time.sleep(stagger_ms / 1000.0)
-                            time.sleep(0.1)  # Brief pause for stability
-                            self._log("💤 Staggered submission pausing briefly for stability", "debug")
                     
                     # Handle completion and stop behavior
                     try:

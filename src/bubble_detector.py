@@ -936,8 +936,6 @@ class BubbleDetector:
                 return []
             
             logger.info(f"✅ Detected {len(bubbles)} speech bubbles")
-            time.sleep(0.1)  # Brief pause for stability
-            logger.debug("💤 Bubble detection pausing briefly for stability")
             return bubbles
             
         except Exception as e:
@@ -1043,10 +1041,6 @@ class BubbleDetector:
                         self._log(f"Device mismatch during inference: {e}", "error")
                         return [] if return_all_bubbles else {'bubbles': [], 'text_bubbles': [], 'text_free': []}
                     raise
-                
-                # Brief pause for stability after inference
-                time.sleep(0.1)
-                logger.debug("💤 RT-DETR inference pausing briefly for stability")
             
             # Post-process results
             if TORCH_AVAILABLE:
@@ -1576,15 +1570,19 @@ class BubbleDetector:
                 except Exception:
                     pass
 
-            # Free CUDA cache and trigger GC
+            # Optional cleanup - only if auto_cleanup_models is enabled
             try:
-                if TORCH_AVAILABLE and torch is not None and torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except Exception:
-                pass
-            try:
-                import gc
-                gc.collect()
+                should_cleanup = False
+                if hasattr(self, 'config') and isinstance(self.config, dict):
+                    manga_settings = self.config.get('manga_settings', {})
+                    advanced = manga_settings.get('advanced', {})
+                    should_cleanup = advanced.get('auto_cleanup_models', False)
+                
+                if should_cleanup:
+                    if TORCH_AVAILABLE and torch is not None and torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    import gc
+                    gc.collect()
             except Exception:
                 pass
         except Exception:
