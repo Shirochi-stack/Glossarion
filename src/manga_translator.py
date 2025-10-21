@@ -22,6 +22,13 @@ import numpy as np
 from bubble_detector import BubbleDetector
 from TransateKRtoEN import send_with_interrupt
 
+# Import ImageRenderer for module-level functions
+try:
+    import ImageRenderer
+except ImportError:
+    ImageRenderer = None
+    print("Warning: ImageRenderer not available")
+
 # Google Cloud Vision imports
 try:
     from google.cloud import vision

@@ -4703,8 +4703,9 @@ class MangaTranslationTab(QObject):
                 except Exception:
                     pass
                 try:
+                    import ImageRenderer
                     from PySide6.QtCore import QTimer
-                    QTimer.singleShot(0, self.save_positions_and_rerender)
+                    QTimer.singleShot(0, lambda: ImageRenderer.save_positions_and_rerender(self))
                 except Exception:
                     pass
         
