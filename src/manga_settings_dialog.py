@@ -4904,6 +4904,13 @@ class MangaSettingsDialog(QDialog):
             if hasattr(self.main_gui, 'config'):
                 self.main_gui.config['manga_settings'] = self.settings
                 
+                # CRITICAL: Invalidate cached MangaTranslator instance so new settings take effect
+                # The cached instance reads font_size, text_wrapping, etc. only during __init__
+                # so we need to force recreation when rendering settings change
+                if hasattr(self.main_gui, 'manga_tab') and hasattr(self.main_gui.manga_tab, '_manga_translator'):
+                    self.main_gui.manga_tab._manga_translator = None
+                    print("✅ Invalidated cached MangaTranslator instance to apply new rendering settings")
+                
                 # Log key settings that were updated
                 ocr_settings = self.settings.get('ocr', {})
                 advanced_settings = self.settings.get('advanced', {})
