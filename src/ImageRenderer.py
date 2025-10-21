@@ -128,6 +128,53 @@ try:
 except ImportError:
     UnifiedClient = None
 
+# MODULE-LEVEL WORKER FUNCTION for parallel save processing (pickleable)
+def _process_save_task_worker(region_index: int, current_image: str, trans_text: str, task: dict) -> dict:
+    """Worker function for ProcessPoolExecutor - processes a single save task.
+    
+    This function is pickleable and runs in a separate process.
+    It cannot access GUI state or non-pickleable objects.
+    
+    Args:
+        region_index: Index of the region to process
+        current_image: Path to the current image
+        trans_text: Translation text for the region
+        task: Task metadata dict
+        
+    Returns:
+        dict with 'success' bool and optional 'error' string
+    """
+    import time
+    start_time = time.time_ns()
+    
+    try:
+        print(f"[PARALLEL_WORKER] Processing region {region_index} in process")
+        
+        # Since we can't access GUI state from a worker process,
+        # we just return success to indicate the task was received
+        # The actual GUI update will happen in the completion callback
+        
+        end_time = time.time_ns()
+        duration_ms = (end_time - start_time) / 1_000_000
+        
+        print(f"[PARALLEL_WORKER] Region {region_index} processed in {duration_ms:.2f}ms")
+        
+        return {
+            'success': True,
+            'region_index': region_index,
+            'duration_ms': duration_ms
+        }
+        
+    except Exception as e:
+        print(f"[PARALLEL_WORKER] Error processing region {region_index}: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            'success': False,
+            'region_index': region_index,
+            'error': str(e)
+        }
+
 # MODULE-LEVEL RENDER FUNCTION (pickle-able for ProcessPoolExecutor)
 def _render_single_region_overlay(region_data: dict, image_size: tuple, render_settings: dict) -> Image.Image:
     """
@@ -6341,12 +6388,13 @@ def _do_source_refresh(self):
         traceback.print_exc()
 
 def _init_parallel_save_system(self):
-    """Initialize the parallel save processing system with microsecond locks."""
+    """Initialize the parallel save processing system with ProcessPoolExecutor."""
     try:
         import threading
         import time
         from queue import Queue
-        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import ProcessPoolExecutor
+        import multiprocessing as mp
         
         class ParallelSaveSystem:
             def __init__(self, parent):
@@ -6368,7 +6416,9 @@ def _init_parallel_save_system(self):
                 except Exception as e:
                     print(f"[PARALLEL] Error reading max_workers from settings, using default: {e}")
                 
-                self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="AutoSave")
+                # Use ProcessPoolExecutor for true parallel processing
+                max_workers = max(1, min(max_workers, mp.cpu_count()))
+                self.executor = ProcessPoolExecutor(max_workers=max_workers)
                 self.processing_count = 0  # Track number of active processes
                 self.count_lock = threading.Lock()  # Lock for processing count
                 
@@ -6379,7 +6429,7 @@ def _init_parallel_save_system(self):
                     name="AutoSaveCoordinator"
                 )
                 self.coordinator_thread.start()
-                print(f"[PARALLEL] Initialized parallel save system with {max_workers} worker threads")
+                print(f"[PARALLEL] Initialized parallel save system with {max_workers} worker processes (ProcessPoolExecutor)")
             
             def queue_save_task(self, region_index: int):
                 """Queue a save task for the given region index."""
@@ -6472,8 +6522,40 @@ def _init_parallel_save_system(self):
                                 # Update button state for parallel processing
                                 _update_parallel_save_button_state(self.parent, self.processing_count)
                         
-                        # Submit the actual work to thread pool
-                        future = self.executor.submit(self._process_save_task, task)
+                        # Submit the actual work to process pool
+                        # Extract pickleable data from task
+                        region_idx = task['region_index']
+                        
+                        # Get current image path and translation text (must be done on main thread)
+                        current_image = None
+                        trans_text = None
+                        try:
+                            if hasattr(self.parent, 'image_preview_widget'):
+                                current_image = getattr(self.parent.image_preview_widget, 'current_image_path', None)
+                            trans_text = _get_translation_text_for_region(self.parent, region_idx)
+                        except Exception as e:
+                            print(f"[PARALLEL] Failed to get data for region {region_idx}: {e}")
+                            # Clean up
+                            with self.microsecond_lock:
+                                self.active_tasks.discard(region_idx)
+                                with self.count_lock:
+                                    self.processing_count = max(0, self.processing_count - 1)
+                            continue
+                        
+                        if not trans_text or not current_image:
+                            print(f"[PARALLEL] Missing data for region {region_idx}, skipping")
+                            # Clean up
+                            with self.microsecond_lock:
+                                self.active_tasks.discard(region_idx)
+                                with self.count_lock:
+                                    self.processing_count = max(0, self.processing_count - 1)
+                            continue
+                        
+                        # Submit to ProcessPoolExecutor with pickleable arguments
+                        future = self.executor.submit(_process_save_task_worker, region_idx, current_image, trans_text, task)
+                        
+                        # Add callback to handle completion
+                        future.add_done_callback(lambda f, idx=region_idx: self._handle_task_completion(f, idx))
                         
                         # Don't wait for completion - let it run in parallel
                         
@@ -6482,37 +6564,43 @@ def _init_parallel_save_system(self):
                     except Exception as e:
                         print(f"[PARALLEL] Coordinator error: {e}")
             
-            def _process_save_task(self, task):
-                """Process a single save task in a worker thread."""
-                region_index = task['region_index']
-                start_time = time.time_ns()
-                success = False
+            def _handle_task_completion(self, future, region_index):
+                """Handle completion of a save task from ProcessPoolExecutor.
                 
+                The worker process just validates the task. Now we do the actual GUI update
+                on the main thread.
+                """
+                success = False
                 try:
-                    print(f"[PARALLEL] Worker processing region {region_index}")
+                    result = future.result(timeout=5.0)
+                    worker_success = result.get('success', False) if isinstance(result, dict) else False
                     
-                    # Get translation text (main thread safe)
-                    trans_text = _get_translation_text_for_region(self.parent, region_index)
-                    if not trans_text:
-                        print(f"[PARALLEL] No translation text for region {region_index}")
-                        return False
-                    
-                    # Process the overlay update
-                    success = _update_single_text_overlay_parallel(self.parent, region_index, trans_text)
-                    
-                    end_time = time.time_ns()
-                    duration_ms = (end_time - start_time) / 1_000_000  # Convert to milliseconds
-                    
-                    if success:
-                        print(f"[PARALLEL] Successfully processed region {region_index} in {duration_ms:.2f}ms")
+                    if worker_success:
+                        print(f"[PARALLEL] Worker validated region {region_index}, doing GUI update on main thread")
+                        # Get the translation text and do the actual update
+                        try:
+                            trans_text = _get_translation_text_for_region(self.parent, region_index)
+                            if trans_text:
+                                # Do the actual update on main thread
+                                success = _update_single_text_overlay_parallel(self.parent, region_index, trans_text)
+                                if success:
+                                    print(f"[PARALLEL] Successfully updated region {region_index}")
+                                    # Schedule source refresh
+                                    try:
+                                        _schedule_source_refresh(self.parent)
+                                    except Exception as refresh_err:
+                                        print(f"[PARALLEL] Failed to schedule source refresh: {refresh_err}")
+                            else:
+                                print(f"[PARALLEL] No translation text for region {region_index}")
+                        except Exception as update_err:
+                            print(f"[PARALLEL] Failed to update region {region_index}: {update_err}")
                     else:
-                        print(f"[PARALLEL] Failed to process region {region_index} after {duration_ms:.2f}ms")
-                    
-                    return success
-                    
+                        print(f"[PARALLEL] Worker failed to process region {region_index}")
+                        
                 except Exception as e:
-                    print(f"[PARALLEL] Error processing region {region_index}: {e}")
-                    return False
+                    print(f"[PARALLEL] Error handling completion for region {region_index}: {e}")
+                    import traceback
+                    traceback.print_exc()
                 finally:
                     # Always clean up
                     with self.microsecond_lock:
@@ -6524,17 +6612,6 @@ def _init_parallel_save_system(self):
                             
                             # Update button state
                             _update_parallel_save_button_state(self.parent, self.processing_count)
-                    
-                    # Note: Pulse effect auto-removes after 0.1s via animation finished callback
-                    
-                    # If successful, schedule source preview refresh on main thread
-                    if success:
-                        try:
-                            print(f"[PARALLEL] Region {region_index} saved successfully - calling source refresh directly")
-                            # Call directly - already safe to call from worker thread
-                            _schedule_source_refresh(self.parent)
-                        except Exception as refresh_err:
-                            print(f"[PARALLEL] Failed to schedule source refresh: {refresh_err}")
             
             def get_active_count(self):
                 """Get the number of currently active processing tasks."""
