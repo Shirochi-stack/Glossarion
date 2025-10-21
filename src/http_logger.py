@@ -204,5 +204,11 @@ def enable_detailed_http_logging(log_folder="http_requests"):
         pass
     
     _patched = True
-    print(f"[HTTP Logger] Enabled - logs in: {_log_folder.absolute()}")
+    # Only log in main process to avoid duplicate messages from multiprocessing workers
+    try:
+        import multiprocessing
+        if multiprocessing.current_process().name == 'MainProcess':
+            print(f"[HTTP Logger] Enabled - logs in: {_log_folder.absolute()}")
+    except:
+        print(f"[HTTP Logger] Enabled - logs in: {_log_folder.absolute()}")
     return _log_folder

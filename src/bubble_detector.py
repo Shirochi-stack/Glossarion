@@ -18,6 +18,15 @@ import time
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Helper to check if we're in a child process (suppress duplicate logging from multiprocessing workers)
+def _is_main_process():
+    """Check if we're running in the main process (not a multiprocessing worker)"""
+    try:
+        import multiprocessing
+        return multiprocessing.current_process().name == 'MainProcess'
+    except:
+        return True  # If we can't determine, assume main process
+
 # Check if we're running in a frozen environment
 IS_FROZEN = getattr(sys, 'frozen', False)
 if IS_FROZEN:
@@ -29,7 +38,8 @@ if IS_FROZEN:
     os.environ['HF_HOME'] = hf_cache_dir
     # Also set transformers cache to same location for backward compatibility
     os.environ['TRANSFORMERS_CACHE'] = os.path.join(hf_cache_dir, 'transformers')
-    logger.info(f"Running in frozen environment: {MEIPASS}")
+    if _is_main_process():
+        logger.info(f"Running in frozen environment: {MEIPASS}")
 
 # Modified import checks for frozen environment
 YOLO_AVAILABLE = False
@@ -45,10 +55,12 @@ PIL_AVAILABLE = False
 # Import huggingface_hub first to ensure consistent import pattern
 try:
     from huggingface_hub import hf_hub_download
-    logger.info("✓ huggingface_hub loaded")
+    if _is_main_process():
+        logger.info("✓ huggingface_hub loaded")
 except ImportError as e:
-    logger.warning(f"huggingface_hub not available: {e}")
-    logger.warning("Install with: pip install -U huggingface_hub")
+    if _is_main_process():
+        logger.warning(f"huggingface_hub not available: {e}")
+        logger.warning("Install with: pip install -U huggingface_hub")
     hf_hub_download = None
 
 # Try to import YOLO dependencies with better error handling
@@ -60,9 +72,11 @@ if IS_FROZEN:
         import torch.nn
         import torch.cuda
         TORCH_AVAILABLE = True
-        logger.info("✓ PyTorch loaded in frozen environment")
+        if _is_main_process():
+            logger.info("✓ PyTorch loaded in frozen environment")
     except Exception as e:
-        logger.warning(f"PyTorch not available in frozen environment: {e}")
+        if _is_main_process():
+            logger.warning(f"PyTorch not available in frozen environment: {e}")
         TORCH_AVAILABLE = False
         torch = None
     
@@ -71,9 +85,11 @@ if IS_FROZEN:
         try:
             from ultralytics import YOLO
             YOLO_AVAILABLE = True
-            logger.info("✓ Ultralytics YOLO loaded in frozen environment")
+            if _is_main_process():
+                logger.info("✓ Ultralytics YOLO loaded in frozen environment")
         except Exception as e:
-            logger.warning(f"Ultralytics not available in frozen environment: {e}")
+            if _is_main_process():
+                logger.warning(f"Ultralytics not available in frozen environment: {e}")
             YOLO_AVAILABLE = False
     
     # Try transformers
@@ -83,12 +99,15 @@ if IS_FROZEN:
         from transformers import RTDetrV2ForObjectDetection, RTDetrImageProcessor
         RTDetrForObjectDetection = RTDetrV2ForObjectDetection
         TRANSFORMERS_AVAILABLE = True
-        logger.info("✓ Transformers RT-DETR v2 loaded in frozen environment")
+        if _is_main_process():
+            logger.info("✓ Transformers RT-DETR v2 loaded in frozen environment")
     except ImportError:
         TRANSFORMERS_AVAILABLE = False
-        logger.warning("Transformers RT-DETR v2 not available in frozen environment")
+        if _is_main_process():
+            logger.warning("Transformers RT-DETR v2 not available in frozen environment")
     except Exception as e:
-        logger.warning(f"Transformers not available in frozen environment: {e}")
+        if _is_main_process():
+            logger.warning(f"Transformers not available in frozen environment: {e}")
         TRANSFORMERS_AVAILABLE = False
 else:
     # Normal environment - original import logic
@@ -97,7 +116,8 @@ else:
         YOLO_AVAILABLE = True
     except:
         YOLO_AVAILABLE = False
-        logger.warning("Ultralytics YOLO not available")
+        if _is_main_process():
+            logger.warning("Ultralytics YOLO not available")
 
     try:
         import torch
@@ -107,16 +127,19 @@ else:
     except (ImportError, AttributeError):
         TORCH_AVAILABLE = False
         torch = None
-        logger.warning("PyTorch not available or incomplete")
+        if _is_main_process():
+            logger.warning("PyTorch not available or incomplete")
 
     try:
         from transformers import RTDetrV2ForObjectDetection, RTDetrImageProcessor
         RTDetrForObjectDetection = RTDetrV2ForObjectDetection
         TRANSFORMERS_AVAILABLE = True
-        logger.info("✓ Transformers RT-DETR v2 loaded")
+        if _is_main_process():
+            logger.info("✓ Transformers RT-DETR v2 loaded")
     except ImportError as e:
         TRANSFORMERS_AVAILABLE = False
-        logger.warning(f"Transformers RT-DETR v2 not available: {e}")
+        if _is_main_process():
+            logger.warning(f"Transformers RT-DETR v2 not available: {e}")
 
 # Configure ORT memory behavior before importing
 try:
@@ -127,10 +150,12 @@ except Exception:
 try:
     import onnxruntime as ort
     ONNX_AVAILABLE = True
-    logger.info("✓ ONNX Runtime available")
+    if _is_main_process():
+        logger.info("✓ ONNX Runtime available")
 except ImportError:
     ONNX_AVAILABLE = False
-    logger.warning("ONNX Runtime not available")
+    if _is_main_process():
+        logger.warning("ONNX Runtime not available")
 
 # PIL
 try:
@@ -138,7 +163,8 @@ try:
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
-    logger.info("PIL not available")
+    if _is_main_process():
+        logger.info("PIL not available")
 
 
 class BubbleDetector:
