@@ -19239,6 +19239,17 @@ class MangaTranslationTab(QObject):
         # Start heartbeat spinner so there's visible activity until logs stream
         self._start_startup_heartbeat()
         
+        # CRITICAL: Wait for any previous worker thread to finish before starting new translation
+        # This prevents race conditions where old worker is still checking stop flags
+        try:
+            if hasattr(self, 'translation_thread') and self.translation_thread and self.translation_thread.is_alive():
+                self._log("⏳ Waiting for previous translation to finish...", "info")
+                self.translation_thread.join(timeout=5.0)  # Wait up to 5 seconds
+                if self.translation_thread.is_alive():
+                    self._log("⚠️ Previous translation thread did not stop cleanly", "warning")
+        except Exception as e:
+            self._log(f"⚠️ Error checking previous thread: {e}", "debug")
+        
         # CRITICAL: Set is_running=True IMMEDIATELY so toggle button works
         self.is_running = True
         if hasattr(self, 'stop_flag'):
