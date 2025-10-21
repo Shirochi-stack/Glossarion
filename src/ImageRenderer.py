@@ -6410,8 +6410,7 @@ def _init_parallel_save_system(self):
         import threading
         import time
         from queue import Queue
-        from concurrent.futures import ProcessPoolExecutor
-        import multiprocessing as mp
+        from concurrent.futures import ThreadPoolExecutor
         
         class ParallelSaveSystem:
             def __init__(self, parent):
@@ -6421,22 +6420,21 @@ def _init_parallel_save_system(self):
                 self.microsecond_lock = threading.Lock()  # Microsecond precision lock
                 
                 # Get max_workers from manga settings
-                max_workers = 4  # Default fallback
+                max_workers = 3  # Default - lower for threads since they're lighter
                 try:
                     if hasattr(parent, 'main_gui') and hasattr(parent.main_gui, 'config'):
                         manga_settings = parent.main_gui.config.get('manga_settings', {})
                         advanced_settings = manga_settings.get('advanced', {})
-                        max_workers = advanced_settings.get('max_workers', 4)
+                        max_workers = advanced_settings.get('max_workers', 3)
                         print(f"[PARALLEL] Using max_workers from settings: {max_workers}")
                     else:
                         print(f"[PARALLEL] Using default max_workers: {max_workers}")
                 except Exception as e:
                     print(f"[PARALLEL] Error reading max_workers from settings, using default: {e}")
                 
-                # Use ProcessPoolExecutor for true parallel processing
-                max_workers = max(1, min(max_workers, mp.cpu_count()))
-                self.executor = ProcessPoolExecutor(max_workers=max_workers)
-                self.processing_count = 0  # Track number of active processes
+                # Use ThreadPoolExecutor for instant response (no process startup overhead)
+                self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="AutoSave")
+                self.processing_count = 0  # Track number of active threads
                 self.count_lock = threading.Lock()  # Lock for processing count
                 
                 # Start the coordinator thread
@@ -6446,7 +6444,7 @@ def _init_parallel_save_system(self):
                     name="AutoSaveCoordinator"
                 )
                 self.coordinator_thread.start()
-                print(f"[PARALLEL] Initialized parallel save system with {max_workers} worker processes (ProcessPoolExecutor)")
+                print(f"[PARALLEL] Initialized parallel save system with {max_workers} worker threads (ThreadPoolExecutor - instant response)")
             
             def queue_save_task(self, region_index: int):
                 """Queue a save task for the given region index."""
@@ -6539,19 +6537,13 @@ def _init_parallel_save_system(self):
                                 # Update button state for parallel processing
                                 _update_parallel_save_button_state(self.parent, self.processing_count)
                         
-                        # Submit the actual work to process pool
-                        # Extract pickleable data from task
+                        # Submit the work to thread pool (threads can access parent directly)
                         region_idx = task['region_index']
                         
-                        # Get current image path and translation text (must be done on main thread)
-                        current_image = None
-                        trans_text = None
-                        try:
-                            if hasattr(self.parent, 'image_preview_widget'):
-                                current_image = getattr(self.parent.image_preview_widget, 'current_image_path', None)
-                            trans_text = _get_translation_text_for_region(self.parent, region_idx)
-                        except Exception as e:
-                            print(f"[PARALLEL] Failed to get data for region {region_idx}: {e}")
+                        # Get translation text
+                        trans_text = _get_translation_text_for_region(self.parent, region_idx)
+                        if not trans_text:
+                            print(f"[PARALLEL] No translation text for region {region_idx}, skipping")
                             # Clean up
                             with self.microsecond_lock:
                                 self.active_tasks.discard(region_idx)
@@ -6559,17 +6551,8 @@ def _init_parallel_save_system(self):
                                     self.processing_count = max(0, self.processing_count - 1)
                             continue
                         
-                        if not trans_text or not current_image:
-                            print(f"[PARALLEL] Missing data for region {region_idx}, skipping")
-                            # Clean up
-                            with self.microsecond_lock:
-                                self.active_tasks.discard(region_idx)
-                                with self.count_lock:
-                                    self.processing_count = max(0, self.processing_count - 1)
-                            continue
-                        
-                        # Submit to ProcessPoolExecutor with pickleable arguments
-                        future = self.executor.submit(_process_save_task_worker, region_idx, current_image, trans_text, task)
+                        # Submit to ThreadPoolExecutor (instant - no process startup)
+                        future = self.executor.submit(self._execute_save_task, region_idx, trans_text)
                         
                         # Add callback to handle completion
                         future.add_done_callback(lambda f, idx=region_idx: self._handle_task_completion(f, idx))
@@ -6581,34 +6564,27 @@ def _init_parallel_save_system(self):
                     except Exception as e:
                         print(f"[PARALLEL] Coordinator error: {e}")
             
+            def _execute_save_task(self, region_index, trans_text):
+                """Execute save task in worker thread (instant - no process startup)."""
+                try:
+                    print(f"[PARALLEL] Thread worker processing region {region_index}")
+                    # Do the actual GUI update (thread-safe via _update_single_text_overlay_parallel)
+                    success = _update_single_text_overlay_parallel(self.parent, region_index, trans_text)
+                    if success:
+                        print(f"[PARALLEL] Successfully updated region {region_index}")
+                    return {'success': success, 'region_index': region_index}
+                except Exception as e:
+                    print(f"[PARALLEL] Thread worker error for region {region_index}: {e}")
+                    return {'success': False, 'region_index': region_index}
+            
             def _handle_task_completion(self, future, region_index):
-                """Handle completion of a save task from ProcessPoolExecutor.
-                
-                The worker process just validates the task. Now we do the actual GUI update
-                on the main thread.
-                """
-                success = False
+                """Handle completion of a save task from ThreadPoolExecutor."""
                 try:
                     result = future.result(timeout=5.0)
-                    worker_success = result.get('success', False) if isinstance(result, dict) else False
+                    success = result.get('success', False) if isinstance(result, dict) else False
                     
-                    if worker_success:
-                        print(f"[PARALLEL] Worker validated region {region_index}, doing GUI update on main thread")
-                        # Get the translation text and do the actual update
-                        try:
-                            trans_text = _get_translation_text_for_region(self.parent, region_index)
-                            if trans_text:
-                                # Do the actual update on main thread
-                                success = _update_single_text_overlay_parallel(self.parent, region_index, trans_text)
-                                if success:
-                                    print(f"[PARALLEL] Successfully updated region {region_index}")
-                                    # Signal emission moved to after file save in _render_with_manga_translator
-                            else:
-                                print(f"[PARALLEL] No translation text for region {region_index}")
-                        except Exception as update_err:
-                            print(f"[PARALLEL] Failed to update region {region_index}: {update_err}")
-                    else:
-                        print(f"[PARALLEL] Worker failed to process region {region_index}")
+                    if not success:
+                        print(f"[PARALLEL] Task failed for region {region_index}")
                         
                 except Exception as e:
                     print(f"[PARALLEL] Error handling completion for region {region_index}: {e}")
@@ -6752,13 +6728,8 @@ def _fallback_single_save(self, region_index: int):
             try:
                 # Update the single text overlay
                 _update_single_text_overlay(self, region_index, trans_text)
-                
-                print(f"[FALLBACK] Region {region_index} saved successfully - calling source refresh directly")
-                # Call directly - the function itself schedules appropriate refresh
-                try:
-                    _schedule_source_refresh(self)
-                except Exception as e:
-                    print(f"[FALLBACK] Source refresh call failed: {e}")
+                print(f"[FALLBACK] Region {region_index} saved successfully")
+                # Signal-based refresh happens automatically after file save
                 return True
             except Exception as e:
                 print(f"[FALLBACK] Render task failed: {e}")
