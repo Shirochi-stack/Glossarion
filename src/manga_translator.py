@@ -950,8 +950,15 @@ class MangaTranslator:
         # Thread-safe lock for cache operations (critical for parallel panel translation)
         import threading
         self._cache_lock = threading.Lock()
-        # Serialize inpainting calls to avoid concurrent RAM spikes with shared instances
-        self._inpaint_lock = threading.Lock()
+        # Serialize inpainting calls to avoid concurrent RAM spikes ONLY with shared/singleton instances
+        # For parallel panel translation with separate instances, no lock is needed
+        # Check if using singleton models or if parallel panels are disabled
+        use_inpaint_lock = self.manga_settings.get('advanced', {}).get('use_singleton_models', False)
+        if not use_inpaint_lock:
+            # Also check if parallel panel translation is disabled (then we might share instances)
+            parallel_panels_enabled = self.manga_settings.get('advanced', {}).get('parallel_panel_translation', False)
+            use_inpaint_lock = not parallel_panels_enabled
+        self._inpaint_lock = threading.Lock() if use_inpaint_lock else None
         try:
             self.batch_size = int(os.getenv('BATCH_SIZE', '1'))
         except Exception:
@@ -9160,10 +9167,8 @@ class MangaTranslator:
         inp = self._get_thread_local_inpainter(local_method, model_path)
         if inp and getattr(inp, 'model_loaded', False):
             self._log("   🧽 Using local inpainting", "info")
-            try:
-                lock = getattr(self, '_inpaint_lock', None)
-            except Exception:
-                lock = None
+            # Only use lock if enabled (singleton mode or non-parallel translation)
+            lock = getattr(self, '_inpaint_lock', None)
             if lock:
                 with lock:
                     return inp.inpaint(image, mask)
@@ -9175,10 +9180,8 @@ class MangaTranslator:
                 shared_inp = self._get_or_init_shared_local_inpainter(local_method, model_path)
                 if shared_inp and getattr(shared_inp, 'model_loaded', False):
                     self._log("   ✅ Using shared inpainting instance", "info")
-                    try:
-                        lock = getattr(self, '_inpaint_lock', None)
-                    except Exception:
-                        lock = None
+                    # Always use lock for shared instances to prevent RAM spikes
+                    lock = getattr(self, '_inpaint_lock', None)
                     if lock:
                         with lock:
                             return shared_inp.inpaint(image, mask)
@@ -9216,10 +9219,8 @@ class MangaTranslator:
                         # Check if model is loaded
                         if getattr(retry_inp, 'model_loaded', False):
                             self._log(f"   ✅ Model loaded successfully on retry attempt {attempt_num}", "info")
-                            try:
-                                lock = getattr(self, '_inpaint_lock', None)
-                            except Exception:
-                                lock = None
+                            # Use lock for retry path (likely using shared instance)
+                            lock = getattr(self, '_inpaint_lock', None)
                             if lock:
                                 with lock:
                                     return retry_inp.inpaint(image, mask)
@@ -9237,10 +9238,8 @@ class MangaTranslator:
                                     )
                                     if loaded_ok and getattr(retry_inp, 'model_loaded', False):
                                         self._log(f"   ✅ Direct load successful on attempt {attempt_num}", "info")
-                                        try:
-                                            lock = getattr(self, '_inpaint_lock', None)
-                                        except Exception:
-                                            lock = None
+                                        # Use lock for retry path (likely using shared instance)
+                                        lock = getattr(self, '_inpaint_lock', None)
                                         if lock:
                                             with lock:
                                                 return retry_inp.inpaint(image, mask)
