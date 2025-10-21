@@ -10123,7 +10123,9 @@ class MangaTranslator:
             overlays = []
             if render_parallel and len(adjusted_regions) > 1:
                 from concurrent.futures import ThreadPoolExecutor, as_completed
-                workers = max(1, min(max_workers, len(adjusted_regions)))
+                import multiprocessing as mp
+                workers = max(1, min(max_workers, len(adjusted_regions), mp.cpu_count()))
+                self._log(f"  🚀 Parallel rendering: {workers} threads for {len(adjusted_regions)} regions (GIL-limited)", "info")
                 with ThreadPoolExecutor(max_workers=workers) as ex:
                     fut_to_idx = {ex.submit(_render_one, r, i): i for i, r in enumerate(adjusted_regions) if r.translated_text}
                     # Collect in order
@@ -10132,7 +10134,8 @@ class MangaTranslator:
                         i = fut_to_idx[fut]
                         try:
                             temp[i] = fut.result()
-                        except Exception:
+                        except Exception as e:
+                            self._log(f"  ⚠️ Region {i} render failed: {e}", "warning")
                             temp[i] = None
                     overlays = [temp.get(i) for i in range(len(adjusted_regions))]
             else:
