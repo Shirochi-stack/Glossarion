@@ -6660,22 +6660,20 @@ def _fallback_single_save(self, region_index: int):
         # Use thread pool executor for background processing
         def render_task():
             try:
-                # ⚡ FAST PATH: Try compositor first, fallback to full render
-                if _fast_update_single_region(self, region_index):
-                    print(f"[FAST] ⚡ Used fast compositor path")
-                    return True
-                else:
-                    print(f"[FAST] Compositor cache miss, using full render")
-                    _update_single_text_overlay(self, region_index, trans_text)
+                # Update the single text overlay
+                _update_single_text_overlay(self, region_index, trans_text)
                 
                 print(f"[FALLBACK] Region {region_index} saved successfully - calling source refresh directly")
-                # Call directly - the function itself schedules QTimers on main thread
+                # Call directly - the function itself schedules appropriate refresh
                 try:
                     _schedule_source_refresh(self)
                 except Exception as e:
                     print(f"[FALLBACK] Source refresh call failed: {e}")
                 return True
-            except Exception:
+            except Exception as e:
+                print(f"[FALLBACK] Render task failed: {e}")
+                import traceback
+                traceback.print_exc()
                 return False
             finally:
                 self._auto_save_in_progress = False
