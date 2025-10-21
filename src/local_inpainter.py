@@ -821,11 +821,6 @@ class LocalInpainter:
         self._mp_pending[call_id] = local_q
         # Send task
         self._mp_task_q.put(payload)
-        # CRITICAL: Clear payload reference after sending to reduce memory footprint
-        try:
-            del payload
-        except Exception:
-            pass
         # Wait for response
         try:
             resp = local_q.get(timeout=max(0.1, float(timeout)))
@@ -872,31 +867,16 @@ class LocalInpainter:
         if not self.model_loaded:
             self._log("No model loaded (worker)", "error")
             return image
-        resp = None
-        result = None
         try:
             resp = self._mp_call({'type': 'inpaint', 'image': image, 'mask': mask, 'refinement': refinement, 'iterations': iterations}, 'inpaint_result', timeout=600.0)
             if resp.get('success') and resp.get('result') is not None:
-                result = resp['result']
-                return result
+                return resp['result']
             else:
                 self._log(f"Worker inpaint failed: {resp.get('error')}", "error")
                 return image
         except Exception as e:
             logger.error(f"Worker inpaint exception: {e}")
             return image
-        finally:
-            # CRITICAL: Clean up response dict to free serialized arrays from queue
-            try:
-                del resp
-            except Exception:
-                pass
-            # Force garbage collection on main process side to free queue buffers
-            try:
-                import gc
-                gc.collect()
-            except Exception:
-                pass
 
     def _load_config(self):
         try:
@@ -2688,186 +2668,171 @@ class LocalInpainter:
                 # Handle fixed-size models (resize instead of padding)
                 if hasattr(self, 'onnx_fixed_size') and self.onnx_fixed_size:
                     fixed_h, fixed_w = self.onnx_fixed_size
-                    image_resized = None
-                    mask_resized = None
-                    img_np = None
-                    mask_np = None
-                    ort_inputs = None
-                    ort_outputs = None
-                    output = None
-                    raw_output = None
-                    try:
-                        # Resize to fixed size
-                        image_resized = cv2.resize(image_rgb, (fixed_w, fixed_h), interpolation=cv2.INTER_LANCZOS4)
-                        mask_resized = cv2.resize(mask, (fixed_w, fixed_h), interpolation=cv2.INTER_NEAREST)
-                        
-                        # Prepare inputs based on model type
-                        if is_carve_model:
-                            # Carve model expects normalized input [0, 1] range
-                            logger.debug("Using Carve model normalization [0, 1]")
-                            img_np = image_resized.astype(np.float32) / 255.0
-                            mask_np = mask_resized.astype(np.float32) / 255.0
-                            mask_np = (mask_np > 0.5) * 1.0  # Binary mask
-                        elif self.current_method == 'aot' or 'aot' in str(self.current_method).lower():
-                            # AOT normalization: [-1, 1] range for image
-                            logger.debug("Using AOT model normalization [-1, 1] for image, [0, 1] for mask")
-                            img_np = (image_resized.astype(np.float32) / 127.5) - 1.0
-                            mask_np = mask_resized.astype(np.float32) / 255.0
-                            mask_np = (mask_np > 0.5) * 1.0  # Binary mask
-                            img_np = img_np * (1 - mask_np[:, :, np.newaxis])  # Mask out regions
-                        elif 'anime' in str(self.current_method).lower():
-                            # Anime/Manga LaMa normalization: [0, 1] range with optional input masking for stability
-                            logger.debug("Using Anime/Manga LaMa normalization [0, 1] with input masking")
-                            img_np = image_resized.astype(np.float32) / 255.0
-                            mask_np = mask_resized.astype(np.float32) / 255.0
-                            mask_np = (mask_np > 0.5) * 1.0  # Binary mask
-                            # CRITICAL: Mask out input regions for better text region stability
-                            # This helps the model focus on generating content rather than being influenced by text artifacts
-                            img_np = img_np * (1 - mask_np[:, :, np.newaxis])
-                        else:
-                            # Standard LaMa normalization: [0, 1] range
-                            logger.debug("Using standard LaMa normalization [0, 1]")
-                            img_np = image_resized.astype(np.float32) / 255.0
-                            mask_np = mask_resized.astype(np.float32) / 255.0
-                            mask_np = (mask_np > 0) * 1.0
-                        
-                        # Convert to NCHW format
-                        img_np = img_np.transpose(2, 0, 1)[np.newaxis, ...]
-                        mask_np = mask_np[np.newaxis, np.newaxis, ...]
-                        
-                        # Run ONNX inference
-                        ort_inputs = {
-                            self.onnx_input_names[0]: img_np.astype(np.float32),
-                            self.onnx_input_names[1]: mask_np.astype(np.float32)
-                        }
-                        
-                        ort_outputs = self.onnx_session.run(self.onnx_output_names, ort_inputs)
-                        output = ort_outputs[0]
-                        
-                        # Post-process output based on model type
-                        if is_carve_model:
-                            # CRITICAL: Carve model outputs values ALREADY in [0, 255] range!
-                            # DO NOT multiply by 255 or apply any scaling
-                            logger.debug("Carve model output is already in [0, 255] range")
-                            raw_output = output[0].transpose(1, 2, 0)
-                            logger.debug(f"Carve output stats: min={raw_output.min():.3f}, max={raw_output.max():.3f}, mean={raw_output.mean():.3f}")
-                            result = raw_output  # Just transpose, no scaling
-                        elif self.current_method == 'aot' or 'aot' in str(self.current_method).lower():
-                            # AOT: [-1, 1] to [0, 255]
-                            result = ((output[0].transpose(1, 2, 0) + 1.0) * 127.5)
-                        else:
-                            # Standard: [0, 1] to [0, 255]
-                            result = output[0].transpose(1, 2, 0) * 255
-                        
-                        result = np.clip(np.round(result), 0, 255).astype(np.uint8)
-                        # CRITICAL: Convert RGB (model output) back to BGR (OpenCV expected)
-                        result = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
-                        
-                        # Resize back to original size
-                        result = cv2.resize(result, (orig_w, orig_h), interpolation=cv2.INTER_LANCZOS4)
-                        self._log_inpaint_diag('onnx-fixed', result, mask)
-                    finally:
-                        # CRITICAL: Explicitly free ONNX outputs and arrays to prevent RAM leak
-                        del raw_output
-                        del output
-                        del ort_outputs
-                        del ort_inputs
-                        del mask_np
-                        del img_np
-                        del mask_resized
-                        del image_resized
+                    # Resize to fixed size
+                    image_resized = cv2.resize(image_rgb, (fixed_w, fixed_h), interpolation=cv2.INTER_LANCZOS4)
+                    mask_resized = cv2.resize(mask, (fixed_w, fixed_h), interpolation=cv2.INTER_NEAREST)
+                    
+                    # Prepare inputs based on model type
+                    if is_carve_model:
+                        # Carve model expects normalized input [0, 1] range
+                        logger.debug("Using Carve model normalization [0, 1]")
+                        img_np = image_resized.astype(np.float32) / 255.0
+                        mask_np = mask_resized.astype(np.float32) / 255.0
+                        mask_np = (mask_np > 0.5) * 1.0  # Binary mask
+                    elif self.current_method == 'aot' or 'aot' in str(self.current_method).lower():
+                        # AOT normalization: [-1, 1] range for image
+                        logger.debug("Using AOT model normalization [-1, 1] for image, [0, 1] for mask")
+                        img_np = (image_resized.astype(np.float32) / 127.5) - 1.0
+                        mask_np = mask_resized.astype(np.float32) / 255.0
+                        mask_np = (mask_np > 0.5) * 1.0  # Binary mask
+                        img_np = img_np * (1 - mask_np[:, :, np.newaxis])  # Mask out regions
+                    elif 'anime' in str(self.current_method).lower():
+                        # Anime/Manga LaMa normalization: [0, 1] range with optional input masking for stability
+                        logger.debug("Using Anime/Manga LaMa normalization [0, 1] with input masking")
+                        img_np = image_resized.astype(np.float32) / 255.0
+                        mask_np = mask_resized.astype(np.float32) / 255.0
+                        mask_np = (mask_np > 0.5) * 1.0  # Binary mask
+                        # CRITICAL: Mask out input regions for better text region stability
+                        # This helps the model focus on generating content rather than being influenced by text artifacts
+                        img_np = img_np * (1 - mask_np[:, :, np.newaxis])
+                    else:
+                        # Standard LaMa normalization: [0, 1] range
+                        logger.debug("Using standard LaMa normalization [0, 1]")
+                        img_np = image_resized.astype(np.float32) / 255.0
+                        mask_np = mask_resized.astype(np.float32) / 255.0
+                        mask_np = (mask_np > 0) * 1.0
+                    
+                    # Convert to NCHW format
+                    img_np = img_np.transpose(2, 0, 1)[np.newaxis, ...]
+                    mask_np = mask_np[np.newaxis, np.newaxis, ...]
+                    
+                    # Run ONNX inference
+                    ort_inputs = {
+                        self.onnx_input_names[0]: img_np.astype(np.float32),
+                        self.onnx_input_names[1]: mask_np.astype(np.float32)
+                    }
+                    
+                    ort_outputs = self.onnx_session.run(self.onnx_output_names, ort_inputs)
+                    output = ort_outputs[0]
+                    
+                    # Post-process output based on model type
+                    if is_carve_model:
+                        # CRITICAL: Carve model outputs values ALREADY in [0, 255] range!
+                        # DO NOT multiply by 255 or apply any scaling
+                        logger.debug("Carve model output is already in [0, 255] range")
+                        raw_output = output[0].transpose(1, 2, 0)
+                        logger.debug(f"Carve output stats: min={raw_output.min():.3f}, max={raw_output.max():.3f}, mean={raw_output.mean():.3f}")
+                        result = raw_output  # Just transpose, no scaling
+                    elif self.current_method == 'aot' or 'aot' in str(self.current_method).lower():
+                        # AOT: [-1, 1] to [0, 255]
+                        result = ((output[0].transpose(1, 2, 0) + 1.0) * 127.5)
+                    else:
+                        # Standard: [0, 1] to [0, 255]
+                        result = output[0].transpose(1, 2, 0) * 255
+                    
+                    result = np.clip(np.round(result), 0, 255).astype(np.uint8)
+                    # CRITICAL: Convert RGB (model output) back to BGR (OpenCV expected)
+                    result = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
+                    
+                    # Resize back to original size
+                    result = cv2.resize(result, (orig_w, orig_h), interpolation=cv2.INTER_LANCZOS4)
+                    self._log_inpaint_diag('onnx-fixed', result, mask)
                     
                 else:
                     # Variable-size models (use padding)
-                    image_padded = None
-                    mask_padded = None
-                    img_np = None
-                    mask_np = None
-                    ort_inputs = None
-                    ort_outputs = None
-                    output = None
-                    raw_output = None
+                    image_padded, padding = self.pad_img_to_modulo(image_rgb, self.pad_mod)
+                    mask_padded, _ = self.pad_img_to_modulo(mask, self.pad_mod)
+                    
+                    # Prepare inputs based on model type
+                    if is_carve_model:
+                        # Carve model normalization [0, 1]
+                        logger.debug("Using Carve model normalization [0, 1]")
+                        img_np = image_padded.astype(np.float32) / 255.0
+                        mask_np = mask_padded.astype(np.float32) / 255.0
+                        mask_np = (mask_np > 0.5) * 1.0
+                    elif self.current_method == 'aot' or 'aot' in str(self.current_method).lower():
+                        # AOT normalization: [-1, 1] for image
+                        logger.debug("Using AOT model normalization [-1, 1] for image, [0, 1] for mask")
+                        img_np = (image_padded.astype(np.float32) / 127.5) - 1.0
+                        mask_np = mask_padded.astype(np.float32) / 255.0
+                        mask_np = (mask_np > 0.5) * 1.0
+                        img_np = img_np * (1 - mask_np[:, :, np.newaxis])  # Mask out regions
+                    elif 'anime' in str(self.current_method).lower():
+                        # Anime/Manga LaMa normalization: [0, 1] range with optional input masking for stability
+                        logger.debug("Using Anime/Manga LaMa normalization [0, 1] with input masking")
+                        img_np = image_padded.astype(np.float32) / 255.0
+                        mask_np = mask_padded.astype(np.float32) / 255.0
+                        mask_np = (mask_np > 0.5) * 1.0  # Binary mask
+                        # CRITICAL: Mask out input regions for better text region stability
+                        # This helps the model focus on generating content rather than being influenced by text artifacts
+                        img_np = img_np * (1 - mask_np[:, :, np.newaxis])
+                    else:
+                        # Standard LaMa normalization: [0, 1]
+                        logger.debug("Using standard LaMa normalization [0, 1]")
+                        img_np = image_padded.astype(np.float32) / 255.0
+                        mask_np = mask_padded.astype(np.float32) / 255.0
+                        mask_np = (mask_np > 0) * 1.0
+                    
+                    # Convert to NCHW format
+                    img_np = img_np.transpose(2, 0, 1)[np.newaxis, ...]
+                    mask_np = mask_np[np.newaxis, np.newaxis, ...]
+                    
+                    # Check for stop before inference
+                    if self._check_stop():
+                        self._log("⏹️ ONNX inference stopped by user", "warning")
+                        return image
+                    
+                    # Run ONNX inference
+                    ort_inputs = {
+                        self.onnx_input_names[0]: img_np.astype(np.float32),
+                        self.onnx_input_names[1]: mask_np.astype(np.float32)
+                    }
+                    
+                    ort_outputs = self.onnx_session.run(self.onnx_output_names, ort_inputs)
+                    output = ort_outputs[0]
+                    
+                    # Post-process output
+                    if is_carve_model:
+                        # CRITICAL: Carve model outputs values ALREADY in [0, 255] range!
+                        logger.debug("Carve model output is already in [0, 255] range")
+                        raw_output = output[0].transpose(1, 2, 0)
+                        logger.debug(f"Carve output stats: min={raw_output.min():.3f}, max={raw_output.max():.3f}, mean={raw_output.mean():.3f}")
+                        result = raw_output  # Just transpose, no scaling
+                    elif self.current_method == 'aot' or 'aot' in str(self.current_method).lower():
+                        result = ((output[0].transpose(1, 2, 0) + 1.0) * 127.5)
+                    else:
+                        result = output[0].transpose(1, 2, 0) * 255
+                    
+                    result = np.clip(np.round(result), 0, 255).astype(np.uint8)
+                    # CRITICAL: Convert RGB (model output) back to BGR (OpenCV expected)
+                    result = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
+                    
+                    # Remove padding
+                    result = self.remove_padding(result, padding)
+                    self._log_inpaint_diag('onnx-padded', result, mask)
+                    
+                    # MEMORY CLEANUP: Clear intermediate arrays
                     try:
-                        image_padded, padding = self.pad_img_to_modulo(image_rgb, self.pad_mod)
-                        mask_padded, _ = self.pad_img_to_modulo(mask, self.pad_mod)
-                        
-                        # Prepare inputs based on model type
-                        if is_carve_model:
-                            # Carve model normalization [0, 1]
-                            logger.debug("Using Carve model normalization [0, 1]")
-                            img_np = image_padded.astype(np.float32) / 255.0
-                            mask_np = mask_padded.astype(np.float32) / 255.0
-                            mask_np = (mask_np > 0.5) * 1.0
-                        elif self.current_method == 'aot' or 'aot' in str(self.current_method).lower():
-                            # AOT normalization: [-1, 1] for image
-                            logger.debug("Using AOT model normalization [-1, 1] for image, [0, 1] for mask")
-                            img_np = (image_padded.astype(np.float32) / 127.5) - 1.0
-                            mask_np = mask_padded.astype(np.float32) / 255.0
-                            mask_np = (mask_np > 0.5) * 1.0
-                            img_np = img_np * (1 - mask_np[:, :, np.newaxis])  # Mask out regions
-                        elif 'anime' in str(self.current_method).lower():
-                            # Anime/Manga LaMa normalization: [0, 1] range with optional input masking for stability
-                            logger.debug("Using Anime/Manga LaMa normalization [0, 1] with input masking")
-                            img_np = image_padded.astype(np.float32) / 255.0
-                            mask_np = mask_padded.astype(np.float32) / 255.0
-                            mask_np = (mask_np > 0.5) * 1.0  # Binary mask
-                            # CRITICAL: Mask out input regions for better text region stability
-                            # This helps the model focus on generating content rather than being influenced by text artifacts
-                            img_np = img_np * (1 - mask_np[:, :, np.newaxis])
-                        else:
-                            # Standard LaMa normalization: [0, 1]
-                            logger.debug("Using standard LaMa normalization [0, 1]")
-                            img_np = image_padded.astype(np.float32) / 255.0
-                            mask_np = mask_padded.astype(np.float32) / 255.0
-                            mask_np = (mask_np > 0) * 1.0
-                        
-                        # Convert to NCHW format
-                        img_np = img_np.transpose(2, 0, 1)[np.newaxis, ...]
-                        mask_np = mask_np[np.newaxis, np.newaxis, ...]
-                        
-                        # Check for stop before inference
-                        if self._check_stop():
-                            self._log("⏹️ ONNX inference stopped by user", "warning")
-                            return image
-                        
-                        # Run ONNX inference
-                        ort_inputs = {
-                            self.onnx_input_names[0]: img_np.astype(np.float32),
-                            self.onnx_input_names[1]: mask_np.astype(np.float32)
-                        }
-                        
-                        ort_outputs = self.onnx_session.run(self.onnx_output_names, ort_inputs)
-                        output = ort_outputs[0]
-                        
-                        # Post-process output
-                        if is_carve_model:
-                            # CRITICAL: Carve model outputs values ALREADY in [0, 255] range!
-                            logger.debug("Carve model output is already in [0, 255] range")
-                            raw_output = output[0].transpose(1, 2, 0)
-                            logger.debug(f"Carve output stats: min={raw_output.min():.3f}, max={raw_output.max():.3f}, mean={raw_output.mean():.3f}")
-                            result = raw_output  # Just transpose, no scaling
-                        elif self.current_method == 'aot' or 'aot' in str(self.current_method).lower():
-                            result = ((output[0].transpose(1, 2, 0) + 1.0) * 127.5)
-                        else:
-                            result = output[0].transpose(1, 2, 0) * 255
-                        
-                        result = np.clip(np.round(result), 0, 255).astype(np.uint8)
-                        # CRITICAL: Convert RGB (model output) back to BGR (OpenCV expected)
-                        result = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
-                        
-                        # Remove padding
-                        result = self.remove_padding(result, padding)
-                        self._log_inpaint_diag('onnx-padded', result, mask)
-                    finally:
-                        # CRITICAL: Explicitly free ONNX outputs and arrays to prevent RAM leak
-                        del raw_output
-                        del output
-                        del ort_outputs
-                        del ort_inputs
-                        del mask_np
-                        del img_np
-                        del mask_padded
-                        del image_padded
+                        if 'image_rgb' in locals():
+                            del image_rgb
+                        if 'image_padded' in locals():
+                            del image_padded
+                        if 'mask_padded' in locals():
+                            del mask_padded
+                        if 'img_np' in locals():
+                            del img_np
+                        if 'mask_np' in locals():
+                            del mask_np
+                        if 'ort_inputs' in locals():
+                            del ort_inputs
+                        if 'ort_outputs' in locals():
+                            del ort_outputs
+                        if 'output' in locals():
+                            del output
+                        if 'raw_output' in locals():
+                            del raw_output
+                    except Exception:
+                        pass
                     
             elif self.is_jit_model:
                 # JIT model processing
@@ -3351,9 +3316,6 @@ class _LocalInpainterWorker(mp.Process):
                 except Exception:
                     pass
             elif t == 'inpaint':
-                img = None
-                m = None
-                res = None
                 try:
                     img = task.get('image')
                     m = task.get('mask')
@@ -3362,41 +3324,6 @@ class _LocalInpainterWorker(mp.Process):
                 except Exception as e:
                     try:
                         self.result_q.put({'type': 'inpaint_result', 'id': task_id, 'success': False, 'error': str(e)})
-                    except Exception:
-                        pass
-                finally:
-                    # CRITICAL: Explicitly free large arrays to prevent 800MB RAM spike in worker
-                    try:
-                        del res
-                    except Exception:
-                        pass
-                    try:
-                        del m
-                    except Exception:
-                        pass
-                    try:
-                        del img
-                    except Exception:
-                        pass
-                    try:
-                        del task
-                    except Exception:
-                        pass
-                    # Force garbage collection after each inpaint to return memory to OS
-                    try:
-                        import gc
-                        gc.collect()
-                        # If ONNX session exists, try to clear any internal caches
-                        if hasattr(core, 'onnx_session') and core.onnx_session is not None:
-                            # ONNX Runtime doesn't have explicit cache clear, but gc should handle it
-                            pass
-                        # Clear CUDA cache if available
-                        if TORCH_AVAILABLE and torch is not None:
-                            try:
-                                if torch.cuda.is_available():
-                                    torch.cuda.empty_cache()
-                            except Exception:
-                                pass
                     except Exception:
                         pass
             else:

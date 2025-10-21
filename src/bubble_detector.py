@@ -955,11 +955,6 @@ class BubbleDetector:
         
         confidence = confidence or self.default_confidence
         
-        pil_image = None
-        image_rgb = None
-        inputs = None
-        outputs = None
-        target_sizes = None
         try:
             # Load image
             if image_path:
@@ -1160,37 +1155,6 @@ class BubbleDetector:
             if return_all_bubbles:
                 return []
             return {'bubbles': [], 'text_bubbles': [], 'text_free': []}
-        finally:
-            # Explicitly free tensors and PIL image to help with memory management
-            try:
-                del target_sizes
-            except Exception:
-                pass
-            try:
-                del outputs
-            except Exception:
-                pass
-            try:
-                del inputs
-            except Exception:
-                pass
-            try:
-                if pil_image is not None:
-                    pil_image.close()
-            except Exception:
-                pass
-            try:
-                del image_rgb
-            except Exception:
-                pass
-            # Best-effort cleanup
-            try:
-                import gc
-                gc.collect()
-                if TORCH_AVAILABLE and torch is not None and torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except Exception:
-                pass
     
     def detect_all_text_regions(self, image_path: str = None, image: np.ndarray = None) -> List[Tuple[int, int, int, int]]:
         """
@@ -1214,71 +1178,54 @@ class BubbleDetector:
     def _detect_with_onnx(self, image: np.ndarray, confidence: float, 
                          iou_threshold: float, max_detections: int) -> List[Tuple[int, int, int, int]]:
         """Run detection using ONNX model."""
-        img_resized = None
-        img_norm = None
-        img_transposed = None
-        img_batch = None
-        outputs = None
-        predictions = None
-        try:
-            # Preprocess image
-            img_size = 640  # Standard YOLOv8 input size
-            img_resized = cv2.resize(image, (img_size, img_size))
-            img_norm = img_resized.astype(np.float32) / 255.0
-            img_transposed = np.transpose(img_norm, (2, 0, 1))
-            img_batch = np.expand_dims(img_transposed, axis=0)
-            
-            # Run inference
-            input_name = self.onnx_session.get_inputs()[0].name
-            outputs = self.onnx_session.run(None, {input_name: img_batch})
-            
-            # Process outputs (YOLOv8 format)
-            predictions = outputs[0][0]  # Remove batch dimension
-            
-            # Filter by confidence and apply NMS
-            bubbles = []
-            boxes = []
-            scores = []
-            
-            for pred in predictions.T:  # Transpose to get predictions per detection
-                if len(pred) >= 5:
-                    x_center, y_center, width, height, obj_conf = pred[:5]
+        # Preprocess image
+        img_size = 640  # Standard YOLOv8 input size
+        img_resized = cv2.resize(image, (img_size, img_size))
+        img_norm = img_resized.astype(np.float32) / 255.0
+        img_transposed = np.transpose(img_norm, (2, 0, 1))
+        img_batch = np.expand_dims(img_transposed, axis=0)
+        
+        # Run inference
+        input_name = self.onnx_session.get_inputs()[0].name
+        outputs = self.onnx_session.run(None, {input_name: img_batch})
+        
+        # Process outputs (YOLOv8 format)
+        predictions = outputs[0][0]  # Remove batch dimension
+        
+        # Filter by confidence and apply NMS
+        bubbles = []
+        boxes = []
+        scores = []
+        
+        for pred in predictions.T:  # Transpose to get predictions per detection
+            if len(pred) >= 5:
+                x_center, y_center, width, height, obj_conf = pred[:5]
+                
+                if obj_conf >= confidence:
+                    # Convert to corner coordinates
+                    x1 = x_center - width / 2
+                    y1 = y_center - height / 2
                     
-                    if obj_conf >= confidence:
-                        # Convert to corner coordinates
-                        x1 = x_center - width / 2
-                        y1 = y_center - height / 2
-                        
-                        # Scale to original image size
-                        h, w = image.shape[:2]
-                        x1 = int(x1 * w / img_size)
-                        y1 = int(y1 * h / img_size)
-                        width = int(width * w / img_size)
-                        height = int(height * h / img_size)
-                        
-                        boxes.append([x1, y1, x1 + width, y1 + height])
-                        scores.append(float(obj_conf))
-            
-            # Apply NMS
-            if boxes:
-                indices = cv2.dnn.NMSBoxes(boxes, scores, confidence, iou_threshold)
-                if len(indices) > 0:
-                    indices = indices.flatten()[:max_detections]
-                    for i in indices:
-                        x1, y1, x2, y2 = boxes[i]
-                        bubbles.append((x1, y1, x2 - x1, y2 - y1))
-            
-            return bubbles
-        finally:
-            # CRITICAL: Explicitly free ONNX outputs and intermediate arrays to prevent RAM leak
-            del predictions
-            del outputs
-            del img_batch
-            del img_transposed
-            del img_norm
-            del img_resized
-            import gc
-            gc.collect()
+                    # Scale to original image size
+                    h, w = image.shape[:2]
+                    x1 = int(x1 * w / img_size)
+                    y1 = int(y1 * h / img_size)
+                    width = int(width * w / img_size)
+                    height = int(height * h / img_size)
+                    
+                    boxes.append([x1, y1, x1 + width, y1 + height])
+                    scores.append(float(obj_conf))
+        
+        # Apply NMS
+        if boxes:
+            indices = cv2.dnn.NMSBoxes(boxes, scores, confidence, iou_threshold)
+            if len(indices) > 0:
+                indices = indices.flatten()[:max_detections]
+                for i in indices:
+                    x1, y1, x2, y2 = boxes[i]
+                    bubbles.append((x1, y1, x2 - x1, y2 - y1))
+        
+        return bubbles
     
     def _detect_with_torchscript(self, image: np.ndarray, confidence: float,
                                  iou_threshold: float, max_detections: int) -> List[Tuple[int, int, int, int]]:
