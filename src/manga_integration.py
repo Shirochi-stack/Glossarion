@@ -21145,6 +21145,9 @@ class MangaTranslationTab(QObject):
     def _stop_translation(self):
         """Stop the translation process"""
         if self.is_running:
+            # CRITICAL: Set is_running to False IMMEDIATELY so button works correctly on next click
+            self.is_running = False
+            
             # Set local stop flag first for immediate response
             self.stop_flag.set()
             
