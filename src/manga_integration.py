@@ -727,7 +727,63 @@ class SavePositionWorker(QObject):
                 result_success = cv2.imwrite(output_path, rendered_image_array)
                 result_path = output_path if result_success else None
             
-            sys.__stdout__.write(f"[WORKER] Render completed: {result_path}\n")
+            # CRITICAL: Clean up heavy objects to prevent RAM leak
+            # Delete large arrays first
+            del base_image_array
+            del rendered_image_array
+            
+            # CRITICAL: Clean up LocalInpainter instances BEFORE translator cleanup
+            # These are the main source of RAM leaks (100-500MB each)
+            try:
+                # Clean up thread-local inpainters
+                if hasattr(translator, '_thread_local'):
+                    tl = translator._thread_local
+                    if hasattr(tl, 'local_inpainters') and isinstance(tl.local_inpainters, dict):
+                        for key, inp in list(tl.local_inpainters.items()):
+                            if inp:
+                                try:
+                                    # Unload model and free CUDA memory
+                                    if hasattr(inp, 'unload'):
+                                        inp.unload()
+                                    # Delete the instance
+                                    del tl.local_inpainters[key]
+                                except Exception:
+                                    pass
+                        tl.local_inpainters.clear()
+                    sys.__stdout__.write(f"[WORKER] Cleaned up thread-local inpainters\n")
+                    sys.__stdout__.flush()
+                
+                # Also clean up any singleton inpainter reference
+                if hasattr(translator, 'local_inpainter') and translator.local_inpainter:
+                    translator.local_inpainter = None
+                if hasattr(translator, 'inpainter') and translator.inpainter:
+                    translator.inpainter = None
+            except Exception as e:
+                sys.__stdout__.write(f"[WORKER] Error cleaning inpainters: {e}\n")
+                sys.__stdout__.flush()
+            
+            # Clean up translator and its components
+            try:
+                if hasattr(translator, 'clear_internal_state'):
+                    translator.clear_internal_state()
+                del translator
+            except Exception:
+                pass
+            
+            # Clean up UnifiedClient
+            try:
+                del unified_client
+            except Exception:
+                pass
+            
+            # Force garbage collection to free memory immediately
+            try:
+                import gc
+                gc.collect()
+            except Exception:
+                pass
+            
+            sys.__stdout__.write(f"[WORKER] Render completed and cleaned up: {result_path}\n")
             sys.__stdout__.flush()
             return result_path is not None
             
@@ -982,6 +1038,10 @@ class MangaTranslationTab(QObject):
         
         # Install event filter for F11 fullscreen toggle
         self._install_fullscreen_handler()
+        
+        # Connect dialog close event to cleanup
+        if self.dialog:
+            self.dialog.finished.connect(self.cleanup)
     
     def _is_stop_requested(self) -> bool:
         """Check if stop has been requested using multiple sources"""
@@ -1003,6 +1063,30 @@ class MangaTranslationTab(QObject):
         """Reset all global cancellation flags for new translation"""
         # Reset local class flag
         self.set_global_cancellation(False)
+    
+    def cleanup(self):
+        """Cleanup method called when dialog closes - prevents RAM leaks"""
+        try:
+            print("[CLEANUP] Starting MangaTranslationTab cleanup...")
+            
+            # Shutdown parallel save system and its ThreadPoolExecutor
+            if hasattr(self, '_parallel_save_system') and self._parallel_save_system:
+                print("[CLEANUP] Shutting down parallel save system...")
+                self._parallel_save_system.shutdown()
+                self._parallel_save_system = None
+            
+            # Flush image state manager
+            if hasattr(self, 'image_state_manager'):
+                print("[CLEANUP] Flushing image state manager...")
+                self.image_state_manager.flush()
+            
+            # Force garbage collection
+            import gc
+            gc.collect()
+            print("[CLEANUP] Cleanup completed")
+            
+        except Exception as e:
+            print(f"[CLEANUP] Error during cleanup: {e}")
 
     def set_use_circle_shapes(self, enabled: bool):
         """Enable/disable circle mode for ROI shapes across detect/clean/recognize/translate."""
@@ -7519,11 +7603,12 @@ class MangaTranslationTab(QObject):
         
         def load_in_background():
             """Background thread for model loading"""
-            from local_inpainter import LocalInpainter
-            
             try:
-                test_inpainter = LocalInpainter()
-                success = test_inpainter.load_model_with_retry(method, model_path, force_reload=True)
+                # Use the shared inpainter from pool instead of creating new instance
+                test_inpainter = self._get_or_create_shared_inpainter(method, model_path)
+                if not test_inpainter:
+                    raise Exception("Failed to get shared inpainter from pool")
+                success = True  # Already loaded by _get_or_create_shared_inpainter
                 print(f"DEBUG: Model loading completed, success={success}")
                 load_result['success'] = success
             except Exception as e:
@@ -7640,8 +7725,9 @@ class MangaTranslationTab(QObject):
         
         try:
             from local_inpainter import LocalInpainter
-            inp = LocalInpainter()
-            model_path = inp.get_cached_model_path(model_type)
+            # Temporarily create instance just to check cache (doesn't load model)
+            temp_inp = LocalInpainter()
+            model_path = temp_inp.get_cached_model_path(model_type)
             
             # Update status labels before download
             if not (model_path and os.path.exists(model_path)):
@@ -7664,7 +7750,7 @@ class MangaTranslationTab(QObject):
                         pass
                 
                 try:
-                    model_path = inp.download_jit_model(model_type)
+                    model_path = temp_inp.download_jit_model(model_type)
                 except Exception as e:
                     if hasattr(self, 'local_model_status_label'):
                         self.local_model_status_label.setText(f"Download failed: {str(e)}")
@@ -9778,9 +9864,6 @@ class MangaTranslationTab(QObject):
                 # Use local inpainter with the same method as manga_translator
                 self._log(f"🖼️ Using local inpainter: {local_model}", "info")
                 
-                # Create local inpainter
-                inpainter = LocalInpainter()
-                
                 # Get model path from config (same way as manga_translator)
                 model_path = self.main_gui.config.get(f'manga_{local_model}_model_path', '')
                 
@@ -9788,32 +9871,26 @@ class MangaTranslationTab(QObject):
                 resolved_model_path = model_path
                 if not resolved_model_path or not os.path.exists(resolved_model_path):
                     try:
+                        from local_inpainter import LocalInpainter
                         self._log(f"📥 Downloading {local_model} model...", "info")
-                        resolved_model_path = inpainter.download_jit_model(local_model)
+                        temp_inp = LocalInpainter()
+                        resolved_model_path = temp_inp.download_jit_model(local_model)
                     except Exception as e:
                         self._log(f"⚠️ Model download failed: {e}", "warning")
                         resolved_model_path = None
                 
-                # Load the model using the same method as manga_translator
+                # Use shared inpainter from pool
                 if resolved_model_path and os.path.exists(resolved_model_path):
-                    try:
-                        self._log(f"📥 Loading {local_model} model from: {os.path.basename(resolved_model_path)}", "info")
-                        # Use load_model_with_retry like manga_translator does
-                        success = inpainter.load_model_with_retry(local_model, resolved_model_path, force_reload=False)
-                        if not success:
-                            self._log(f"❌ Failed to load model with retry", "error")
-                            self.update_queue.put(('clean_button_restore', None))
-                            return
-                    except Exception as e:
-                        self._log(f"❌ Model loading error: {str(e)}", "error")
+                    self._log(f"🎨 Using shared inpainter from pool: {os.path.basename(resolved_model_path)}", "info")
+                    inpainter = self._get_or_create_shared_inpainter(local_model, resolved_model_path)
+                    if not inpainter:
+                        self._log(f"❌ Failed to get shared inpainter", "error")
                         self.update_queue.put(('clean_button_restore', None))
                         return
                 else:
                     self._log(f"❌ No valid model path for {local_model}", "error")
                     self.update_queue.put(('clean_button_restore', None))
                     return
-                
-                # Run inpainting with custom iterations if available
                 # Get custom iteration values from rectangles
                 custom_iterations = self._get_custom_iterations_for_regions(filtered_regions)
                 
@@ -10237,8 +10314,8 @@ class MangaTranslationTab(QObject):
                     try:
                         from local_inpainter import LocalInpainter
                         print(f"[INPAINT_SYNC] Downloading {local_model} model...")
-                        temp_inpainter = LocalInpainter()
-                        resolved_model_path = temp_inpainter.download_jit_model(local_model)
+                        temp_inp = LocalInpainter()
+                        resolved_model_path = temp_inp.download_jit_model(local_model)
                     except Exception as e:
                         print(f"[INPAINT_SYNC] Model download failed: {e}")
                         resolved_model_path = None
@@ -12661,45 +12738,52 @@ class MangaTranslationTab(QObject):
             self._log(f"❌ Failed to start rectangle cleaning: {str(e)}", "error")
     
     def _get_or_create_shared_inpainter(self, method: str, model_path: str):
-        """Get or create shared inpainter instance, reusing if same method/path"""
+        """Get or create a LocalInpainter via MangaTranslator's shared pool (with reuse).
+        Prefer checking out a spare or using the shared instance; avoid new loads when possible.
+        """
         try:
-            from local_inpainter import LocalInpainter
             import os
+            # Normalize model_path to match pool keys used by MangaTranslator
+            if model_path:
+                try:
+                    model_path = os.path.abspath(os.path.normpath(model_path))
+                except Exception:
+                    pass
             
-            # Check if we already have a loaded inpainter for this method/path
-            if (self._shared_inpainter is not None and 
-                self._shared_inpainter_method == method and 
-                self._shared_inpainter_path == model_path and
-                hasattr(self._shared_inpainter, 'model_loaded') and 
-                self._shared_inpainter.model_loaded):
-                print(f"[SHARED_INPAINTER] Reusing loaded {method} model: {os.path.basename(model_path)}")
-                return self._shared_inpainter
+            from manga_translator import MangaTranslator
+            # If we already have a translator, delegate to its pool-aware method
+            if hasattr(self, 'translator') and self.translator:
+                return self.translator._get_or_init_shared_local_inpainter(method, model_path, force_reload=False)
             
-            # Need to create or reload inpainter
-            print(f"[SHARED_INPAINTER] Creating/loading {method} inpainter: {os.path.basename(model_path)}")
+            # Otherwise, create a lightweight translator to initialize/access the pool
+            try:
+                ocr_config = self._get_ocr_config()
+            except Exception:
+                ocr_config = {}
+            try:
+                from unified_api_client import UnifiedClient
+                api_key = self.main_gui.config.get('api_key', '') or 'dummy'
+                model = self.main_gui.config.get('model', 'gpt-4o-mini')
+                uc = UnifiedClient(model=model, api_key=api_key)
+            except Exception:
+                uc = None
             
-            # Create new inpainter instance if needed
-            if self._shared_inpainter is None:
-                self._shared_inpainter = LocalInpainter()
-                print(f"[SHARED_INPAINTER] Created new LocalInpainter instance")
+            # Fallback logging callback that prints to stdout if _log is unavailable
+            def _cb(msg, level='info'):
+                try:
+                    if hasattr(self, '_log'):
+                        self._log(msg, level)
+                    else:
+                        print(f"[GUI] {level.upper()}: {msg}")
+                except Exception:
+                    pass
             
-            # Load the model
-            success = self._shared_inpainter.load_model_with_retry(method, model_path, force_reload=False)
-            if not success:
-                print(f"[SHARED_INPAINTER] Failed to load {method} model")
-                return None
-            
-            # Update tracking variables
-            self._shared_inpainter_method = method
-            self._shared_inpainter_path = model_path
-            
-            print(f"[SHARED_INPAINTER] Successfully loaded {method} model: {os.path.basename(model_path)}")
-            return self._shared_inpainter
-            
+            mt = MangaTranslator(ocr_config=ocr_config, unified_client=uc, main_gui=self.main_gui, log_callback=_cb)
+            return mt._get_or_init_shared_local_inpainter(method, model_path, force_reload=False)
         except Exception as e:
-            print(f"[SHARED_INPAINTER] Error creating/loading inpainter: {e}")
+            print(f"[SHARED_INPAINTER] Pool access error: {e}")
             import traceback
-            print(f"[SHARED_INPAINTER] Traceback: {traceback.format_exc()}")
+            print(traceback.format_exc())
             return None
     
     def _preload_shared_inpainter(self):
@@ -14659,9 +14743,12 @@ class MangaTranslationTab(QObject):
                 def shutdown(self):
                     """Shutdown the parallel processing system."""
                     try:
-                        self.executor.shutdown(wait=False)
-                        print(f"[PARALLEL] Parallel save system shutdown")
-                    except Exception:
+                        print(f"[PARALLEL] Shutting down executor (waiting for tasks to complete)...")
+                        # Wait for tasks to complete with short timeout
+                        self.executor.shutdown(wait=True, cancel_futures=True)
+                        print(f"[PARALLEL] Parallel save system shutdown completed")
+                    except Exception as e:
+                        print(f"[PARALLEL] Error during shutdown: {e}")
                         pass
             
             self._parallel_save_system = ParallelSaveSystem(self)
@@ -16184,7 +16271,7 @@ class MangaTranslationTab(QObject):
                         # Always hide text overlays (keep them hidden)
                         try:
                             group.setVisible(False)
-                            print(f"[DEBUG] Hiding overlay for region {region_index} - text overlays kept hidden")
+                            #print(f"[DEBUG] Hiding overlay for region {region_index} - text overlays kept hidden")
                         except Exception as hide_err:
                             print(f"[DEBUG] Error setting overlay visibility: {hide_err}")
                         
@@ -16494,7 +16581,7 @@ class MangaTranslationTab(QObject):
             available_width = safe_width - (padding * 2)
             available_height = safe_height - (padding * 2)
             
-            print(f"[DEBUG] Bubble: ({w}x{h}) -> Safe area: ({safe_width}x{safe_height}) -> Available: ({available_width}x{available_height}), margin={margin_factor:.2f}")
+            #print(f"[DEBUG] Bubble: ({w}x{h}) -> Safe area: ({safe_width}x{safe_height}) -> Available: ({available_width}x{available_height}), margin={margin_factor:.2f}")
             
             if available_width <= 0 or available_height <= 0:
                 return None, 0
@@ -16679,7 +16766,7 @@ class MangaTranslationTab(QObject):
                         text_item.setCacheMode(_QGI.CacheMode.DeviceCoordinateCache)
                     except Exception:
                         pass
-                    print(f"[DEBUG] Applied shadow effect: color={shadow_color.name()}, offset=({settings.get('shadow_offset_x', 1)},{settings.get('shadow_offset_y', 1)}), blur={settings.get('shadow_blur', 2)}")
+                    #print(f"[DEBUG] Applied shadow effect: color={shadow_color.name()}, offset=({settings.get('shadow_offset_x', 1)},{settings.get('shadow_offset_y', 1)}), blur={settings.get('shadow_blur', 2)}")
                 except Exception as shadow_err:
                     print(f"[DEBUG] Error applying shadow: {shadow_err}")
             
@@ -16812,7 +16899,7 @@ class MangaTranslationTab(QObject):
             text_x = safe_x + padding
             text_y = safe_y + max(0, (safe_h - text_h) / 2)
             
-            print(f"[DEBUG] Enhanced text positioning: bbox=({x},{y},{w},{h}) safe=({safe_x},{safe_y},{safe_w},{safe_h}) text=({text_w:.0f}x{text_h:.0f}) pos=({text_x:.0f},{text_y:.0f})")
+            #print(f"[DEBUG] Enhanced text positioning: bbox=({x},{y},{w},{h}) safe=({safe_x},{safe_y},{safe_w},{safe_h}) text=({text_w:.0f}x{text_h:.0f}) pos=({text_x:.0f},{text_y:.0f})")
             
             text_item.setPos(text_x, text_y)
             text_item.setZValue(11)  # Above background
@@ -18777,7 +18864,7 @@ class MangaTranslationTab(QObject):
                         # Add or replace overlay for just this region
                         try:
                             self._add_text_overlay_for_region(region_index, original_text, translation_result, bbox)
-                            self._log(f"✅ Added text overlay for region {region_index}", "success")
+                            #self._log(f"✅ Added text overlay for region {region_index}", "success")
                         except Exception as overlay_err:
                             self._log(f"⚠️ Failed to add overlay: {overlay_err}", "warning")
                         
@@ -20106,13 +20193,13 @@ class MangaTranslationTab(QObject):
         # Value is now read directly from checkbox in PySide6
         
         # Log the applied rendering and inpainting settings
-        self._log(f"Applied rendering settings:", "info")
-        self._log(f"  Background: {self.bg_style_value} @ {int(self.bg_opacity_value/255*100)}% opacity", "info")
+        #self._log(f"Applied rendering settings:", "info")
+        #self._log(f"  Background: {self.bg_style_value} @ {int(self.bg_opacity_value/255*100)}% opacity", "info")
         import os
-        self._log(f"  Font: {os.path.basename(self.selected_font_path) if self.selected_font_path else 'Default'}", "info")
-        self._log(f"  Minimum Font Size: {self.auto_min_size_value}pt", "info")
-        self._log(f"  Maximum Font Size: {self.max_font_size_value}pt", "info")
-        self._log(f"  Strict Text Wrapping: {'Enabled (force fit)' if self.strict_text_wrapping_value else 'Disabled (allow overflow)'}", "info")
+       #self._log(f"  Font: {os.path.basename(self.selected_font_path) if self.selected_font_path else 'Default'}", "info")
+       #self._log(f"  Minimum Font Size: {self.auto_min_size_value}pt", "info")
+       #self._log(f"  Maximum Font Size: {self.max_font_size_value}pt", "info")
+       #self._log(f"  Strict Text Wrapping: {'Enabled (force fit)' if self.strict_text_wrapping_value else 'Disabled (allow overflow)'}", "info")
         if self.font_size_mode_value == 'multiplier':
             self._log(f"  Font Size: Dynamic multiplier ({self.font_size_multiplier_value:.1f}x)", "info")
             if hasattr(self, 'constrain_to_bubble_value'):
@@ -20121,8 +20208,8 @@ class MangaTranslationTab(QObject):
         else:
             size_text = f"{self.font_size_value}pt" if self.font_size_value > 0 else "Auto"
             self._log(f"  Font Size: Fixed ({size_text})", "info")
-        self._log(f"  Text Color: RGB({text_color[0]}, {text_color[1]}, {text_color[2]})", "info")
-        self._log(f"  Shadow: {'Enabled' if self.shadow_enabled_value else 'Disabled'}", "info")
+        #self._log(f"  Text Color: RGB({text_color[0]}, {text_color[1]}, {text_color[2]})", "info")
+        #self._log(f"  Shadow: {'Enabled' if self.shadow_enabled_value else 'Disabled'}", "info")
         try:
             self._log(f"  Free-text-only BG opacity: {'Enabled' if getattr(self, 'free_text_only_bg_opacity_value', False) else 'Disabled'}", "info")
         except Exception:
