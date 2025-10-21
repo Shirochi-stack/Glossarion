@@ -25,7 +25,8 @@ class ONNXCppBackend:
         """Load the C++ shared library"""
         # Try to find the library
         possible_names = [
-            'onnx_inpainter.dll',  # Windows
+            'onnx_inpainter.dll',  # Windows (MSVC)
+            'libonnx_inpainter.dll',  # Windows (MinGW)
             'libonnx_inpainter.so',  # Linux
             'libonnx_inpainter.dylib',  # Mac
         ]

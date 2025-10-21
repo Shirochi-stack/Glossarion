@@ -862,10 +862,14 @@ class LocalInpainter:
             # Mirror minimal state for compatibility
             self.model_loaded = ok
             self.use_onnx = bool(resp.get('use_onnx', False))
+            self.use_onnx_cpp = bool(resp.get('use_onnx_cpp', False))
             try:
                 self.current_method = resp.get('current_method') or method
             except Exception:
                 self.current_method = method
+            # Log if worker is using C++ backend
+            if self.use_onnx_cpp:
+                logger.info("✅ Worker process using C++ ONNX backend (2x faster)")
             return ok
         except Exception as e:
             logger.error(f"Worker load_model failed: {e}")
@@ -3383,7 +3387,15 @@ class _LocalInpainterWorker(mp.Process):
                 except Exception as e:
                     err = str(e)
                 try:
-                    self.result_q.put({'type': 'load_model_done', 'id': task_id, 'success': bool(ok), 'use_onnx': bool(getattr(core, 'use_onnx', False)), 'current_method': getattr(core, 'current_method', None), 'error': err})
+                    self.result_q.put({
+                        'type': 'load_model_done',
+                        'id': task_id,
+                        'success': bool(ok),
+                        'use_onnx': bool(getattr(core, 'use_onnx', False)),
+                        'use_onnx_cpp': bool(getattr(core, 'use_onnx_cpp', False)),
+                        'current_method': getattr(core, 'current_method', None),
+                        'error': err
+                    })
                 except Exception:
                     pass
             elif t == 'inpaint':
