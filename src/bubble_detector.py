@@ -24,8 +24,11 @@ if IS_FROZEN:
     # In frozen environment, set proper paths for ML libraries
     MEIPASS = sys._MEIPASS
     os.environ['TORCH_HOME'] = MEIPASS
-    os.environ['TRANSFORMERS_CACHE'] = os.path.join(MEIPASS, 'transformers')
-    os.environ['HF_HOME'] = os.path.join(MEIPASS, 'huggingface')
+    # Use HF_HOME instead of deprecated TRANSFORMERS_CACHE (v5+ compatibility)
+    hf_cache_dir = os.path.join(MEIPASS, 'huggingface')
+    os.environ['HF_HOME'] = hf_cache_dir
+    # Also set transformers cache to same location for backward compatibility
+    os.environ['TRANSFORMERS_CACHE'] = os.path.join(hf_cache_dir, 'transformers')
     logger.info(f"Running in frozen environment: {MEIPASS}")
 
 # Modified import checks for frozen environment
