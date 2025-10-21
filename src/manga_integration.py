@@ -5887,6 +5887,15 @@ class MangaTranslationTab(QObject):
             except Exception:
                 pass
             
+            # CRITICAL: Invalidate cached MangaTranslator instance to force fresh settings on next render
+            # This ensures font algorithm and auto_fit_style changes take effect immediately
+            try:
+                if hasattr(self, '_manga_translator'):
+                    self._manga_translator = None
+                    print("[SETTINGS] Cleared cached _manga_translator to apply new font settings")
+            except Exception as e:
+                print(f"[SETTINGS] Failed to clear _manga_translator: {e}")
+            
             # Continue with other settings
             self.main_gui.config['manga_font_path'] = self.selected_font_path
             
