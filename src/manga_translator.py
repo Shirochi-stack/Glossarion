@@ -711,7 +711,7 @@ class MangaTranslator:
                 
                 cls._singleton_refs = 0
     
-    def __init__(self, ocr_config: dict, unified_client, main_gui, log_callback=None):
+    def __init__(self, ocr_config: dict, unified_client, main_gui, log_callback=None, skip_inpainter_init: bool = False):
         """Initialize with OCR configuration and API client from main GUI
         
         Args:
@@ -722,6 +722,7 @@ class MangaTranslator:
                     'azure_key': str (if azure),
                     'azure_endpoint': str (if azure)
                 }
+            skip_inpainter_init: If True, skip automatic inpainter initialization (for pool access only)
         """
         # CRITICAL: Set thread limits FIRST before any heavy library operations
         # This must happen before cv2, torch, numpy operations
@@ -751,6 +752,9 @@ class MangaTranslator:
         # Set up logging first
         self.log_callback = log_callback
         self.main_gui = main_gui
+        
+        # Store init flags
+        self._skip_inpainter_init = skip_inpainter_init
         
         # Initialize batch_mode early so _log can check it
         try:
@@ -1239,7 +1243,8 @@ class MangaTranslator:
         # Note: self.manga_settings is a property that reads fresh from config
 
         # Initialize local inpainter if configured (respects singleton mode)
-        if self.manga_settings.get('inpainting', {}).get('method') == 'local':
+        # Skip if skip_inpainter_init=True (e.g., when creating temp instance for pool access)
+        if not skip_inpainter_init and self.manga_settings.get('inpainting', {}).get('method') == 'local':
             if self.use_singleton_models:
                 self._initialize_singleton_local_inpainter()
             else:
@@ -12736,23 +12741,18 @@ class MangaTranslator:
             ocr_settings = self.manga_settings.get('ocr', {}) if hasattr(self, 'manga_settings') else {}
             if ocr_settings.get('bubble_detection_enabled', False):
                 loaded, det = self._is_bubble_detector_loaded(ocr_settings)
-                det_name = 'YOLO' if det == 'yolo' else ('RT-DETR' if det == 'rtdetr' else 'RTEDR_onnx')
                 if loaded:
-                    self._log("🤖 Using bubble detector (already loaded)", "info")
-                else:
-                    self._log("🤖 Bubble detector will load on first use", "debug")
+                    self._log("🤖 Bubble detector ready", "info")
         except Exception:
             pass
-        try:
-            loaded, local_method = self._is_local_inpainter_loaded()
-            if local_method:
-                label = local_method.upper()
-                if loaded:
-                    self._log("🎨 Using local inpainter (already loaded)", "info")
-                else:
-                    self._log("🎨 Local inpainter will load on first use", "debug")
-        except Exception:
-            pass
+        # Skip inpainting status logging for rendering-only instances (created with skip_inpainter_init=True)
+        if not getattr(self, '_skip_inpainter_init', False):
+            try:
+                loaded, local_method = self._is_local_inpainter_loaded()
+                if loaded and local_method:
+                    self._log("🎨 Local inpainter ready", "info")
+            except Exception:
+                pass
 
     def process_image(self, image_path: str, output_path: Optional[str] = None, 
                      batch_index: int = None, batch_total: int = None) -> Dict[str, Any]:

@@ -681,7 +681,8 @@ class SavePositionWorker(QObject):
                 ocr_config=ocr_config,
                 unified_client=unified_client,
                 main_gui=self.manga_integration.main_gui,
-                log_callback=safe_log_callback
+                log_callback=safe_log_callback,
+                skip_inpainter_init=True  # Rendering-only, no inpainting needed
             )
             
             # Load the base image for rendering
@@ -11399,7 +11400,8 @@ class MangaTranslationTab(QObject):
                     ocr_config=ocr_config,
                     unified_client=unified_client,
                     main_gui=self.main_gui,
-                    log_callback=self._log
+                    log_callback=self._log,
+                    skip_inpainter_init=True  # Full page context - translation only, no inpainting
                 )
                 print(f"[DEBUG] Created MangaTranslator instance for full page context")
             
@@ -12772,7 +12774,7 @@ class MangaTranslationTab(QObject):
                 except Exception:
                     pass
             
-            mt = MangaTranslator(ocr_config=ocr_config, unified_client=uc, main_gui=self.main_gui, log_callback=_cb)
+            mt = MangaTranslator(ocr_config=ocr_config, unified_client=uc, main_gui=self.main_gui, log_callback=_cb, skip_inpainter_init=True)
             return mt._get_or_init_shared_local_inpainter(method, model_path, force_reload=False)
         except Exception as e:
             print(f"[SHARED_INPAINTER] Pool access error: {e}")
@@ -15718,7 +15720,8 @@ class MangaTranslationTab(QObject):
                     ocr_config=ocr_config,
                     unified_client=unified_client,
                     main_gui=self.main_gui,
-                    log_callback=self._log
+                    log_callback=self._log,
+                    skip_inpainter_init=True  # Rendering only, no inpainting needed
                 )
                 print(f"[RENDER] MangaTranslator instance created")
             else:
@@ -16627,7 +16630,8 @@ class MangaTranslationTab(QObject):
                             ocr_config=self._get_ocr_config(),
                             unified_client=tr_client,
                             main_gui=self.main_gui,
-                            log_callback=lambda *_: None
+                            log_callback=lambda *_: None,
+                            skip_inpainter_init=True  # Text sizing only, no inpainting needed
                         )
                     tr = self._manga_translator
                     
