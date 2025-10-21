@@ -9951,12 +9951,8 @@ class MangaTranslator:
             i += 1
 
     
-    def render_translated_text(self, image: np.ndarray, regions: List[TextRegion], skip_mask: bool = False) -> np.ndarray:
-        """Enhanced text rendering with customizable backgrounds and styles
-        
-        Args:
-            skip_mask: If True, skip mask creation (5x faster for position-only updates)
-        """
+    def render_translated_text(self, image: np.ndarray, regions: List[TextRegion]) -> np.ndarray:
+        """Enhanced text rendering with customizable backgrounds and styles"""
         self._log(f"\n🎨 Starting ENHANCED text rendering with custom settings:", "info")
         self._log(f"  ✅ Using ENHANCED renderer (not the simple version)", "info")
         self._log(f"  Background: {self.text_bg_style} @ {int(self.text_bg_opacity/255*100)}% opacity", "info")
@@ -9976,21 +9972,15 @@ class MangaTranslator:
         
         # Create text mask to get accurate render boundaries
         # This represents what will actually be inpainted
-        # ⚡ SKIP MASK for position-only updates (5x faster!)
-        if skip_mask:
+        try:
+            text_mask = self.create_text_mask(image, regions)
+            use_mask_for_rendering = True
+            self._log(f"  🎭 Created text mask for accurate render boundaries", "info")
+        except Exception as e:
             text_mask = None
             use_mask_for_rendering = False
-            self._log(f"  ⚡ FAST MODE: Skipped mask creation (5x faster)", "info")
-        else:
-            try:
-                text_mask = self.create_text_mask(image, regions)
-                use_mask_for_rendering = True
-                self._log(f"  🎭 Created text mask for accurate render boundaries", "info")
-            except Exception as e:
-                text_mask = None
-                use_mask_for_rendering = False
-                if not getattr(self, 'concise_logs', False):
-                    self._log(f"  ⚠️ Failed to create mask, using polygon bounds: {e}", "warning")
+            if not getattr(self, 'concise_logs', False):
+                self._log(f"  ⚠️ Failed to create mask, using polygon bounds: {e}", "warning")
         
         # Only adjust overlapping regions if constraining to bubbles
         if self.constrain_to_bubble:
