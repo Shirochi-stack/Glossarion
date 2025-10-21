@@ -10026,7 +10026,8 @@ class MangaTranslator:
                 adv = getattr(self, 'manga_settings', {}).get('advanced', {}) if hasattr(self, 'manga_settings') else {}
             except Exception:
                 adv = {}
-            render_parallel = bool(adv.get('render_parallel', True))
+            # TEMP FIX: Disable parallel rendering until _render_single_region_overlay is updated with proper wrapping
+            render_parallel = False  # bool(adv.get('render_parallel', True))
             max_workers = None
             try:
                 max_workers = int(adv.get('max_workers', 4))
@@ -10073,9 +10074,28 @@ class MangaTranslator:
                     render_x, render_y, render_w, render_h = x, y, w, h
                 
                 # Fit text - use render dimensions for proper sizing
+                # DEBUG: Log which path we're taking
+                print(f"[WRAP_DEBUG] custom_font_size={self.custom_font_size}, font_size_mode={self.font_size_mode}")
+                print(f"[WRAP_DEBUG] render_w={render_w}, render_h={render_h}")
+                print(f"[WRAP_DEBUG] strict_text_wrapping={self.strict_text_wrapping}")
+                print(f"[WRAP_DEBUG] manga_font_size from config={self.main_gui.config.get('manga_font_size', 'NOT SET')}")
+                
                 if self.custom_font_size:
+                    # Use custom font size but STILL validate and wrap properly using _pil_word_wrap
+                    print(f"[WRAP_DEBUG] Using custom_font_size path: {self.custom_font_size}")
+                    font_path = self.selected_font_style or self.font_path
+                    wrapped_text, _ = self._pil_word_wrap(
+                        text=tr_text,
+                        font_path=font_path,
+                        roi_width=render_w,
+                        roi_height=render_h,
+                        init_font_size=self.custom_font_size,
+                        min_font_size=self.custom_font_size,  # Force this size
+                        draw=draw
+                    )
                     font_size = self.custom_font_size
-                    lines = self._wrap_text(tr_text, self._get_font(font_size), render_w, draw)
+                    lines = wrapped_text.split('\n') if wrapped_text else [tr_text]
+                    print(f"[WRAP_DEBUG] After _pil_word_wrap: {len(lines)} lines")
                 elif self.font_size_mode == 'multiplier':
                     # Pass use_as_is=True since render dimensions are already safe area
                     font_size, lines = self._fit_text_to_region(tr_text, render_w, render_h, draw, region, use_as_is=True)
@@ -10309,10 +10329,19 @@ class MangaTranslator:
                 
                 # Find optimal font size - use render dimensions for proper sizing
                 if self.custom_font_size:
+                    # Use custom font size but STILL validate and wrap properly using _pil_word_wrap
+                    font_path = self.selected_font_style or self.font_path
+                    wrapped_text, _ = self._pil_word_wrap(
+                        text=region.translated_text,
+                        font_path=font_path,
+                        roi_width=render_w,
+                        roi_height=render_h,
+                        init_font_size=self.custom_font_size,
+                        min_font_size=self.custom_font_size,  # Force this size
+                        draw=draw
+                    )
                     font_size = self.custom_font_size
-                    lines = self._wrap_text(region.translated_text, 
-                                          self._get_font(font_size), 
-                                          render_w, draw)
+                    lines = wrapped_text.split('\n') if wrapped_text else [region.translated_text]
                 else:
                     # Pass use_as_is=True since render dimensions are already safe area
                     font_size, lines = self._fit_text_to_region(
