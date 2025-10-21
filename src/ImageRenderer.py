@@ -6283,11 +6283,14 @@ def _save_position_async(self, region_index: int):
         # Fallback to single region processing
         _fallback_single_save(self, region_index)
 
-@Slot()
 def _schedule_source_refresh(self):
-    """Schedule source preview refresh on main thread (called from worker threads)."""
+    """Schedule source preview refresh on main thread (called from worker threads).
+    Thread-safe: uses QApplication.instance().postEvent for cross-thread communication.
+    """
     try:
-        from PySide6.QtCore import QTimer
+        from PySide6.QtCore import QTimer, QMetaObject, Qt, QEvent, QObject
+        from PySide6.QtWidgets import QApplication
+        
         def _refresh_source():
             try:
                 ipw = getattr(self, 'image_preview_widget', None)
@@ -6306,11 +6309,19 @@ def _schedule_source_refresh(self):
                 print(f"[REFRESH] Source preview refresh failed: {_e}")
                 import traceback
                 traceback.print_exc()
-        # Schedule TWO refreshes to catch async renders
-        # Aggressive fast timings since immediate preview is already shown
-        print(f"[REFRESH] Scheduling double source refresh at 200ms and 1000ms")
-        QTimer.singleShot(200, _refresh_source)  # Ultra-fast first refresh
-        QTimer.singleShot(1000, _refresh_source)  # Catch full renders
+        
+        # Check if we're on the main thread
+        app = QApplication.instance()
+        if app and app.thread() == QObject().thread():
+            # On main thread - schedule normally
+            print(f"[REFRESH] On main thread - scheduling double source refresh at 200ms and 1000ms")
+            QTimer.singleShot(200, _refresh_source)
+            QTimer.singleShot(1000, _refresh_source)
+        else:
+            # On worker thread - use invokeMethod to marshal to main thread
+            print(f"[REFRESH] On worker thread - using QMetaObject.invokeMethod for thread-safe refresh")
+            QMetaObject.invokeMethod(app, lambda: QTimer.singleShot(200, _refresh_source), Qt.ConnectionType.QueuedConnection)
+            QMetaObject.invokeMethod(app, lambda: QTimer.singleShot(1000, _refresh_source), Qt.ConnectionType.QueuedConnection)
     except Exception as e:
         print(f"[REFRESH] Failed to schedule source refresh: {e}")
         import traceback
@@ -6506,10 +6517,9 @@ def _init_parallel_save_system(self):
                     # If successful, schedule source preview refresh on main thread
                     if success:
                         try:
-                            from PySide6.QtCore import QTimer, QMetaObject, Qt
-                            print(f"[PARALLEL] Region {region_index} saved successfully - scheduling source refresh")
-                            # Schedule refresh on main thread with delay to allow file write to complete
-                            QMetaObject.invokeMethod(self.parent, "_schedule_source_refresh", Qt.ConnectionType.QueuedConnection)
+                            print(f"[PARALLEL] Region {region_index} saved successfully - calling source refresh directly")
+                            # Call directly - already safe to call from worker thread
+                            _schedule_source_refresh(self.parent)
                         except Exception as refresh_err:
                             print(f"[PARALLEL] Failed to schedule source refresh: {refresh_err}")
             
@@ -6645,18 +6655,12 @@ def _fallback_single_save(self, region_index: int):
                     print(f"[FAST] Compositor cache miss, using full render")
                     _update_single_text_overlay(self, region_index, trans_text)
                 
-                print(f"[FALLBACK] Region {region_index} saved successfully - scheduling source refresh")
-                # Schedule source preview refresh on the main thread (match parallel path behavior)
+                print(f"[FALLBACK] Region {region_index} saved successfully - calling source refresh directly")
+                # Call directly - the function itself schedules QTimers on main thread
                 try:
-                    from PySide6.QtCore import QMetaObject, Qt
-                    QMetaObject.invokeMethod(self, "_schedule_source_refresh", Qt.ConnectionType.QueuedConnection)
-                except Exception as e1:
-                    print(f"[FALLBACK] QMetaObject.invokeMethod failed: {e1}, trying direct call")
-                    try:
-                        # Fallback: call directly (safe if already on main thread)
-                        _schedule_source_refresh(self, )
-                    except Exception as e2:
-                        print(f"[FALLBACK] Direct call also failed: {e2}")
+                    _schedule_source_refresh(self)
+                except Exception as e:
+                    print(f"[FALLBACK] Source refresh call failed: {e}")
                 return True
             except Exception:
                 return False
@@ -10019,3 +10023,69 @@ def _process_translate_results(self, results: dict):
         self._log(f"❌ Failed to process translation results: {str(e)}", "error")
 
 
+def _render_with_manga_translator_thread_safe(self, base_image_path, regions, output_path, original_image_path):
+    """Thread-safe rendering using existing translator instance (no heavy initialization)"""
+    try:
+        import sys
+        import cv2
+        import os
+        
+        sys.__stdout__.write(f"[WORKER] Starting render: base={os.path.basename(base_image_path)}\n")
+        sys.__stdout__.write(f"[WORKER] Regions to render: {len(regions)}\n")
+        sys.__stdout__.write(f"[WORKER] Output path: {output_path}\n")
+        sys.__stdout__.flush()
+        
+        # Use existing translator instance from manga_integration (already has loaded models)
+        translator = self.manga_integration.translator
+        if not translator:
+            sys.__stdout__.write("[WORKER] ERROR: No translator instance available\n")
+            sys.__stdout__.flush()
+            return False
+        
+        # Load the base image for rendering
+        base_image_array = cv2.imread(base_image_path)
+        if base_image_array is None:
+            raise ValueError(f"Failed to load base image: {base_image_path}")
+        
+        # Ensure all regions have translated_text set
+        filtered_regions = []
+        for region in regions:
+            if not hasattr(region, 'translated_text') or not region.translated_text:
+                # Fallback to original text if translation missing
+                region.translated_text = region.text
+            filtered_regions.append(region)
+        
+        sys.__stdout__.write(f"[WORKER] Rendering {len(filtered_regions)} regions with translations\n")
+        sys.__stdout__.flush()
+        
+        # Render using the existing translator's render method (thread-safe for rendering)
+        # The translator already has loaded models in the shared pool
+        rendered_image_array = translator.render_translated_text(base_image_array, filtered_regions)
+        
+        # Save the rendered image
+        if output_path:
+            result_success = cv2.imwrite(output_path, rendered_image_array)
+            result_path = output_path if result_success else None
+        else:
+            # Generate output path if not provided
+            base_dir = os.path.dirname(base_image_path)
+            base_name = os.path.splitext(os.path.basename(base_image_path))[0]
+            output_path = os.path.join(base_dir, f"{base_name}_translated.png")
+            result_success = cv2.imwrite(output_path, rendered_image_array)
+            result_path = output_path if result_success else None
+        
+        # Clean up only local resources (images)
+        # DO NOT clean up translator or models - they're shared and reused!
+        del base_image_array
+        del rendered_image_array
+        
+        sys.__stdout__.write(f"[WORKER] Render completed: {result_path}\n")
+        sys.__stdout__.flush()
+        return result_path is not None
+        
+    except Exception as e:
+        sys.__stdout__.write(f"[WORKER] Render failed: {e}\n")
+        sys.__stdout__.flush()
+        import traceback
+        traceback.print_exc()
+        return False

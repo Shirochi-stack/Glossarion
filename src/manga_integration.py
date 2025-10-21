@@ -600,8 +600,9 @@ class SavePositionWorker(QObject):
             
             # Call the heavy rendering method
             # This is the blocking operation that was freezing the GUI
-            result = self._render_with_manga_translator_thread_safe(
-                base_image, regions, output_path, current_image
+            import ImageRenderer
+            result = ImageRenderer._render_with_manga_translator_thread_safe(
+                self.manga_integration, base_image, regions, output_path, current_image
             )
             
             # Find the rendered image path
@@ -633,72 +634,6 @@ class SavePositionWorker(QObject):
             traceback.print_exc()
             self.finished.emit(False, self.region_index, "")
     
-    def _render_with_manga_translator_thread_safe(self, base_image_path, regions, output_path, original_image_path):
-        """Thread-safe rendering using existing translator instance (no heavy initialization)"""
-        try:
-            import sys
-            import cv2
-            import os
-            
-            sys.__stdout__.write(f"[WORKER] Starting render: base={os.path.basename(base_image_path)}\n")
-            sys.__stdout__.write(f"[WORKER] Regions to render: {len(regions)}\n")
-            sys.__stdout__.write(f"[WORKER] Output path: {output_path}\n")
-            sys.__stdout__.flush()
-            
-            # Use existing translator instance from manga_integration (already has loaded models)
-            translator = self.manga_integration.translator
-            if not translator:
-                sys.__stdout__.write("[WORKER] ERROR: No translator instance available\n")
-                sys.__stdout__.flush()
-                return False
-            
-            # Load the base image for rendering
-            base_image_array = cv2.imread(base_image_path)
-            if base_image_array is None:
-                raise ValueError(f"Failed to load base image: {base_image_path}")
-            
-            # Ensure all regions have translated_text set
-            filtered_regions = []
-            for region in regions:
-                if not hasattr(region, 'translated_text') or not region.translated_text:
-                    # Fallback to original text if translation missing
-                    region.translated_text = region.text
-                filtered_regions.append(region)
-            
-            sys.__stdout__.write(f"[WORKER] Rendering {len(filtered_regions)} regions with translations\n")
-            sys.__stdout__.flush()
-            
-            # Render using the existing translator's render method (thread-safe for rendering)
-            # The translator already has loaded models in the shared pool
-            rendered_image_array = translator.render_translated_text(base_image_array, filtered_regions)
-            
-            # Save the rendered image
-            if output_path:
-                result_success = cv2.imwrite(output_path, rendered_image_array)
-                result_path = output_path if result_success else None
-            else:
-                # Generate output path if not provided
-                base_dir = os.path.dirname(base_image_path)
-                base_name = os.path.splitext(os.path.basename(base_image_path))[0]
-                output_path = os.path.join(base_dir, f"{base_name}_translated.png")
-                result_success = cv2.imwrite(output_path, rendered_image_array)
-                result_path = output_path if result_success else None
-            
-            # Clean up only local resources (images)
-            # DO NOT clean up translator or models - they're shared and reused!
-            del base_image_array
-            del rendered_image_array
-            
-            sys.__stdout__.write(f"[WORKER] Render completed: {result_path}\n")
-            sys.__stdout__.flush()
-            return result_path is not None
-            
-        except Exception as e:
-            sys.__stdout__.write(f"[WORKER] Render failed: {e}\n")
-            sys.__stdout__.flush()
-            import traceback
-            traceback.print_exc()
-            return False
 
 class MangaTranslationTab(QObject):
     """GUI interface for manga translation integrated with TranslatorGUI"""
