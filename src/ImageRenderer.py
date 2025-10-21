@@ -4629,6 +4629,57 @@ def _get_or_create_shared_inpainter(self, method: str, model_path: str):
         print(traceback.format_exc())
         return None
 
+def _preload_shared_bubble_detector(self):
+    """Preload the shared bubble detector with current settings if not already loaded"""
+    try:
+        # Get bubble detection settings
+        ocr_settings = self.main_gui.config.get('manga_settings', {}).get('ocr', {})
+        bubble_detection_enabled = ocr_settings.get('bubble_detection_enabled', True)
+        
+        if not bubble_detection_enabled:
+            print(f"[PRELOAD_DETECTOR] Skipping preload - bubble detection is disabled")
+            return
+        
+        # Create a temporary translator to access the detector pool
+        try:
+            ocr_config = _get_ocr_config(self, )
+        except Exception:
+            ocr_config = {}
+        
+        try:
+            from unified_api_client import UnifiedClient
+            api_key = self.main_gui.config.get('api_key', '') or 'dummy'
+            model = self.main_gui.config.get('model', 'gpt-4o-mini')
+            uc = UnifiedClient(model=model, api_key=api_key)
+        except Exception:
+            uc = None
+        
+        def _cb(msg, level='info'):
+            try:
+                if hasattr(self, '_log'):
+                    self._log(msg, level)
+                else:
+                    print(f"[GUI] {level.upper()}: {msg}")
+            except Exception:
+                pass
+        
+        from manga_translator import MangaTranslator
+        mt = MangaTranslator(ocr_config=ocr_config, unified_client=uc, main_gui=self.main_gui, log_callback=_cb, skip_inpainter_init=True)
+        
+        # Preload 1 detector instance
+        print(f"[PRELOAD_DETECTOR] Preloading bubble detector...")
+        created = mt.preload_bubble_detectors(ocr_settings, 1)
+        if created > 0:
+            print(f"[PRELOAD_DETECTOR] Successfully preloaded {created} bubble detector(s)")
+            self._log(f"🎯 Preloaded bubble detector", "info")
+        else:
+            print(f"[PRELOAD_DETECTOR] Bubble detector already loaded or preload skipped")
+        
+    except Exception as e:
+        print(f"[PRELOAD_DETECTOR] Error during preload: {e}")
+        import traceback
+        print(f"[PRELOAD_DETECTOR] Traceback: {traceback.format_exc()}")
+
 def _preload_shared_inpainter(self):
     """Preload the shared inpainter with current settings if not already loaded"""
     try:

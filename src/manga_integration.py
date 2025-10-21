@@ -869,16 +869,19 @@ class MangaTranslationTab(QObject):
         # Now that everything is initialized, allow saving
         self._initializing = False
         
-        # Preload shared inpainter in background to avoid lag on first Clean/Translate click
-        # This spawns the C++ worker process ahead of time so GUI stays responsive
+        # Preload shared models in background to avoid lag on first use
+        # This spawns worker processes/loads models ahead of time so GUI stays responsive
         try:
-            import threading
-            def _bg_preload_inpainter():
+            def _bg_preload_models():
                 try:
+                    # Preload bubble detector first (lighter)
+                    ImageRenderer._preload_shared_bubble_detector(self)
+                    # Then preload inpainter (heavier, C++ worker process)
                     ImageRenderer._preload_shared_inpainter(self)
                 except Exception as e:
-                    print(f"[INIT_PRELOAD] Background inpainter preload failed: {e}")
-            threading.Thread(target=_bg_preload_inpainter, daemon=True).start()
+                    print(f"[INIT_PRELOAD] Background model preload failed: {e}")
+            
+            threading.Thread(target=_bg_preload_models, daemon=True).start()
         except Exception:
             pass
         
