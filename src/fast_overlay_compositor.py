@@ -23,14 +23,7 @@ class FastOverlayCompositor:
         
     def set_base_image(self, image_bgr: np.ndarray):
         """Set the base cleaned image (BGR numpy array)"""
-        try:
-            from image_utils_cpp import convert_rgb_bgr, is_available as cpp_available
-            if cpp_available():
-                self.base_image = Image.fromarray(convert_rgb_bgr(image_bgr))
-            else:
-                self.base_image = Image.fromarray(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB))
-        except Exception:
-            self.base_image = Image.fromarray(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB))
+        self.base_image = Image.fromarray(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB))
         
         self.image_size = self.base_image.size
         logger.info(f"⚡ Set base image: {self.image_size[0]}x{self.image_size[1]}")
@@ -90,15 +83,7 @@ class FastOverlayCompositor:
         # Convert back to BGR
         result_rgb = result.convert('RGB')
         result_array = np.array(result_rgb)
-        
-        try:
-            from image_utils_cpp import convert_rgb_bgr, is_available as cpp_available
-            if cpp_available():
-                return convert_rgb_bgr(result_array)
-            else:
-                return cv2.cvtColor(result_array, cv2.COLOR_RGB2BGR)
-        except Exception:
-            return cv2.cvtColor(result_array, cv2.COLOR_RGB2BGR)
+        return cv2.cvtColor(result_array, cv2.COLOR_RGB2BGR)
     
     def render_single_region_fast(self, region_index: int, text: str, new_position: Tuple[int, int, int, int],
                                   font: ImageFont, text_color: Tuple[int, int, int], 

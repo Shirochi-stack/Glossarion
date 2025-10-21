@@ -22,13 +22,6 @@ import numpy as np
 from bubble_detector import BubbleDetector
 from TransateKRtoEN import send_with_interrupt
 
-# Import ImageRenderer for module-level functions
-try:
-    import ImageRenderer
-except ImportError:
-    ImageRenderer = None
-    print("Warning: ImageRenderer not available")
-
 # Google Cloud Vision imports
 try:
     from google.cloud import vision
@@ -45,6 +38,98 @@ except ImportError:
     print("Warning: HistoryManager not available. Context tracking will be limited.")
 
 logger = logging.getLogger(__name__)
+
+# MODULE-LEVEL RENDER FUNCTION (pickle-able for ProcessPoolExecutor)
+def _render_single_region_overlay(region_data: dict, image_size: tuple, render_settings: dict):
+    """
+    Render a single region overlay as RGBA PIL Image (pickle-able for multiprocessing)
+    
+    Args:
+        region_data: dict with 'text', 'bbox' (x,y,w,h), 'vertices'
+        image_size: (width, height)
+        render_settings: dict with font/color/outline settings
+    
+    Returns:
+        PIL RGBA Image of full size with transparent overlay
+    """
+    try:
+        # Create transparent overlay
+        overlay = Image.new('RGBA', image_size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+        
+        # Extract data
+        text = region_data.get('translated_text', '')
+        if not text:
+            return overlay
+        
+        x, y, w, h = region_data.get('bbox', (0, 0, 100, 100))
+        
+        # Get settings
+        font_size = render_settings.get('font_size', 24)
+        font_path = render_settings.get('font_path')
+        text_color = tuple(render_settings.get('text_color', (102, 0, 0))) + (255,)
+        outline_color = tuple(render_settings.get('outline_color', (255, 255, 255))) + (255,)
+        outline_width = render_settings.get('outline_width', 2)
+        force_caps = render_settings.get('force_caps_lock', False)
+        
+        if force_caps:
+            text = text.upper()
+        
+        # Load font
+        try:
+            if font_path and os.path.exists(font_path):
+                font = ImageFont.truetype(font_path, font_size)
+            else:
+                font = ImageFont.load_default()
+        except Exception:
+            font = ImageFont.load_default()
+        
+        # Simple text wrapping
+        lines = text.split('\n')
+        line_height = int(font_size * 1.2)
+        total_height = len(lines) * line_height
+        start_y = y + (h - total_height) // 2
+        
+        # Render each line
+        for i, line in enumerate(lines):
+            if not line.strip():
+                continue
+            
+            # Get text width
+            try:
+                bbox = draw.textbbox((0, 0), line, font=font)
+                text_width = bbox[2] - bbox[0]
+            except Exception:
+                text_width = len(line) * font_size * 0.6
+            
+            tx = x + (w - text_width) // 2
+            ty = start_y + i * line_height
+            
+            # Clamp to bounds
+            tx = max(0, min(tx, image_size[0] - 10))
+            ty = max(0, min(ty, image_size[1] - 10))
+            
+            # Render with outline using PIL stroke parameter
+            try:
+                draw.text(
+                    (tx, ty), line, font=font,
+                    fill=text_color,
+                    stroke_width=outline_width,
+                    stroke_fill=outline_color
+                )
+            except TypeError:
+                # Fallback for older PIL
+                if outline_width > 0:
+                    for dx in range(-outline_width, outline_width + 1):
+                        for dy in range(-outline_width, outline_width + 1):
+                            if dx != 0 or dy != 0:
+                                draw.text((tx + dx, ty + dy), line, font=font, fill=outline_color)
+                draw.text((tx, ty), line, font=font, fill=text_color)
+        
+        return overlay
+    except Exception as e:
+        print(f"[RENDER] Error rendering region: {e}")
+        return Image.new('RGBA', image_size, (0, 0, 0, 0))
 
 @dataclass
 class TextRegion:
@@ -9446,15 +9531,7 @@ class MangaTranslator:
                         # Convert back to numpy
                         result_pil = PILImage.open(BytesIO(img_response.content))
                         result_rgb = np.array(result_pil)
-                        # Use C++ for fast RGB->BGR conversion
-                        try:
-                            from image_utils_cpp import convert_rgb_bgr, is_available as cpp_available
-                            if cpp_available():
-                                result_bgr = convert_rgb_bgr(result_rgb)
-                            else:
-                                result_bgr = cv2.cvtColor(result_rgb, cv2.COLOR_RGB2BGR)
-                        except Exception:
-                            result_bgr = cv2.cvtColor(result_rgb, cv2.COLOR_RGB2BGR)
+                        result_bgr = cv2.cvtColor(result_rgb, cv2.COLOR_RGB2BGR)
                         
                         self._log("   ✅ Cloud inpainting completed", "success")
                         return result_bgr
@@ -9891,16 +9968,7 @@ class MangaTranslator:
         
         # Convert to PIL for text rendering
         import cv2
-        # Use C++ for fast BGR->RGB conversion (4x faster)
-        try:
-            from image_utils_cpp import convert_rgb_bgr, is_available as cpp_available
-            if cpp_available():
-                image_rgb = convert_rgb_bgr(image)
-                self._log("  ⚡ Using C++ for image conversion (4x faster)", "info")
-            else:
-                image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        except Exception:
-            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         pil_image = Image.fromarray(image_rgb)
         
         # Get image dimensions for boundary checking
@@ -10131,7 +10199,6 @@ class MangaTranslator:
             if render_parallel and len(adjusted_regions) > 1:
                 from concurrent.futures import ProcessPoolExecutor, as_completed
                 import multiprocessing as mp
-                from ImageRenderer import _render_single_region_overlay
                 
                 workers = max(1, min(max_workers, len(adjusted_regions), mp.cpu_count()))
                 self._log(f"  🚀 TRUE PARALLEL: {workers} CPU processes for {len(adjusted_regions)} regions", "info")
@@ -10356,16 +10423,7 @@ class MangaTranslator:
         
         # Convert back to numpy array
         result_rgb = np.array(pil_image)
-        # Use C++ for fast RGB->BGR conversion (4x faster)
-        try:
-            from image_utils_cpp import convert_rgb_bgr, is_available as cpp_available
-            if cpp_available():
-                result = convert_rgb_bgr(result_rgb)
-                self._log(f"  ⚡ Using C++ for final conversion (4x faster)", "info")
-            else:
-                result = cv2.cvtColor(result_rgb, cv2.COLOR_RGB2BGR)
-        except Exception:
-            result = cv2.cvtColor(result_rgb, cv2.COLOR_RGB2BGR)
+        result = cv2.cvtColor(result_rgb, cv2.COLOR_RGB2BGR)
         self._log(f"✅ ENHANCED text rendering complete - rendered {region_count} regions", "info")
         return result
     
@@ -13083,18 +13141,8 @@ class MangaTranslator:
                     import numpy as np
                     pil_image = PILImage.open(image_path)
                     image_rgb = np.array(pil_image)
-                    # Use C++ for fast RGB->BGR conversion (4x faster)
-                    try:
-                        from image_utils_cpp import convert_rgb_bgr, is_available as cpp_available
-                        if cpp_available():
-                            image = convert_rgb_bgr(image_rgb)
-                            self._log(f"   ✅ Successfully loaded with PIL + C++ conversion (4x faster)", "info")
-                        else:
-                            image = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
-                            self._log(f"   ✅ Successfully loaded with PIL", "info")
-                    except Exception:
-                        image = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
-                        self._log(f"   ✅ Successfully loaded with PIL", "info")
+                    image = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+                    self._log(f"   ✅ Successfully loaded with PIL", "info")
             except Exception as e:
                 error_msg = f"Failed to load image: {image_path} - {str(e)}"
                 self._log(f"❌ {error_msg}", "error")
