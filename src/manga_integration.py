@@ -23,6 +23,7 @@ from queue import Queue, Empty
 import logging
 from manga_translator import MangaTranslator, GOOGLE_CLOUD_VISION_AVAILABLE
 from manga_settings_dialog import MangaSettingsDialog
+import ImageRenderer  # Import module-level methods
 
 # Optional: psutil/ctypes helpers to reduce GUI lag by lowering background thread priority
 try:
@@ -3261,8 +3262,8 @@ class MangaTranslationTab(QObject):
         self.image_preview_widget.viewer.manga_integration = self
         
         # Connect image preview workflow signals to translation methods
-        self.image_preview_widget.detect_text_clicked.connect(self._on_detect_text_clicked)
-        self.image_preview_widget.clean_image_clicked.connect(self._on_clean_image_clicked)
+        self.image_preview_widget.detect_text_clicked.connect(lambda: ImageRenderer._on_detect_text_clicked(self))
+        self.image_preview_widget.clean_image_clicked.connect(lambda: ImageRenderer._on_clean_image_clicked(self))
         self.image_preview_widget.recognize_text_clicked.connect(self._on_recognize_text_clicked)
         self.image_preview_widget.translate_text_clicked.connect(self._on_translate_text_clicked)
         self.image_preview_widget.translate_all_clicked.connect(self._on_translate_all_clicked)
@@ -8255,7 +8256,7 @@ class MangaTranslationTab(QObject):
         # Persist current image state before mutating the list
         try:
             if hasattr(self, '_current_image_path') and self._current_image_path:
-                self._persist_current_image_state()
+                ImageRenderer._persist_current_image_state(self)
         except Exception:
             pass
         
@@ -8285,7 +8286,7 @@ class MangaTranslationTab(QObject):
         # Persist current image state before clearing
         try:
             if hasattr(self, '_current_image_path') and self._current_image_path:
-                self._persist_current_image_state()
+                ImageRenderer._persist_current_image_state(self)
         except Exception:
             pass
         
@@ -8303,7 +8304,7 @@ class MangaTranslationTab(QObject):
             
             # PERSIST CURRENT IMAGE STATE before switching
             if hasattr(self, '_current_image_path') and self._current_image_path:
-                self._persist_current_image_state()
+                ImageRenderer._persist_current_image_state(self)
             
             selected_items = self.file_listbox.selectedItems()
             
@@ -8311,7 +8312,7 @@ class MangaTranslationTab(QObject):
                 if hasattr(self, 'image_preview_widget'):
                     self.image_preview_widget.clear()
                 # CLEAR STATE ISOLATION FIX: Clear recognition and translation data when no image is selected
-                self._clear_cross_image_state()
+                ImageRenderer._clear_cross_image_state(self)
                 self._current_image_path = None
                 return
             
@@ -8327,7 +8328,7 @@ class MangaTranslationTab(QObject):
                 self._current_image_path = image_path
                 
                 # CLEAR STATE ISOLATION FIX: Clear recognition and translation data for new image to prevent cross-contamination
-                self._clear_cross_image_state()
+                ImageRenderer._clear_cross_image_state(self)
                 
                 # DEBUG: Log the image loading attempt
                 self._log(f"🖼️ Loading preview: {os.path.basename(image_path)}", "debug")
@@ -8345,7 +8346,7 @@ class MangaTranslationTab(QObject):
                         self.image_preview_widget.load_image(image_path)
                         # After loading, restore any saved rectangles/overlays for this image
                         try:
-                            self._restore_image_state(image_path)
+                            ImageRenderer._restore_image_state(self, image_path)
                         except Exception:
                             pass
                         self._log(f"✅ Preview loaded: {os.path.basename(image_path)}", "debug")
@@ -9120,14 +9121,14 @@ class MangaTranslationTab(QObject):
                     _, results = update
                     # Process detection results and update preview
                     try:
-                        self._process_detect_results(results)
+                        ImageRenderer._process_detect_results(self, results)
                     except Exception as e:
                         self._log(f"❌ Failed to process detection results: {str(e)}", "error")
                 
                 elif update[0] == 'detect_button_restore':
                     # Restore the detect button to its normal state
                     try:
-                        self._restore_detect_button()
+                        ImageRenderer._restore_detect_button(self)
                     except Exception as e:
                         self._log(f"❌ Failed to restore detect button: {str(e)}", "error")
                 
