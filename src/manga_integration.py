@@ -8287,7 +8287,7 @@ class MangaTranslationTab(QObject):
                                 self.image_preview_widget.current_translated_path = None
                         except Exception:
                             pass
-                        # Just load the source image - tabbed view will handle translated output
+                # Just load the source image - tabbed view will handle translated output
                         self.image_preview_widget.load_image(image_path)
                         # After loading, restore any saved rectangles/overlays for this image
                         try:
@@ -8295,6 +8295,19 @@ class MangaTranslationTab(QObject):
                         except Exception:
                             pass
                         self._log(f"✅ Preview loaded: {os.path.basename(image_path)}", "debug")
+                        
+                        # Preload shared inpainter in background thread to avoid lag on Clean/Translate clicks
+                        # This ensures the C++ worker process is spawned ahead of time
+                        try:
+                            import threading
+                            def _bg_preload():
+                                try:
+                                    ImageRenderer._preload_shared_inpainter(self)
+                                except Exception as e:
+                                    print(f"[PRELOAD] Background inpainter preload failed: {e}")
+                            threading.Thread(target=_bg_preload, daemon=True).start()
+                        except Exception:
+                            pass
                     else:
                         self._log(f"❌ Image file not found: {image_path}", "error")
                 else:
