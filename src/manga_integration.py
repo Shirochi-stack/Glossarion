@@ -1374,16 +1374,10 @@ class MangaTranslationTab(QObject):
                             
                             # Load into pool
                             print(f"  🔄 Loading {model_name}...")
-                            inp = LocalInpainter()
-                            
-                            # CRITICAL: Disable worker processes during preload to save RAM
-                            # Workers would load duplicate model copies
-                            inp.use_workers = False
-                            if hasattr(inp, '_stop_workers'):
-                                try:
-                                    inp._stop_workers()
-                                except:
-                                    pass
+                            # Get worker process setting from config
+                            # Note: During preload we always disable workers to save RAM
+                            # since workers would load duplicate model copies
+                            inp = LocalInpainter(enable_worker_process=False)
                             
                             # Ensure model file exists or download it
                             resolved_path = model_path

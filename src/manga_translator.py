@@ -946,6 +946,8 @@ class MangaTranslator:
         # Thread-safe lock for cache operations (critical for parallel panel translation)
         import threading
         self._cache_lock = threading.Lock()
+        # Serialize inpainting calls to avoid concurrent RAM spikes with shared instances
+        self._inpaint_lock = threading.Lock()
         try:
             self.batch_size = int(os.getenv('BATCH_SIZE', '1'))
         except Exception:
@@ -8288,6 +8290,21 @@ class MangaTranslator:
         except Exception as e:
             self._log(f"   Debug logging error: {e}", "debug")
         
+        # Helper to reconcile worker state with current settings
+        def _reconcile_worker(inp):
+            try:
+                disable_worker = bool(self.manga_settings.get('inpainting', {}).get('disable_worker_process', False))
+            except Exception:
+                disable_worker = False
+            try:
+                if inp and disable_worker and getattr(inp, '_mp_enabled', False):
+                    # Stop any existing worker to prevent extra RAM usage
+                    if hasattr(inp, '_stop_worker'):
+                        inp._stop_worker()
+            except Exception:
+                pass
+            return inp
+        
         # FIRST: Try to check out a spare instance if available (for true parallelism)
         # Don't pop it - instead mark it as 'in use' so it stays in memory
         with MangaTranslator._inpaint_pool_lock:
@@ -8309,6 +8326,13 @@ class MangaTranslator:
                     rec['checked_out'] = []
                 checked_out = rec['checked_out']
                 
+                # Ensure any existing spares have their workers stopped if disabled now
+                try:
+                    for _sp in list(spares):
+                        _reconcile_worker(_sp)
+                except Exception:
+                    pass
+                
                 # Look for an available spare (not checked out)
                 for spare in spares:
                     if spare not in checked_out and spare and getattr(spare, 'model_loaded', False):
@@ -8319,7 +8343,7 @@ class MangaTranslator:
                         # Store reference for later return
                         self._checked_out_inpainter = spare
                         self._inpainter_pool_key = key
-                        return spare
+                        return _reconcile_worker(spare)
                 
                 # No available spares - all are checked out
                 if spares:
@@ -8328,14 +8352,14 @@ class MangaTranslator:
         # FALLBACK: Use the shared instance
         rec = MangaTranslator._inpaint_pool.get(key)
         if rec and rec.get('loaded') and rec.get('inpainter'):
-            # Already loaded - do NOT force reload!
-            return rec['inpainter']
+            # Already loaded - ensure worker matches current setting
+            return _reconcile_worker(rec['inpainter'])
         # Create or wait for loader
         with MangaTranslator._inpaint_pool_lock:
             rec = MangaTranslator._inpaint_pool.get(key)
             if rec and rec.get('loaded') and rec.get('inpainter'):
-                # Already loaded - do NOT force reload!
-                return rec['inpainter']
+                # Already loaded - ensure worker matches current setting
+                return _reconcile_worker(rec['inpainter'])
             if not rec:
                 # Register loading record with spares list initialized
                 rec = {'inpainter': None, 'loaded': False, 'event': threading.Event(), 'spares': [], 'checked_out': []}
@@ -8350,7 +8374,15 @@ class MangaTranslator:
         # Loader performs heavy work without holding the lock
         if is_loader:
             try:
-                inp = LocalInpainter()
+                # Get worker process setting from config (default: False = disabled)
+                disable_worker = False
+                try:
+                    disable_worker = bool(
+                        self.manga_settings.get('inpainting', {}).get('disable_worker_process', False)
+                    )
+                except Exception:
+                    pass
+                inp = LocalInpainter(enable_worker_process=not disable_worker)
                 # Apply tiling settings once to the shared instance
                 tiling_settings = self.manga_settings.get('tiling', {})
                 inp.tiling_enabled = tiling_settings.get('enabled', False)
@@ -8403,7 +8435,7 @@ class MangaTranslator:
                     rec['loaded'] = bool(loaded_ok)
                     if 'event' in rec and rec['event']:
                         rec['event'].set()
-                return inp
+                return _reconcile_worker(inp)
             except Exception as e:
                 with MangaTranslator._inpaint_pool_lock:
                     rec = MangaTranslator._inpaint_pool.get(key) or rec
@@ -8447,7 +8479,7 @@ class MangaTranslator:
                             return inp
                     except Exception as e:
                         self._log(f"❌ Failed to load in waiting thread: {e}", "warning")
-                return inp  # Return anyway, inpaint will no-op
+                return _reconcile_worker(inp)  # Return anyway, inpaint will no-op
             else:
                 self._log(f"⚠️ Loader thread failed to create inpainter", "warning")
                 return None
@@ -8555,9 +8587,17 @@ class MangaTranslator:
             return 0
         ctx = " for parallel panels" if int(count) > 1 else ""
         self._log(f"🧰 Preloading {desired} local inpainting instance(s){ctx}", "info")
+        # Get worker process setting from config
+        disable_worker = False
+        try:
+            disable_worker = bool(
+                self.manga_settings.get('inpainting', {}).get('disable_worker_process', False)
+            )
+        except Exception:
+            pass
         for i in range(desired):
             try:
-                inp = LocalInpainter()
+                inp = LocalInpainter(enable_worker_process=not disable_worker)
                 inp.tiling_enabled = tiling_settings.get('enabled', False)
                 inp.tile_size = tiling_settings.get('tile_size', 512)
                 inp.tile_overlap = tiling_settings.get('tile_overlap', 64)
@@ -8673,17 +8713,33 @@ class MangaTranslator:
         resolved_path = model_path
         if not resolved_path or not os.path.exists(resolved_path):
             try:
-                probe_inp = LocalInpainter()
+                # Get worker process setting from config
+                disable_worker = False
+                try:
+                    disable_worker = bool(
+                        self.manga_settings.get('inpainting', {}).get('disable_worker_process', False)
+                    )
+                except Exception:
+                    pass
+                probe_inp = LocalInpainter(enable_worker_process=not disable_worker)
                 resolved_path = probe_inp.download_jit_model(local_method)
             except Exception as e:
                 self._log(f"⚠️ JIT download failed for concurrent preload: {e}", "warning")
                 resolved_path = None
         tiling_settings = self.manga_settings.get('tiling', {}) if hasattr(self, 'manga_settings') else {}
+        # Get worker process setting from config
+        disable_worker = False
+        try:
+            disable_worker = bool(
+                self.manga_settings.get('inpainting', {}).get('disable_worker_process', False)
+            )
+        except Exception:
+            pass
         from concurrent.futures import ThreadPoolExecutor, as_completed
         created = 0
         def _one():
             try:
-                inp = LocalInpainter()
+                inp = LocalInpainter(enable_worker_process=not disable_worker)
                 inp.tiling_enabled = tiling_settings.get('enabled', False)
                 inp.tile_size = tiling_settings.get('tile_size', 512)
                 inp.tile_overlap = tiling_settings.get('tile_overlap', 64)
@@ -9099,14 +9155,30 @@ class MangaTranslator:
         inp = self._get_thread_local_inpainter(local_method, model_path)
         if inp and getattr(inp, 'model_loaded', False):
             self._log("   🧽 Using local inpainting", "info")
-            return inp.inpaint(image, mask)
+            try:
+                lock = getattr(self, '_inpaint_lock', None)
+            except Exception:
+                lock = None
+            if lock:
+                with lock:
+                    return inp.inpaint(image, mask)
+            else:
+                return inp.inpaint(image, mask)
         else:
             # Conservative fallback: try shared instance only; do not attempt risky reloads that can corrupt output
             try:
                 shared_inp = self._get_or_init_shared_local_inpainter(local_method, model_path)
                 if shared_inp and getattr(shared_inp, 'model_loaded', False):
                     self._log("   ✅ Using shared inpainting instance", "info")
-                    return shared_inp.inpaint(image, mask)
+                    try:
+                        lock = getattr(self, '_inpaint_lock', None)
+                    except Exception:
+                        lock = None
+                    if lock:
+                        with lock:
+                            return shared_inp.inpaint(image, mask)
+                    else:
+                        return shared_inp.inpaint(image, mask)
             except Exception:
                 pass
             
@@ -9139,7 +9211,15 @@ class MangaTranslator:
                         # Check if model is loaded
                         if getattr(retry_inp, 'model_loaded', False):
                             self._log(f"   ✅ Model loaded successfully on retry attempt {attempt_num}", "info")
-                            return retry_inp.inpaint(image, mask)
+                            try:
+                                lock = getattr(self, '_inpaint_lock', None)
+                            except Exception:
+                                lock = None
+                            if lock:
+                                with lock:
+                                    return retry_inp.inpaint(image, mask)
+                            else:
+                                return retry_inp.inpaint(image, mask)
                         else:
                             # Model exists but not loaded - try loading it directly
                             self._log(f"   🔧 Model not loaded, attempting direct load...", "info")
@@ -9152,7 +9232,15 @@ class MangaTranslator:
                                     )
                                     if loaded_ok and getattr(retry_inp, 'model_loaded', False):
                                         self._log(f"   ✅ Direct load successful on attempt {attempt_num}", "info")
-                                        return retry_inp.inpaint(image, mask)
+                                        try:
+                                            lock = getattr(self, '_inpaint_lock', None)
+                                        except Exception:
+                                            lock = None
+                                        if lock:
+                                            with lock:
+                                                return retry_inp.inpaint(image, mask)
+                                        else:
+                                            return retry_inp.inpaint(image, mask)
                                     else:
                                         self._log(f"   ⚠️ Direct load returned {loaded_ok}, model_loaded={getattr(retry_inp, 'model_loaded', False)}", "warning")
                                 except Exception as load_err:
@@ -12047,12 +12135,17 @@ class MangaTranslator:
         """Initialize singleton local inpainter instance"""
         with MangaTranslator._singleton_lock:
             was_existing = MangaTranslator._singleton_local_inpainter is not None
+            # Determine desired worker setting
+            try:
+                disable_worker = bool(self.manga_settings.get('inpainting', {}).get('disable_worker_process', False))
+            except Exception:
+                disable_worker = False
             if MangaTranslator._singleton_local_inpainter is None:
                 try:
                     from local_inpainter import LocalInpainter
                     local_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
-                    # LocalInpainter only accepts config_path, not method
-                    MangaTranslator._singleton_local_inpainter = LocalInpainter()
+                    # Respect worker setting when creating singleton
+                    MangaTranslator._singleton_local_inpainter = LocalInpainter(enable_worker_process=not disable_worker)
                     # Now load the model with the specified method
                     if local_method:
                         # Try to load the model
@@ -12079,6 +12172,12 @@ class MangaTranslator:
                     return
             # Use the singleton instance
             self.local_inpainter = MangaTranslator._singleton_local_inpainter
+            # If an old singleton has a worker but setting disables it, stop it
+            try:
+                if disable_worker and getattr(self.local_inpainter, '_mp_enabled', False) and hasattr(self.local_inpainter, '_stop_worker'):
+                    self.local_inpainter._stop_worker()
+            except Exception:
+                pass
             self.inpainter = self.local_inpainter
             MangaTranslator._singleton_refs += 1
             if was_existing:

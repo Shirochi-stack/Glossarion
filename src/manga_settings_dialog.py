@@ -4098,6 +4098,11 @@ class MangaSettingsDialog(QDialog):
         self.enable_cache_checkbox = self._create_styled_checkbox("Enable inpainting cache (speeds up repeated processing)")
         self.enable_cache_checkbox.setChecked(self.settings.get('inpainting', {}).get('enable_cache', True))
         inpaint_perf_layout.addWidget(self.enable_cache_checkbox)
+        
+        # Worker process control
+        self.disable_worker_process_checkbox = self._create_styled_checkbox("Disable local inpainter worker process (may reduce concurrency issues)")
+        self.disable_worker_process_checkbox.setChecked(self.settings.get('inpainting', {}).get('disable_worker_process', False))
+        inpaint_perf_layout.addWidget(self.disable_worker_process_checkbox)
 
         # Max concurrent panels
         panels_frame = QWidget()
@@ -4769,6 +4774,7 @@ class MangaSettingsDialog(QDialog):
                 self.settings['inpainting'] = {}
             self.settings['inpainting']['batch_size'] = self.inpaint_batch_size_spinbox.value()
             self.settings['inpainting']['enable_cache'] = self.enable_cache_checkbox.isChecked()
+            self.settings['inpainting']['disable_worker_process'] = self.disable_worker_process_checkbox.isChecked()
             
             # Save all dilation settings
             self.settings['mask_dilation'] = self.mask_dilation_spinbox.value()

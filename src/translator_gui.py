@@ -9043,6 +9043,8 @@ Important rules:
                 ('MANGA_INPAINT_PASSES', str(self.config.get('manga_inpaint_passes', 2))),
                 ('MANGA_INPAINT_METHOD', str(inpaint.get('method', 'local'))),
                 ('MANGA_LOCAL_INPAINT_METHOD', str(inpaint.get('local_method', 'anime_onnx'))),
+                # New: pass worker process control to environment for downstream components
+                ('MANGA_DISABLE_WORKER_PROCESS', '1' if inpaint.get('disable_worker_process', False) else '0'),
                 ('MANGA_FONT_ALGORITHM', str(font_cfg.get('algorithm', 'smart'))),
                 ('MANGA_PREFER_LARGER', '1' if font_cfg.get('prefer_larger', True) else '0'),
                 ('MANGA_BUBBLE_SIZE_FACTOR', '1' if font_cfg.get('bubble_size_factor', True) else '0'),
