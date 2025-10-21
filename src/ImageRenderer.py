@@ -4796,7 +4796,7 @@ def _add_rectangle_pulse_effect(self, rect_item, region_index, auto_remove=False
         
         # Create pulsing animation using QObject wrapper
         class PulsingRectangle(QObject):
-            def _init__(self, rect_item, parent=None):
+            def __init__(self, rect_item, parent=None):
                 super().__init__(parent)
                 self._rect_item = rect_item
                 self._intensity = 100
@@ -6344,7 +6344,7 @@ def _init_parallel_save_system(self):
         from concurrent.futures import ThreadPoolExecutor
         
         class ParallelSaveSystem:
-            def _init__(self, parent):
+            def __init__(self, parent):
                 self.parent = parent
                 self.pending_tasks = Queue()
                 self.active_tasks = set()  # Track active region indices

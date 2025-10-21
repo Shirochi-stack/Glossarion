@@ -941,8 +941,8 @@ class MangaTranslationTab(QObject):
         self._attach_logging_bridge()
         
         # Connect OCR signals to handlers
-        self.ocr_result_signal.connect(lambda data: ImageRenderer._process_ocr_result(self, data))
-        self.ocr_error_signal.connect(lambda error: ImageRenderer._handle_ocr_error(self, error))
+        self.ocr_result_signal.connect(lambda recognized_texts, rect_item, region_index, bbox, ocr_provider: ImageRenderer._process_ocr_result(self, recognized_texts, rect_item, region_index, bbox, ocr_provider))
+        self.ocr_error_signal.connect(lambda error, rect_item, region_index: ImageRenderer._handle_ocr_error(self, error, rect_item, region_index))
 
         # Start update loop
         self._process_updates()
