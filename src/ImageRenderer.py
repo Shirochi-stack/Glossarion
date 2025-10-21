@@ -826,6 +826,15 @@ def _restore_image_state(self, image_path: str):
                 viewer._scene.addItem(item)
                 viewer.rectangles.append(item)
             print(f"[STATE] Restored {len(state['viewer_rectangles'])} viewer shapes (preferred)")
+            
+            # CRITICAL: Rehydrate text state so OCR/translation data is available in memory
+            ocr_count, trans_count = _rehydrate_text_state_from_persisted(self, image_path)
+            if ocr_count and hasattr(self, '_update_rectangles_with_recognition'):
+                try:
+                    _update_rectangles_with_recognition(self, self._recognized_texts)
+                    print(f"[STATE] Attached OCR tooltips to {ocr_count} rectangles (viewer_rectangles branch)")
+                except Exception:
+                    pass
             used_boxes = True
         
         if not used_boxes and 'detection_regions' in state:
