@@ -189,12 +189,14 @@ class BubbleDetector:
     _rtdetr_onnx_loaded = False
     _rtdetr_onnx_providers = None
     _rtdetr_onnx_model_path = None
-    # Limit concurrent runs to avoid device hangs. Defaults to 2 for better parallelism.
+    # Limit concurrent runs to avoid device hangs.
+    # Defaults: 1 (sequential) normally, or panel_max_workers when parallel panel translation is enabled
     # Can be overridden via env DML_MAX_CONCURRENT or config rtdetr_max_concurrency
+    # This initial value is only used if environment variable is set before any instance is created
     try:
-        _rtdetr_onnx_max_concurrent = int(os.environ.get('DML_MAX_CONCURRENT', '2'))
+        _rtdetr_onnx_max_concurrent = int(os.environ.get('DML_MAX_CONCURRENT', '1'))
     except Exception:
-        _rtdetr_onnx_max_concurrent = 2
+        _rtdetr_onnx_max_concurrent = 1
     _rtdetr_onnx_sema = threading.Semaphore(max(1, _rtdetr_onnx_max_concurrent))
     _rtdetr_onnx_sema_initialized = False
     
@@ -279,13 +281,14 @@ class BubbleDetector:
                     rtdetr_max_conc = 2
             else:
                 # Fall back to OCR-specific setting or environment variable
+                # Default to 1 (sequential) when parallel panels are disabled for stability
                 rtdetr_max_conc = int(ocr_cfg.get('rtdetr_max_concurrency', 0))
                 if rtdetr_max_conc <= 0:
-                    # Check environment variable DML_MAX_CONCURRENT
+                    # Check environment variable DML_MAX_CONCURRENT, default to 1 for safety
                     try:
-                        rtdetr_max_conc = int(os.environ.get('DML_MAX_CONCURRENT', '2'))
+                        rtdetr_max_conc = int(os.environ.get('DML_MAX_CONCURRENT', '1'))
                     except Exception:
-                        rtdetr_max_conc = 2
+                        rtdetr_max_conc = 1
             
             # Update class-level semaphore if not yet initialized or if value changed
             if not BubbleDetector._rtdetr_onnx_sema_initialized or rtdetr_max_conc != BubbleDetector._rtdetr_onnx_max_concurrent:
