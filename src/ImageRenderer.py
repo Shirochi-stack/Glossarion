@@ -6446,7 +6446,7 @@ def _init_parallel_save_system(self):
                                 print(f"[PARALLEL] Started processing region {region_index} (active: {self.processing_count})")
                                 
                                 # Update button state for parallel processing
-                                self.parent._update_parallel_save_button_state(self.processing_count)
+                                _update_parallel_save_button_state(self.parent, self.processing_count)
                         
                         # Submit the actual work to thread pool
                         future = self.executor.submit(self._process_save_task, task)
@@ -6468,13 +6468,13 @@ def _init_parallel_save_system(self):
                     print(f"[PARALLEL] Worker processing region {region_index}")
                     
                     # Get translation text (main thread safe)
-                    trans_text = self.parent._get_translation_text_for_region(region_index)
+                    trans_text = _get_translation_text_for_region(self.parent, region_index)
                     if not trans_text:
                         print(f"[PARALLEL] No translation text for region {region_index}")
                         return False
                     
                     # Process the overlay update
-                    success = self.parent._update_single_text_overlay_parallel(region_index, trans_text)
+                    success = _update_single_text_overlay_parallel(self.parent, region_index, trans_text)
                     
                     end_time = time.time_ns()
                     duration_ms = (end_time - start_time) / 1_000_000  # Convert to milliseconds
@@ -6499,7 +6499,7 @@ def _init_parallel_save_system(self):
                             print(f"[PARALLEL] Finished processing region {region_index} (active: {self.processing_count})")
                             
                             # Update button state
-                            self.parent._update_parallel_save_button_state(self.processing_count)
+                            _update_parallel_save_button_state(self.parent, self.processing_count)
                     
                     # Note: Pulse effect auto-removes after 0.1s via animation finished callback
                     

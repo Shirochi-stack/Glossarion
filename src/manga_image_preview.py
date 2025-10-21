@@ -1326,7 +1326,8 @@ class CompactImageViewer(QGraphicsView):
                 hasattr(self, 'manga_integration') and self.manga_integration):
                 try:
                     print(f"[DELETE] Calling cleanup for blue rectangle region {region_index}")
-                    self.manga_integration._clean_up_deleted_rectangle_overlays(region_index)
+                    import ImageRenderer
+                    ImageRenderer._clean_up_deleted_rectangle_overlays(self.manga_integration, region_index)
                 except Exception as e:
                     print(f"[DELETE] Cleanup failed: {e}")
             else:
@@ -2050,11 +2051,11 @@ class MangaImagePreviewWidget(QWidget):
             # Clear detection state aggressively (both memory and persisted)
             try:
                 if hasattr(self, 'manga_integration') and self.manga_integration:
-                    if hasattr(self.manga_integration, '_clear_detection_state_for_image'):
-                        self.manga_integration._clear_detection_state_for_image(self.current_image_path)
+                    import ImageRenderer
+                    ImageRenderer._clear_detection_state_for_image(self.manga_integration, self.current_image_path)
                     # Clear overlays from scene and persisted offsets/positions
                     try:
-                        self.manga_integration.clear_text_overlays_for_image(self.current_image_path)
+                        ImageRenderer.clear_text_overlays_for_image(self.manga_integration, self.current_image_path)
                     except Exception:
                         pass
                     # Clear in-memory translation and recognition data that causes "Edit Translation" tooltips
@@ -2126,7 +2127,8 @@ class MangaImagePreviewWidget(QWidget):
         try:
             if hasattr(self, 'manga_integration') and self.manga_integration and self.current_image_path:
                 try:
-                    self.manga_integration.clear_text_overlays_for_image(self.current_image_path)
+                    import ImageRenderer
+                    ImageRenderer.clear_text_overlays_for_image(self.manga_integration, self.current_image_path)
                 except Exception:
                     pass
                 # Clear in-memory translation and recognition data that causes "Edit Translation" tooltips
@@ -2358,7 +2360,8 @@ class MangaImagePreviewWidget(QWidget):
             # Attach context menu via integration if available
             try:
                 if hasattr(self, 'manga_integration') and self.manga_integration:
-                    self.manga_integration._add_context_menu_to_rectangle(rect_item, idx)
+                    import ImageRenderer
+                    ImageRenderer._add_context_menu_to_rectangle(self.manga_integration, rect_item, idx)
             except Exception:
                 pass
         except Exception:
@@ -2397,14 +2400,15 @@ class MangaImagePreviewWidget(QWidget):
                     # Use current_image_path (original) for overlay lookup since overlays are mapped to original path
                     overlay_path = getattr(self, 'current_image_path', image_path) or image_path
                     print(f"[LOAD] Preserving text overlays for: {os.path.basename(overlay_path)}")
-                    self.manga_integration.show_text_overlays_for_image(overlay_path)
+                    import ImageRenderer
+                    ImageRenderer.show_text_overlays_for_image(self.manga_integration, overlay_path)
                 else:
                     # Hide existing overlays and clear caches for new image
-                    self.manga_integration.show_text_overlays_for_image(image_path)
+                    import ImageRenderer
+                    ImageRenderer.show_text_overlays_for_image(self.manga_integration, image_path)
                     # STATE ISOLATION FIX: Use centralized state clearing method
                     try:
-                        if hasattr(self.manga_integration, '_clear_cross_image_state'):
-                            self.manga_integration._clear_cross_image_state()
+                        ImageRenderer._clear_cross_image_state(self.manga_integration)
                     except Exception:
                         pass
         except Exception:
@@ -2435,16 +2439,17 @@ class MangaImagePreviewWidget(QWidget):
                     # Normal load - restore full state from persistence
                     print(f"[LOADED] Normal state restoration for: {os.path.basename(self.current_image_path)}")
                     # Restore detection/recognition overlays
-                    self.manga_integration._restore_image_state_overlays_only(self.current_image_path)
+                    import ImageRenderer
+                    ImageRenderer._restore_image_state_overlays_only(self.manga_integration, self.current_image_path)
                     # Attach recognition tooltips/updates
                     if hasattr(self.manga_integration, 'show_recognized_overlays_for_image'):
-                        self.manga_integration.show_recognized_overlays_for_image(self.current_image_path)
+                        ImageRenderer.show_recognized_overlays_for_image(self.manga_integration, self.current_image_path)
                     # Restore translated text overlays using current_image_path (original)
                     # Rebuild overlays with current settings to ensure they match
                     if hasattr(self.manga_integration, '_translated_texts') and self.manga_integration._translated_texts:
-                        self.manga_integration._add_text_overlay_to_viewer(self.manga_integration._translated_texts)
+                        ImageRenderer._add_text_overlay_to_viewer(self.manga_integration, self.manga_integration._translated_texts)
                     else:
-                        self.manga_integration.show_text_overlays_for_image(self.current_image_path)
+                        ImageRenderer.show_text_overlays_for_image(self.manga_integration, self.current_image_path)
                 else:
                     # Preserve mode - don't restore from state, keep current rectangles/overlays
                     print(f"[LOADED] Preserve mode - skipping state restoration for: {os.path.basename(self.current_image_path)}")
@@ -2463,7 +2468,8 @@ class MangaImagePreviewWidget(QWidget):
             # Also clear overlays for current image persistently
             if hasattr(self, 'manga_integration') and self.manga_integration and self.current_image_path:
                 try:
-                    self.manga_integration.clear_text_overlays_for_image(self.current_image_path)
+                    import ImageRenderer
+                    ImageRenderer.clear_text_overlays_for_image(self.manga_integration, self.current_image_path)
                 except Exception:
                     pass
                 try:
@@ -2476,8 +2482,7 @@ class MangaImagePreviewWidget(QWidget):
                     pass
                 # STATE ISOLATION FIX: Clear cross-image state when clearing preview
                 try:
-                    if hasattr(self.manga_integration, '_clear_cross_image_state'):
-                        self.manga_integration._clear_cross_image_state()
+                    ImageRenderer._clear_cross_image_state(self.manga_integration)
                 except Exception:
                     pass
         except Exception:
