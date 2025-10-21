@@ -821,6 +821,11 @@ class LocalInpainter:
         self._mp_pending[call_id] = local_q
         # Send task
         self._mp_task_q.put(payload)
+        # CRITICAL: Clear payload reference after sending to reduce memory footprint
+        try:
+            del payload
+        except Exception:
+            pass
         # Wait for response
         try:
             resp = local_q.get(timeout=max(0.1, float(timeout)))
@@ -867,16 +872,31 @@ class LocalInpainter:
         if not self.model_loaded:
             self._log("No model loaded (worker)", "error")
             return image
+        resp = None
+        result = None
         try:
             resp = self._mp_call({'type': 'inpaint', 'image': image, 'mask': mask, 'refinement': refinement, 'iterations': iterations}, 'inpaint_result', timeout=600.0)
             if resp.get('success') and resp.get('result') is not None:
-                return resp['result']
+                result = resp['result']
+                return result
             else:
                 self._log(f"Worker inpaint failed: {resp.get('error')}", "error")
                 return image
         except Exception as e:
             logger.error(f"Worker inpaint exception: {e}")
             return image
+        finally:
+            # CRITICAL: Clean up response dict to free serialized arrays from queue
+            try:
+                del resp
+            except Exception:
+                pass
+            # Force garbage collection on main process side to free queue buffers
+            try:
+                import gc
+                gc.collect()
+            except Exception:
+                pass
 
     def _load_config(self):
         try:
@@ -3331,6 +3351,9 @@ class _LocalInpainterWorker(mp.Process):
                 except Exception:
                     pass
             elif t == 'inpaint':
+                img = None
+                m = None
+                res = None
                 try:
                     img = task.get('image')
                     m = task.get('mask')
@@ -3339,6 +3362,41 @@ class _LocalInpainterWorker(mp.Process):
                 except Exception as e:
                     try:
                         self.result_q.put({'type': 'inpaint_result', 'id': task_id, 'success': False, 'error': str(e)})
+                    except Exception:
+                        pass
+                finally:
+                    # CRITICAL: Explicitly free large arrays to prevent 800MB RAM spike in worker
+                    try:
+                        del res
+                    except Exception:
+                        pass
+                    try:
+                        del m
+                    except Exception:
+                        pass
+                    try:
+                        del img
+                    except Exception:
+                        pass
+                    try:
+                        del task
+                    except Exception:
+                        pass
+                    # Force garbage collection after each inpaint to return memory to OS
+                    try:
+                        import gc
+                        gc.collect()
+                        # If ONNX session exists, try to clear any internal caches
+                        if hasattr(core, 'onnx_session') and core.onnx_session is not None:
+                            # ONNX Runtime doesn't have explicit cache clear, but gc should handle it
+                            pass
+                        # Clear CUDA cache if available
+                        if TORCH_AVAILABLE and torch is not None:
+                            try:
+                                if torch.cuda.is_available():
+                                    torch.cuda.empty_cache()
+                            except Exception:
+                                pass
                     except Exception:
                         pass
             else:
