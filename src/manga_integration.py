@@ -968,6 +968,20 @@ class MangaTranslationTab(QObject):
         """Reset all global cancellation flags for new translation"""
         # Reset local class flag
         self.set_global_cancellation(False)
+        
+        # CRITICAL: Also reset MangaTranslator class flag
+        try:
+            from manga_translator import MangaTranslator
+            MangaTranslator.set_global_cancellation(False)
+        except ImportError:
+            pass
+        
+        # CRITICAL: Also reset UnifiedClient flag
+        try:
+            from unified_api_client import UnifiedClient
+            UnifiedClient.set_global_cancellation(False)
+        except ImportError:
+            pass
     
     def cleanup(self):
         """Cleanup method called when dialog closes - prevents RAM leaks"""
