@@ -3720,7 +3720,7 @@ def _add_processing_overlay(self):
         from PySide6.QtCore import QObject
         
         class OpacityItem(QObject):
-            def _init__(self, item, parent=None):
+            def __init__(self, item, parent=None):
                 super().__init__(parent)
                 self._item = item
                 self._opacity = 30
@@ -3778,25 +3778,6 @@ def _remove_processing_overlay(self):
     except Exception as e:
         print(f"[DEBUG] Error removing processing overlay: {str(e)}")
 
-def _remove_processing_overlay(self):
-    """Remove the processing overlay effect"""
-    try:
-        if hasattr(self, '_pulse_animation'):
-            self._pulse_animation.stop()
-            del self._pulse_animation
-        
-        if hasattr(self, '_processing_overlay'):
-            if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'viewer'):
-                self.image_preview_widget.viewer._scene.removeItem(self._processing_overlay)
-            del self._processing_overlay
-        
-        if hasattr(self, '_opacity_wrapper'):
-            del self._opacity_wrapper
-        
-        print(f"[DEBUG] Removed processing overlay")
-        
-    except Exception as e:
-        print(f"[DEBUG] Error removing processing overlay: {str(e)}")
 
 def _handle_ocr_this_text(self, region_index: int, rect_item=None):
     """Handle OCR this text context menu action for any rectangle type"""

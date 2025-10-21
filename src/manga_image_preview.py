@@ -2781,7 +2781,8 @@ class MangaImagePreviewWidget(QWidget):
                 try:
                     rect_item = self.viewer.rectangles[moved_index]
                     if hasattr(self, 'manga_integration') and self.manga_integration:
-                        self.manga_integration._add_rectangle_pulse_effect(rect_item, moved_index, auto_remove=True)
+                        import ImageRenderer
+                        ImageRenderer._add_rectangle_pulse_effect(self.manga_integration, rect_item, moved_index, auto_remove=True)
                 except Exception as e:
                     print(f"[PULSE] Failed to add pulse effect: {e}")
                 
@@ -2795,7 +2796,8 @@ class MangaImagePreviewWidget(QWidget):
                 
                 # THEN trigger background re-render IMMEDIATELY (no delay)
                 if hasattr(self, 'manga_integration') and self.manga_integration:
-                    self.manga_integration._save_position_async(moved_index)
+                    import ImageRenderer
+                    ImageRenderer._save_position_async(self.manga_integration, moved_index)
         except Exception as e:
             print(f"[DEBUG] Error in _on_rectangle_moved: {e}")
     
