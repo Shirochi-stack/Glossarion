@@ -260,8 +260,7 @@ def _on_detect_text_clicked(self):
         
         # Run detection in background thread
         import threading
-        thread = threading.Thread(target=self._run_detect_background, 
-                                args=(image_path, detection_config),
+        thread = threading.Thread(target=_run_detect_background, args=(self, image_path, detection_config),
                                 daemon=True)
         thread.start()
         
@@ -1489,8 +1488,7 @@ def _on_clean_image_clicked(self):
 
         # Run inpainting in background thread
         import threading
-        thread = threading.Thread(target=self._run_clean_background,
-                                  args=(image_path, regions),
+        thread = threading.Thread(target=_run_clean_background, args=(self, image_path, regions),
                                   daemon=True)
         thread.start()
 
@@ -2744,8 +2742,7 @@ def _on_recognize_text_clicked(self):
         # Run OCR in background thread
         # Pass regions (if extracted) or None (will trigger detection in background)
         import threading
-        thread = threading.Thread(target=self._run_recognize_background, 
-                                args=(image_path, regions, ocr_config),
+        thread = threading.Thread(target=_run_recognize_background, args=(self, image_path, regions, ocr_config),
                                 daemon=True)
         thread.start()
         
@@ -2927,8 +2924,7 @@ def _on_translate_text_clicked(self):
             self._log(f"🌍 Starting translation of {len(self._recognized_texts)} text regions", "info")
             
             import threading
-            thread = threading.Thread(target=self._run_translate_background, 
-                                    args=(self._recognized_texts.copy(), image_path),
+            thread = threading.Thread(target=_run_translate_background, args=(self, self._recognized_texts.copy(), image_path),
                                     daemon=True)
             thread.start()
         else:
@@ -2936,8 +2932,7 @@ def _on_translate_text_clicked(self):
             self._log("🚀 Running full translation pipeline...", "info")
             
             import threading
-            thread = threading.Thread(target=self._run_full_translate_pipeline, 
-                                    args=(image_path, regions_for_recognition),
+            thread = threading.Thread(target=_run_full_translate_pipeline, args=(self, image_path, regions_for_recognition),
                                     daemon=True)
             thread.start()
         
@@ -9499,8 +9494,7 @@ def _on_translate_all_clicked(self):
         
         # Run in background thread
         import threading
-        thread = threading.Thread(target=self._run_translate_all_background, 
-                                args=(image_paths,),
+        thread = threading.Thread(target=_run_translate_all_background, args=(self, image_paths),
                                 daemon=True)
         thread.start()
         
@@ -10042,3 +10036,5 @@ def _process_translate_results(self, results: dict):
         import traceback
         print(traceback.format_exc())
         self._log(f"❌ Failed to process translation results: {str(e)}", "error")
+
+
