@@ -8686,6 +8686,7 @@ class MangaTranslationTab(QObject):
     def _persist_current_image_state(self):
         """Persist the current image's state (rectangles, overlays, paths) before switching.
         IMPORTANT: Merge into existing state to avoid wiping recognized/translated texts.
+        Also cleans up old overlays to prevent RAM accumulation.
         """
         try:
             if not hasattr(self, '_current_image_path') or not self._current_image_path:
@@ -8695,6 +8696,19 @@ class MangaTranslationTab(QObject):
                 return
             
             image_path = self._current_image_path
+            
+            # MEMORY OPTIMIZATION: Clean up overlays for the image we're leaving
+            # This prevents overlay accumulation in memory when switching between many images
+            try:
+                if hasattr(self, '_text_overlays_by_image') and image_path in self._text_overlays_by_image:
+                    # Keep track of overlay count for logging
+                    overlay_count = len(self._text_overlays_by_image[image_path])
+                    if overlay_count > 0:
+                        # Clean up overlays (they'll be recreated from state when we return)
+                        self.clear_text_overlays_for_image(image_path)
+                        print(f"[MEMORY] Cleaned up {overlay_count} overlays for {os.path.basename(image_path)} to free RAM")
+            except Exception as cleanup_err:
+                print(f"[MEMORY] Warning: Could not clean up overlays: {cleanup_err}")
             
             # Collect current state (partial)
             partial = {}
@@ -13275,7 +13289,7 @@ class MangaTranslationTab(QObject):
             if new_text_item is None:
                 return
             viewer = self.image_preview_widget.viewer
-            # Replace text item in group
+            # Replace text item in group with proper cleanup
             try:
                 old_text = getattr(target, '_overlay_text_item', None)
                 if old_text is not None:
@@ -13285,6 +13299,8 @@ class MangaTranslationTab(QObject):
                         pass
                     try:
                         viewer._scene.removeItem(old_text)
+                        # Explicitly delete old text item to free memory
+                        old_text.deleteLater()
                     except Exception:
                         pass
             except Exception:
@@ -14285,7 +14301,7 @@ class MangaTranslationTab(QObject):
             print(f"[DELETE] Error cleaning up deleted rectangle overlays: {e}")
     
     def clear_text_overlays_for_image(self, image_path: str = None):
-        """Clear text overlays for a specific image (or all if no path given)"""
+        """Clear text overlays for a specific image (or all if no path given) with proper Qt cleanup"""
         try:
             viewer = self.image_preview_widget.viewer
             
@@ -14294,19 +14310,45 @@ class MangaTranslationTab(QObject):
                 self._text_overlays_by_image = {}
             
             if image_path is None:
-                # Clear all overlays from all images
+                # Clear all overlays from all images with proper cleanup
                 for overlays in self._text_overlays_by_image.values():
                     for overlay in overlays:
-                        viewer._scene.removeItem(overlay)
+                        try:
+                            # Remove from scene first
+                            viewer._scene.removeItem(overlay)
+                            # Destroy all child items explicitly
+                            for child in overlay.childItems():
+                                try:
+                                    child.setParentItem(None)
+                                    child.deleteLater()
+                                except Exception:
+                                    pass
+                            # Destroy the group itself
+                            overlay.deleteLater()
+                        except Exception:
+                            pass
                 self._text_overlays_by_image = {}
-                print("[DEBUG] Cleared all text overlays for all images")
+                print("[DEBUG] Cleared all text overlays for all images with Qt cleanup")
             else:
-                # Clear overlays for specific image
+                # Clear overlays for specific image with proper cleanup
                 if image_path in self._text_overlays_by_image:
                     for overlay in self._text_overlays_by_image[image_path]:
-                        viewer._scene.removeItem(overlay)
+                        try:
+                            # Remove from scene first
+                            viewer._scene.removeItem(overlay)
+                            # Destroy all child items explicitly
+                            for child in overlay.childItems():
+                                try:
+                                    child.setParentItem(None)
+                                    child.deleteLater()
+                                except Exception:
+                                    pass
+                            # Destroy the group itself
+                            overlay.deleteLater()
+                        except Exception:
+                            pass
                     del self._text_overlays_by_image[image_path]
-                    print(f"[DEBUG] Cleared text overlays for image: {os.path.basename(image_path)}")
+                    print(f"[DEBUG] Cleared text overlays for image with Qt cleanup: {os.path.basename(image_path)}")
         except Exception as e:
             print(f"[DEBUG] Error clearing text overlays: {e}")
     
@@ -15993,10 +16035,23 @@ class MangaTranslationTab(QObject):
             if not hasattr(self, '_text_overlays_by_image'):
                 self._text_overlays_by_image = {}
             
-            # Clear any existing overlays for this specific image
+            # Clear any existing overlays for this specific image with proper Qt cleanup
             if current_image in self._text_overlays_by_image:
                 for overlay in self._text_overlays_by_image[current_image]:
-                    viewer._scene.removeItem(overlay)
+                    try:
+                        # Remove from scene
+                        viewer._scene.removeItem(overlay)
+                        # Destroy all child items to free memory
+                        for child in overlay.childItems():
+                            try:
+                                child.setParentItem(None)
+                                child.deleteLater()
+                            except Exception:
+                                pass
+                        # Destroy the group itself
+                        overlay.deleteLater()
+                    except Exception:
+                        pass
             
             # Create new list for this image's overlays
             self._text_overlays_by_image[current_image] = []
@@ -16252,14 +16307,25 @@ class MangaTranslationTab(QObject):
             if current_image not in self._text_overlays_by_image:
                 self._text_overlays_by_image[current_image] = []
             
-            # Remove existing overlay for this region
+            # Remove existing overlay for this region with proper Qt cleanup
             to_remove = []
             for grp in list(self._text_overlays_by_image[current_image]):
                 if getattr(grp, '_overlay_region_index', None) == int(region_index):
                     to_remove.append(grp)
             for grp in to_remove:
                 try:
+                    # Remove from scene
                     viewer._scene.removeItem(grp)
+                    # Destroy all child items
+                    for child in grp.childItems():
+                        try:
+                            child.setParentItem(None)
+                            child.deleteLater()
+                        except Exception:
+                            pass
+                    # Destroy the group
+                    grp.deleteLater()
+                    # Remove from tracking list
                     self._text_overlays_by_image[current_image].remove(grp)
                 except Exception:
                     pass
