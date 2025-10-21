@@ -1810,13 +1810,19 @@ class BubbleDetector:
             # To PIL then resize 640x640 as in reference
             from PIL import Image as _PILImage
             pil_image = _PILImage.fromarray(image_rgb)
+            w, h = pil_image.size  # Get size before resizing
             im_resized = pil_image.resize((640, 640))
             arr = np.asarray(im_resized, dtype=np.float32) / 255.0
             arr = np.transpose(arr, (2, 0, 1))  # (3,H,W)
             im_data = arr[np.newaxis, ...]
-
-            w, h = pil_image.size
             orig_size = np.array([[w, h]], dtype=np.int64)
+            
+            # MEMORY CLEANUP: Clear intermediate arrays
+            del arr
+            del im_resized
+            if 'pil_image' in locals():
+                pil_image.close()
+                del pil_image
 
             # Run with a concurrency guard to prevent device hangs and limit memory usage
             # Apply semaphore for ALL providers (not just DML) to control concurrency
@@ -1968,6 +1974,25 @@ class BubbleDetector:
                     elif class_id == self.CLASS_TEXT_FREE:
                         detections['text_free'].append(bbox)
 
+            # MEMORY CLEANUP: Clear intermediate arrays after inference
+            try:
+                if 'im_data' in locals():
+                    del im_data
+                if 'orig_size' in locals():
+                    del orig_size
+                if 'outputs' in locals():
+                    del outputs
+                if 'labels' in locals():
+                    del labels
+                if 'boxes' in locals():
+                    del boxes
+                if 'scores' in locals():
+                    del scores
+                if 'image_rgb' in locals():
+                    del image_rgb
+            except Exception:
+                pass
+            
             return bubbles_all if return_all_bubbles else detections
         except Exception as e:
             logger.error(f"RT-DETR ONNX detection failed: {e}")

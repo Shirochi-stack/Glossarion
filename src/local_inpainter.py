@@ -2811,6 +2811,29 @@ class LocalInpainter:
                     result = self.remove_padding(result, padding)
                     self._log_inpaint_diag('onnx-padded', result, mask)
                     
+                    # MEMORY CLEANUP: Clear intermediate arrays
+                    try:
+                        if 'image_rgb' in locals():
+                            del image_rgb
+                        if 'image_padded' in locals():
+                            del image_padded
+                        if 'mask_padded' in locals():
+                            del mask_padded
+                        if 'img_np' in locals():
+                            del img_np
+                        if 'mask_np' in locals():
+                            del mask_np
+                        if 'ort_inputs' in locals():
+                            del ort_inputs
+                        if 'ort_outputs' in locals():
+                            del ort_outputs
+                        if 'output' in locals():
+                            del output
+                        if 'raw_output' in locals():
+                            del raw_output
+                    except Exception:
+                        pass
+                    
             elif self.is_jit_model:
                 # JIT model processing
                 if self.current_method == 'aot':
@@ -2873,7 +2896,30 @@ class LocalInpainter:
                     
                     # Remove padding
                     result = self.remove_padding(result, padding)
-                    self._log_inpaint_diag('jit-aot', result, mask)
+                    self._log_inpaint_diag('onnx-fixed', result, mask)
+                    
+                    # MEMORY CLEANUP: Clear intermediate arrays
+                    try:
+                        if 'image_rgb' in locals():
+                            del image_rgb
+                        if 'image_resized' in locals():
+                            del image_resized
+                        if 'mask_resized' in locals():
+                            del mask_resized
+                        if 'img_np' in locals():
+                            del img_np
+                        if 'mask_np' in locals():
+                            del mask_np
+                        if 'ort_inputs' in locals():
+                            del ort_inputs
+                        if 'ort_outputs' in locals():
+                            del ort_outputs
+                        if 'output' in locals():
+                            del output
+                        if 'raw_output' in locals():
+                            del raw_output
+                    except Exception:
+                        pass
                     
                 else:
                     # LaMa/Anime model processing
