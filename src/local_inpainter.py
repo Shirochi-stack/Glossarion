@@ -1060,28 +1060,28 @@ class LocalInpainter:
 
     def load_onnx_model(self, onnx_path: str) -> bool:
         """Load an ONNX model with C++ backend support for 2x performance"""
-        cpp_loaded = False
-        
         # Try C++ backend first for better performance
         if ONNX_CPP_AVAILABLE:
             try:
                 logger.info("🚀 Loading ONNX model with C++ backend...")
                 self.onnx_cpp_backend = ONNXCppBackend()
                 if self.onnx_cpp_backend.load_model(onnx_path, use_gpu=self.use_gpu):
+                    self.use_onnx = True
                     self.use_onnx_cpp = True
-                    cpp_loaded = True
-                    logger.info("✅ ONNX C++ backend loaded successfully")
-                    # Continue to ALSO load Python session as fallback
+                    self.model_loaded = True
+                    self.current_onnx_path = onnx_path
+                    logger.info("✅ ONNX C++ backend loaded successfully (Python fallback disabled)")
+                    return True
                 else:
-                    logger.warning("C++ backend load failed, falling back to Python only")
+                    logger.warning("C++ backend load failed, falling back to Python")
                     self.onnx_cpp_backend = None
                     self.use_onnx_cpp = False
             except Exception as cpp_err:
-                logger.warning(f"C++ backend error: {cpp_err}, will use Python fallback")
+                logger.warning(f"C++ backend error: {cpp_err}, using Python fallback")
                 self.onnx_cpp_backend = None
                 self.use_onnx_cpp = False
         
-        # ALWAYS load Python ONNX Runtime as fallback
+        # Load Python ONNX Runtime if C++ backend not available or failed
         if not ONNX_AVAILABLE:
             logger.error("ONNX Runtime not available")
             return False
@@ -2702,14 +2702,14 @@ class LocalInpainter:
                 try:
                     # CRITICAL: Convert BGR (OpenCV default) to RGB (ML model expected)
                     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                    # Normalize to [0, 1] range
-                    img_normalized = image_rgb.astype(np.float32) / 255.0
-                    mask_normalized = mask.astype(np.float32) / 255.0
                     
-                    # Ensure mask dimensions match image exactly
-                    if mask_normalized.shape[:2] != img_normalized.shape[:2]:
-                        logger.warning(f"Mask size {mask_normalized.shape[:2]} != image size {img_normalized.shape[:2]}, resizing mask")
-                        mask_normalized = cv2.resize(mask_normalized, (img_normalized.shape[1], img_normalized.shape[0]), interpolation=cv2.INTER_NEAREST)
+                    # CRITICAL: Pad to modulo for dynamic models (same as Python path)
+                    image_padded, padding = self.pad_img_to_modulo(image_rgb, self.pad_mod)
+                    mask_padded, _ = self.pad_img_to_modulo(mask, self.pad_mod)
+                    
+                    # Normalize to [0, 1] range
+                    img_normalized = image_padded.astype(np.float32) / 255.0
+                    mask_normalized = mask_padded.astype(np.float32) / 255.0
                     
                     # Apply input masking for anime/manga models (same as Python path)
                     if 'anime' in str(self.current_method).lower():
@@ -2720,6 +2720,10 @@ class LocalInpainter:
                     # Run C++ inference
                     result_rgb = self.onnx_cpp_backend.infer(img_normalized, mask_normalized)
                     
+                    # Remove padding from result
+                    if padding[0] > 0 or padding[1] > 0:
+                        result_rgb = result_rgb[:orig_h, :orig_w]
+                    
                     # Convert back to uint8 and BGR
                     result = (result_rgb * 255).astype(np.uint8)
                     result = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
@@ -2727,12 +2731,13 @@ class LocalInpainter:
                     self._log_inpaint_diag('onnx-cpp', result, mask)
                     
                 except Exception as cpp_err:
-                    logger.warning(f"C++ ONNX inference failed: {cpp_err}, using fallback")
-                    # Fall through to Python ONNX or JIT
-                    pass
-                else:
-                    # C++ inference succeeded, return result
-                    return result
+                    logger.error(f"C++ ONNX inference failed: {cpp_err}")
+                    logger.error(f"Image shape: {image.shape}, Mask shape: {mask.shape}")
+                    logger.error(f"Padded image shape: {image_padded.shape}, Padded mask shape: {mask_padded.shape}")
+                    raise RuntimeError(f"C++ ONNX inference failed: {cpp_err}")
+                
+                # C++ inference succeeded, return result
+                return result
             
             # Python ONNX inference path (fallback)
             if self.use_onnx and self.onnx_session:
