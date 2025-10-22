@@ -1103,11 +1103,30 @@ def _restore_image_state_overlays_only(self, image_path: str):
                 has_text_for_this_rect = False
                 if has_any_text and idx < max(len(recognized_texts), len(translated_texts)):
                     # Check if this specific rectangle has text (either OCR or translated)
-                    has_recognized = (idx < len(recognized_texts) and 
-                                    not (isinstance(recognized_texts[idx], dict) and recognized_texts[idx].get('deleted')))
-                    has_translation = (idx < len(translated_texts) and 
-                                     not (isinstance(translated_texts[idx], dict) and translated_texts[idx].get('deleted')))
+                    has_recognized = False
+                    if idx < len(recognized_texts):
+                        text_entry = recognized_texts[idx]
+                        # Check if it's a valid text entry (not deleted, not empty)
+                        if isinstance(text_entry, dict):
+                            if not text_entry.get('deleted') and text_entry.get('text', '').strip():
+                                has_recognized = True
+                        elif isinstance(text_entry, str) and text_entry.strip():
+                            has_recognized = True
+                    
+                    has_translation = False
+                    if idx < len(translated_texts):
+                        trans_entry = translated_texts[idx]
+                        # Check if it's a valid translation entry (not deleted, not empty)
+                        if isinstance(trans_entry, dict):
+                            if not trans_entry.get('deleted') and trans_entry.get('translation', '').strip():
+                                has_translation = True
+                    
                     has_text_for_this_rect = has_recognized or has_translation
+                    
+                    if has_text_for_this_rect:
+                        print(f"[STATE] Rectangle {idx} has text - will be BLUE (OCR={has_recognized}, Trans={has_translation})")
+                    else:
+                        print(f"[STATE] Rectangle {idx} has no valid text - will be GREEN")
                 
                 if has_text_for_this_rect:
                     # Blue for rectangles with recognized/translated text
