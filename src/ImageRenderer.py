@@ -8561,20 +8561,16 @@ def show_recognized_overlays_for_image(self, image_path: str):
     - Apply recognition tooltips/updates if recognized_texts exist in state
     """
     try:
-        print(f"[SHOW_RECOGNIZED] Called for: {os.path.basename(image_path)}")
         if not hasattr(self, 'image_state_manager') or not image_path:
-            print(f"[SHOW_RECOGNIZED] No state manager or image path")
             return
         state = self.image_state_manager.get_state(image_path)
         if not state:
-            print(f"[SHOW_RECOGNIZED] No state found for image")
             return
         # Ensure rectangles exist; if not, draw detection regions first
         need_draw = False
         try:
             rects = getattr(self.image_preview_widget.viewer, 'rectangles', [])
             need_draw = (not rects)
-            print(f"[SHOW_RECOGNIZED] Current rectangles: {len(rects)}, need_draw: {need_draw}")
         except Exception:
             need_draw = True
         if need_draw:
@@ -8589,11 +8585,8 @@ def show_recognized_overlays_for_image(self, image_path: str):
                 _draw_detection_boxes_on_preview(self, )
         # Apply recognition data if available
         recognized_texts = state.get('recognized_texts') or []
-        print(f"[SHOW_RECOGNIZED] Found {len(recognized_texts)} recognized texts in state")
         if recognized_texts:
-            print(f"[SHOW_RECOGNIZED] Calling _update_rectangles_with_recognition with {len(recognized_texts)} texts")
             _update_rectangles_with_recognition(self, recognized_texts)
-            print(f"[SHOW_RECOGNIZED] Finished updating rectangle colors to BLUE")
     except Exception as e:
         print(f"[DEBUG] Error restoring recognized overlays: {e}")
 
