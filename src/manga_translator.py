@@ -8411,34 +8411,72 @@ class MangaTranslator:
         auto_iterations = manga_settings.get('auto_iterations', True)
         kernel_size = 5  # Default kernel size
         
+        # INPAINTER ITERATIONS: Set based on model type when auto_iterations is enabled
+        inpainter_iterations = 1  # Default single pass
+        if auto_iterations:
+            try:
+                # Check inpainting method
+                inpaint_method = manga_settings.get('inpainting', {}).get('method', 'local')
+                if inpaint_method in ('local', 'hybrid'):
+                    local_method = manga_settings.get('inpainting', {}).get('local_method', 'anime')
+                    
+                    # MAT uses 0 iterations (None = default single pass behavior)
+                    # Other models work fine with single pass
+                    if local_method == 'mat':
+                        inpainter_iterations = 0
+                        self._log(f"🔁 Auto iterations for MAT: disabled (single pass only)", "info")
+                    else:
+                        inpainter_iterations = 1
+                        self._log(f"🔁 Auto iterations for {local_method.upper()}: {inpainter_iterations} pass", "debug")
+            except Exception:
+                inpainter_iterations = 1
+        else:
+            # Manual mode: respect user-configured iterations if available
+            inpainter_iterations = manga_settings.get('inpainting', {}).get('iterations', 1)
+        
+        # Store for use in inpaint_regions
+        self._current_inpainter_iterations = inpainter_iterations
+        
         if auto_iterations:
             try:
                 # Use 5x5 kernel when auto mode is enabled (comic-translate standard)
                 kernel_size = 5
                 
-                # Heuristic: consider image B&W if RGB channels are near-equal
-                if len(image.shape) < 3 or image.shape[2] == 1:
-                    is_bw = True
-                else:
-                    # Compute mean absolute differences between channels
-                    ch0 = image[:, :, 0].astype(np.int16)
-                    ch1 = image[:, :, 1].astype(np.int16)
-                    ch2 = image[:, :, 2].astype(np.int16)
-                    diff01 = np.mean(np.abs(ch0 - ch1))
-                    diff12 = np.mean(np.abs(ch1 - ch2))
-                    diff02 = np.mean(np.abs(ch0 - ch2))
-                    # If channels are essentially the same, treat as B&W
-                    is_bw = max(diff01, diff12, diff02) < 2.0
-                if is_bw:
-                    text_bubble_iterations = 2
-                    empty_bubble_iterations = 2
+                # SPECIAL HANDLING FOR MAT: Use minimal mask dilation
+                # MAT works best with tight, accurate masks - too much dilation causes artifacts
+                inpaint_method = manga_settings.get('inpainting', {}).get('method', 'local')
+                local_method = manga_settings.get('inpainting', {}).get('local_method', 'anime')
+                if inpaint_method in ('local', 'hybrid') and local_method == 'mat':
+                    # MAT: Use minimal dilation (0 iterations) for best quality
+                    text_bubble_iterations = 0
+                    empty_bubble_iterations = 0
                     free_text_iterations = 0
-                    self._log(f"📏 Auto mode (B&W): kernel={kernel_size}x{kernel_size}px, text=2, empty=2, free=0", "info")
+                    self._log(f"📏 Auto mode (MAT): kernel={kernel_size}x{kernel_size}px, all=0 (minimal dilation for MAT)", "info")
                 else:
-                    text_bubble_iterations = 4
-                    empty_bubble_iterations = 4
-                    free_text_iterations = 4
-                    self._log(f"📏 Auto mode (Color): kernel={kernel_size}x{kernel_size}px, all=4", "info")
+                    # Other models: Use B&W vs Color heuristic
+                    # Heuristic: consider image B&W if RGB channels are near-equal
+                    if len(image.shape) < 3 or image.shape[2] == 1:
+                        is_bw = True
+                    else:
+                        # Compute mean absolute differences between channels
+                        ch0 = image[:, :, 0].astype(np.int16)
+                        ch1 = image[:, :, 1].astype(np.int16)
+                        ch2 = image[:, :, 2].astype(np.int16)
+                        diff01 = np.mean(np.abs(ch0 - ch1))
+                        diff12 = np.mean(np.abs(ch1 - ch2))
+                        diff02 = np.mean(np.abs(ch0 - ch2))
+                        # If channels are essentially the same, treat as B&W
+                        is_bw = max(diff01, diff12, diff02) < 2.0
+                    if is_bw:
+                        text_bubble_iterations = 2
+                        empty_bubble_iterations = 2
+                        free_text_iterations = 0
+                        self._log(f"📏 Auto mode (B&W): kernel={kernel_size}x{kernel_size}px, text=2, empty=2, free=0", "info")
+                    else:
+                        text_bubble_iterations = 4
+                        empty_bubble_iterations = 4
+                        free_text_iterations = 4
+                        self._log(f"📏 Auto mode (Color): kernel={kernel_size}x{kernel_size}px, all=4", "info")
             except Exception:
                 # Fallback to configured behavior on any error
                 auto_iterations = False
@@ -9516,6 +9554,9 @@ class MangaTranslator:
         local_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
         model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '')
         
+        # Get iterations setting (from auto_iterations logic or config)
+        iterations = getattr(self, '_current_inpainter_iterations', 1)
+        
         # Use a thread-local inpainter instance
         inp = self._get_thread_local_inpainter(local_method, model_path)
         if inp and getattr(inp, 'model_loaded', False):
@@ -9524,9 +9565,9 @@ class MangaTranslator:
             lock = getattr(self, '_inpaint_lock', None)
             if lock:
                 with lock:
-                    return inp.inpaint(image, mask)
+                    return inp.inpaint(image, mask, iterations=iterations)
             else:
-                return inp.inpaint(image, mask)
+                return inp.inpaint(image, mask, iterations=iterations)
         else:
             # Conservative fallback: try shared instance only; do not attempt risky reloads that can corrupt output
             try:
@@ -9535,11 +9576,12 @@ class MangaTranslator:
                     self._log("   ✅ Using shared inpainting instance", "info")
                     # Always use lock for shared instances to prevent RAM spikes
                     lock = getattr(self, '_inpaint_lock', None)
+                    iterations = getattr(self, '_current_inpainter_iterations', 1)
                     if lock:
                         with lock:
-                            return shared_inp.inpaint(image, mask)
+                            return shared_inp.inpaint(image, mask, iterations=iterations)
                     else:
-                        return shared_inp.inpaint(image, mask)
+                        return shared_inp.inpaint(image, mask, iterations=iterations)
             except Exception:
                 pass
             
@@ -9574,11 +9616,12 @@ class MangaTranslator:
                             self._log(f"   ✅ Model loaded successfully on retry attempt {attempt_num}", "info")
                             # Use lock for retry path (likely using shared instance)
                             lock = getattr(self, '_inpaint_lock', None)
+                            iterations = getattr(self, '_current_inpainter_iterations', 1)
                             if lock:
                                 with lock:
-                                    return retry_inp.inpaint(image, mask)
+                                    return retry_inp.inpaint(image, mask, iterations=iterations)
                             else:
-                                return retry_inp.inpaint(image, mask)
+                                return retry_inp.inpaint(image, mask, iterations=iterations)
                         else:
                             # Model exists but not loaded - try loading it directly
                             self._log(f"   🔧 Model not loaded, attempting direct load...", "info")
@@ -9593,11 +9636,12 @@ class MangaTranslator:
                                         self._log(f"   ✅ Direct load successful on attempt {attempt_num}", "info")
                                         # Use lock for retry path (likely using shared instance)
                                         lock = getattr(self, '_inpaint_lock', None)
+                                        iterations = getattr(self, '_current_inpainter_iterations', 1)
                                         if lock:
                                             with lock:
-                                                return retry_inp.inpaint(image, mask)
+                                                return retry_inp.inpaint(image, mask, iterations=iterations)
                                         else:
-                                            return retry_inp.inpaint(image, mask)
+                                            return retry_inp.inpaint(image, mask, iterations=iterations)
                                     else:
                                         self._log(f"   ⚠️ Direct load returned {loaded_ok}, model_loaded={getattr(retry_inp, 'model_loaded', False)}", "warning")
                                 except Exception as load_err:

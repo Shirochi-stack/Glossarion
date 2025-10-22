@@ -3332,10 +3332,14 @@ class LocalInpainter:
                         pass
 
                     # Determine number of iterations
+                    # Log the received iterations parameter for debugging
+                    logger.info(f"🔍 Received iterations parameter: {iterations} (type: {type(iterations).__name__})")
                     num_iterations = 1
                     if iterations is not None and iterations > 0:
                         num_iterations = int(iterations)
                         logger.info(f"🔁 Running {num_iterations} iteration(s) for JIT {self.current_method.upper()}")
+                    else:
+                        logger.info(f"🔁 Using default single pass (iterations={iterations}) for JIT {self.current_method.upper()}")
 
                     # Run inference with proper error handling and iteration support
                     with torch.no_grad():
@@ -3416,10 +3420,14 @@ class LocalInpainter:
                 size = 768 if self.current_method == 'anime' else 512
                 
                 # Determine number of iterations (default 1 for single pass)
+                # Log the received iterations parameter for debugging
+                logger.info(f"🔍 Received iterations parameter: {iterations} (type: {type(iterations).__name__})")
                 num_iterations = 1
                 if iterations is not None and iterations > 0:
                     num_iterations = int(iterations)
                     logger.info(f"🔁 Running {num_iterations} iteration(s) for {self.current_method.upper()}")
+                else:
+                    logger.info(f"🔁 Using default single pass (iterations={iterations}) for {self.current_method.upper()}")
                 
                 # For MAT, use 512x512 and convert BGR to RGB
                 if self.current_method == 'mat':
