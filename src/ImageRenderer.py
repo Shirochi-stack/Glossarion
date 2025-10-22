@@ -5457,9 +5457,17 @@ def _attach_move_sync_to_rectangle(self, rect_item, region_index: int):
                     except Exception:
                         pass
 
-                    # Re-layout overlay to fit the new rectangle size (auto-resize like pipeline)
+                    # Only re-layout if rectangle SIZE changed (width/height), not just position
+                    # This avoids expensive text rendering on simple moves
                     try:
-                        _relayout_overlay_for_region(self, idx)
+                        if hasattr(target, '_overlay_bbox_size'):
+                            old_w, old_h = target._overlay_bbox_size
+                            new_w, new_h = int(rr.width()), int(rr.height())
+                            # Only re-layout if size changed by more than 2 pixels (avoid rounding noise)
+                            if abs(new_w - old_w) > 2 or abs(new_h - old_h) > 2:
+                                print(f"[PERF] Rectangle {idx} resized ({old_w}x{old_h} -> {new_w}x{new_h}), re-layouting text")
+                                _relayout_overlay_for_region(self, idx)
+                            # else: just moved, text overlay already moved with it via moveBy()
                     except Exception:
                         pass
                 
