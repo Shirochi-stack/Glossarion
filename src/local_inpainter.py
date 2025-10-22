@@ -143,6 +143,13 @@ LAMA_JIT_MODELS = {
         'name': 'AOT ONNX (Fast)',
         'is_onnx': True
     },
+    'mat': {
+        'repo_id': 'Acly/MAT',
+        'filename': 'MAT_Places512_G_fp16.safetensors',
+        'md5': None,
+        'name': 'MAT (High Resolution)',
+        'fallback_url': 'https://huggingface.co/Acly/MAT/resolve/main/MAT_Places512_G_fp16.safetensors'
+    },
     'lama_onnx': {
         'repo_id': 'Carve/LaMa-ONNX',
         'filename': 'lama_fp32.onnx',
@@ -414,6 +421,46 @@ def download_model(url: str = None, md5: str = None, progress_callback=None, rep
     raise ValueError("Either repo_id/filename or url must be provided")
 
 
+class MATInpaintModel(BaseModel):
+    """MAT (Mask-Aware Transformer) model - dynamically built from checkpoint"""
+    
+    def __init__(self):
+        if not TORCH_AVAILABLE:
+            super().__init__()
+            logger.warning("PyTorch not available - MATInpaintModel initialized as placeholder")
+            self._pytorch_available = False
+            return
+        
+        # Clear CUDA cache and sync before init
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            except Exception:
+                pass
+            
+        # Additional safety check for nn being None
+        if nn is None:
+            super().__init__()
+            logger.error("Neural network modules not available - MATInpaintModel disabled")
+            self._pytorch_available = False
+            return
+            
+        super().__init__()
+        self._pytorch_available = True
+        
+        # Don't create any modules - they'll be created automatically when loading state dict
+        logger.info("MATInpaintModel initialized (modules will be created from checkpoint)")
+    
+    def forward(self, image, mask):
+        """Forward pass for MAT model - NOTE: This is for MATInpaintModel wrapper
+        The actual forward logic is in the DynamicModule created during load"""
+        # This should not be called - the model is replaced with DynamicModule during load
+        # But if it is, try to delegate
+        raise NotImplementedError("MAT forward should use DynamicModule, not MATInpaintModel")
+    
+
+
 class FFCInpaintModel(BaseModel):  # Use BaseModel instead of nn.Module
     """FFC model for LaMa inpainting - for checkpoint compatibility"""
     
@@ -577,7 +624,7 @@ class LocalInpainter:
     # MAINTAIN ORIGINAL SUPPORTED_METHODS for compatibility
     SUPPORTED_METHODS = {
         'lama': ('LaMa Inpainting', FFCInpaintModel),
-        'mat': ('MAT Inpainting', FFCInpaintModel),
+        'mat': ('MAT Inpainting', MATInpaintModel),
         'aot': ('AOT GAN Inpainting', FFCInpaintModel),
         'aot_onnx': ('AOT ONNX (Fast)', FFCInpaintModel),
         'sd': ('Stable Diffusion Inpainting', FFCInpaintModel),
@@ -1678,7 +1725,51 @@ class LocalInpainter:
                 logger.warning(f"CUDA move failed twice; using CPU tensor for this op: {e2}")
                 return tensor.contiguous()
 
-    def _load_weights_with_mapping(self, model, state_dict):
+    def _build_mat_from_checkpoint(self, state_dict: dict):
+        """Build MAT model architecture dynamically from checkpoint keys"""
+        try:
+            # Analyze keys to understand architecture
+            all_keys = list(state_dict.keys())
+            logger.info(f"Total keys in checkpoint: {len(all_keys)}")
+            
+            # Remove prefix if present
+            prefix = None
+            if any(k.startswith('generator.') for k in all_keys):
+                prefix = 'generator.'
+            elif any(k.startswith('netG.') for k in all_keys):
+                prefix = 'netG.'
+            
+            # Create a mapping from prefixed to non-prefixed keys
+            if prefix:
+                new_state_dict = {}
+                for k, v in state_dict.items():
+                    if k.startswith(prefix):
+                        new_key = k[len(prefix):]
+                        new_state_dict[new_key] = v
+                    else:
+                        new_state_dict[k] = v
+                state_dict.clear()
+                state_dict.update(new_state_dict)
+                logger.info(f"Removed '{prefix}' prefix from keys")
+            
+            # Now build layers based on remaining keys
+            unique_layer_names = set()
+            for key in state_dict.keys():
+                # Extract layer name (everything before .weight or .bias)
+                if '.weight' in key or '.bias' in key:
+                    layer_name = key.rsplit('.', 1)[0]
+                    unique_layer_names.add(layer_name)
+            
+            logger.info(f"Found {len(unique_layer_names)} unique layers in MAT checkpoint")
+            
+            # The model.layers ModuleDict will be populated by load_state_dict
+            # We just need to make sure the model can accept these keys
+            
+        except Exception as e:
+            logger.error(f"Failed to build MAT architecture: {e}")
+            raise
+    
+    def _load_weights_with_mapping(self, model, state_dict) -> bool:
         """Load weights with proper mapping"""
         model_dict = model.state_dict()
         
@@ -1807,21 +1898,40 @@ class LocalInpainter:
                 if hasattr(self, 'progress_queue'):
                     self.progress_queue.put(('model_file_status', f"📥 Downloading {model_info['name']}..."))
                 
+                model_path = None
                 # Prefer HuggingFace download if repo info is available
                 if 'repo_id' in model_info and 'filename' in model_info:
-                    model_path = download_model(
-                        repo_id=model_info['repo_id'],
-                        filename=model_info['filename'],
-                        md5=model_info.get('md5')
-                    )
+                    try:
+                        model_path = download_model(
+                            repo_id=model_info['repo_id'],
+                            filename=model_info['filename'],
+                            md5=model_info.get('md5')
+                        )
+                    except Exception as hf_err:
+                        logger.warning(f"HuggingFace download failed: {hf_err}")
+                        # Try fallback URL if available
+                        if 'fallback_url' in model_info:
+                            logger.info(f"Trying fallback URL...")
+                            model_path = download_model(
+                                url=model_info['fallback_url'],
+                                md5=model_info.get('md5')
+                            )
+                        else:
+                            raise
                 # Fallback to legacy URL if available
                 elif 'url' in model_info:
                     model_path = download_model(
                         url=model_info['url'],
                         md5=model_info.get('md5')
                     )
+                elif 'fallback_url' in model_info:
+                    model_path = download_model(
+                        url=model_info['fallback_url'],
+                        md5=model_info.get('md5')
+                    )
                 else:
                     raise ValueError(f"No download info for {method}")
+                
                 if hasattr(self, 'progress_queue'):
                     self.progress_queue.put(('model_file_status', '✅ Download complete'))
                 return model_path
@@ -2289,8 +2399,12 @@ class LocalInpainter:
             # If we get here, it's not JIT, so load as checkpoint
             if not self.is_jit_model:
                 try:
-                    # Try to create the model - this might fail if nn.Module is None
-                    self.model = FFCInpaintModel()
+                    # Create the appropriate model based on method
+                    if method == 'mat':
+                        logger.info("📦 Creating MAT model architecture...")
+                        self.model = MATInpaintModel()
+                    else:
+                        self.model = FFCInpaintModel()
                     
                     if isinstance(checkpoint, dict):
                         if 'gen_state_dict' in checkpoint:
@@ -2305,7 +2419,91 @@ class LocalInpainter:
                     else:
                         state_dict = checkpoint
                     
-                    self._load_weights_with_mapping(self.model, state_dict)
+                    # For MAT models, use the original architecture
+                    if method == 'mat':
+                        logger.info("🔍 Loading MAT with original architecture...")
+                        
+                        try:
+                            # Import MAT's Generator class
+                            import sys
+                            
+                            # CRITICAL: Add paths in correct order so local modules override system ones
+                            src_path = os.path.dirname(__file__)
+                            
+                            # Add src path first so it can find torch_utils, dnnlib, and networks
+                            if src_path not in sys.path:
+                                sys.path.insert(0, src_path)
+                            
+                            # Now import - it should find our local torch_utils, dnnlib, and networks
+                            from networks.mat import Generator
+                            
+                            # Create generator with MAT's default parameters
+                            # z_dim=512, c_dim=0, w_dim=512, img_resolution=512, img_channels=3
+                            logger.info("🏭 Creating MAT Generator...")
+                            generator = Generator(
+                                z_dim=512,
+                                c_dim=0, 
+                                w_dim=512,
+                                img_resolution=512,
+                                img_channels=3
+                            )
+                            
+                            # Load checkpoint into generator
+                            logger.info("📦 Loading checkpoint into MAT Generator...")
+                            missing, unexpected = generator.load_state_dict(state_dict, strict=False)
+                            logger.info(f"✅ MAT loaded. Missing: {len(missing)}, Unexpected: {len(unexpected)}")
+                            
+                            # Put generator in eval mode
+                            generator.eval()
+                            
+                            # Wrap the generator for our forward interface
+                            class MATWrapper(nn.Module):
+                                def __init__(self, generator):
+                                    super().__init__()
+                                    self.generator = generator
+                                    self._pytorch_available = True
+                                
+                                def forward(self, image, mask):
+                                    # MAT Generator.forward expects:
+                                    # (images_in, masks_in, z, c, truncation_psi, truncation_cutoff, skip_w_avg_update, noise_mode)
+                                    # images_in and masks_in should be in [-1, 1] range
+                                    # CRITICAL: MAT expects mask where 1=keep, 0=inpaint (opposite of our convention)
+                                    logger.info(f"🔍 MAT forward - Input image shape: {image.shape}, range: [{image.min():.3f}, {image.max():.3f}]")
+                                    logger.info(f"🔍 MAT forward - Input mask shape: {mask.shape}, range: [{mask.min():.3f}, {mask.max():.3f}]")
+                                    
+                                    batch_size = image.shape[0]
+                                    z = torch.randn(batch_size, 512, device=image.device, dtype=image.dtype)
+                                    c = None
+                                    
+                                    # Ensure generator is in eval mode
+                                    self.generator.eval()
+                                    
+                                    # CRITICAL: Invert mask - MAT expects 1=keep, 0=inpaint
+                                    # Our convention is 1=inpaint, 0=keep, so we need to invert
+                                    inverted_mask = 1.0 - mask
+                                    logger.info(f"🔍 MAT forward - Inverted mask range: [{inverted_mask.min():.3f}, {inverted_mask.max():.3f}]")
+                                    logger.info(f"🔍 MAT forward - Calling generator with z shape: {z.shape}, c: {c}")
+                                    
+                                    # Call generator with inverted mask
+                                    output = self.generator(image, inverted_mask, z, c, truncation_psi=1.0, noise_mode='const')
+                                    
+                                    logger.info(f"🔍 MAT forward - Output shape: {output.shape}, range: [{output.min():.3f}, {output.max():.3f}]")
+                                    logger.info(f"🔍 MAT forward - Output differs from input: {not torch.equal(output, image)}")
+                                    
+                                    return output
+                            
+                            self.model = MATWrapper(generator)
+                            logger.info("✅ MAT wrapper created")
+                            
+                        except Exception as mat_err:
+                            logger.error(f"❌ Failed to load MAT with original architecture: {mat_err}")
+                            import traceback
+                            logger.error(traceback.format_exc())
+                            return False
+                    
+                    # For non-MAT models, use standard weight loading
+                    else:
+                        self._load_weights_with_mapping(self.model, state_dict)
                     
                     self.model.eval()
                     if self.use_gpu and self.device:
@@ -3176,18 +3374,31 @@ class LocalInpainter:
                     self._log_inpaint_diag('jit-lama', result, mask)
             
             else:
-                # Original checkpoint model processing (keep as is)
+                # Original checkpoint model processing
                 h, w = image.shape[:2]
                 size = 768 if self.current_method == 'anime' else 512
                 
-                img_resized = cv2.resize(image, (size, size), interpolation=cv2.INTER_LANCZOS4)
-                mask_resized = cv2.resize(mask, (size, size), interpolation=cv2.INTER_NEAREST)
-                
-                img_norm = img_resized.astype(np.float32) / 127.5 - 1
-                mask_norm = mask_resized.astype(np.float32) / 255.0
+                # For MAT, use 512x512 and convert BGR to RGB
+                if self.current_method == 'mat':
+                    logger.info("🎨 MAT checkpoint processing: converting BGR to RGB")
+                    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                    img_resized = cv2.resize(image_rgb, (512, 512), interpolation=cv2.INTER_LANCZOS4)
+                    mask_resized = cv2.resize(mask, (512, 512), interpolation=cv2.INTER_NEAREST)
+                    
+                    # MAT expects [-1, 1] range
+                    img_norm = img_resized.astype(np.float32) / 127.5 - 1
+                    mask_norm = mask_resized.astype(np.float32) / 255.0
+                else:
+                    img_resized = cv2.resize(image, (size, size), interpolation=cv2.INTER_LANCZOS4)
+                    mask_resized = cv2.resize(mask, (size, size), interpolation=cv2.INTER_NEAREST)
+                    
+                    img_norm = img_resized.astype(np.float32) / 127.5 - 1
+                    mask_norm = mask_resized.astype(np.float32) / 255.0
                 
                 img_tensor = torch.from_numpy(img_norm).permute(2, 0, 1).unsqueeze(0).float()
                 mask_tensor = torch.from_numpy(mask_norm).unsqueeze(0).unsqueeze(0).float()
+                
+                logger.info(f"📊 Checkpoint input - Image: {img_tensor.shape} [{img_tensor.min():.3f}, {img_tensor.max():.3f}], Mask: {mask_tensor.shape} [{mask_tensor.min():.3f}, {mask_tensor.max():.3f}]")
                 
                 if self.use_gpu and self.device:
                     img_tensor = self._to_device_safe(img_tensor)
@@ -3196,8 +3407,32 @@ class LocalInpainter:
                 with torch.no_grad():
                     output = self.model(img_tensor, mask_tensor)
                 
+                logger.info(f"📊 Checkpoint output - Shape: {output.shape}, range: [{output.min():.3f}, {output.max():.3f}]")
+                
                 result = output.squeeze(0).permute(1, 2, 0).cpu().numpy()
+                
+                # For MAT, clamp to [-1, 1] before denormalizing
+                if self.current_method == 'mat':
+                    logger.info(f"🎨 MAT output before clamp: min={result.min():.3f}, max={result.max():.3f}")
+                    result = np.clip(result, -1.0, 1.0)
+                    logger.info(f"🎨 MAT output after clamp: min={result.min():.3f}, max={result.max():.3f}")
+                
                 result = ((result + 1) * 127.5).clip(0, 255).astype(np.uint8)
+                logger.info(f"🎨 Final uint8 result: min={result.min()}, max={result.max()}, mean={result.mean():.1f}")
+                
+                # For MAT, convert RGB back to BGR
+                if self.current_method == 'mat':
+                    result = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
+                    # Compare with original to see if anything changed
+                    orig_resized = cv2.resize(image, (512, 512), interpolation=cv2.INTER_LANCZOS4)
+                    diff = cv2.absdiff(result, orig_resized)
+                    logger.info(f"🔍 MAT result vs original (512x512): max_diff={diff.max()}, mean_diff={diff.mean():.2f}")
+                    # Check masked region specifically
+                    mask_resized_check = cv2.resize(mask, (512, 512), interpolation=cv2.INTER_NEAREST)
+                    masked_diff = diff[mask_resized_check > 0]
+                    if len(masked_diff) > 0:
+                        logger.info(f"🔍 MAT masked region: max_diff={masked_diff.max()}, mean_diff={masked_diff.mean():.2f}")
+                
                 result = cv2.resize(result, (w, h), interpolation=cv2.INTER_LANCZOS4)
                 self._log_inpaint_diag('ckpt', result, mask)
             
@@ -3350,7 +3585,7 @@ class LocalInpainter:
 class LaMaModel(FFCInpaintModel):
     pass
 
-class MATModel(FFCInpaintModel):
+class MATModel(MATInpaintModel):
     pass
 
 class AOTModel(FFCInpaintModel):
