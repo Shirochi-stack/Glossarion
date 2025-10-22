@@ -13482,12 +13482,13 @@ class MangaTranslator:
                 try:
                     # Check if inpainting was already started early (after RT-DETR)
                     if hasattr(self, '_inpainting_future') and self._inpainting_future:
-                        self._log(f"⏩ Early inpainting already running - will wait for it to complete")
-                        # Just return the future - the main flow will handle getting the result
+                        # Early inpainting is running - just return the future
+                        # The main flow will wait for it and get the result
                         return self._inpainting_future
                     
-                    # If we get here, early inpainting was NOT started (shouldn't happen with RT-DETR)
-                    self._log(f"⚠️ Early inpainting was not started - starting now (this shouldn't happen)")
+                    # If we get here, early inpainting was NOT started
+                    # This only happens when RT-DETR/bubble detection is disabled
+                    self._log(f"⚠️ No early inpainting (bubble detection disabled or no bubbles found)")
                     
                     # CRITICAL: Re-check the skip flag from config at runtime (don't use cached value)
                     # This ensures toggle changes are respected even after MangaTranslator initialization
