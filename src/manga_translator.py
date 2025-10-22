@@ -7435,8 +7435,8 @@ class MangaTranslator:
                 self._log(f"📊 Total translations: {len(translations)}")
                 
             except Exception as e:
-                self._log(f"❌ Failed to parse JSON: {str(e)}", "error")
-                self._log(f"Response preview: {response_text[:5000]}...", "warning")
+                #self._log(f"❌ Failed to parse JSON: {str(e)}", "error")
+                #self._log(f"Response preview: {response_text[:5000]}...", "warning")
                 
                 # CRITICAL: Check if this is a refusal message BEFORE regex fallback
                 # OpenAI and other APIs refuse certain content with text responses instead of JSON

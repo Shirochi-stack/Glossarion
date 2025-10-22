@@ -9162,7 +9162,7 @@ class MangaTranslationTab(QObject):
                             except Exception as refresh_err:
                                 print(f"[PREVIEW_UPDATE] Failed to refresh source viewer: {refresh_err}")
                             
-                            print(f"[PREVIEW_UPDATE] ✅ Preview updated successfully")
+                            #print(f"[PREVIEW_UPDATE] ✅ Preview updated successfully")
                     except Exception as e:
                         print(f"[PREVIEW_UPDATE] ❌ Error updating preview: {e}")
                         import traceback
