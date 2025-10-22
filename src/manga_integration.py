@@ -9040,6 +9040,18 @@ class MangaTranslationTab(QObject):
                         result_image = data['result_image']
                         original_path = data['original_path']
                         
+                        # STATE ISOLATION: Only stop pulse effect if operation is for currently displayed image
+                        current_img = getattr(self.image_preview_widget, 'current_image_path', None) if hasattr(self, 'image_preview_widget') else None
+                        if current_img and original_path:
+                            try:
+                                import os
+                                if os.path.abspath(original_path) != os.path.abspath(current_img):
+                                    print(f"[STATE_ISOLATION] Clean complete for different image - skipping pulse stop")
+                                    return
+                            except Exception:
+                                if original_path != current_img:
+                                    return
+                        
                         # Stop pulse effect on the rectangle
                         try:
                             if hasattr(self.image_preview_widget, 'viewer') and hasattr(self.image_preview_widget.viewer, 'rectangles'):
@@ -9063,6 +9075,20 @@ class MangaTranslationTab(QObject):
                     try:
                         region_index = data['region_index']
                         error = data['error']
+                        original_path = data.get('original_path')  # May not always be present
+                        
+                        # STATE ISOLATION: Only stop pulse effect if operation is for currently displayed image
+                        if original_path:
+                            current_img = getattr(self.image_preview_widget, 'current_image_path', None) if hasattr(self, 'image_preview_widget') else None
+                            if current_img:
+                                try:
+                                    import os
+                                    if os.path.abspath(original_path) != os.path.abspath(current_img):
+                                        print(f"[STATE_ISOLATION] Clean error for different image - skipping pulse stop")
+                                        return
+                                except Exception:
+                                    if original_path != current_img:
+                                        return
                         
                         # Stop pulse effect on the rectangle
                         try:

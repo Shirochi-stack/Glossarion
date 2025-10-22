@@ -2183,9 +2183,13 @@ class MangaImagePreviewWidget(QWidget):
         # Check for cleaned image and use it instead of original in src tab if available
         src_image_path = self._check_for_cleaned_image(image_path)
         
+        # CRITICAL: Set current_image_path BEFORE starting async load
+        # Otherwise _on_image_loaded_success will use the old/stale path
+        self.current_image_path = image_path  # Still track original path for state management
+        print(f"[STATE_ISOLATION] Set current_image_path to: {os.path.basename(image_path)}")
+        
         # Start loading (happens in background)
         self.viewer.load_image(src_image_path)
-        self.current_image_path = image_path  # Still track original path for state management
         
         # Update thumbnail selection
         self._update_thumbnail_selection(image_path)
@@ -2445,6 +2449,13 @@ class MangaImagePreviewWidget(QWidget):
                 if not preserve_rectangles_after and not preserve_overlays_after:
                     # Normal load - restore full state from persistence
                     print(f"[LOADED] Normal state restoration for: {os.path.basename(self.current_image_path)}")
+                    
+                    # STATE ISOLATION: Explicitly clear rectangles BEFORE restoration to prevent accumulation
+                    rect_count_before = len(self.viewer.rectangles) if hasattr(self.viewer, 'rectangles') else 0
+                    if rect_count_before > 0:
+                        print(f"[STATE_ISOLATION] Found {rect_count_before} lingering rectangles - clearing before restoration")
+                        self.viewer.clear_rectangles()
+                    
                     # Restore detection/recognition overlays
                     import ImageRenderer
                     ImageRenderer._restore_image_state_overlays_only(self.manga_integration, self.current_image_path)

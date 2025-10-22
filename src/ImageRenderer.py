@@ -295,6 +295,11 @@ def _on_detect_text_clicked(self):
         
         image_path = self.image_preview_widget.current_image_path
         
+        # STATE ISOLATION: Track which image detection was started for
+        # This prevents results from appearing on the wrong image if user switches images
+        self._detection_started_for_image = os.path.abspath(image_path)
+        print(f"[STATE_ISOLATION] Detection started for: {os.path.basename(self._detection_started_for_image)}")
+        
         # Get detection settings for the background thread
         detection_config = _get_detection_config(self, )
         
@@ -608,6 +613,13 @@ def _clear_cross_image_state(self):
             self._current_state_image_path = None
             if old_path:
                 print(f"[STATE_ISOLATION] Cleared state image path tracking (was: {os.path.basename(old_path)})")
+        
+        # Clear detection tracking to prevent results from appearing on wrong image
+        if hasattr(self, '_detection_started_for_image'):
+            old_detection = getattr(self, '_detection_started_for_image', None)
+            self._detection_started_for_image = None
+            if old_detection:
+                print(f"[STATE_ISOLATION] Cleared detection tracking (was: {os.path.basename(old_detection)})")
         
         print(f"[STATE_ISOLATION] Cross-image state isolation completed")
         
@@ -1062,8 +1074,18 @@ def _restore_image_state_overlays_only(self, image_path: str):
         used_boxes = False
         if 'viewer_rectangles' in state and state['viewer_rectangles']:
             viewer = self.image_preview_widget.viewer
+            
+            # STATE ISOLATION: Track rectangle count before and after clearing
+            rect_count_before_clear = len(viewer.rectangles) if hasattr(viewer, 'rectangles') else 0
+            print(f"[STATE_ISOLATION] Rectangle count BEFORE clear: {rect_count_before_clear}")
+            
             if hasattr(viewer, 'clear_rectangles'):
                 viewer.clear_rectangles()
+            
+            rect_count_after_clear = len(viewer.rectangles) if hasattr(viewer, 'rectangles') else 0
+            print(f"[STATE_ISOLATION] Rectangle count AFTER clear: {rect_count_after_clear}")
+            print(f"[STATE_ISOLATION] About to restore {len(state['viewer_rectangles'])} rectangles for {os.path.basename(image_path)}")
+            
             from PySide6.QtCore import QRectF, Qt
             from PySide6.QtGui import QPen, QBrush, QColor, QPainterPath
             from manga_image_preview import MoveableRectItem, MoveableEllipseItem, MoveablePathItem
@@ -1402,7 +1424,10 @@ def _restore_image_state_overlays_only(self, image_path: str):
         traceback.print_exc()
 
 def _process_detect_results(self, results: dict):
-    """Process detection results on main thread and update preview (image-aware)."""
+    """Process detection results on main thread and update preview (image-aware).
+    
+    STATE ISOLATION: Only draws rectangles if the detection results are for the currently displayed image.
+    """
     try:
         image_path = results['image_path']
         regions = results['regions']
@@ -1420,18 +1445,55 @@ def _process_detect_results(self, results: dict):
             except Exception:
                 pass
         
-        # Only draw if this image is currently displayed in the source viewer
+        # STATE ISOLATION: Only draw if this image is currently displayed in the source viewer
         # Suppress drawing while batch is active
         if getattr(self, '_batch_mode_active', False):
             print(f"[DETECT_RESULTS] Batch active — suppressing rectangle draw for {os.path.basename(image_path)}")
             return
-        if not hasattr(self, 'image_preview_widget') or image_path != getattr(self.image_preview_widget, 'current_image_path', None):
-            print(f"[DETECT_RESULTS] Skipping draw; not current image: {os.path.basename(image_path)}")
+        
+        # Check if detection is for current image (normalize paths for comparison)
+        current_img = getattr(self.image_preview_widget, 'current_image_path', None) if hasattr(self, 'image_preview_widget') else None
+        if not current_img:
+            print(f"[DETECT_RESULTS] No current image in preview - skipping draw")
             return
+        
+        # Normalize paths for comparison (resolve to absolute paths)
+        import os
+        try:
+            image_path_abs = os.path.abspath(image_path)
+            current_img_abs = os.path.abspath(current_img)
+            
+            # Additional check: Verify results match the image detection was started for
+            # This catches the race condition where user switches images during detection
+            if hasattr(self, '_detection_started_for_image') and self._detection_started_for_image:
+                detection_started_abs = self._detection_started_for_image
+                if image_path_abs != detection_started_abs:
+                    print(f"[STATE_ISOLATION] Results don't match detection start image")
+                    print(f"[STATE_ISOLATION] Started for: {os.path.basename(detection_started_abs)}")
+                    print(f"[STATE_ISOLATION] Results for: {os.path.basename(image_path)}")
+                    print(f"[STATE_ISOLATION] Skipping rectangle draw")
+                    return
+            
+            # Check if results are for currently displayed image
+            if image_path_abs != current_img_abs:
+                print(f"[STATE_ISOLATION] Detection for different image - Detected: {os.path.basename(image_path)}, Current: {os.path.basename(current_img)}")
+                print(f"[STATE_ISOLATION] Skipping rectangle draw to prevent cross-contamination")
+                return
+        except Exception as e:
+            print(f"[STATE_ISOLATION] Path validation error: {e}")
+            # Fallback to simple comparison
+            if image_path != current_img:
+                print(f"[DETECT_RESULTS] Skipping draw; not current image: {os.path.basename(image_path)}")
+                return
         
         # Update working state and draw
         self._current_regions = regions
         self._original_image_path = image_path
+        
+        # STATE ISOLATION: Clear detection tracking since results were successfully applied
+        if hasattr(self, '_detection_started_for_image'):
+            self._detection_started_for_image = None
+            print(f"[STATE_ISOLATION] Cleared detection tracking after successful draw")
         
         # Only clear rectangles if not preserving them (e.g., during clean operations)
         if not preserve_rectangles and hasattr(self.image_preview_widget.viewer, 'clear_rectangles'):
