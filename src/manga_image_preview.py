@@ -2404,20 +2404,12 @@ class MangaImagePreviewWidget(QWidget):
         except Exception as e:
             print(f"[IMAGE_LOADING] Failed to remove processing overlay: {e}")
         
-        # STATE ISOLATION FIX: Clear cross-image state FIRST to prevent leakage
-        # This must happen before any restoration or overlay showing
-        preserve_overlays = getattr(self, '_preserve_text_overlays_on_load', False)
-        if not preserve_overlays:
-            try:
-                if hasattr(self, 'manga_integration') and self.manga_integration:
-                    import ImageRenderer
-                    ImageRenderer._clear_cross_image_state(self.manga_integration)
-                    print(f"[STATE_ISOLATION] Cleared cross-image state before loading {os.path.basename(image_path)}")
-            except Exception as e:
-                print(f"[STATE_ISOLATION] Failed to clear cross-image state: {e}")
+        # NOTE: Cross-image state clearing moved to file selection handler to avoid
+        # wiping out recognition data that was just loaded. Do NOT clear here.
         
         # Clear previous image data (unless preserve flag is set for workflow continuity)
         preserve_rectangles = getattr(self, '_preserve_rectangles_on_load', False)
+        preserve_overlays = getattr(self, '_preserve_text_overlays_on_load', False)
         if not preserve_rectangles:
             self.viewer.clear_rectangles()
             self._clear_strokes()
@@ -2477,9 +2469,8 @@ class MangaImagePreviewWidget(QWidget):
                     # Restore detection/recognition overlays
                     import ImageRenderer
                     ImageRenderer._restore_image_state_overlays_only(self.manga_integration, self.current_image_path)
-                    # Attach recognition tooltips/updates
-                    if hasattr(self.manga_integration, 'show_recognized_overlays_for_image'):
-                        ImageRenderer.show_recognized_overlays_for_image(self.manga_integration, self.current_image_path)
+                    # Attach recognition tooltips/updates - ALWAYS call this to update rectangle colors
+                    ImageRenderer.show_recognized_overlays_for_image(self.manga_integration, self.current_image_path)
                     # Restore translated text overlays using current_image_path (original)
                     # Rebuild overlays with current settings to ensure they match
                     if hasattr(self.manga_integration, '_translated_texts') and self.manga_integration._translated_texts:
