@@ -660,7 +660,7 @@ def _persist_current_image_state(self):
         # Store detection rectangles
         if hasattr(self, '_current_regions') and self._current_regions:
             partial['detection_regions'] = self._current_regions
-            print(f"[STATE] Persisting {len(self._current_regions)} detection regions for {os.path.basename(image_path)}")
+            #print(f"[STATE] Persisting {len(self._current_regions)} detection regions for {os.path.basename(image_path)}")
         
         # Store recognition overlays (if any)
         if hasattr(self.image_preview_widget.viewer, 'overlay_rects'):
