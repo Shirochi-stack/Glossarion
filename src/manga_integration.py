@@ -9136,16 +9136,16 @@ class MangaTranslationTab(QObject):
                         if getattr(self, '_batch_mode_active', False):
                             # Only update when the update is for the current image
                             if not source_path or source_path != getattr(self.image_preview_widget, 'current_image_path', None):
-                                print(f"[PREVIEW_UPDATE] Batch active — skipping update for non-current image")
+                                #print(f"[PREVIEW_UPDATE] Batch active — skipping update for non-current image")
                                 return
                         
                         # Outside batch mode: if a source_path is provided, only update if it matches current image
                         if source_path and source_path != getattr(self.image_preview_widget, 'current_image_path', None):
-                            print(f"[PREVIEW_UPDATE] Skipping update for non-current image outside batch mode")
+                            #print(f"[PREVIEW_UPDATE] Skipping update for non-current image outside batch mode")
                             return
                         
                         if hasattr(self, 'image_preview_widget') and os.path.exists(translated_path):
-                            print(f"[PREVIEW_UPDATE] New translated/cleaned image available: {translated_path}")
+                            #print(f"[PREVIEW_UPDATE] New translated/cleaned image available: {translated_path}")
                             
                             # Store the translated path for potential use
                             if hasattr(self.image_preview_widget, 'current_translated_path'):
@@ -9156,7 +9156,7 @@ class MangaTranslationTab(QObject):
                             try:
                                 current_img = getattr(self.image_preview_widget, 'current_image_path', source_path)
                                 if current_img:
-                                    print(f"[PREVIEW_UPDATE] Refreshing source viewer with current display mode")
+                                    #print(f"[PREVIEW_UPDATE] Refreshing source viewer with current display mode")
                                     # Preserve rectangles and overlays while refreshing
                                     self.image_preview_widget.load_image(current_img, preserve_rectangles=True, preserve_text_overlays=True)
                             except Exception as refresh_err:
@@ -11135,9 +11135,9 @@ class MangaTranslationTab(QObject):
                                 # Use thread-safe queue to update preview from sequential worker
                                 if hasattr(self, 'image_preview_widget'):
                                     current_path = self.image_preview_widget.current_image_path
-                                    print(f"[PREVIEW_UPDATE] Translation completed for: {filename}")
-                                    print(f"[PREVIEW_UPDATE]   Current preview path: {current_path}")
-                                    print(f"[PREVIEW_UPDATE]   Source filepath: {filepath}")
+                                    #print(f"[PREVIEW_UPDATE] Translation completed for: {filename}")
+                                    #print(f"[PREVIEW_UPDATE]   Current preview path: {current_path}")
+                                    #print(f"[PREVIEW_UPDATE]   Source filepath: {filepath}")
                                     print(f"[PREVIEW_UPDATE]   Translated output: {result.get('output_path')}")
                                     
                                     # Normalize paths for comparison (fix slash mixing on Windows)
@@ -11147,9 +11147,9 @@ class MangaTranslationTab(QObject):
                                     # Match if showing original OR any translated version of this image
                                     is_current = (norm_current == norm_source or 
                                                  (norm_current and os.path.dirname(norm_current).endswith(f"{os.path.splitext(os.path.basename(filepath))[0]}_translated")))
-                                    print(f"[PREVIEW_UPDATE]   Normalized current: {norm_current}")
-                                    print(f"[PREVIEW_UPDATE]   Normalized source: {norm_source}")
-                                    print(f"[PREVIEW_UPDATE]   Is current image: {is_current}")
+                                    #print(f"[PREVIEW_UPDATE]   Normalized current: {norm_current}")
+                                    #print(f"[PREVIEW_UPDATE]   Normalized source: {norm_source}")
+                                    #print(f"[PREVIEW_UPDATE]   Is current image: {is_current}")
                                     
                                     if is_current:
                                         # Use queue for thread-safe GUI update

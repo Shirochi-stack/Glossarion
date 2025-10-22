@@ -8125,7 +8125,6 @@ def _add_text_overlay_to_viewer(self, translated_texts: list):
         except Exception:
             pass
         
-        print(f"[DEBUG] Using manga rendering settings: {manga_settings}")
         
         for i, result in enumerate(translated_texts):
             try:
@@ -8162,7 +8161,6 @@ def _add_text_overlay_to_viewer(self, translated_texts: list):
                     # Create text item with proper manga text rendering
                     text_item, final_font_size = _create_manga_text_item(self, text, x, y, w, h, manga_settings)
                     if text_item is None:
-                        print(f"[DEBUG] Failed to create text item for: {text[:30]}...")
                         # Clean up orphan bg if created
                         try:
                             if bg_rect:
