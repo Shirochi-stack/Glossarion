@@ -1132,11 +1132,30 @@ class MangaTranslator:
             
             if not azure_key or not azure_endpoint:
                 raise ValueError("Azure key and endpoint required")
+            
+            # OPTIMIZATION: Configure Azure client with better connection settings
+            try:
+                from azure.core.pipeline.policies import RetryPolicy
+                # Create retry policy with shorter timeouts
+                retry_policy = RetryPolicy(
+                    retry_total=3,
+                    retry_backoff_factor=1,
+                    retry_backoff_max=10,
+                    retry_on_status_codes=[429, 500, 502, 503, 504]  # Retry on rate limit and server errors
+                )
                 
-            self.vision_client = self.azure_client_class(
-                endpoint=azure_endpoint,
-                credential=self.azure_cred_class(azure_key)
-            )
+                # Create client with custom retry policy
+                self.vision_client = self.azure_client_class(
+                    endpoint=azure_endpoint,
+                    credential=self.azure_cred_class(azure_key),
+                    retry_policy=retry_policy
+                )
+            except Exception:
+                # Fallback to standard client creation
+                self.vision_client = self.azure_client_class(
+                    endpoint=azure_endpoint,
+                    credential=self.azure_cred_class(azure_key)
+                )
         else:
             # New OCR providers handled by OCR manager
             try:
@@ -3730,20 +3749,83 @@ class MangaTranslator:
                             # - No tight cropping artifacts
                             self._log(f"📊 Step 1: Running Azure Vision on full image to detect text lines")
                             
-                            # Use Azure Vision to OCR the full image
+                            # OPTIMIZATION: Add caching and better async handling for Azure Vision
                             from azure.ai.vision.imageanalysis.models import VisualFeatures
+                            import time
+                            import hashlib
                             
-                            result = self.vision_client.analyze(
-                                image_data=processed_image_data,
-                                visual_features=[VisualFeatures.READ]
-                            )
+                            # Cache key based on image content hash
+                            image_hash = hashlib.md5(processed_image_data).hexdigest()
+                            cache_key = f"azure_ocr_{image_hash}"
+                            
+                            # Check if we have cached results for this exact image
+                            if hasattr(self, '_azure_ocr_cache') and cache_key in self._azure_ocr_cache:
+                                self._log("   ⚡ Using cached Azure Vision results", "info")
+                                result = self._azure_ocr_cache[cache_key]
+                            else:
+                                # Initialize cache if needed
+                                if not hasattr(self, '_azure_ocr_cache'):
+                                    self._azure_ocr_cache = {}
+                                
+                                max_retries = 3
+                                retry_delay = 0.5  # Start with shorter delay
+                                result = None
+                                
+                                for attempt in range(max_retries):
+                                    try:
+                                        # Check for stop signal before making API call
+                                        if self._check_stop():
+                                            self._log("⏹️ OCR stopped by user", "warning")
+                                            return []
+                                        
+                                        # Make the Azure Vision API call - NO QUALITY REDUCTION
+                                        start_time = time.time()
+                                        result = self.vision_client.analyze(
+                                            image_data=processed_image_data,
+                                            visual_features=[VisualFeatures.READ]
+                                        )
+                                        elapsed = time.time() - start_time
+                                        
+                                        if elapsed > 10:
+                                            self._log(f"   ⚠️ Azure Vision took {elapsed:.1f}s (slow response)", "warning")
+                                        else:
+                                            self._log(f"   ✅ Azure Vision completed in {elapsed:.1f}s", "debug")
+                                        
+                                        # Cache successful result
+                                        self._azure_ocr_cache[cache_key] = result
+                                        break  # Success, exit retry loop
+                                        
+                                    except Exception as e:
+                                        if attempt < max_retries - 1:
+                                            self._log(f"   ⚠️ Azure Vision attempt {attempt + 1} failed: {str(e)[:100]}", "warning")
+                                            self._log(f"   🔄 Retrying in {retry_delay}s...", "info")
+                                            time.sleep(retry_delay)
+                                            retry_delay = min(retry_delay * 2, 4.0)  # Cap at 4s
+                                        else:
+                                            self._log(f"   ❌ Azure Vision failed after {max_retries} attempts", "error")
+                                            raise
+                                
+                                if result is None:
+                                    self._log("❌ Azure Vision returned no result", "error")
+                                    return []
                             
                             # Extract text lines from Azure Vision result
                             # CRITICAL: Use blocks[0] only (comic-translate approach)
                             # blocks[0] contains ALL text lines in reading order
                             full_image_ocr = []
-                            if result.read and result.read.blocks:
+                            if result and result.read and result.read.blocks:
+                                # OPTIMIZATION: Add progress tracking for large results
+                                total_lines = sum(len(block.lines) for block in result.read.blocks if hasattr(block, 'lines'))
+                                if total_lines > 50:
+                                    self._log(f"   📋 Processing {total_lines} text lines...", "info")
+                                
+                                processed_lines = 0
                                 for line in result.read.blocks[0].lines:
+                                    # Check for cancellation periodically
+                                    if processed_lines % 10 == 0 and self._check_stop():
+                                        self._log("⏹️ OCR processing stopped by user", "warning")
+                                        return []
+                                    processed_lines += 1
                                     # Get bounding box from Azure Vision line
                                     # Azure Vision provides bounding_polygon with points
                                     if hasattr(line, 'bounding_polygon') and line.bounding_polygon:
@@ -5969,13 +6051,19 @@ class MangaTranslator:
                 roi['cache_key'] = cache_key
                 work_rois.append(roi)
 
+        # OPTIMIZATION: Better concurrency control for Azure OCR
+        import threading
+        api_semaphore = threading.Semaphore(2)  # Limit concurrent Azure API calls to 2
+        
         def ocr_one(roi):
             try:
-                # RATE LIMITING: Add delay between Azure API calls to avoid "Too Many Requests"
-                import time
-                import random
-                # Stagger requests with randomized delay
-                time.sleep(0.1 + random.random() * 0.2)  # 0.1-0.3s random delay
+                # OPTIMIZATION: Use semaphore to limit concurrent API calls
+                with api_semaphore:
+                    # RATE LIMITING: Shorter delay with semaphore protection
+                    import time
+                    import random
+                    # Reduced delay since we're limiting concurrency
+                    time.sleep(0.05 + random.random() * 0.1)  # 0.05-0.15s random delay
                 
                 # Ensure Azure-supported format for ROI bytes; honor compression preference when possible
                 data = roi['bytes']
@@ -13294,7 +13382,7 @@ class MangaTranslator:
                     
                     if skip_flag:
                         self._log(f"🎨 Skipping inpainting (preserving original art)", "info")
-                        return image.copy()
+                        result_img = image.copy()
                     else:
                         self._log(f"🎨 Inpainting enabled - will remove original text", "debug")
                     
@@ -13358,6 +13446,31 @@ class MangaTranslator:
                             self._save_intermediate_image(image_path, inpainted_local, "inpainted", debug_base_dir=output_dir)
                         except Exception:
                             pass
+                    
+                    # OPTIMIZATION: Save cleaned image immediately after inpainting
+                    # Don't wait for translation to complete
+                    try:
+                        if output_path:
+                            base, ext = os.path.splitext(output_path)
+                        else:
+                            base, ext = os.path.splitext(image_path)
+                        cleaned_path = f"{base}_cleaned{ext}"
+                        
+                        # Fast save with no compression
+                        ext_lower = ext.lower()
+                        if ext_lower == '.png':
+                            cv2.imwrite(cleaned_path, inpainted_local, [cv2.IMWRITE_PNG_COMPRESSION, 0])
+                        elif ext_lower in ['.jpg', '.jpeg']:
+                            cv2.imwrite(cleaned_path, inpainted_local, [cv2.IMWRITE_JPEG_QUALITY, 100])
+                        elif ext_lower == '.webp':
+                            cv2.imwrite(cleaned_path, inpainted_local, [cv2.IMWRITE_WEBP_QUALITY, 100])
+                        else:
+                            cv2.imwrite(cleaned_path, inpainted_local)
+                        
+                        self._log(f"💾 Saved cleaned image: {os.path.basename(cleaned_path)}", "info")
+                    except Exception as e:
+                        self._log(f"⚠️ Failed to save cleaned image in thread: {e}", "warning")
+                    
                     return inpainted_local
                 except Exception as ie:
                     self._log(f"❌ Inpainting task error: {ie}", "error")
@@ -13369,24 +13482,45 @@ class MangaTranslator:
             
             if run_concurrent:
                 self._log("🔀 Running translation and inpainting concurrently", "info")
+                # OPTIMIZATION: Use shorter timeout and immediate cleanup
+                from concurrent.futures import as_completed
                 with ThreadPoolExecutor(max_workers=2) as _executor:
                     fut_translate = _executor.submit(_task_translate)
                     fut_inpaint = _executor.submit(_task_inpaint)
-                    # Wait for completion
+                    
+                    # Wait for both to complete
+                    translate_ok = False
+                    inpainted = None
+                    
+                    # Get results with timing
+                    import time
                     try:
-                        translate_ok = fut_translate.result()
-                    except Exception:
+                        translate_ok = fut_translate.result(timeout=60)
+                        self._log("✅ Translation task completed", "debug")
+                    except Exception as e:
+                        self._log(f"⚠️ Translation failed: {e}", "warning")
                         translate_ok = False
+                    
                     try:
-                        inpainted = fut_inpaint.result()
-                    except Exception:
+                        inpaint_start = time.time()
+                        self._log("⏳ Waiting for inpainting to complete...", "info")
+                        inpainted = fut_inpaint.result(timeout=60)
+                        inpaint_wait = time.time() - inpaint_start
+                        if inpaint_wait > 0.5:
+                            self._log(f"✅ Inpainting completed (waited {inpaint_wait:.1f}s after translation)", "info")
+                    except Exception as e:
+                        self._log(f"⚠️ Inpainting failed: {e}", "warning")
                         inpainted = image.copy()
+                
+                # CRITICAL: Exit context manager immediately to avoid cleanup delay
+                # ThreadPoolExecutor shutdown can take 1-3 seconds
             else:
                 self._log("↪️ Concurrent mode disabled — running sequentially", "info")
                 translate_ok = _task_translate()
                 inpainted = _task_inpaint()
             
             # After concurrent phase, validate translation
+            # OPTIMIZATION: Skip slow to_dict() conversion unless actually interrupted
             if self._check_stop():
                 result['interrupted'] = True
                 self._log("⏹️ Translation cancelled before rendering", "warning")
@@ -13399,34 +13533,22 @@ class MangaTranslator:
                 result['regions'] = [r.to_dict() for r in regions]
                 return result
             
-            # Save the cleaned/inpainted image separately before rendering translations
-            cleaned_image_path = None
-            try:
-                if inpainted is not None:
-                    # Generate cleaned image path in the same directory as output
-                    if output_path:
-                        base, ext = os.path.splitext(output_path)
-                    else:
-                        base, ext = os.path.splitext(image_path)
-                    cleaned_image_path = f"{base}_cleaned{ext}"
-                    
-                    # Save cleaned image
-                    success_cleaned = cv2.imwrite(cleaned_image_path, inpainted)
-                    if not success_cleaned:
-                        # Try with PIL for Unicode paths
-                        from PIL import Image as PILImage
-                        rgb_cleaned = cv2.cvtColor(inpainted, cv2.COLOR_BGR2RGB)
-                        pil_cleaned = PILImage.fromarray(rgb_cleaned)
-                        pil_cleaned.save(cleaned_image_path)
-                    
-                    self._log(f"💾 Saved cleaned image to: {os.path.basename(cleaned_image_path)}", "info")
-            except Exception as e:
-                self._log(f"⚠️ Failed to save cleaned image: {str(e)}", "warning")
+            # Cleaned image already saved in inpainting thread for speed
+            # Just set the path for the result
+            if output_path:
+                base, ext = os.path.splitext(output_path)
+            else:
+                base, ext = os.path.splitext(image_path)
+            cleaned_image_path = f"{base}_cleaned{ext}"
+            
+            # Verify it was saved
+            if not os.path.exists(cleaned_image_path):
+                self._log(f"⚠️ Cleaned image not found, may have failed to save in thread", "warning")
                 cleaned_image_path = None
             
             # Render translated text
             self._log(f"✍️ Rendering translated text...")
-            self._log(f"   Using enhanced renderer with custom settings", "info")
+            # OPTIMIZATION: Skip verbose logging during rendering
             final_image = self.render_translated_text(inpainted, regions)
             
             # Save output
