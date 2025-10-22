@@ -778,11 +778,6 @@ class MangaTranslationTab(QObject):
         state_file = os.path.join(state_dir, 'image_state.json')
         self.image_state_manager = ImageStateManager(state_file)
         
-        # Initialize fast overlay compositor for instant text updates
-        from fast_overlay_compositor import FastOverlayCompositor
-        self.fast_compositor = FastOverlayCompositor()
-        self._compositor_initialized = False
-        
         # Track current image path for state persistence on navigation
         self._current_image_path = None
         
