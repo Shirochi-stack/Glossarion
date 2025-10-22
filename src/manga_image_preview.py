@@ -1820,8 +1820,35 @@ class MangaImagePreviewWidget(QWidget):
         self.download_btn.wheelEvent = lambda event: None  # Disable scroll wheel
         self.download_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # Prevent focus on click
         self.download_btn.clicked.connect(self._on_download_images_clicked)
-        self.download_btn.setEnabled(False)  # Initially disabled until images are translated
+        self.download_btn.setEnabled(True)  # Always enabled
         file_info_layout.addWidget(self.download_btn)
+        
+        # Create CBZ button
+        self.cbz_btn = QPushButton("📦 Create CBZ")
+        self.cbz_btn.setMinimumHeight(24)
+        self.cbz_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #007bff;
+                color: white;
+                border: 1px solid #007bff;
+                border-radius: 3px;
+                padding: 4px 10px;
+                font-size: 8pt;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #0056b3;
+                border-color: #0056b3;
+            }
+            QPushButton:pressed {
+                background-color: #004085;
+            }
+        """)
+        self.cbz_btn.wheelEvent = lambda event: None  # Disable scroll wheel
+        self.cbz_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # Prevent focus on click
+        self.cbz_btn.clicked.connect(self._on_create_cbz_clicked)
+        self.cbz_btn.setEnabled(True)  # Always enabled
+        file_info_layout.addWidget(self.cbz_btn)
         
         layout.addWidget(file_info_container)
         
@@ -2702,8 +2729,12 @@ class MangaImagePreviewWidget(QWidget):
         except Exception as e:
             print(f"[ERROR] Failed to cycle source display mode: {e}")
     
-    def _on_download_images_clicked(self):
-        """Handle download images button - consolidate isolated images into structured folder"""
+    def _on_download_images_clicked(self, silent=False):
+        """Handle download images button - consolidate isolated images into structured folder
+        
+        Args:
+            silent: If True, suppress message boxes (for auto-consolidation)
+        """
         try:
             from PySide6.QtWidgets import QFileDialog, QMessageBox
             import shutil
@@ -2730,11 +2761,12 @@ class MangaImagePreviewWidget(QWidget):
                     translated_folders.append(item_path)
             
             if not translated_folders:
-                QMessageBox.warning(
-                    self,
-                    "No Translated Images",
-                    "No translated images found. Please translate some images first."
-                )
+                if not silent:
+                    QMessageBox.warning(
+                        self,
+                        "No Translated Images",
+                        "No translated images found. Please translate some images first."
+                    )
                 return
             
             
@@ -2768,20 +2800,41 @@ class MangaImagePreviewWidget(QWidget):
                         copied_count += 1
             
             
-            # Show success message
-            QMessageBox.information(
-                self,
-                "Download Complete",
-                f"Successfully consolidated {copied_count} translated images into:\n{consolidated_folder}\n\n"
-                f"All images from separate folders have been combined into a single 'translated' folder."
-            )
+            # Show success message (unless silent)
+            if not silent:
+                QMessageBox.information(
+                    self,
+                    "Download Complete",
+                    f"Successfully consolidated {copied_count} translated images into:\n{consolidated_folder}\n\n"
+                    f"All images from separate folders have been combined into a single 'translated' folder."
+                )
             
+        except Exception as e:
+            if not silent:
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.critical(
+                    self,
+                    "Download Error",
+                    f"Failed to consolidate images:\n{str(e)}"
+                )
+            else:
+                # In silent mode, just let the exception propagate to be caught by caller
+                raise
+    
+    def _on_create_cbz_clicked(self):
+        """Handle Create CBZ button - call the isolated CBZ method"""
+        try:
+            if not hasattr(self, 'manga_integration') or not self.manga_integration:
+                return
+            
+            # Call the existing isolated CBZ creation method
+            self.manga_integration._create_cbz_from_isolated_folders()
         except Exception as e:
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.critical(
                 self,
-                "Download Error",
-                f"Failed to consolidate images:\n{str(e)}"
+                "CBZ Creation Error",
+                f"Failed to create CBZ file:\n{str(e)}"
             )
     
     def _on_rectangle_moved(self, rect: QRectF):

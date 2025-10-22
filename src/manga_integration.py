@@ -9154,6 +9154,7 @@ class MangaTranslationTab(QObject):
                     # Update preview to show translated/cleaned image (thread-safe)
                     _, data = update
                     try:
+                        import os
                         # Handle both string and dict formats
                         if isinstance(data, dict):
                             translated_path = data.get('translated_path')
@@ -11271,6 +11272,15 @@ class MangaTranslationTab(QObject):
                     self._create_cbz_from_isolated_folders()
                 except Exception as e:
                     self._log(f"⚠️ Failed to create CBZ file: {e}", "warning")
+            
+            # Auto-consolidate translated images (silent, no message box)
+            try:
+                if hasattr(self, 'image_preview_widget') and self.image_preview_widget:
+                    self._log("📥 Consolidating translated images...", "info")
+                    self.image_preview_widget._on_download_images_clicked(silent=True)
+                    self._log("✅ Images consolidated successfully", "success")
+            except Exception as e:
+                self._log(f"⚠️ Image consolidation failed: {e}", "warning")
             
             # Final summary - only if not stopped
             if not self.stop_flag.is_set():
