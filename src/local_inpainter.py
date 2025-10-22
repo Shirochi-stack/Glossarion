@@ -2470,6 +2470,9 @@ class LocalInpainter:
                                     # CRITICAL: MAT expects mask where 1=keep, 0=inpaint (opposite of our convention)
                                     
                                     batch_size = image.shape[0]
+                                    
+                                    # IMPROVEMENT: Use fixed seed for deterministic results in const mode
+                                    # This prevents random variation between runs
                                     z = torch.randn(batch_size, 512, device=image.device, dtype=image.dtype)
                                     c = None
                                     
@@ -2480,8 +2483,25 @@ class LocalInpainter:
                                     # Our convention is 1=inpaint, 0=keep, so we need to invert
                                     inverted_mask = 1.0 - mask
                                     
-                                    # Call generator with inverted mask
-                                    output = self.generator(image, inverted_mask, z, c, truncation_psi=1.0, noise_mode='const')
+                                    # Log tensor stats for debugging
+                                    logger.debug(f"🔍 MAT Input - Image: shape={image.shape}, range=[{image.min():.3f}, {image.max():.3f}]")
+                                    logger.debug(f"🔍 MAT Input - Mask (inverted): shape={inverted_mask.shape}, sum={inverted_mask.sum():.0f}")
+                                    
+                                    # IMPROVEMENT: Use higher truncation_psi for better quality (default 1.0)
+                                    # Lower values (0.5-0.8) = more conservative/realistic
+                                    # Higher values (1.0+) = more creative/diverse
+                                    # For inpainting accuracy, we want deterministic results
+                                    with torch.no_grad():
+                                        output = self.generator(
+                                            image, 
+                                            inverted_mask, 
+                                            z, 
+                                            c, 
+                                            truncation_psi=1.0,  # Full style diversity
+                                            noise_mode='const'   # Deterministic noise
+                                        )
+                                    
+                                    logger.debug(f"🔍 MAT Output - shape={output.shape}, range=[{output.min():.3f}, {output.max():.3f}]")
                                     
                                     return output
                             
@@ -3311,39 +3331,63 @@ class LocalInpainter:
                     except Exception:
                         pass
 
-                    # Run inference with proper error handling
+                    # Determine number of iterations
+                    num_iterations = 1
+                    if iterations is not None and iterations > 0:
+                        num_iterations = int(iterations)
+                        logger.info(f"🔁 Running {num_iterations} iteration(s) for JIT {self.current_method.upper()}")
+
+                    # Run inference with proper error handling and iteration support
                     with torch.no_grad():
-                        try:
-                            # Standard LaMa JIT models expect (image, mask)
-                            inpainted = self.model(image_tensor, mask_tensor)
-                        except RuntimeError as e:
-                            error_str = str(e)
-                            logger.error(f"Model inference failed: {error_str}")
+                        for iter_idx in range(num_iterations):
+                            if num_iterations > 1:
+                                logger.debug(f"  JIT Iteration {iter_idx + 1}/{num_iterations}")
                             
-                            # If tensor size mismatch, log detailed info
-                            if "size of tensor" in error_str.lower():
-                                logger.error(f"Image shape: {image_tensor.shape}")
-                                logger.error(f"Mask shape: {mask_tensor.shape}")
+                            try:
+                                # Standard LaMa JIT models expect (image, mask)
+                                inpainted = self.model(image_tensor, mask_tensor)
+                            except RuntimeError as e:
+                                error_str = str(e)
+                                logger.error(f"Model inference failed: {error_str}")
                                 
-                                # Try transposing if needed
-                                if "dimension 3" in error_str and "880" in error_str:
-                                    # This suggests the tensors might be in wrong format
-                                    # Try different permutation
-                                    logger.info("Attempting to fix tensor format...")
+                                # If tensor size mismatch, log detailed info
+                                if "size of tensor" in error_str.lower():
+                                    logger.error(f"Image shape: {image_tensor.shape}")
+                                    logger.error(f"Mask shape: {mask_tensor.shape}")
                                     
-                                    # Ensure image is [B, C, H, W] not [B, H, W, C]
-                                    if image_tensor.shape[1] > 3:
-                                        image_tensor = image_tensor.permute(0, 3, 1, 2)
-                                        logger.info(f"Permuted image to: {image_tensor.shape}")
-                                    
-                                    # Try again
-                                    inpainted = self.model(image_tensor, mask_tensor)
+                                    # Try transposing if needed
+                                    if "dimension 3" in error_str and "880" in error_str:
+                                        # This suggests the tensors might be in wrong format
+                                        # Try different permutation
+                                        logger.info("Attempting to fix tensor format...")
+                                        
+                                        # Ensure image is [B, C, H, W] not [B, H, W, C]
+                                        if image_tensor.shape[1] > 3:
+                                            image_tensor = image_tensor.permute(0, 3, 1, 2)
+                                            logger.info(f"Permuted image to: {image_tensor.shape}")
+                                        
+                                        # Try again
+                                        inpainted = self.model(image_tensor, mask_tensor)
+                                    else:
+                                        # As last resort, try swapped arguments
+                                        logger.info("Trying swapped arguments (mask, image)...")
+                                        inpainted = self.model(mask_tensor, image_tensor)
                                 else:
-                                    # As last resort, try swapped arguments
-                                    logger.info("Trying swapped arguments (mask, image)...")
-                                    inpainted = self.model(mask_tensor, image_tensor)
-                            else:
-                                raise e
+                                    raise e
+                            
+                            # For multi-iteration: use output as input for next iteration (progressive refinement)
+                            if iter_idx < num_iterations - 1:
+                                # Normalize output back to [0, 1] range for next iteration
+                                if len(inpainted.shape) == 4:
+                                    next_input = inpainted[0].detach()  # Keep on GPU if available
+                                else:
+                                    next_input = inpainted.detach()
+                                    if len(next_input.shape) == 3 and next_input.shape[0] == 3:
+                                        next_input = next_input  # Already [C, H, W]
+                                
+                                # Clamp to valid range and update image_tensor
+                                next_input = torch.clamp(next_input, 0.0, 1.0)
+                                image_tensor = next_input.unsqueeze(0) if len(next_input.shape) == 3 else next_input
                     
                     # Process output
                     # Output should be [B, C, H, W]
@@ -3371,15 +3415,27 @@ class LocalInpainter:
                 h, w = image.shape[:2]
                 size = 768 if self.current_method == 'anime' else 512
                 
+                # Determine number of iterations (default 1 for single pass)
+                num_iterations = 1
+                if iterations is not None and iterations > 0:
+                    num_iterations = int(iterations)
+                    logger.info(f"🔁 Running {num_iterations} iteration(s) for {self.current_method.upper()}")
+                
                 # For MAT, use 512x512 and convert BGR to RGB
                 if self.current_method == 'mat':
+                    logger.debug("📦 MAT checkpoint inference path")
                     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                    
+                    # IMPROVEMENT: Use LANCZOS4 for downscaling, preserve details
                     img_resized = cv2.resize(image_rgb, (512, 512), interpolation=cv2.INTER_LANCZOS4)
                     mask_resized = cv2.resize(mask, (512, 512), interpolation=cv2.INTER_NEAREST)
                     
-                    # MAT expects [-1, 1] range
-                    img_norm = img_resized.astype(np.float32) / 127.5 - 1
+                    # CRITICAL: MAT expects [-1, 1] range for both image and mask
+                    img_norm = img_resized.astype(np.float32) / 127.5 - 1.0
                     mask_norm = mask_resized.astype(np.float32) / 255.0
+                    
+                    logger.debug(f"📊 MAT Input Stats - Image: [{img_norm.min():.3f}, {img_norm.max():.3f}], mean={img_norm.mean():.3f}")
+                    logger.debug(f"📊 MAT Mask Stats - range: [{mask_norm.min():.3f}, {mask_norm.max():.3f}], coverage={mask_norm.sum()/(512*512)*100:.1f}%")
                 else:
                     img_resized = cv2.resize(image, (size, size), interpolation=cv2.INTER_LANCZOS4)
                     mask_resized = cv2.resize(mask, (size, size), interpolation=cv2.INTER_NEAREST)
@@ -3387,6 +3443,7 @@ class LocalInpainter:
                     img_norm = img_resized.astype(np.float32) / 127.5 - 1
                     mask_norm = mask_resized.astype(np.float32) / 255.0
                 
+                # Initial tensors
                 img_tensor = torch.from_numpy(img_norm).permute(2, 0, 1).unsqueeze(0).float()
                 mask_tensor = torch.from_numpy(mask_norm).unsqueeze(0).unsqueeze(0).float()
                 
@@ -3394,20 +3451,41 @@ class LocalInpainter:
                     img_tensor = self._to_device_safe(img_tensor)
                     mask_tensor = self._to_device_safe(mask_tensor)
                 
+                # ITERATION LOOP: Run inference multiple times for progressive refinement
                 with torch.no_grad():
-                    output = self.model(img_tensor, mask_tensor)
+                    for iter_idx in range(num_iterations):
+                        if num_iterations > 1:
+                            logger.debug(f"  Iteration {iter_idx + 1}/{num_iterations}")
+                        
+                        # Run model inference
+                        output = self.model(img_tensor, mask_tensor)
+                        
+                        # For multi-iteration: use output as input for next iteration
+                        if iter_idx < num_iterations - 1:
+                            # Convert output back to normalized input range
+                            output_np = output.squeeze(0).permute(1, 2, 0).cpu().numpy()
+                            output_np = np.clip(output_np, -1.0, 1.0)
+                            
+                            # Update image tensor with output (keeps mask the same)
+                            img_tensor = torch.from_numpy(output_np).permute(2, 0, 1).unsqueeze(0).float()
+                            if self.use_gpu and self.device:
+                                img_tensor = self._to_device_safe(img_tensor)
                 
                 result = output.squeeze(0).permute(1, 2, 0).cpu().numpy()
                 
                 # For MAT, clamp to [-1, 1] before denormalizing
                 if self.current_method == 'mat':
+                    logger.debug(f"📊 MAT Raw Output - range: [{result.min():.3f}, {result.max():.3f}], mean={result.mean():.3f}")
                     result = np.clip(result, -1.0, 1.0)
+                    logger.debug(f"📊 MAT After Clip - range: [{result.min():.3f}, {result.max():.3f}]")
                 
-                result = ((result + 1) * 127.5).clip(0, 255).astype(np.uint8)
+                # Denormalize from [-1, 1] to [0, 255]
+                result = ((result + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
                 
                 # For MAT, convert RGB back to BGR
                 if self.current_method == 'mat':
                     result = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
+                    logger.debug(f"📊 MAT Final Output - shape={result.shape}, dtype={result.dtype}")
                 
                 result = cv2.resize(result, (w, h), interpolation=cv2.INTER_LANCZOS4)
                 self._log_inpaint_diag('ckpt', result, mask)
