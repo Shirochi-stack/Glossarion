@@ -8812,10 +8812,11 @@ class MangaTranslationTab(QObject):
                         
                         if self._should_autoscroll():
                             self.log_text.ensureCursorVisible()
-                            # Also set scrollbar to max now and a few times later in case layout changes
+                            # AGGRESSIVE: Set scrollbar to max now and repeatedly with more frequent intervals
                             scrollbar = self.log_text.verticalScrollBar()
                             scrollbar.setValue(scrollbar.maximum())
-                            for delay in [50, 100, 200]:
+                            # More aggressive timing: 10ms, 25ms, 50ms, 75ms, 100ms, 150ms, 200ms, 300ms
+                            for delay in [10, 25, 50, 75, 100, 150, 200, 300]:
                                 QTimer.singleShot(delay, lambda sb=scrollbar: (sb.setValue(sb.maximum()) if self._should_autoscroll() else None))
                     except Exception:
                         pass
@@ -8915,10 +8916,15 @@ class MangaTranslationTab(QObject):
                         
                         cursor.insertText(message, format)
                         
-                        # Scroll to bottom (favor auto-scroll when near bottom)
+                        # AGGRESSIVE: Scroll to bottom (favor auto-scroll when near bottom)
                         try:
                             if self._should_autoscroll():
                                 self.log_text.ensureCursorVisible()
+                                # Force scrollbar to max repeatedly to fight fast log updates
+                                scrollbar = self.log_text.verticalScrollBar()
+                                scrollbar.setValue(scrollbar.maximum())
+                                for delay in [10, 25, 50, 75, 100, 150, 200, 300]:
+                                    QTimer.singleShot(delay, lambda sb=scrollbar: (sb.setValue(sb.maximum()) if self._should_autoscroll() else None))
                         except Exception:
                             pass
                     except Exception:

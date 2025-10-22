@@ -2719,6 +2719,18 @@ Recent translations to summarize:
         # Connect scrollbar to detect manual scrolling
         scrollbar = self.log_text.verticalScrollBar()
         scrollbar.valueChanged.connect(self._on_log_scroll)
+        
+        # Auto-scroll helper button (appears when scrolled up)
+        from PySide6.QtWidgets import QToolButton
+        self.log_scroll_btn = QToolButton(self.log_text.viewport())
+        self.log_scroll_btn.setText("Scroll to bottom")
+        self.log_scroll_btn.setStyleSheet("QToolButton { background: #2d2d2d; color: white; border: 1px solid #4a5568; padding: 4px 8px; border-radius: 3px; }")
+        self.log_scroll_btn.hide()
+        self.log_scroll_btn.clicked.connect(self._scroll_log_to_bottom)
+        # Track resize to keep button anchored
+        self.log_text.installEventFilter(self)
+        self.log_text.viewport().installEventFilter(self)
+        QTimer.singleShot(0, self._update_log_scroll_button)
 
     def _check_poe_model(self, *args):
         """Automatically show POE helper when POE model is selected"""
@@ -7069,25 +7081,27 @@ Important rules:
             sys.exit(0)
 
     def _on_log_scroll(self, value):
-        """Detect when user manually scrolls up in the log"""
+        """Detect when user manually scrolls in the log"""
         try:
             scrollbar = self.log_text.verticalScrollBar()
-            # If user scrolled up (not at bottom), mark it
-            at_bottom = value >= scrollbar.maximum() - 10
-            
-            # Only mark as user scrolled if we were previously at bottom and now we're not
-            # This prevents false positives when content is added and scrollbar max changes
-            was_at_bottom = getattr(self, '_was_at_bottom', True)
-            
-            if not at_bottom and was_at_bottom:
-                # User intentionally scrolled up from the bottom
-                self._user_scrolled_up = True
-            elif at_bottom:
-                # User scrolled back to bottom, resume auto-scroll
+            # Distance from bottom
+            distance = max(0, scrollbar.maximum() - int(value))
+            # Consider 'near bottom' generously so manual override is disabled when close
+            near_threshold = max(20, int(scrollbar.pageStep() * 0.9))  # ~one page or ≥20px
+            disable_threshold = max(near_threshold + 40, int(scrollbar.pageStep() * 1.5))  # clearly away from bottom
+
+            if distance <= near_threshold:
+                # Close enough to bottom — treat as at bottom and re-enable auto-scroll
                 self._user_scrolled_up = False
-            
-            # Track current state for next comparison
-            self._was_at_bottom = at_bottom
+                self._was_at_bottom = True
+            elif distance >= disable_threshold:
+                # Only mark as manually scrolled when clearly away from bottom
+                self._user_scrolled_up = True
+                self._was_at_bottom = False
+            # If in between thresholds, keep prior state (prevents flapping)
+
+            # Update helper button
+            self._update_log_scroll_button()
         except Exception:
             pass
     
@@ -7099,6 +7113,50 @@ Important rules:
             self._user_scrolled_up = False
         except Exception:
             self._autoscroll_delay_until = 0.0
+    
+    def _position_log_scroll_button(self):
+        try:
+            if not hasattr(self, 'log_scroll_btn') or not hasattr(self, 'log_text'):
+                return
+            btn = self.log_scroll_btn
+            vp = self.log_text.viewport()
+            margin = 8
+            x = max(0, vp.width() - btn.sizeHint().width() - margin)
+            y = max(0, vp.height() - btn.sizeHint().height() - margin)
+            btn.move(x, y)
+        except Exception:
+            pass
+
+    def _update_log_scroll_button(self):
+        try:
+            if not hasattr(self, 'log_scroll_btn') or not hasattr(self, 'log_text'):
+                return
+            visible = bool(getattr(self, '_user_scrolled_up', False))
+            self.log_scroll_btn.setVisible(visible)
+            if visible:
+                self._position_log_scroll_button()
+        except Exception:
+            pass
+
+    def _scroll_log_to_bottom(self):
+        try:
+            if hasattr(self, 'log_text'):
+                sb = self.log_text.verticalScrollBar()
+                sb.setValue(sb.maximum())
+                self._user_scrolled_up = False
+                self._update_log_scroll_button()
+        except Exception:
+            pass
+
+    def eventFilter(self, obj, event):
+        try:
+            if hasattr(self, 'log_text') and obj in (self.log_text, self.log_text.viewport()):
+                from PySide6.QtCore import QEvent
+                if event.type() in (QEvent.Resize, QEvent.Show):
+                    QTimer.singleShot(0, self._position_log_scroll_button)
+        except Exception:
+            pass
+        return False
     
     def append_log_direct(self, message):
         """Direct append - MUST be called from main thread only"""
@@ -7121,14 +7179,18 @@ Important rules:
             
             cursor.insertText(message)
             
-            # Scroll to bottom (respect delay and manual scrolling)
+            # AGGRESSIVE: Scroll to bottom (respect delay and manual scrolling)
             try:
                 import time as _time
+                from PySide6.QtCore import QTimer
                 # Only auto-scroll if delay passed AND user hasn't scrolled up
                 if (_time.time() >= getattr(self, '_autoscroll_delay_until', 0) and 
                     not getattr(self, '_user_scrolled_up', False)):
                     scrollbar = self.log_text.verticalScrollBar()
                     scrollbar.setValue(scrollbar.maximum())
+                    # Force scroll repeatedly with aggressive timing to fight fast log updates
+                    for delay in [10, 25, 50, 75, 100, 150, 200, 300]:
+                        QTimer.singleShot(delay, lambda sb=scrollbar: sb.setValue(sb.maximum()) if _time.time() >= getattr(self, '_autoscroll_delay_until', 0) and not getattr(self, '_user_scrolled_up', False) else None)
             except Exception:
                 pass
         except Exception as e:
@@ -7201,15 +7263,19 @@ Important rules:
                    # Regular text append
                    self.log_text.append(message)
                
-               # Try to scroll to bottom to ensure visibility, but respect delayed auto-scroll window and manual scrolling
+               # AGGRESSIVE: Try to scroll to bottom to ensure visibility, but respect delayed auto-scroll window and manual scrolling
                try:
                    import time as _time
+                   from PySide6.QtCore import QTimer
                    # Only auto-scroll if delay passed AND user hasn't scrolled up
                    if (_time.time() >= getattr(self, '_autoscroll_delay_until', 0) and 
                        not getattr(self, '_user_scrolled_up', False)):
                        scrollbar = self.log_text.verticalScrollBar()
                        if at_bottom or True:
                            scrollbar.setValue(scrollbar.maximum())
+                           # Force scroll repeatedly with aggressive timing to fight fast log updates
+                           for delay in [10, 25, 50, 75, 100, 150, 200, 300]:
+                               QTimer.singleShot(delay, lambda sb=scrollbar: sb.setValue(sb.maximum()) if _time.time() >= getattr(self, '_autoscroll_delay_until', 0) and not getattr(self, '_user_scrolled_up', False) else None)
                    # Force immediate update of the widget
                    self.log_text.update()
                    self.log_text.repaint()
@@ -7281,9 +7347,13 @@ Important rules:
                    else:
                        self.log_text.append(status_msg)
                
-               # Scroll to bottom
+               # AGGRESSIVE: Scroll to bottom
+               from PySide6.QtCore import QTimer
                scrollbar = self.log_text.verticalScrollBar()
                scrollbar.setValue(scrollbar.maximum())
+               # Force scroll repeatedly with aggressive timing
+               for delay in [10, 25, 50, 75, 100, 150, 200, 300]:
+                   QTimer.singleShot(delay, lambda sb=scrollbar: sb.setValue(sb.maximum()))
            except Exception:
                try:
                    print(message)
