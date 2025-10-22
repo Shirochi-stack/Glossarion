@@ -7521,6 +7521,7 @@ def save_positions_and_rerender(self):
     try:
         current_image = getattr(self.image_preview_widget, 'current_image_path', None)
         if not current_image:
+            print("[SAVE_POS] No current image path")
             return
         # Build text regions list
         # Load translated_texts
@@ -7529,7 +7530,10 @@ def save_positions_and_rerender(self):
             if hasattr(self, 'image_state_manager') and self.image_state_manager:
                 st = self.image_state_manager.get_state(current_image) or {}
                 translated_texts = st.get('translated_texts') or []
-        except Exception:
+        except Exception as e:
+            print(f"[SAVE_POS] Error loading translated_texts from state: {e}")
+            import traceback
+            print(f"[SAVE_POS] Traceback:\n{traceback.format_exc()}")
             translated_texts = []
         if not translated_texts and hasattr(self, '_translated_texts'):
             translated_texts = self._translated_texts or []
@@ -7542,7 +7546,10 @@ def save_positions_and_rerender(self):
                         br = rects[int(idx)].sceneBoundingRect()
                         bbox = [int(br.x()), int(br.y()), int(br.width()), int(br.height())]
                         translated_texts.append({'original': {'text': td.get('original',''), 'region_index': int(idx)}, 'translation': td.get('translation',''), 'bbox': bbox})
-                except Exception:
+                except Exception as e:
+                    print(f"[SAVE_POS] Error synthesizing text for region {idx}: {e}")
+                    import traceback
+                    print(f"[SAVE_POS] Traceback:\n{traceback.format_exc()}")
                     continue
         if not translated_texts:
             print("[SAVE_POS] No translated_texts available to render; aborting")
@@ -7553,7 +7560,10 @@ def save_positions_and_rerender(self):
         try:
             st = self.image_state_manager.get_state(current_image) if hasattr(self, 'image_state_manager') else {}
             last_pos = (st or {}).get('last_render_positions', {}) or {}
-        except Exception:
+        except Exception as e:
+            print(f"[SAVE_POS] Error loading last_render_positions: {e}")
+            import traceback
+            print(f"[SAVE_POS] Traceback:\n{traceback.format_exc()}")
             last_pos = {}
         
         # Build regions from last_pos or rectangles
@@ -7579,7 +7589,10 @@ def save_positions_and_rerender(self):
                 tr = TextRegion(text=result['original']['text'], vertices=vertices, bounding_box=(x, y, w, h), confidence=1.0, region_type='text_block')
                 tr.translated_text = result['translation']
                 regions.append(tr)
-            except Exception:
+            except Exception as e:
+                print(f"[SAVE_POS] Error building region {i}: {e}")
+                import traceback
+                print(f"[SAVE_POS] Traceback:\n{traceback.format_exc()}")
                 continue
         if not regions:
             print("[SAVE_POS] No regions built; aborting")
@@ -7592,15 +7605,20 @@ def save_positions_and_rerender(self):
             cand = (st or {}).get('cleaned_image_path')
             if cand and os.path.exists(cand):
                 base_image = cand
-        except Exception:
+        except Exception as e:
+            print(f"[SAVE_POS] Error getting cleaned_image_path: {e}")
+            import traceback
+            print(f"[SAVE_POS] Traceback:\n{traceback.format_exc()}")
             base_image = None
         if base_image is None:
             try:
                 cand = getattr(self, '_cleaned_image_path', None)
                 if cand and os.path.exists(cand):
                     base_image = cand
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[SAVE_POS] Error getting _cleaned_image_path: {e}")
+                import traceback
+                print(f"[SAVE_POS] Traceback:\n{traceback.format_exc()}")
         # For consistency, prefer original image over translated base to avoid artifacts
         if base_image is None:
             base_image = current_image
@@ -7623,8 +7641,10 @@ def save_positions_and_rerender(self):
                     nr.translated_text = r.translated_text
                     scaled.append(nr)
                 regions = scaled
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[SAVE_POS] Error scaling regions: {e}")
+            import traceback
+            print(f"[SAVE_POS] Traceback:\n{traceback.format_exc()}")
         
         # Generate proper isolated output path for this specific image
         output_path = None
@@ -7645,6 +7665,8 @@ def save_positions_and_rerender(self):
         _render_with_manga_translator(self, base_image, regions, output_path=output_path, original_image_path=current_image, switch_tab=False)
     except Exception as e:
         print(f"[SAVE_POS] Error: {e}")
+        import traceback
+        print(f"[SAVE_POS] Traceback:\n{traceback.format_exc()}")
 
 def _render_with_manga_translator(self, image_path: str, regions, output_path: str = None, image_bgr=None, original_image_path: str = None, switch_tab: bool = True):
     """Render translated text using MangaTranslator's PIL pipeline.

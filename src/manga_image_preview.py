@@ -2221,11 +2221,12 @@ class MangaImagePreviewWidget(QWidget):
                 print(f"[SAVE_OVERLAY] Failed to persist rectangles: {e}")
             
             from PySide6.QtCore import QTimer
+            import ImageRenderer
             
             # Run save_positions_and_rerender in background thread using executor
             if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'executor') and self.main_gui.executor:
                 print("[SAVE_OVERLAY] Submitting to background thread executor")
-                future = self.main_gui.executor.submit(self.manga_integration.save_positions_and_rerender)
+                future = self.main_gui.executor.submit(ImageRenderer.save_positions_and_rerender, self.manga_integration)
                 
                 # Schedule refreshes after rendering completes
                 def _refresh_source():
@@ -2244,7 +2245,7 @@ class MangaImagePreviewWidget(QWidget):
             else:
                 print("[SAVE_OVERLAY] No executor available, falling back to main thread")
                 # Fallback to QTimer if no executor (shouldn't happen)
-                QTimer.singleShot(0, self.manga_integration.save_positions_and_rerender)
+                QTimer.singleShot(0, lambda: ImageRenderer.save_positions_and_rerender(self.manga_integration))
                 
                 def _refresh_source():
                     try:

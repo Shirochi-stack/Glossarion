@@ -47,6 +47,10 @@ logs/
 *.pyo
 *.pyd
 
+# Allow C++ and DLL files
+!*.cpp
+!*.dll
+
 # Do not commit text files by default (change if needed)
 *.txt
 # But always include requirements files

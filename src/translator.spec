@@ -36,13 +36,11 @@ hiddenimports = []
 # Add custom DLL and CPP files
 binaries.extend([
     ('libgcc_s_seh-1.dll', '.'),
-    ('libimage_utils.dll', '.'),
     ('libonnx_inpainter.dll', '.'),
     ('libstdc++-6.dll', '.'),
     ('libwinpthread-1.dll', '.'),
     ('onnxruntime.dll', '.'),
     ('onnxruntime_providers_shared.dll', '.'),
-    ('image_utils.cpp', '.'),
     ('onnx_inpainter.cpp', '.')
 ])
 
