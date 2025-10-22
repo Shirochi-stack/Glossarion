@@ -1783,7 +1783,7 @@ class MangaImagePreviewWidget(QWidget):
         # Current file label with download button
         file_info_container = QWidget()
         file_info_layout = QHBoxLayout(file_info_container)
-        file_info_layout.setContentsMargins(0, 0, 0, 0)
+        file_info_layout.setContentsMargins(0, 8, 0, 0)  # Add 8px top margin for spacing
         file_info_layout.setSpacing(8)
         
         self.file_label = QLabel("No image loaded")
@@ -2822,20 +2822,105 @@ class MangaImagePreviewWidget(QWidget):
                 raise
     
     def _on_create_cbz_clicked(self):
-        """Handle Create CBZ button - call the isolated CBZ method"""
+        """Handle Create CBZ button - call the isolated CBZ method with animated feedback"""
         try:
             if not hasattr(self, 'manga_integration') or not self.manga_integration:
                 return
             
+            # Store original button state
+            original_text = self.cbz_btn.text()
+            original_stylesheet = self.cbz_btn.styleSheet()
+            
+            # Show processing state
+            self.cbz_btn.setText("⏳ Creating...")
+            self.cbz_btn.setEnabled(False)
+            self.cbz_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #6c757d;
+                    color: white;
+                    border: 1px solid #6c757d;
+                    border-radius: 3px;
+                    padding: 4px 10px;
+                    font-size: 8pt;
+                    font-weight: bold;
+                }
+            """)
+            
+            # Process events to update UI immediately
+            from PySide6.QtWidgets import QApplication
+            QApplication.processEvents()
+            
             # Call the existing isolated CBZ creation method
             self.manga_integration._create_cbz_from_isolated_folders()
+            
+            # Show success state
+            self.cbz_btn.setText("✅ Created!")
+            self.cbz_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #28a745;
+                    color: white;
+                    border: 1px solid #28a745;
+                    border-radius: 3px;
+                    padding: 4px 10px;
+                    font-size: 8pt;
+                    font-weight: bold;
+                }
+            """)
+            QApplication.processEvents()
+            
+            # Reset button after 2 seconds
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(2000, lambda: self._reset_cbz_button(original_text, original_stylesheet))
+            
         except Exception as e:
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.critical(
-                self,
-                "CBZ Creation Error",
-                f"Failed to create CBZ file:\n{str(e)}"
-            )
+            # Show error state
+            self.cbz_btn.setText("❌ Failed")
+            self.cbz_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #dc3545;
+                    color: white;
+                    border: 1px solid #dc3545;
+                    border-radius: 3px;
+                    padding: 4px 10px;
+                    font-size: 8pt;
+                    font-weight: bold;
+                }
+            """)
+            from PySide6.QtWidgets import QApplication
+            QApplication.processEvents()
+            
+            # Reset button after 2 seconds
+            from PySide6.QtCore import QTimer
+            original_text = "📦 Create CBZ"
+            original_stylesheet = """
+                QPushButton {
+                    background-color: #007bff;
+                    color: white;
+                    border: 1px solid #007bff;
+                    border-radius: 3px;
+                    padding: 4px 10px;
+                    font-size: 8pt;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #0056b3;
+                    border-color: #0056b3;
+                }
+                QPushButton:pressed {
+                    background-color: #004085;
+                }
+            """
+            QTimer.singleShot(2000, lambda: self._reset_cbz_button(original_text, original_stylesheet))
+            print(f"[ERROR] CBZ creation failed: {e}")
+    
+    def _reset_cbz_button(self, text: str, stylesheet: str):
+        """Reset CBZ button to original state"""
+        try:
+            self.cbz_btn.setText(text)
+            self.cbz_btn.setStyleSheet(stylesheet)
+            self.cbz_btn.setEnabled(True)
+        except Exception:
+            pass
     
     def _on_rectangle_moved(self, rect: QRectF):
         """Handle rectangle movement - automatically apply save position"""

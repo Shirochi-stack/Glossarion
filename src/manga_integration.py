@@ -3730,7 +3730,7 @@ class MangaTranslationTab(QObject):
         cbz_row_layout.setSpacing(10)
         
         self.create_cbz_checkbox = self._create_styled_checkbox("Create .cbz file at translation end")
-        self.create_cbz_checkbox.setChecked(bool(getattr(self, 'create_cbz_at_end_value', self.main_gui.config.get('manga_create_cbz_at_end', False))))
+        self.create_cbz_checkbox.setChecked(bool(getattr(self, 'create_cbz_at_end_value', self.main_gui.config.get('manga_create_cbz_at_end', True))))
         self.create_cbz_checkbox.stateChanged.connect(self._on_create_cbz_toggle)
         cbz_row_layout.addWidget(self.create_cbz_checkbox)
         cbz_row_layout.addStretch()
@@ -3743,7 +3743,7 @@ class MangaTranslationTab(QObject):
         consolidate_row_layout.setSpacing(10)
         
         self.auto_consolidate_checkbox = self._create_styled_checkbox("Auto consolidate images at translation end")
-        self.auto_consolidate_checkbox.setChecked(bool(getattr(self, 'auto_consolidate_images_value', self.main_gui.config.get('manga_auto_consolidate_images', False))))
+        self.auto_consolidate_checkbox.setChecked(bool(getattr(self, 'auto_consolidate_images_value', self.main_gui.config.get('manga_auto_consolidate_images', True))))
         self.auto_consolidate_checkbox.stateChanged.connect(self._on_auto_consolidate_toggle)
         consolidate_row_layout.addWidget(self.auto_consolidate_checkbox)
         consolidate_row_layout.addStretch()
@@ -5805,7 +5805,7 @@ class MangaTranslationTab(QObject):
         self.rapidocr_detection_mode_value = self.main_gui.config.get('rapidocr_detection_mode', 'document')
 
         # Output settings
-        self.create_cbz_at_end_value = config.get('manga_create_cbz_at_end', False)
+        self.create_cbz_at_end_value = config.get('manga_create_cbz_at_end', True)
         self.auto_consolidate_images_value = config.get('manga_auto_consolidate_images', True)
     
     def _save_rendering_settings(self):
@@ -8346,9 +8346,10 @@ class MangaTranslationTab(QObject):
         """Create a single CBZ file from all isolated *_translated folders"""
         import zipfile
         
+        if not self.selected_files or len(self.selected_files) == 0:
+            raise FileNotFoundError("No images loaded. Please load some images first.")
+        
         try:
-            if not self.selected_files or len(self.selected_files) == 0:
-                return
             
             # Get parent directory
             first_file = self.selected_files[0]
@@ -8363,7 +8364,7 @@ class MangaTranslationTab(QObject):
             
             if not translated_folders:
                 self._log("⚠️ No translated folders found for CBZ creation", "warning")
-                return
+                raise FileNotFoundError("No translated images found. Please translate some images first.")
             
             # Create CBZ filename based on parent folder name
             parent_folder_name = os.path.basename(parent_dir)
@@ -8395,6 +8396,8 @@ class MangaTranslationTab(QObject):
             self._log(f"❌ Error creating CBZ file: {str(e)}", "error")
             import traceback
             self._log(traceback.format_exc(), "debug")
+            # Re-raise so button handler can show error state
+            raise
     
     def _finalize_cbz_jobs(self):
         """Package translated outputs back into .cbz for each imported CBZ.
