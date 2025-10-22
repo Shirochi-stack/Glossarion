@@ -163,10 +163,6 @@ app_modules = [
     'splash_utils',
     'other_settings',      # Other Settings module
     'ai_hunter_enhanced',  # AI Hunter Enhanced module
-    'manga_translator',    # Manga translator module
-    'manga_integration',   # Manga GUI integration
-    'manga_settings_dialog',
-    'manga_image_preview', # Manga image preview widget
     'dialog_animations',   # Dialog fade animations
     'spinning',            # Spinning icon helper
     'update_manager',
@@ -178,9 +174,6 @@ app_modules = [
 	'enhanced_text_extractor.py',
 	'multi_api_key_manager.py',
 	'individual_endpoint_dialog.py',
-	'bubble_detector', 
-	'local_inpainter',  	
-	'ocr_manager',
 	'model_options',
 	'hyphen_textwrap',
 	'duplicate_detection_config',
@@ -333,15 +326,8 @@ api_modules = [
     'google.rpc',
     'google.type',
     
-    # Azure Computer Vision (for manga OCR) - New Image Analysis API
+    # Azure (for Azure OpenAI endpoints - NOT Computer Vision)
     'azure',
-    'azure.ai',
-    'azure.ai.vision',
-    'azure.ai.vision.imageanalysis',
-    'azure.ai.vision.imageanalysis.models',
-    'azure.ai.vision.imageanalysis._client',
-    'azure.ai.vision.imageanalysis._operations',
-    'azure.ai.vision.imageanalysis._version',
     'azure.core',
     'azure.core.credentials',
     'azure.core.exceptions',
@@ -358,14 +344,6 @@ api_modules = [
     'isodate',  # Required by Azure
     'oauthlib',  # May be required for Azure auth
     'requests_oauthlib',  # May be required for Azure auth
-    
-    # Google Cloud Vision (for manga OCR)
-    'google.cloud',
-    'google.cloud.vision',
-    'google.cloud.vision_v1',
-    'google.cloud.vision_v1.types',
-    'google.cloud.vision_v1.services',
-    'google.cloud.vision_v1.services.image_annotator',
 	
 	# Google Cloud Translate
 	'google.cloud.translate',
