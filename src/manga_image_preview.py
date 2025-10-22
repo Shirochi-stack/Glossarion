@@ -2382,6 +2382,18 @@ class MangaImagePreviewWidget(QWidget):
         self.file_label.setText(f"⌛ Loading {os.path.basename(image_path)}...")
         self.file_label.setStyleSheet("color: #5a9fd4; font-size: 8pt;")  # Blue while loading
         
+        # STATE ISOLATION FIX: Clear cross-image state FIRST to prevent leakage
+        # This must happen before any restoration or overlay showing
+        preserve_overlays = getattr(self, '_preserve_text_overlays_on_load', False)
+        if not preserve_overlays:
+            try:
+                if hasattr(self, 'manga_integration') and self.manga_integration:
+                    import ImageRenderer
+                    ImageRenderer._clear_cross_image_state(self.manga_integration)
+                    print(f"[STATE_ISOLATION] Cleared cross-image state before loading {os.path.basename(image_path)}")
+            except Exception as e:
+                print(f"[STATE_ISOLATION] Failed to clear cross-image state: {e}")
+        
         # Clear previous image data (unless preserve flag is set for workflow continuity)
         preserve_rectangles = getattr(self, '_preserve_rectangles_on_load', False)
         if not preserve_rectangles:
@@ -2393,7 +2405,6 @@ class MangaImagePreviewWidget(QWidget):
             self._clear_strokes()
         
         # Handle text overlays based on preserve flag
-        preserve_overlays = getattr(self, '_preserve_text_overlays_on_load', False)
         try:
             if hasattr(self, 'manga_integration') and self.manga_integration:
                 if preserve_overlays:
@@ -2404,14 +2415,9 @@ class MangaImagePreviewWidget(QWidget):
                     import ImageRenderer
                     ImageRenderer.show_text_overlays_for_image(self.manga_integration, overlay_path)
                 else:
-                    # Hide existing overlays and clear caches for new image
+                    # Hide existing overlays for new image
                     import ImageRenderer
                     ImageRenderer.show_text_overlays_for_image(self.manga_integration, image_path)
-                    # STATE ISOLATION FIX: Use centralized state clearing method
-                    try:
-                        ImageRenderer._clear_cross_image_state(self.manga_integration)
-                    except Exception:
-                        pass
         except Exception:
             pass
         

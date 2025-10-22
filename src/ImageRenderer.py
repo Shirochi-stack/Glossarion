@@ -602,6 +602,13 @@ def _clear_cross_image_state(self):
             self._recognized_texts_image_path = None
             print(f"[STATE_ISOLATION] Cleared recognized texts image path tracking")
         
+        # Clear current state image path to prevent stale references
+        if hasattr(self, '_current_state_image_path'):
+            old_path = getattr(self, '_current_state_image_path', None)
+            self._current_state_image_path = None
+            if old_path:
+                print(f"[STATE_ISOLATION] Cleared state image path tracking (was: {os.path.basename(old_path)})")
+        
         print(f"[STATE_ISOLATION] Cross-image state isolation completed")
         
     except Exception as e:
@@ -703,11 +710,18 @@ def _persist_current_image_state(self):
 def _rehydrate_text_state_from_persisted(self, image_path: str):
     """Rebuild in-memory recognition/translation data from persisted state without redrawing.
     Returns (ocr_count, trans_count).
+    
+    STATE ISOLATION: This function properly scopes data to image_path and tags the restored
+    state with _current_state_image_path to prevent cross-contamination.
     """
     try:
         if not hasattr(self, 'image_state_manager'):
             return (0, 0)
         state = self.image_state_manager.get_state(image_path) or {}
+        
+        # STATE ISOLATION: Tag the current image path so we can validate later
+        self._current_state_image_path = image_path
+        
         # Recognized texts
         rec = state.get('recognized_texts') or []
         active_rec = []
@@ -728,6 +742,7 @@ def _rehydrate_text_state_from_persisted(self, image_path: str):
         except Exception:
             pass
         self._recognition_data = recognition_data
+        
         # Translated texts
         trans = state.get('translated_texts') or []
         active_trans = []
@@ -744,8 +759,11 @@ def _rehydrate_text_state_from_persisted(self, image_path: str):
             active_trans.append(t)
         self._translated_texts = active_trans
         self._translation_data = translation_data
+        
+        print(f"[STATE_ISOLATION] Rehydrated state for {os.path.basename(image_path)}: {len(active_rec)} OCR, {len(active_trans)} translations")
         return (len(active_rec), len(active_trans))
-    except Exception:
+    except Exception as e:
+        print(f"[STATE_ISOLATION] Failed to rehydrate state: {e}")
         return (0, 0)
 
 def _restore_image_state(self, image_path: str):
@@ -1018,10 +1036,19 @@ def _restore_image_state_overlays_only(self, image_path: str):
     """Restore ONLY rectangles/overlays for an image, without loading images
     
     This is used after manually loading the correct image to avoid double-loading.
+    
+    STATE ISOLATION: Validates that we're restoring the correct image's state.
     """
     try:
         if not hasattr(self, 'image_state_manager'):
             return
+        
+        # STATE ISOLATION: Verify we don't have stale state from another image
+        if hasattr(self, '_current_state_image_path') and self._current_state_image_path:
+            if self._current_state_image_path != image_path:
+                print(f"[STATE_ISOLATION] WARNING: Stale state detected! Current={os.path.basename(self._current_state_image_path)}, Requested={os.path.basename(image_path)}")
+                print(f"[STATE_ISOLATION] Clearing stale state before restoration")
+                _clear_cross_image_state(self)
         
         # Get saved state
         state = self.image_state_manager.get_state(image_path)
