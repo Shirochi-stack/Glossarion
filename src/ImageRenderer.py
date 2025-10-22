@@ -285,9 +285,6 @@ def _on_detect_text_clicked(self):
             self.image_preview_widget.detect_btn.setEnabled(False)
             self.image_preview_widget.detect_btn.setText("Detecting...")
         
-        # Add processing overlay effect
-        _add_processing_overlay(self, )
-        
         # Clear cleaned image path when starting new detection (new workflow)
         if hasattr(self, '_cleaned_image_path'):
             self._cleaned_image_path = None
@@ -299,6 +296,9 @@ def _on_detect_text_clicked(self):
         # This prevents results from appearing on the wrong image if user switches images
         self._detection_started_for_image = os.path.abspath(image_path)
         print(f"[STATE_ISOLATION] Detection started for: {os.path.basename(self._detection_started_for_image)}")
+        
+        # Add processing overlay effect (after tracking image)
+        _add_processing_overlay(self, )
         
         # Get detection settings for the background thread
         detection_config = _get_detection_config(self, )
@@ -533,8 +533,9 @@ def _run_detect_background(self, image_path: str, detection_config: dict):
 def _restore_detect_button(self):
     """Restore the detect button to its original state"""
     try:
-        # Remove processing overlay effect
-        _remove_processing_overlay(self, )
+        # Remove processing overlay effect for the image that was being processed
+        image_path = getattr(self, '_detection_started_for_image', None)
+        _remove_processing_overlay(self, image_path)
         
         if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'detect_btn'):
             self.image_preview_widget.detect_btn.setEnabled(True)
@@ -1611,11 +1612,14 @@ def _on_clean_image_clicked(self):
             self.image_preview_widget.clean_btn.setEnabled(False)
             self.image_preview_widget.clean_btn.setText("Cleaning...")
 
-        # Add processing overlay effect
-        _add_processing_overlay(self, )
-
         # Determine base image path
         image_path = self._original_image_path if hasattr(self, '_original_image_path') and self._original_image_path else self.image_preview_widget.current_image_path
+        
+        # Track which image we're cleaning for overlay removal
+        self._original_image_path = image_path
+        
+        # Add processing overlay effect (after tracking image)
+        _add_processing_overlay(self, )
 
         # Prepare regions: use existing rectangles if any; otherwise run detection synchronously
         has_rectangles = (hasattr(self.image_preview_widget, 'viewer') and
@@ -1946,8 +1950,12 @@ def _update_preview_after_clean(self, output_path: str):
 def _restore_clean_button(self):
     """Restore the clean button to its original state"""
     try:
-        # Remove processing overlay effect
-        _remove_processing_overlay(self, )
+        # Remove processing overlay effect for the image that was being processed
+        # For clean button, use _original_image_path if available, otherwise current image
+        image_path = getattr(self, '_original_image_path', None)
+        if not image_path and hasattr(self, 'image_preview_widget'):
+            image_path = getattr(self.image_preview_widget, 'current_image_path', None)
+        _remove_processing_overlay(self, image_path)
         
         if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'clean_btn'):
             self.image_preview_widget.clean_btn.setEnabled(True)
@@ -2861,10 +2869,13 @@ def _on_recognize_text_clicked(self):
         else:
             print("[DEBUG] No recognize_btn found!")
         
-        # Add processing overlay effect
-        _add_processing_overlay(self, )
-        
         image_path = self.image_preview_widget.current_image_path
+        
+        # Track which image we're recognizing for overlay removal
+        self._recognized_texts_image_path = image_path
+        
+        # Add processing overlay effect (after tracking image)
+        _add_processing_overlay(self, )
         
         # Get OCR settings
         ocr_config = _get_ocr_config(self, )
@@ -2996,8 +3007,14 @@ def _run_recognize_background(self, image_path: str, regions: list, ocr_config: 
 def _restore_recognize_button(self):
     """Restore the recognize button to its original state"""
     try:
-        # Remove processing overlay effect
-        _remove_processing_overlay(self, )
+        # Remove processing overlay effect for the image that was being processed
+        # For recognize, track the image path from the operation
+        image_path = None
+        if hasattr(self, '_recognized_texts_image_path'):
+            image_path = self._recognized_texts_image_path
+        elif hasattr(self, 'image_preview_widget'):
+            image_path = getattr(self.image_preview_widget, 'current_image_path', None)
+        _remove_processing_overlay(self, image_path)
         
         if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'recognize_btn'):
             self.image_preview_widget.recognize_btn.setEnabled(True)
@@ -3043,16 +3060,19 @@ def _on_translate_text_clicked(self):
             # If no rectangles, we already logged the message above
             # In both cases, we need to run recognition (which will detect if needed)
         
+        # Get current image path first
+        image_path = self.image_preview_widget.current_image_path
+        
+        # Track which image we're translating for overlay removal
+        self._translating_image_path = image_path
+        
         # Disable the translate button
         if hasattr(self.image_preview_widget, 'translate_btn'):
             self.image_preview_widget.translate_btn.setEnabled(False)
             self.image_preview_widget.translate_btn.setText("Translating...")
         
-        # Add processing overlay effect
+        # Add processing overlay effect (after tracking image)
         _add_processing_overlay(self, )
-        
-        # Get current image path
-        image_path = self.image_preview_widget.current_image_path
 
         # Invalidate stale recognized text from another image
         try:
@@ -3874,9 +3894,23 @@ def _add_processing_overlay(self):
         if not hasattr(self, 'image_preview_widget'):
             return
         
+        # Get current image path for per-image overlay tracking
+        current_image = getattr(self.image_preview_widget, 'current_image_path', None)
+        if not current_image:
+            return
+        
         from PySide6.QtWidgets import QGraphicsRectItem
-        from PySide6.QtCore import QRectF, QPropertyAnimation, QEasingCurve, Qt
+        from PySide6.QtCore import QRectF, QPropertyAnimation, QEasingCurve, Qt, QObject, Property
         from PySide6.QtGui import QBrush, QColor
+        
+        # Initialize per-image overlay storage
+        if not hasattr(self, '_processing_overlays_by_image'):
+            self._processing_overlays_by_image = {}
+        
+        # Don't add overlay if one already exists for this image
+        if current_image in self._processing_overlays_by_image:
+            print(f"[OVERLAY] Processing overlay already exists for {os.path.basename(current_image)}")
+            return
         
         # Use source viewer (no more separate output viewer)
         viewer = getattr(self.image_preview_widget, 'viewer', None)
@@ -3892,12 +3926,8 @@ def _add_processing_overlay(self):
         
         # Add to scene
         viewer._scene.addItem(overlay)
-        self._processing_overlay = overlay
-        self._processing_overlay_viewer = viewer
         
         # Create pulsing animation using QObject wrapper
-        from PySide6.QtCore import QObject
-        
         class OpacityItem(QObject):
             def __init__(self, item, parent=None):
                 super().__init__(parent)
@@ -3913,49 +3943,63 @@ def _add_processing_overlay(self):
             
             opacity = Property(int, get_opacity, set_opacity)
         
-        self._opacity_wrapper = OpacityItem(overlay)
+        opacity_wrapper = OpacityItem(overlay)
         
-        self._pulse_animation = QPropertyAnimation(self._opacity_wrapper, b"opacity")
-        self._pulse_animation.setDuration(1500)  # 1.5 seconds
-        self._pulse_animation.setStartValue(15)
-        self._pulse_animation.setEndValue(50)
-        self._pulse_animation.setEasingCurve(QEasingCurve.InOutQuad)
-        self._pulse_animation.setLoopCount(-1)  # Infinite loop
-        self._pulse_animation.start()
+        pulse_animation = QPropertyAnimation(opacity_wrapper, b"opacity")
+        pulse_animation.setDuration(1500)  # 1.5 seconds
+        pulse_animation.setStartValue(15)
+        pulse_animation.setEndValue(50)
+        pulse_animation.setEasingCurve(QEasingCurve.InOutQuad)
+        pulse_animation.setLoopCount(-1)  # Infinite loop
+        pulse_animation.start()
         
-        print(f"[DEBUG] Added processing overlay with pulsing animation (active tab)")
+        # Store per-image
+        self._processing_overlays_by_image[current_image] = {
+            'overlay': overlay,
+            'animation': pulse_animation,
+            'wrapper': opacity_wrapper,
+            'viewer': viewer
+        }
+        
+        print(f"[OVERLAY] Added processing overlay for {os.path.basename(current_image)}")
         
     except Exception as e:
-        print(f"[DEBUG] Error adding processing overlay: {str(e)}")
+        print(f"[OVERLAY] Error adding processing overlay: {str(e)}")
 
-def _remove_processing_overlay(self):
-    """Remove the processing overlay effect"""
+def _remove_processing_overlay(self, image_path=None):
+    """Remove the processing overlay effect for a specific image or current image"""
     try:
-        if hasattr(self, '_pulse_animation'):
-            self._pulse_animation.stop()
-            del self._pulse_animation
+        # Get image path if not provided
+        if image_path is None:
+            if hasattr(self, 'image_preview_widget'):
+                image_path = getattr(self.image_preview_widget, 'current_image_path', None)
         
-        if hasattr(self, '_processing_overlay'):
-            # Remove from the viewer where it was added (source or output)
-            viewer = getattr(self, '_processing_overlay_viewer', None)
-            if viewer is None and hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'viewer'):
-                viewer = self.image_preview_widget.viewer
-            if viewer is not None and hasattr(viewer, '_scene'):
-                try:
-                    viewer._scene.removeItem(self._processing_overlay)
-                except Exception:
-                    pass
-            del self._processing_overlay
+        if not image_path:
+            return
         
-        if hasattr(self, '_opacity_wrapper'):
-            del self._opacity_wrapper
-        if hasattr(self, '_processing_overlay_viewer'):
-            del self._processing_overlay_viewer
-        
-        print(f"[DEBUG] Removed processing overlay")
+        # Check per-image storage
+        if hasattr(self, '_processing_overlays_by_image') and image_path in self._processing_overlays_by_image:
+            overlay_data = self._processing_overlays_by_image[image_path]
+            
+            # Stop animation
+            try:
+                overlay_data['animation'].stop()
+            except Exception:
+                pass
+            
+            # Remove overlay from scene
+            try:
+                overlay_data['viewer']._scene.removeItem(overlay_data['overlay'])
+            except Exception:
+                pass
+            
+            # Clean up references
+            del self._processing_overlays_by_image[image_path]
+            
+            print(f"[OVERLAY] Removed processing overlay for {os.path.basename(image_path)}")
         
     except Exception as e:
-        print(f"[DEBUG] Error removing processing overlay: {str(e)}")
+        print(f"[OVERLAY] Error removing processing overlay: {str(e)}")
 
 
 def _handle_ocr_this_text(self, region_index: int, rect_item=None):
@@ -6087,9 +6131,26 @@ def _show_translation_popup(self, translation_data: dict, region_index: int = No
                 # Refresh the text overlay for this region
                 if changed:
                     try:
-                        # Persist updated translated_texts to state so overlays restore across sessions
+        # Persist updated translated_texts to state so overlays restore across sessions
                         try:
                             current_image = getattr(self.image_preview_widget, 'current_image_path', None)
+                            
+                            # CRITICAL: Validate that we're editing the correct image's translation
+                            # Check if the translation data belongs to the currently displayed image
+                            translation_image_path = None
+                            if hasattr(self, '_translating_image_path'):
+                                translation_image_path = self._translating_image_path
+                            elif hasattr(self, '_translation_data_image_path'):
+                                translation_image_path = self._translation_data_image_path
+                            
+                            # If translation belongs to a different image, abort with clear error
+                            if translation_image_path and current_image and os.path.abspath(translation_image_path) != os.path.abspath(current_image):
+                                error_msg = f"⚠️ Cannot update: Translation is for {os.path.basename(translation_image_path)} but you're viewing {os.path.basename(current_image)}"
+                                self._log(error_msg, "error")
+                                print(f"[CRITICAL] {error_msg}")
+                                dialog.accept()
+                                return
+                            
                             if current_image and hasattr(self, 'image_state_manager') and self.image_state_manager:
                                 state = self.image_state_manager.get_state(current_image) or {}
                                 tlist = state.get('translated_texts') or []
@@ -7475,6 +7536,20 @@ def _update_single_text_overlay(self, region_index: int, new_translation: str, u
             self._log("❌ No image loaded", "error")
             return False
         
+        # CRITICAL: Validate that translation data belongs to the current image
+        translation_image_path = None
+        if hasattr(self, '_translating_image_path'):
+            translation_image_path = self._translating_image_path
+        elif hasattr(self, '_translation_data_image_path'):
+            translation_image_path = self._translation_data_image_path
+        
+        # If translation belongs to a different image, abort with clear error
+        if translation_image_path and os.path.abspath(translation_image_path) != os.path.abspath(current_image):
+            error_msg = f"Cannot render: Translation data is for {os.path.basename(translation_image_path)} but you're viewing {os.path.basename(current_image)}"
+            print(f"[CRITICAL] {error_msg}")
+            self._log(f"❌ {error_msg}", "error")
+            return False
+        
         print(f"[DEBUG] Current image: {current_image}")
         print(f"[DEBUG] Manual edit complete for region {region_index}. Rendering with MangaTranslator...")
         self._log(f"🔄 Rendering edited translation...", "info")
@@ -8626,8 +8701,9 @@ def _wrap_text_to_width(self, text: str, max_width: int, font) -> str:
 def _restore_translate_button(self):
     """Restore the translate button to its original state"""
     try:
-        # Remove processing overlay effect
-        _remove_processing_overlay(self, )
+        # Remove processing overlay effect for the image that was being processed
+        image_path = getattr(self, '_translating_image_path', None)
+        _remove_processing_overlay(self, image_path)
         
         # CRITICAL: Restore print hijacking if MangaTranslator exists
         if hasattr(self, '_manga_translator') and self._manga_translator:
@@ -9091,6 +9167,11 @@ def _process_translate_results(self, results: dict):
         
         # Store translated texts
         self._translated_texts = translated_texts
+        
+        # CRITICAL: Track which image these translations belong to
+        self._translation_data_image_path = original_image_path
+        print(f"[TRANSLATE_RESULTS] Translation data now belongs to: {os.path.basename(original_image_path)}")
+        
         # Persist translated_texts to state for overlay restoration across sessions
         try:
             if hasattr(self, 'image_state_manager') and original_image_path:
@@ -9197,7 +9278,15 @@ def _process_translate_results(self, results: dict):
                     )
                     print(f"[TRANSLATE] Returned from _render_with_manga_translator")
                     
-                    # Refresh image preview to show translated output
+                    # CRITICAL: Always remove processing overlay for the translated image
+                    # This must happen regardless of which image is currently displayed
+                    try:
+                        _remove_processing_overlay(self, original_image_path)
+                        print(f"[TRANSLATE] Removed processing overlay for {os.path.basename(original_image_path)}")
+                    except Exception as e:
+                        print(f"[TRANSLATE] Failed to remove processing overlay: {e}")
+                    
+                    # Refresh image preview to show translated output (only if currently viewing this image)
                     try:
                         if not getattr(self, '_batch_mode_active', False):
                             current_image = getattr(self.image_preview_widget, 'current_image_path', None)

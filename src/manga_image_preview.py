@@ -2380,15 +2380,7 @@ class MangaImagePreviewWidget(QWidget):
         from PySide6.QtCore import Qt
         image_path = item.data(Qt.ItemDataRole.UserRole)
         if image_path and os.path.exists(image_path):
-            # Remove any processing overlay when switching images
-            try:
-                if hasattr(self, 'manga_integration') and self.manga_integration:
-                    import ImageRenderer
-                    ImageRenderer._remove_processing_overlay(self.manga_integration)
-                    print(f"[THUMBNAIL_CLICK] Removed processing overlay when switching to: {os.path.basename(image_path)}")
-            except Exception as e:
-                print(f"[THUMBNAIL_CLICK] Failed to remove processing overlay: {e}")
-            
+            # Per-image overlay isolation: Don't remove overlays when switching - they're managed per-image
             self.load_image(image_path)
     
     @Slot(str)
@@ -2398,14 +2390,7 @@ class MangaImagePreviewWidget(QWidget):
         self.file_label.setText(f"⌛ Loading {os.path.basename(image_path)}...")
         self.file_label.setStyleSheet("color: #5a9fd4; font-size: 8pt;")  # Blue while loading
         
-        # Remove any processing overlay when switching images (e.g., during batch translation)
-        try:
-            if hasattr(self, 'manga_integration') and self.manga_integration:
-                import ImageRenderer
-                ImageRenderer._remove_processing_overlay(self.manga_integration)
-                print(f"[IMAGE_LOADING] Removed processing overlay when loading: {os.path.basename(image_path)}")
-        except Exception as e:
-            print(f"[IMAGE_LOADING] Failed to remove processing overlay: {e}")
+        # Per-image overlay isolation: Don't remove overlays when switching - they're managed per-image
         
         # NOTE: Cross-image state clearing moved to file selection handler to avoid
         # wiping out recognition data that was just loaded. Do NOT clear here.
