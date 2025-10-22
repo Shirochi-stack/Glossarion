@@ -14,7 +14,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 
 APP_NAME = 'L_Glossarion_Lite v6.1.9'  # CHANGED: Updated version
 APP_ICON = 'Halgakos.ico'
-ENABLE_CONSOLE = False  # Console disabled for production
+ENABLE_CONSOLE = True  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
 ONE_FILE = True         # Single executable vs folder distribution
 
@@ -34,18 +34,7 @@ binaries = []
 hiddenimports = []
 
 # Add custom DLL and CPP files
-binaries.extend([
-    ('libgcc_s_seh-1.dll', '.'),
-    ('libonnx_inpainter.dll', '.'),
-    ('onnx_inpainter.dll', '.'),
-    ('libstdc++-6.dll', '.'),
-    ('libwinpthread-1.dll', '.'),
-    ('onnxruntime.dll', '.'),
-    ('onnxruntime_providers_shared.dll', '.'),
-    ('onnx_inpainter.cpp', '.'),
-    ('vfcompat.dll', '.'),
-    ('appverifUI.dll', '.')
-])
+binaries.extend([])
 
 # Collect data files from packages that need them
 for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'chardet', 'charset_normalizer']:
@@ -135,8 +124,6 @@ app_files = [
 	('duplicate_detection_config.py', '.'),
 	('advanced_duplicate_detection.py', '.'),
 	
-	# Image Rendering
-	('ImageRenderer.py', '.'),
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -198,7 +185,6 @@ app_modules = [
 	'hyphen_textwrap',
 	'duplicate_detection_config',
 	'advanced_duplicate_detection',
-	'ImageRenderer',
 	
 ]
 
