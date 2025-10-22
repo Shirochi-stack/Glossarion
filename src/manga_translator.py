@@ -3741,6 +3741,21 @@ class MangaTranslator:
                                 if len(all_regions) < original_count:
                                     self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions)} unique blocks (removed {original_count - len(all_regions)} overlaps)")
                             
+                            # START EARLY INPAINTING after RT-DETR detection
+                            # Load image for inpainting if not already loaded
+                            if 'image' not in locals():
+                                import cv2
+                                image = cv2.imread(image_path)
+                                if image is None:
+                                    from PIL import Image as PILImage
+                                    import numpy as np
+                                    pil_image = PILImage.open(image_path)
+                                    image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+                            
+                            self._inpainting_future = self._start_early_inpainting_if_needed(
+                                rtdetr_detections, image, ocr_settings, image_path
+                            )
+                            
                             # Step 1: Run OCR on FULL IMAGE (comic-translate approach)
                             # This is MUCH better for Azure Vision:
                             # - Preserves document layout context
@@ -5004,6 +5019,11 @@ class MangaTranslator:
                                     if len(all_regions) < original_count:
                                         self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions)} unique blocks (removed {original_count - len(all_regions)} overlaps)")
                                 
+                                # START EARLY INPAINTING after RT-DETR detection
+                                self._inpainting_future = self._start_early_inpainting_if_needed(
+                                    rtdetr_detections, image, ocr_settings, image_path
+                                )
+                                
                                 # Step 1: Run OCR on FULL IMAGE (comic-translate approach)
                                 # This is MUCH better for Azure Document Intelligence:
                                 # - Preserves document layout context
@@ -5501,6 +5521,73 @@ class MangaTranslator:
         
         return languages
 
+    def _start_early_inpainting_if_needed(self, rtdetr_detections, image, ocr_settings, image_path):
+        """Start inpainting in background immediately after RT-DETR detection.
+        This runs concurrently with OCR for maximum speed.
+        """
+        if getattr(self, 'skip_inpainting', False) or not rtdetr_detections:
+            return None
+            
+        # Get all regions for mask creation
+        all_regions = []
+        if 'text_bubbles' in rtdetr_detections:
+            all_regions.extend(rtdetr_detections.get('text_bubbles', []))
+        if 'text_free' in rtdetr_detections:
+            all_regions.extend(rtdetr_detections.get('text_free', []))
+        
+        if not all_regions:
+            return None
+            
+        # Merge overlapping regions
+        original_count = len(all_regions)
+        all_regions = merge_overlapping_boxes(all_regions, containment_threshold=0.3, overlap_threshold=0.5)
+        if len(all_regions) < original_count:
+            self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions)} unique blocks for mask")
+        
+        self._log("🎭 Pre-creating text mask for early inpainting...")
+        try:
+            import time
+            mask_start = time.time()
+            
+            # Create temporary TextRegion objects for mask creation
+            temp_regions = []
+            for bbox in all_regions:
+                region = TextRegion(
+                    text="",  # Empty for now, will be filled by OCR
+                    vertices=[],
+                    bounding_box=bbox,
+                    confidence=1.0,
+                    region_type='text_block'
+                )
+                # Classify region for inpainting decision
+                classify_rtdetr_region_and_set_inpaint(
+                    region, bbox, rtdetr_detections, ocr_settings,
+                    self.main_gui if hasattr(self, 'main_gui') else None,
+                    log_func=self._log
+                )
+                temp_regions.append(region)
+            
+            # Create mask
+            mask = self.create_text_mask(image, temp_regions)
+            mask_percentage = ((mask > 0).sum() / mask.size) * 100
+            self._log(f"📊 Mask coverage: {mask_percentage:.1f}% of image")
+            self._log(f"   ✅ Mask created in {time.time() - mask_start:.1f}s")
+            
+            # Start inpainting in background thread IMMEDIATELY
+            import concurrent.futures
+            self._inpainting_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            self._inpainting_future = self._inpainting_executor.submit(
+                self.inpaint_regions, 
+                image.copy(), 
+                mask
+            )
+            self._log("   🚀 INPAINTING STARTED IN BACKGROUND (will run during OCR)")
+            return self._inpainting_future
+            
+        except Exception as e:
+            self._log(f"⚠️ Failed to start early inpainting: {e}", "warning")
+            return None
+    
     def _parallel_ocr_regions(self, image: np.ndarray, regions: List, provider: str, confidence_threshold: float) -> List:
         """Process multiple regions in parallel using ThreadPoolExecutor"""
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -13362,6 +13449,12 @@ class MangaTranslator:
             
             def _task_inpaint():
                 try:
+                    # Check if inpainting was already started early (after RT-DETR)
+                    if hasattr(self, '_inpainting_future') and self._inpainting_future:
+                        self._log(f"🎨 Using early-started inpainting (already running)")
+                        # Return the future itself, not its result - will be handled in main flow
+                        return self._inpainting_future
+                    
                     # CRITICAL: Re-check the skip flag from config at runtime (don't use cached value)
                     # This ensures toggle changes are respected even after MangaTranslator initialization
                     skip_flag = False
@@ -13483,7 +13576,9 @@ class MangaTranslator:
             if run_concurrent:
                 self._log("🔀 Running translation and inpainting concurrently", "info")
                 # OPTIMIZATION: Use shorter timeout and immediate cleanup
-                from concurrent.futures import as_completed
+                from concurrent.futures import as_completed, Future as FutureType
+                import concurrent
+                import numpy as np
                 with ThreadPoolExecutor(max_workers=2) as _executor:
                     fut_translate = _executor.submit(_task_translate)
                     fut_inpaint = _executor.submit(_task_inpaint)
@@ -13503,14 +13598,41 @@ class MangaTranslator:
                     
                     try:
                         inpaint_start = time.time()
-                        self._log("⏳ Waiting for inpainting to complete...", "info")
-                        inpainted = fut_inpaint.result(timeout=60)
+                        # Get the result from fut_inpaint
+                        fut_inpaint_result = fut_inpaint.result(timeout=60)
+                        
+                        # Check what we got back
+                        if isinstance(fut_inpaint_result, concurrent.futures.Future):
+                            # It's an early inpainting future, get its result
+                            self._log("⏳ Waiting for early-started inpainting to complete...", "info")
+                            inpainted = fut_inpaint_result.result(timeout=60)
+                        elif isinstance(fut_inpaint_result, np.ndarray):
+                            # It's the actual image array
+                            self._log("✅ Got inpainted image", "debug")
+                            inpainted = fut_inpaint_result
+                        else:
+                            # Unexpected type
+                            self._log(f"⚠️ Unexpected inpainting result type: {type(fut_inpaint_result)}", "warning")
+                            inpainted = image.copy()
+                        
                         inpaint_wait = time.time() - inpaint_start
                         if inpaint_wait > 0.5:
                             self._log(f"✅ Inpainting completed (waited {inpaint_wait:.1f}s after translation)", "info")
+                        else:
+                            self._log(f"✅ Inpainting already complete (early start worked!)", "info")
                     except Exception as e:
                         self._log(f"⚠️ Inpainting failed: {e}", "warning")
                         inpainted = image.copy()
+                    finally:
+                        # Clean up early inpainting resources
+                        if hasattr(self, '_inpainting_future'):
+                            self._inpainting_future = None
+                        if hasattr(self, '_inpainting_executor'):
+                            try:
+                                self._inpainting_executor.shutdown(wait=False)
+                            except:
+                                pass
+                            self._inpainting_executor = None
                 
                 # CRITICAL: Exit context manager immediately to avoid cleanup delay
                 # ThreadPoolExecutor shutdown can take 1-3 seconds
