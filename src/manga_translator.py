@@ -1024,9 +1024,6 @@ class MangaTranslator:
             # Default to False so logs are verbose by default (user must opt-in to concise mode)
             concise_value = self.manga_settings.get('advanced', {}).get('concise_logs', False)
             self.concise_logs = bool(concise_value)
-            # DIRECT PRINT to bypass all filtering for debugging
-            print(f"[MANGA_TRANSLATOR INIT] concise_logs setting from config: {concise_value}")
-            print(f"[MANGA_TRANSLATOR INIT] self.concise_logs = {self.concise_logs}")
         except Exception as e:
             self.concise_logs = False
             print(f"[MANGA_TRANSLATOR INIT] Exception reading concise_logs: {e}")
