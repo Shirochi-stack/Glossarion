@@ -2103,6 +2103,9 @@ class MangaImagePreviewWidget(QWidget):
                             st.pop('detection_regions', None)  # Clear detection data
                             st.pop('viewer_rectangles', None)  # Clear rectangle data
                             self.manga_integration.image_state_manager.set_state(self.current_image_path, st, save=True)
+                            # Force immediate flush to disk to ensure deletion persists
+                            self.manga_integration.image_state_manager.flush()
+                            print(f"[CLEAR] Flushed cleared state to disk for {os.path.basename(self.current_image_path)}")
                     except Exception:
                         pass
             except Exception:
