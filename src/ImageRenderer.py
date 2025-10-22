@@ -852,8 +852,8 @@ def _restore_image_state(self, image_path: str):
                 try:
                     item._viewer = viewer
                     item.region_index = idx
-                    if has_text_for_this_rect:
-                        item.is_recognized = True
+                    # CRITICAL: Always set is_recognized based on text state, not just when true
+                    item.is_recognized = has_text_for_this_rect
                     # Attach move sync and context menu
                     _attach_move_sync_to_rectangle(self, item, idx)
                     _add_context_menu_to_rectangle(self, item, idx)
@@ -894,14 +894,19 @@ def _restore_image_state(self, image_path: str):
                     for idx, rect_item in enumerate(rects):
                         has_recognized = (idx < len(recognized_texts) and not (isinstance(recognized_texts[idx], dict) and recognized_texts[idx].get('deleted')))
                         has_translation = (idx < len(translated_texts) and not (isinstance(translated_texts[idx], dict) and translated_texts[idx].get('deleted')))
-                        if has_recognized or has_translation:
+                        has_text = has_recognized or has_translation
+                        if has_text:
                             # Make blue and mark recognized
                             try:
                                 rect_item.setPen(QPen(QColor(0, 150, 255), 2))
                                 rect_item.setBrush(QBrush(QColor(0, 150, 255, 50)))
-                                rect_item.is_recognized = True
                             except Exception:
                                 pass
+                        # CRITICAL: Always set is_recognized based on text state, not just when true
+                        try:
+                            rect_item.is_recognized = has_text
+                        except Exception:
+                            pass
                         # Always ensure region_index and context menu are attached
                         try:
                             rect_item.region_index = idx
@@ -1331,9 +1336,8 @@ def _restore_image_state_overlays_only(self, image_path: str):
                 # Attach region index and move-sync handler for ALL rectangles
                 try:
                     rect_item.region_index = idx
-                    # Mark as recognized when blue so selection keeps it blue
-                    if has_text_for_this_rect:
-                        rect_item.is_recognized = True
+                    # CRITICAL: Always set is_recognized based on text state, not just when true
+                    rect_item.is_recognized = has_text_for_this_rect
                     _attach_move_sync_to_rectangle(self, rect_item, idx)
                     # CRITICAL: Add context menu to ALL rectangles (both blue and green)
                     _add_context_menu_to_rectangle(self, rect_item, idx)
