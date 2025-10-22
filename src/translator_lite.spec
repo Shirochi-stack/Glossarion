@@ -33,6 +33,19 @@ datas = []
 binaries = []
 hiddenimports = []
 
+# Add custom DLL and CPP files
+binaries.extend([
+    ('libgcc_s_seh-1.dll', '.'),
+    ('libimage_utils.dll', '.'),
+    ('libonnx_inpainter.dll', '.'),
+    ('libstdc++-6.dll', '.'),
+    ('libwinpthread-1.dll', '.'),
+    ('onnxruntime.dll', '.'),
+    ('onnxruntime_providers_shared.dll', '.'),
+    ('image_utils.cpp', '.'),
+    ('onnx_inpainter.cpp', '.')
+])
+
 # Collect data files from packages that need them
 for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'chardet', 'charset_normalizer']:
     try:
@@ -120,6 +133,9 @@ app_files = [
 	# Duplicate detection
 	('duplicate_detection_config.py', '.'),
 	('advanced_duplicate_detection.py', '.'),
+	
+	# Image Rendering
+	('ImageRenderer.py', '.'),
 ]
 # Add application files to datas
 datas.extend(app_files)
@@ -181,6 +197,7 @@ app_modules = [
 	'hyphen_textwrap',
 	'duplicate_detection_config',
 	'advanced_duplicate_detection',
+	'ImageRenderer',
 	
 ]
 
