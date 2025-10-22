@@ -1169,15 +1169,8 @@ class UnifiedClient:
             #print(f"[DEBUG] ❌ Multi-key mode is DISABLED for this instance (env var = 0)")
             self._multi_key_mode = False
         
-        # Initial setup based on THIS INSTANCE's mode
-        if not self._multi_key_mode:
-            self.api_key = api_key
-            self.model = model
-            self.key_identifier = "Single Key"
-            self._setup_client()
-        
         # Check for Vertex AI Model Garden models (contain @ symbol)
-        # NOTE: This happens AFTER the initial setup, as in the second version
+        # NOTE: This happens BEFORE the initial setup to set correct client_type
         if '@' in self.model or self.model.startswith('vertex/'):
             # For Vertex AI, we need Google Cloud credentials, not API key
             self.client_type = 'vertex_model_garden'
@@ -1205,43 +1198,43 @@ class UnifiedClient:
                     print(msg)
             else:
                 print("Vertex AI Model Garden: Google Cloud credentials not yet configured")
-        else:
-            # Only set up client if not in multi-key mode
-            # Multi-key mode will set up the client when a key is selected
-            if not self._multi_key_mode:
-                # NOTE: This is a SECOND call to _setup_client() in the else branch
-                # Determine client type from model name
-                self._setup_client()
-                print(f"[DEBUG] After setup - client_type: {getattr(self, 'client_type', None)}, openai_client: {self.openai_client}")
+        
+        # Initial setup based on THIS INSTANCE's mode (SINGLE CALL)
+        if not self._multi_key_mode:
+            self.api_key = api_key
+            self.model = model
+            self.key_identifier = "Single Key"
+            self._setup_client()
+            print(f"[DEBUG] After setup - client_type: {getattr(self, 'client_type', None)}, openai_client: {self.openai_client}")
+            
+            # FORCE OPENAI CLIENT IF CUSTOM BASE URL IS SET AND ENABLED
+            use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
+            custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', '')
+            
+            # Force OpenAI client when custom endpoint is enabled
+            if custom_base_url and use_custom_endpoint and self.openai_client is None:
+                original_client_type = self.client_type
+                print(f"[DEBUG] Custom base URL detected and enabled, overriding {original_client_type or 'unmatched'} model to use OpenAI client: {self.model}")
+                self.client_type = 'openai'
                 
-                # FORCE OPENAI CLIENT IF CUSTOM BASE URL IS SET AND ENABLED
-                use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
-                custom_base_url = os.getenv('OPENAI_CUSTOM_BASE_URL', '')
-
-                # Force OpenAI client when custom endpoint is enabled
-                if custom_base_url and use_custom_endpoint and self.openai_client is None:
-                    original_client_type = self.client_type
-                    print(f"[DEBUG] Custom base URL detected and enabled, overriding {original_client_type or 'unmatched'} model to use OpenAI client: {self.model}")
-                    self.client_type = 'openai'
-                    
-                    # Check if openai module is available
-                    try:
-                        import openai
-                    except ImportError:
-                        raise ImportError("OpenAI library not installed. Install with: pip install openai")
-                    
-                    # Validate URL has protocol
-                    if not custom_base_url.startswith(('http://', 'https://')):
-                        print(f"[WARNING] Custom base URL missing protocol, adding https://")
-                        custom_base_url = 'https://' + custom_base_url
-                    
-                    self.openai_client = openai.OpenAI(
-                        api_key=self.api_key,
-                        base_url=custom_base_url
-                    )
-                    print(f"[DEBUG] OpenAI client created with custom base URL: {custom_base_url}")
-                elif custom_base_url and not use_custom_endpoint:
-                    print(f"[DEBUG] Custom base URL detected but disabled via toggle, using standard client")
+                # Check if openai module is available
+                try:
+                    import openai
+                except ImportError:
+                    raise ImportError("OpenAI library not installed. Install with: pip install openai")
+                
+                # Validate URL has protocol
+                if not custom_base_url.startswith(('http://', 'https://')):
+                    print(f"[WARNING] Custom base URL missing protocol, adding https://")
+                    custom_base_url = 'https://' + custom_base_url
+                
+                self.openai_client = openai.OpenAI(
+                    api_key=self.api_key,
+                    base_url=custom_base_url
+                )
+                print(f"[DEBUG] OpenAI client created with custom base URL: {custom_base_url}")
+            elif custom_base_url and not use_custom_endpoint:
+                print(f"[DEBUG] Custom base URL detected but disabled via toggle, using standard client")
  
     def _apply_thread_submission_delay(self):
         # Get threading delay from environment (default 0.5)
