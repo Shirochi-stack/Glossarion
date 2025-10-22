@@ -13652,6 +13652,30 @@ class MangaTranslator:
                                     self._log(f"✅ Early inpainting already done!", "info")
                                 else:
                                     self._log(f"✅ Early inpainting completed (waited {inpaint_wait_time:.1f}s)", "info")
+                            
+                            # CRITICAL: Save cleaned image after early inpainting completes
+                            # This was missing - early inpainting path skipped the file save
+                            try:
+                                if output_path:
+                                    base, ext = os.path.splitext(output_path)
+                                else:
+                                    base, ext = os.path.splitext(image_path)
+                                cleaned_path = f"{base}_cleaned{ext}"
+                                
+                                # Fast save with no compression
+                                ext_lower = ext.lower()
+                                if ext_lower == '.png':
+                                    cv2.imwrite(cleaned_path, inpainted, [cv2.IMWRITE_PNG_COMPRESSION, 0])
+                                elif ext_lower in ['.jpg', '.jpeg']:
+                                    cv2.imwrite(cleaned_path, inpainted, [cv2.IMWRITE_JPEG_QUALITY, 100])
+                                elif ext_lower == '.webp':
+                                    cv2.imwrite(cleaned_path, inpainted, [cv2.IMWRITE_WEBP_QUALITY, 100])
+                                else:
+                                    cv2.imwrite(cleaned_path, inpainted)
+                                
+                                self._log(f"💾 Saved cleaned image (early inpainting): {os.path.basename(cleaned_path)}", "info")
+                            except Exception as e:
+                                self._log(f"⚠️ Failed to save cleaned image after early inpainting: {e}", "warning")
                         elif isinstance(fut_inpaint_result, np.ndarray):
                             # It's the actual image array (shouldn't happen if early inpainting worked)
                             self._log("⚠️ Got direct inpainted image (early inpainting didn't run)", "warning")
@@ -13697,7 +13721,7 @@ class MangaTranslator:
                 result['regions'] = [r.to_dict() for r in regions]
                 return result
             
-            # Cleaned image already saved in inpainting thread for speed
+            # Cleaned image already saved during inpainting (both early and normal paths)
             # Just set the path for the result
             if output_path:
                 base, ext = os.path.splitext(output_path)
@@ -13705,9 +13729,9 @@ class MangaTranslator:
                 base, ext = os.path.splitext(image_path)
             cleaned_image_path = f"{base}_cleaned{ext}"
             
-            # Verify it was saved
+            # Verify it was saved (should always exist now that both paths save it)
             if not os.path.exists(cleaned_image_path):
-                self._log(f"⚠️ Cleaned image not found, may have failed to save in thread", "warning")
+                self._log(f"⚠️ Cleaned image not found at expected path", "warning")
                 cleaned_image_path = None
             
             # Render translated text
