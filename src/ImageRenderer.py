@@ -3071,6 +3071,11 @@ def _on_translate_text_clicked(self):
             self.image_preview_widget.translate_btn.setEnabled(False)
             self.image_preview_widget.translate_btn.setText("Translating...")
         
+        # Disable thumbnail list to prevent user from switching images during translation
+        if hasattr(self.image_preview_widget, 'thumbnail_list'):
+            self.image_preview_widget.thumbnail_list.setEnabled(False)
+            print(f"[TRANSLATE] Disabled thumbnail list during translation")
+        
         # Add processing overlay effect (after tracking image)
         _add_processing_overlay(self, )
 
@@ -8715,6 +8720,11 @@ def _restore_translate_button(self):
         if hasattr(self, 'image_preview_widget') and hasattr(self.image_preview_widget, 'translate_btn'):
             self.image_preview_widget.translate_btn.setEnabled(True)
             self.image_preview_widget.translate_btn.setText("Translate")
+        
+        # Re-enable thumbnail list
+        if hasattr(self.image_preview_widget, 'thumbnail_list'):
+            self.image_preview_widget.thumbnail_list.setEnabled(True)
+            print(f"[TRANSLATE] Re-enabled thumbnail list after translation")
     except Exception:
         pass
 
