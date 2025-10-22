@@ -244,10 +244,13 @@ class ONNXCppBackend:
     
     def unload(self):
         """Release model resources"""
+        # WORKAROUND: Skip cleanup to avoid access violation bug in C++ allocator->Free()
+        # The session cleanup has a bug where it calls allocator->Free() incorrectly
+        # Until the DLL is rebuilt with the fix, we skip cleanup (OS will clean up on exit)
         if self._session:
-            self._lib.onnx_destroy_session(self._session)
+            # self._lib.onnx_destroy_session(self._session)  # Commented out - causes access violation
             self._session = None
-            logger.info("✓ ONNX C++ session released")
+            logger.info("✓ ONNX C++ session marked for cleanup (skipped buggy destroy to avoid crash)")
     
     def detect_bubbles(self, image: np.ndarray, confidence: float = 0.3) -> dict:
         """
@@ -346,7 +349,10 @@ class ONNXCppBackend:
     
     def __del__(self):
         """Cleanup on destruction"""
-        self.unload()
+        # WORKAROUND: Skip cleanup to avoid access violation bug in C++ allocator->Free()
+        # The OS will clean up resources when process exits anyway
+        pass
+        # self.unload()  # Commented out - causes access violation
 
 
 # Convenience function to check if C++ backend is available

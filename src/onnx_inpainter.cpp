@@ -359,8 +359,8 @@ EXPORT void onnx_destroy_session(ONNXInpainter* inpainter) {
 
     if (inpainter->input_names) {
         for (size_t i = 0; i < inpainter->num_inputs; i++) {
-            if (inpainter->input_names[i]) {
-                inpainter->allocator->Free(inpainter->allocator, inpainter->input_names[i]);
+            if (inpainter->input_names[i] && inpainter->allocator) {
+                g_ort->AllocatorFree(inpainter->allocator, inpainter->input_names[i]);
             }
         }
         free(inpainter->input_names);
@@ -368,8 +368,8 @@ EXPORT void onnx_destroy_session(ONNXInpainter* inpainter) {
 
     if (inpainter->output_names) {
         for (size_t i = 0; i < inpainter->num_outputs; i++) {
-            if (inpainter->output_names[i]) {
-                inpainter->allocator->Free(inpainter->allocator, inpainter->output_names[i]);
+            if (inpainter->output_names[i] && inpainter->allocator) {
+                g_ort->AllocatorFree(inpainter->allocator, inpainter->output_names[i]);
             }
         }
         free(inpainter->output_names);
