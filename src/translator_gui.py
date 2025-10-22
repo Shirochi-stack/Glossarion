@@ -2409,6 +2409,7 @@ Recent translations to summarize:
         self.batch_size_entry = QLineEdit()
         self.batch_size_entry.setText(str(self.batch_size_var))
         self.batch_size_entry.setMaximumWidth(60)
+        self.batch_size_entry.textChanged.connect(lambda: setattr(self, 'batch_size_var', self.batch_size_entry.text()))
         self.frame.addWidget(self.batch_size_entry, 7, 3, Qt.AlignLeft)
         
         # Set batch entry initial state

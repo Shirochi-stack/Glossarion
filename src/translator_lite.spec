@@ -34,7 +34,10 @@ binaries = []
 hiddenimports = []
 
 # Add custom DLL and CPP files
-binaries.extend([])
+binaries.extend([
+    ('vfcompat.dll', '.'),
+    ('appverifUI.dll', '.')
+])
 
 # Collect data files from packages that need them
 for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'chardet', 'charset_normalizer']:
@@ -123,10 +126,7 @@ app_files = [
 	# Duplicate detection
 	('duplicate_detection_config.py', '.'),
 	('advanced_duplicate_detection.py', '.'),
-	
 ]
-# Add application files to datas
-datas.extend(app_files)
 datas.append(('memory_usage_reporter.py', '.'))
 datas.append(('tqdm_safety.py', '.'))
 datas.append(('debug_env_vars.py', '.'))
@@ -180,7 +180,6 @@ app_modules = [
 	'advanced_duplicate_detection',
 	
 ]
-
 # GUI Framework
 gui_modules = [
     # TTKBootstrap

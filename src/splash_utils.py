@@ -250,6 +250,18 @@ class SplashManager:
                 return
                 
             if self.splash_window and self.progress_value < 100:
+                # Store last auto-update time to prevent too frequent updates
+                current_time = time.time()
+                if not hasattr(self, '_last_auto_update'):
+                    self._last_auto_update = current_time
+                
+                # Only auto-increment if enough time has passed
+                time_since_last = current_time - self._last_auto_update
+                if time_since_last < 0.1:  # Minimum 100ms between auto-increments
+                    return
+                
+                self._last_auto_update = current_time
+                
                 # Auto-increment progress for visual effect during startup
                 if self.progress_value < 30:
                     self.progress_value += 8  # Fast initial progress
@@ -338,6 +350,10 @@ class SplashManager:
             self.progress_bar.setValue(self.progress_value)
         if self.progress_label:
             self.progress_label.setText(f"{self.progress_value}%")
+        
+        # Process events to ensure smooth UI updates
+        if self.app:
+            self.app.processEvents()
     
     def validate_all_scripts(self, base_dir=None):
         """Validate that all Python scripts in the project compile without syntax errors
