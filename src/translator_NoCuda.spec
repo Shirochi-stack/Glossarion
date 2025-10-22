@@ -156,6 +156,20 @@ datas.append(('tqdm_safety.py', '.'))
 datas.append(('debug_env_vars.py', '.'))
 datas.append(('enable_debug_mode.py', '.'))
 
+# MAT Inpainting Support - Add MAT architecture directories
+from PyInstaller.utils.hooks import collect_all
+try:
+    # Collect MAT model architecture directories
+    from pathlib import Path
+    mat_dirs = ['torch_utils', 'dnnlib', 'networks']
+    for mat_dir in mat_dirs:
+        mat_path = Path(mat_dir)
+        if mat_path.exists() and mat_path.is_dir():
+            datas.append((str(mat_path), mat_dir))
+            print(f"  Added MAT directory: {mat_dir}")
+except Exception as e:
+    print(f"  Warning: Could not add MAT directories: {e}")
+
 # ============================================================================
 # ADD WINDOWS RUNTIME DEPENDENCIES
 # ============================================================================
@@ -332,6 +346,13 @@ app_modules = [
 	'model_options',
 	'hyphen_textwrap',
 	'ImageRenderer',
+	
+	# MAT Inpainting Support
+	'torch_utils',
+	'dnnlib',
+	'dnnlib.util',
+	'networks',
+	'networks.mat',
 	
 ]
 

@@ -2468,8 +2468,6 @@ class LocalInpainter:
                                     # (images_in, masks_in, z, c, truncation_psi, truncation_cutoff, skip_w_avg_update, noise_mode)
                                     # images_in and masks_in should be in [-1, 1] range
                                     # CRITICAL: MAT expects mask where 1=keep, 0=inpaint (opposite of our convention)
-                                    logger.info(f"🔍 MAT forward - Input image shape: {image.shape}, range: [{image.min():.3f}, {image.max():.3f}]")
-                                    logger.info(f"🔍 MAT forward - Input mask shape: {mask.shape}, range: [{mask.min():.3f}, {mask.max():.3f}]")
                                     
                                     batch_size = image.shape[0]
                                     z = torch.randn(batch_size, 512, device=image.device, dtype=image.dtype)
@@ -2481,14 +2479,9 @@ class LocalInpainter:
                                     # CRITICAL: Invert mask - MAT expects 1=keep, 0=inpaint
                                     # Our convention is 1=inpaint, 0=keep, so we need to invert
                                     inverted_mask = 1.0 - mask
-                                    logger.info(f"🔍 MAT forward - Inverted mask range: [{inverted_mask.min():.3f}, {inverted_mask.max():.3f}]")
-                                    logger.info(f"🔍 MAT forward - Calling generator with z shape: {z.shape}, c: {c}")
                                     
                                     # Call generator with inverted mask
                                     output = self.generator(image, inverted_mask, z, c, truncation_psi=1.0, noise_mode='const')
-                                    
-                                    logger.info(f"🔍 MAT forward - Output shape: {output.shape}, range: [{output.min():.3f}, {output.max():.3f}]")
-                                    logger.info(f"🔍 MAT forward - Output differs from input: {not torch.equal(output, image)}")
                                     
                                     return output
                             
@@ -3380,7 +3373,6 @@ class LocalInpainter:
                 
                 # For MAT, use 512x512 and convert BGR to RGB
                 if self.current_method == 'mat':
-                    logger.info("🎨 MAT checkpoint processing: converting BGR to RGB")
                     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
                     img_resized = cv2.resize(image_rgb, (512, 512), interpolation=cv2.INTER_LANCZOS4)
                     mask_resized = cv2.resize(mask, (512, 512), interpolation=cv2.INTER_NEAREST)
@@ -3398,8 +3390,6 @@ class LocalInpainter:
                 img_tensor = torch.from_numpy(img_norm).permute(2, 0, 1).unsqueeze(0).float()
                 mask_tensor = torch.from_numpy(mask_norm).unsqueeze(0).unsqueeze(0).float()
                 
-                logger.info(f"📊 Checkpoint input - Image: {img_tensor.shape} [{img_tensor.min():.3f}, {img_tensor.max():.3f}], Mask: {mask_tensor.shape} [{mask_tensor.min():.3f}, {mask_tensor.max():.3f}]")
-                
                 if self.use_gpu and self.device:
                     img_tensor = self._to_device_safe(img_tensor)
                     mask_tensor = self._to_device_safe(mask_tensor)
@@ -3407,31 +3397,17 @@ class LocalInpainter:
                 with torch.no_grad():
                     output = self.model(img_tensor, mask_tensor)
                 
-                logger.info(f"📊 Checkpoint output - Shape: {output.shape}, range: [{output.min():.3f}, {output.max():.3f}]")
-                
                 result = output.squeeze(0).permute(1, 2, 0).cpu().numpy()
                 
                 # For MAT, clamp to [-1, 1] before denormalizing
                 if self.current_method == 'mat':
-                    logger.info(f"🎨 MAT output before clamp: min={result.min():.3f}, max={result.max():.3f}")
                     result = np.clip(result, -1.0, 1.0)
-                    logger.info(f"🎨 MAT output after clamp: min={result.min():.3f}, max={result.max():.3f}")
                 
                 result = ((result + 1) * 127.5).clip(0, 255).astype(np.uint8)
-                logger.info(f"🎨 Final uint8 result: min={result.min()}, max={result.max()}, mean={result.mean():.1f}")
                 
                 # For MAT, convert RGB back to BGR
                 if self.current_method == 'mat':
                     result = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
-                    # Compare with original to see if anything changed
-                    orig_resized = cv2.resize(image, (512, 512), interpolation=cv2.INTER_LANCZOS4)
-                    diff = cv2.absdiff(result, orig_resized)
-                    logger.info(f"🔍 MAT result vs original (512x512): max_diff={diff.max()}, mean_diff={diff.mean():.2f}")
-                    # Check masked region specifically
-                    mask_resized_check = cv2.resize(mask, (512, 512), interpolation=cv2.INTER_NEAREST)
-                    masked_diff = diff[mask_resized_check > 0]
-                    if len(masked_diff) > 0:
-                        logger.info(f"🔍 MAT masked region: max_diff={masked_diff.max()}, mean_diff={masked_diff.mean():.2f}")
                 
                 result = cv2.resize(result, (w, h), interpolation=cv2.INTER_LANCZOS4)
                 self._log_inpaint_diag('ckpt', result, mask)
