@@ -1528,24 +1528,36 @@ class MangaTranslator:
             pass
 
     def _cleanup_thread_locals(self):
-        """Aggressively release thread-local heavy objects (onnx sessions, detectors)."""
+        """Aggressively release thread-local heavy objects (onnx sessions, detectors).
+        Respects unload_models_after_translation setting.
+        """
         try:
+            # Check if unload is enabled in settings
+            unload_enabled = False
+            try:
+                if hasattr(self, 'manga_settings'):
+                    unload_enabled = self.manga_settings.get('advanced', {}).get('unload_models_after_translation', False)
+            except Exception:
+                pass
+            
             if hasattr(self, '_thread_local'):
                 tl = self._thread_local
-                # Release thread-local inpainters
+                # Release thread-local inpainters only if unload is enabled
                 if hasattr(tl, 'local_inpainters') and isinstance(tl.local_inpainters, dict):
                     try:
-                        for inp in list(tl.local_inpainters.values()):
-                            try:
-                                if hasattr(inp, 'unload'):
-                                    inp.unload()
-                            except Exception:
-                                pass
-                    finally:
-                        try:
+                        if unload_enabled:
+                            for inp in list(tl.local_inpainters.values()):
+                                try:
+                                    if hasattr(inp, 'unload'):
+                                        inp.unload()
+                                except Exception:
+                                    pass
                             tl.local_inpainters.clear()
-                        except Exception:
-                            pass
+                        else:
+                            # Just clear references, don't unload models
+                            tl.local_inpainters.clear()
+                    except Exception:
+                        pass
                 # Return thread-local bubble detector to pool (DO NOT unload)
                 if hasattr(tl, 'bubble_detector') and tl.bubble_detector is not None:
                     try:
@@ -1574,7 +1586,7 @@ class MangaTranslator:
                     self._mem_stop_event.set()
                 except Exception:
                     pass
-            # Perform deep cleanup, then try to teardown torch
+            # Perform deep cleanup if enabled in settings
             try:
                 self._deep_cleanup_models()
             except Exception:
@@ -2177,7 +2189,7 @@ class MangaTranslator:
                 rss = self._get_process_rss_mb()
                 if rss and rss > self.ram_cap_mb:
                     self._mem_over_cap = True
-                    # Aggressive attempt to reduce memory
+                    # Aggressive attempt to reduce memory (respects unload setting)
                     try:
                         self._deep_cleanup_models()
                     except Exception:
@@ -2246,7 +2258,7 @@ class MangaTranslator:
             if now - last_log > 3.0 and rss:
                 self._log(f"⏳ Waiting for RAM drop: RSS={rss} MB, target={target} MB ({context_msg})", "info")
                 last_log = now
-            # Attempt cleanup while waiting
+            # Attempt cleanup while waiting (respects unload setting)
             try:
                 self._deep_cleanup_models()
             except Exception:

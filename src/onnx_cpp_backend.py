@@ -9,6 +9,7 @@ import os
 import sys
 from pathlib import Path
 import logging
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,7 @@ class ONNXCppBackend:
     def __init__(self):
         self._lib = None
         self._session = None
+        self._session_lock = threading.RLock()  # Thread-safe access to session
         self._load_library()
     
     def _load_library(self):
@@ -127,47 +129,48 @@ class ONNXCppBackend:
             return "unknown"
     
     def load_model(self, model_path: str, use_gpu: bool = False) -> bool:
-        """Load ONNX model from file"""
+        """Load ONNX model from file (thread-safe)"""
         if not os.path.exists(model_path):
             logger.error(f"Model file not found: {model_path}")
             return False
         
-        try:
-            # Initialize ONNX Runtime
-            if self._lib.onnx_init() != 0:
-                logger.error("Failed to initialize ONNX Runtime")
+        with self._session_lock:
+            try:
+                # Initialize ONNX Runtime
+                if self._lib.onnx_init() != 0:
+                    logger.error("Failed to initialize ONNX Runtime")
+                    return False
+                
+                # Create session
+                model_path_bytes = model_path.encode('utf-8')
+                self._session = self._lib.onnx_create_session(
+                    model_path_bytes,
+                    1 if use_gpu else 0
+                )
+                
+                if not self._session:
+                    logger.error("Failed to create ONNX session")
+                    return False
+                
+                # Get input shape info
+                shape = (ctypes.c_int * 4)()
+                is_dynamic = self._lib.onnx_get_input_shape(self._session, shape)
+                
+                logger.info(f"Model input shape: [{shape[0]}, {shape[1]}, {shape[2]}, {shape[3]}]")
+                if is_dynamic:
+                    logger.info("Model supports dynamic input sizes")
+                else:
+                    logger.info(f"Model expects fixed size: {shape[2]}x{shape[3]}")
+                
+                return True
+                
+            except Exception as e:
+                logger.error(f"Failed to load model: {e}")
                 return False
-            
-            # Create session
-            model_path_bytes = model_path.encode('utf-8')
-            self._session = self._lib.onnx_create_session(
-                model_path_bytes,
-                1 if use_gpu else 0
-            )
-            
-            if not self._session:
-                logger.error("Failed to create ONNX session")
-                return False
-            
-            # Get input shape info
-            shape = (ctypes.c_int * 4)()
-            is_dynamic = self._lib.onnx_get_input_shape(self._session, shape)
-            
-            logger.info(f"Model input shape: [{shape[0]}, {shape[1]}, {shape[2]}, {shape[3]}]")
-            if is_dynamic:
-                logger.info("Model supports dynamic input sizes")
-            else:
-                logger.info(f"Model expects fixed size: {shape[2]}x{shape[3]}")
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"Failed to load model: {e}")
-            return False
     
     def infer(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
         """
-        Run inference on image and mask
+        Run inference on image and mask (thread-safe)
         
         Args:
             image: RGB image [H, W, 3] or [C, H, W], float32, normalized [0, 1]
@@ -176,85 +179,87 @@ class ONNXCppBackend:
         Returns:
             Inpainted image [H, W, 3], float32, normalized [0, 1]
         """
-        if not self._session:
-            raise RuntimeError("Model not loaded. Call load_model() first.")
+        with self._session_lock:
+            if not self._session:
+                raise RuntimeError("Model not loaded. Call load_model() first.")
         
-        # Normalize inputs
-        orig_shape = image.shape
-        
-        # Convert to float32
-        image = image.astype(np.float32)
-        mask = mask.astype(np.float32)
-        
-        # Handle different input formats
-        if len(image.shape) == 3 and image.shape[2] == 3:
-            # HWC -> CHW
-            image = np.transpose(image, (2, 0, 1))
-        
-        if len(mask.shape) == 2:
-            # HW -> 1HW
-            mask = mask[np.newaxis, ...]
-        elif len(mask.shape) == 3 and mask.shape[2] == 1:
-            # HW1 -> 1HW
-            mask = np.transpose(mask, (2, 0, 1))
-        
-        # Add batch dimension if needed
-        if len(image.shape) == 3:
-            image = image[np.newaxis, ...]  # 1CHW
-        if len(mask.shape) == 3:
-            mask = mask[np.newaxis, ...]  # 11HW
-        
-        batch, channels, height, width = image.shape
-        
-        # Ensure contiguous memory
-        image = np.ascontiguousarray(image, dtype=np.float32)
-        mask = np.ascontiguousarray(mask, dtype=np.float32)
-        
-        # Allocate output buffer
-        output = np.zeros_like(image, dtype=np.float32)
-        
-        # Get pointers
-        image_ptr = image.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
-        mask_ptr = mask.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
-        output_ptr = output.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
-        
-        # Run inference
-        result = self._lib.onnx_infer(
-            self._session,
-            image_ptr,
-            mask_ptr,
-            batch,
-            channels,
-            height,
-            width,
-            output_ptr
-        )
-        
-        if result != 0:
-            raise RuntimeError("Inference failed")
-        
-        # Convert back to original format
-        output = output[0]  # Remove batch dimension
-        
-        if len(orig_shape) == 3 and orig_shape[2] == 3:
-            # CHW -> HWC
-            output = np.transpose(output, (1, 2, 0))
-        
-        return output
+            # Normalize inputs
+            orig_shape = image.shape
+            
+            # Convert to float32
+            image = image.astype(np.float32)
+            mask = mask.astype(np.float32)
+            
+            # Handle different input formats
+            if len(image.shape) == 3 and image.shape[2] == 3:
+                # HWC -> CHW
+                image = np.transpose(image, (2, 0, 1))
+            
+            if len(mask.shape) == 2:
+                # HW -> 1HW
+                mask = mask[np.newaxis, ...]
+            elif len(mask.shape) == 3 and mask.shape[2] == 1:
+                # HW1 -> 1HW
+                mask = np.transpose(mask, (2, 0, 1))
+            
+            # Add batch dimension if needed
+            if len(image.shape) == 3:
+                image = image[np.newaxis, ...]  # 1CHW
+            if len(mask.shape) == 3:
+                mask = mask[np.newaxis, ...]  # 11HW
+            
+            batch, channels, height, width = image.shape
+            
+            # Ensure contiguous memory
+            image = np.ascontiguousarray(image, dtype=np.float32)
+            mask = np.ascontiguousarray(mask, dtype=np.float32)
+            
+            # Allocate output buffer
+            output = np.zeros_like(image, dtype=np.float32)
+            
+            # Get pointers
+            image_ptr = image.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+            mask_ptr = mask.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+            output_ptr = output.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+            
+            # Run inference
+            result = self._lib.onnx_infer(
+                self._session,
+                image_ptr,
+                mask_ptr,
+                batch,
+                channels,
+                height,
+                width,
+                output_ptr
+            )
+            
+            if result != 0:
+                raise RuntimeError("Inference failed")
+            
+            # Convert back to original format
+            output = output[0]  # Remove batch dimension
+            
+            if len(orig_shape) == 3 and orig_shape[2] == 3:
+                # CHW -> HWC
+                output = np.transpose(output, (1, 2, 0))
+            
+            return output
     
     def unload(self):
-        """Release model resources"""
+        """Release model resources (thread-safe)"""
         # WORKAROUND: Skip cleanup to avoid access violation bug in C++ allocator->Free()
         # The session cleanup has a bug where it calls allocator->Free() incorrectly
         # Until the DLL is rebuilt with the fix, we skip cleanup (OS will clean up on exit)
-        if self._session:
-            # self._lib.onnx_destroy_session(self._session)  # Commented out - causes access violation
-            self._session = None
-            logger.info("✓ ONNX C++ session marked for cleanup (skipped buggy destroy to avoid crash)")
+        with self._session_lock:
+            if self._session:
+                # self._lib.onnx_destroy_session(self._session)  # Commented out - causes access violation
+                self._session = None
+                logger.info("✓ ONNX C++ session marked for cleanup (skipped buggy destroy to avoid crash)")
     
     def detect_bubbles(self, image: np.ndarray, confidence: float = 0.3) -> dict:
         """
-        Run RT-DETR bubble detection
+        Run RT-DETR bubble detection (thread-safe)
         
         Args:
             image: RGB image [H, W, 3], float32, normalized [0, 1]
@@ -264,88 +269,89 @@ class ONNXCppBackend:
             Dictionary with 'bubbles', 'text_bubbles', 'text_free' lists
             Each item is (x, y, width, height) tuple
         """
-        if not self._session:
-            raise RuntimeError("Model not loaded. Call load_model() first.")
+        with self._session_lock:
+            if not self._session:
+                raise RuntimeError("Model not loaded. Call load_model() first.")
         
-        # Store original size
-        orig_h, orig_w = image.shape[:2]
-        
-        # Resize to 640x640
-        from PIL import Image
-        if image.dtype == np.uint8:
-            image = image.astype(np.float32) / 255.0
-        
-        # Convert to PIL for resizing
-        image_pil = Image.fromarray((image * 255).astype(np.uint8))
-        image_resized = image_pil.resize((640, 640))
-        
-        # Convert to float32 CHW format
-        image_arr = np.array(image_resized).astype(np.float32) / 255.0
-        image_chw = np.transpose(image_arr, (2, 0, 1))  # HWC -> CHW
-        image_chw = np.ascontiguousarray(image_chw, dtype=np.float32)
-        
-        # Prepare output buffer (max 300 detections)
-        max_det = 300
-        
-        # Define Detection structure (must match C structure)
-        class Detection(ctypes.Structure):
-            _fields_ = [
-                ('x1', ctypes.c_float),
-                ('y1', ctypes.c_float),
-                ('x2', ctypes.c_float),
-                ('y2', ctypes.c_float),
-                ('score', ctypes.c_float),
-                ('label', ctypes.c_int)
-            ]
-        
-        detections = (Detection * max_det)()
-        num_det = ctypes.c_int(0)
-        
-        # Get pointer to image data
-        image_ptr = image_chw.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
-        
-        # Call C function
-        result = self._lib.onnx_detect_bubbles(
-            self._session,
-            image_ptr,
-            640,  # height
-            640,  # width
-            orig_w,  # original width
-            orig_h,  # original height
-            detections,
-            max_det,
-            ctypes.byref(num_det)
-        )
-        
-        if result != 0:
-            raise RuntimeError("Bubble detection failed")
-        
-        # Parse results and group by class
-        results = {
-            'bubbles': [],        # Class 0: empty bubbles
-            'text_bubbles': [],   # Class 1: text in bubbles
-            'text_free': []       # Class 2: free text
-        }
-        
-        class_names = ['bubbles', 'text_bubbles', 'text_free']
-        
-        for i in range(num_det.value):
-            det = detections[i]
+            # Store original size
+            orig_h, orig_w = image.shape[:2]
             
-            if det.score < confidence:
-                continue
+            # Resize to 640x640
+            from PIL import Image
+            if image.dtype == np.uint8:
+                image = image.astype(np.float32) / 255.0
             
-            # Convert to (x, y, width, height) format
-            x = int(det.x1)
-            y = int(det.y1)
-            w = int(det.x2 - det.x1)
-            h = int(det.y2 - det.y1)
+            # Convert to PIL for resizing
+            image_pil = Image.fromarray((image * 255).astype(np.uint8))
+            image_resized = image_pil.resize((640, 640))
             
-            # Group by class
-            if det.label >= 0 and det.label < len(class_names):
-                results[class_names[det.label]].append((x, y, w, h))
-        
-        return results
+            # Convert to float32 CHW format
+            image_arr = np.array(image_resized).astype(np.float32) / 255.0
+            image_chw = np.transpose(image_arr, (2, 0, 1))  # HWC -> CHW
+            image_chw = np.ascontiguousarray(image_chw, dtype=np.float32)
+            
+            # Prepare output buffer (max 300 detections)
+            max_det = 300
+            
+            # Define Detection structure (must match C structure)
+            class Detection(ctypes.Structure):
+                _fields_ = [
+                    ('x1', ctypes.c_float),
+                    ('y1', ctypes.c_float),
+                    ('x2', ctypes.c_float),
+                    ('y2', ctypes.c_float),
+                    ('score', ctypes.c_float),
+                    ('label', ctypes.c_int)
+                ]
+            
+            detections = (Detection * max_det)()
+            num_det = ctypes.c_int(0)
+            
+            # Get pointer to image data
+            image_ptr = image_chw.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+            
+            # Call C function
+            result = self._lib.onnx_detect_bubbles(
+                self._session,
+                image_ptr,
+                640,  # height
+                640,  # width
+                orig_w,  # original width
+                orig_h,  # original height
+                detections,
+                max_det,
+                ctypes.byref(num_det)
+            )
+            
+            if result != 0:
+                raise RuntimeError("Bubble detection failed")
+            
+            # Parse results and group by class
+            results = {
+                'bubbles': [],        # Class 0: empty bubbles
+                'text_bubbles': [],   # Class 1: text in bubbles
+                'text_free': []       # Class 2: free text
+            }
+            
+            class_names = ['bubbles', 'text_bubbles', 'text_free']
+            
+            for i in range(num_det.value):
+                det = detections[i]
+                
+                if det.score < confidence:
+                    continue
+                
+                # Convert to (x, y, width, height) format
+                x = int(det.x1)
+                y = int(det.y1)
+                w = int(det.x2 - det.x1)
+                h = int(det.y2 - det.y1)
+                
+                # Group by class
+                if det.label >= 0 and det.label < len(class_names):
+                    results[class_names[det.label]].append((x, y, w, h))
+            
+            return results
     
     def __del__(self):
         """Cleanup on destruction"""
