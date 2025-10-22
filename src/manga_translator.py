@@ -3277,6 +3277,10 @@ class MangaTranslator:
                             if cv_image is None:
                                 self._log("⚠️ Failed to load image, falling back to full-page OCR", "warning")
                             else:
+                                # START EARLY INPAINTING after RT-DETR detection
+                                self._inpainting_future = self._start_early_inpainting_if_needed(
+                                    rtdetr_detections, cv_image, ocr_settings, image_path
+                                )
                                 # Define worker function for concurrent OCR
                                 def ocr_region_google(region_data):
                                     i, region_idx, x, y, w, h = region_data
@@ -4624,12 +4628,14 @@ class MangaTranslator:
                     if ocr_settings.get('bubble_detection_enabled', False):
                         self._log("📝 Using bubble detection regions for Qwen2-VL...")
                         
-                        # Run bubble detection to get regions (thread-local)
-                        _ = self._get_thread_bubble_detector()
-                        
                         # Get regions from bubble detector
                         rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
                         if rtdetr_detections:
+                            
+                            # START EARLY INPAINTING after RT-DETR detection
+                            self._inpainting_future = self._start_early_inpainting_if_needed(
+                                rtdetr_detections, image, ocr_settings, image_path
+                            )
                             
                             # Process only text-containing regions
                             all_regions = []
@@ -4682,12 +4688,14 @@ class MangaTranslator:
                     if ocr_settings.get('bubble_detection_enabled', False):
                         self._log("📝 Using bubble detection regions for Custom API...")
                         
-                        # Run bubble detection to get regions (thread-local)
-                        _ = self._get_thread_bubble_detector()
-                        
                         # Get regions from bubble detector
                         rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
                         if rtdetr_detections:
+                            
+                            # START EARLY INPAINTING after RT-DETR detection
+                            self._inpainting_future = self._start_early_inpainting_if_needed(
+                                rtdetr_detections, image, ocr_settings, image_path
+                            )
                             
                             # Process only text-containing regions
                             all_regions = []
@@ -4773,12 +4781,14 @@ class MangaTranslator:
                     if ocr_settings.get('bubble_detection_enabled', False):
                         self._log("📝 Using bubble detection regions for EasyOCR...")
                         
-                        # Run bubble detection to get regions (thread-local)
-                        _ = self._get_thread_bubble_detector()
-                        
                         # Get regions from bubble detector
                         rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
                         if rtdetr_detections:
+                            
+                            # START EARLY INPAINTING after RT-DETR detection
+                            self._inpainting_future = self._start_early_inpainting_if_needed(
+                                rtdetr_detections, image, ocr_settings, image_path
+                            )
                             
                             # Process only text-containing regions
                             all_regions = []
@@ -4864,6 +4874,11 @@ class MangaTranslator:
                         rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
                         if rtdetr_detections:
                             
+                            # START EARLY INPAINTING after RT-DETR detection
+                            self._inpainting_future = self._start_early_inpainting_if_needed(
+                                rtdetr_detections, image, ocr_settings, image_path
+                            )
+                            
                             # Process only text-containing regions
                             all_regions = []
                             if 'text_bubbles' in rtdetr_detections:
@@ -4932,6 +4947,11 @@ class MangaTranslator:
                         rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
                         if rtdetr_detections:
                             
+                            # START EARLY INPAINTING after RT-DETR detection
+                            self._inpainting_future = self._start_early_inpainting_if_needed(
+                                rtdetr_detections, image, ocr_settings, image_path
+                            )
+                            
                             # Process only text-containing regions
                             all_regions = []
                             if 'text_bubbles' in rtdetr_detections:
@@ -4999,13 +5019,18 @@ class MangaTranslator:
                         # Get regions from bubble detector
                         rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
                         if rtdetr_detections:
-                            # Get all text-containing regions
+                            
+                            # START EARLY INPAINTING after RT-DETR detection
+                            self._inpainting_future = self._start_early_inpainting_if_needed(
+                                rtdetr_detections, image, ocr_settings, image_path
+                            )
+                            
+                            # Process only text-containing regions
                             all_regions = []
                             if 'text_bubbles' in rtdetr_detections:
                                 all_regions.extend(rtdetr_detections.get('text_bubbles', []))
                             if 'text_free' in rtdetr_detections:
                                 all_regions.extend(rtdetr_detections.get('text_free', []))
-                            
                             if not all_regions:
                                 self._log("⚠️ No RT-DETR text regions found")
                             else:
@@ -5260,6 +5285,11 @@ class MangaTranslator:
                         # Get regions from bubble detector
                         rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
                         if rtdetr_detections:
+                            # START EARLY INPAINTING after RT-DETR detection
+                            self._inpainting_future = self._start_early_inpainting_if_needed(
+                                rtdetr_detections, image, ocr_settings, image_path
+                            )
+                            
                             # Get all text-containing regions
                             all_regions = []
                             if 'text_bubbles' in rtdetr_detections:
@@ -5576,12 +5606,13 @@ class MangaTranslator:
             # Start inpainting in background thread IMMEDIATELY
             import concurrent.futures
             self._inpainting_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            self._inpainting_start_time = time.time()  # Track when inpainting started
             self._inpainting_future = self._inpainting_executor.submit(
                 self.inpaint_regions, 
                 image.copy(), 
                 mask
             )
-            self._log("   🚀 INPAINTING STARTED IN BACKGROUND (will run during OCR)")
+            self._log("   🚀 EARLY INPAINTING STARTED (running concurrently with OCR)")
             return self._inpainting_future
             
         except Exception as e:
@@ -13382,8 +13413,8 @@ class MangaTranslator:
             if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
                 self._save_debug_image(image_path, regions, debug_base_dir=output_dir)
             
-            # Step 2: Translation & Inpainting (concurrent)
-            self._log(f"\n📍 [STEP 2] Translation & Inpainting Phase (concurrent)")
+            # Step 2: Translation Phase (inpainting may already be running from detection)
+            self._log(f"\n📍 [STEP 2] Translation Phase")
             
             # Load image once (used by inpainting task); keep PIL fallback for Unicode paths
             import cv2
@@ -13451,9 +13482,12 @@ class MangaTranslator:
                 try:
                     # Check if inpainting was already started early (after RT-DETR)
                     if hasattr(self, '_inpainting_future') and self._inpainting_future:
-                        self._log(f"🎨 Using early-started inpainting (already running)")
-                        # Return the future itself, not its result - will be handled in main flow
+                        self._log(f"⏩ Early inpainting already running - will wait for it to complete")
+                        # Just return the future - the main flow will handle getting the result
                         return self._inpainting_future
+                    
+                    # If we get here, early inpainting was NOT started (shouldn't happen with RT-DETR)
+                    self._log(f"⚠️ Early inpainting was not started - starting now (this shouldn't happen)")
                     
                     # CRITICAL: Re-check the skip flag from config at runtime (don't use cached value)
                     # This ensures toggle changes are respected even after MangaTranslator initialization
@@ -13475,9 +13509,7 @@ class MangaTranslator:
                     
                     if skip_flag:
                         self._log(f"🎨 Skipping inpainting (preserving original art)", "info")
-                        result_img = image.copy()
-                    else:
-                        self._log(f"🎨 Inpainting enabled - will remove original text", "debug")
+                        return image.copy()
                     
                     self._log(f"🎭 Creating text mask...")
                     try:
@@ -13597,29 +13629,36 @@ class MangaTranslator:
                         translate_ok = False
                     
                     try:
-                        inpaint_start = time.time()
                         # Get the result from fut_inpaint
                         fut_inpaint_result = fut_inpaint.result(timeout=60)
                         
                         # Check what we got back
                         if isinstance(fut_inpaint_result, concurrent.futures.Future):
                             # It's an early inpainting future, get its result
-                            self._log("⏳ Waiting for early-started inpainting to complete...", "info")
+                            inpaint_wait_start = time.time()
                             inpainted = fut_inpaint_result.result(timeout=60)
+                            inpaint_wait_time = time.time() - inpaint_wait_start
+                            
+                            # Calculate total inpainting time from when it started early
+                            if hasattr(self, '_inpainting_start_time'):
+                                total_inpaint_time = time.time() - self._inpainting_start_time
+                                if inpaint_wait_time < 0.1:
+                                    self._log(f"✅ Early inpainting ALREADY COMPLETE! (ran for {total_inpaint_time:.1f}s during OCR/translation)", "info")
+                                else:
+                                    self._log(f"✅ Early inpainting finished (total: {total_inpaint_time:.1f}s, additional wait: {inpaint_wait_time:.1f}s)", "info") 
+                            else:
+                                if inpaint_wait_time < 0.1:
+                                    self._log(f"✅ Early inpainting already done!", "info")
+                                else:
+                                    self._log(f"✅ Early inpainting completed (waited {inpaint_wait_time:.1f}s)", "info")
                         elif isinstance(fut_inpaint_result, np.ndarray):
-                            # It's the actual image array
-                            self._log("✅ Got inpainted image", "debug")
+                            # It's the actual image array (shouldn't happen if early inpainting worked)
+                            self._log("⚠️ Got direct inpainted image (early inpainting didn't run)", "warning")
                             inpainted = fut_inpaint_result
                         else:
                             # Unexpected type
                             self._log(f"⚠️ Unexpected inpainting result type: {type(fut_inpaint_result)}", "warning")
                             inpainted = image.copy()
-                        
-                        inpaint_wait = time.time() - inpaint_start
-                        if inpaint_wait > 0.5:
-                            self._log(f"✅ Inpainting completed (waited {inpaint_wait:.1f}s after translation)", "info")
-                        else:
-                            self._log(f"✅ Inpainting already complete (early start worked!)", "info")
                     except Exception as e:
                         self._log(f"⚠️ Inpainting failed: {e}", "warning")
                         inpainted = image.copy()
@@ -13627,6 +13666,8 @@ class MangaTranslator:
                         # Clean up early inpainting resources
                         if hasattr(self, '_inpainting_future'):
                             self._inpainting_future = None
+                        if hasattr(self, '_inpainting_start_time'):
+                            delattr(self, '_inpainting_start_time')
                         if hasattr(self, '_inpainting_executor'):
                             try:
                                 self._inpainting_executor.shutdown(wait=False)
