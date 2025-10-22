@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Glossarion Lite v6.1.9 - PyInstaller Specification File
+Glossarion Lite v6.2.0 - PyInstaller Specification File
 Enhanced Translation Tool with QA Scanner, and AI Hunter
 """
 
@@ -12,7 +12,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'L_Glossarion_Lite v6.1.9'  # CHANGED: Updated version
+APP_NAME = 'L_Glossarion_Lite v6.2.0'  # CHANGED: Updated version
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = True  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
@@ -34,10 +34,7 @@ binaries = []
 hiddenimports = []
 
 # Add custom DLL and CPP files
-binaries.extend([
-    ('vfcompat.dll', '.'),
-    ('appverifUI.dll', '.')
-])
+binaries.extend([])
 
 # Collect data files from packages that need them
 for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'chardet', 'charset_normalizer']:
@@ -126,7 +123,10 @@ app_files = [
 	# Duplicate detection
 	('duplicate_detection_config.py', '.'),
 	('advanced_duplicate_detection.py', '.'),
+	
 ]
+# Add application files to datas
+datas.extend(app_files)
 datas.append(('memory_usage_reporter.py', '.'))
 datas.append(('tqdm_safety.py', '.'))
 datas.append(('debug_env_vars.py', '.'))

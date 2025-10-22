@@ -65,7 +65,7 @@ class SplashManager:
             self._load_icon(layout)
             
             # Title
-            title_label = QLabel("Glossarion v6.1.9")
+            title_label = QLabel("Glossarion v6.2.0")
             title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             title_font = QFont("Arial", 20, QFont.Weight.Bold)
             title_label.setFont(title_font)
@@ -250,18 +250,6 @@ class SplashManager:
                 return
                 
             if self.splash_window and self.progress_value < 100:
-                # Store last auto-update time to prevent too frequent updates
-                current_time = time.time()
-                if not hasattr(self, '_last_auto_update'):
-                    self._last_auto_update = current_time
-                
-                # Only auto-increment if enough time has passed
-                time_since_last = current_time - self._last_auto_update
-                if time_since_last < 0.1:  # Minimum 100ms between auto-increments
-                    return
-                
-                self._last_auto_update = current_time
-                
                 # Auto-increment progress for visual effect during startup
                 if self.progress_value < 30:
                     self.progress_value += 8  # Fast initial progress
@@ -405,10 +393,14 @@ class SplashManager:
         for idx, filepath in enumerate(python_files, 1):
             filename = os.path.basename(filepath)
             
+            # Log progress for debugging hangs
+            print(f"📂 Scanning files: [{idx}/{total_count}] {filename}")
+            
             try:
                 # Try to compile the file
                 py_compile.compile(filepath, doraise=True)
                 success_count += 1
+                print(f"✅ Validated {idx}/{total_count}: {filename}")
                 
                 # Update progress based on validation progress
                 # Map 0-100% of files to 15-25% of total progress
@@ -420,9 +412,13 @@ class SplashManager:
             except SyntaxError as e:
                 failed_scripts.append((filename, str(e)))
                 print(f"❌ Syntax error in {filename}: {e}")
+                import traceback
+                print(f"Full traceback:\n{traceback.format_exc()}")
             except Exception as e:
                 failed_scripts.append((filename, str(e)))
                 print(f"⚠️ Could not validate {filename}: {e}")
+                import traceback
+                print(f"Full traceback:\n{traceback.format_exc()}")
             
             # Process events to keep UI responsive
             if self.app:
