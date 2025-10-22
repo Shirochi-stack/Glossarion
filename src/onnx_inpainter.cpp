@@ -30,6 +30,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <mutex>
 
 #ifdef _WIN32
     #include <windows.h>
@@ -44,7 +45,7 @@
 // ONNX Runtime API
 const OrtApi* g_ort = NULL;
 
-// Session handle
+// Session handle with thread-safe mutex
 typedef struct {
     OrtSession* session;
     OrtAllocator* allocator;
@@ -54,6 +55,7 @@ typedef struct {
     size_t num_outputs;
     int64_t* input_shape;
     bool is_dynamic;
+    std::mutex* inference_mutex;  // Mutex for thread-safe inference
 } ONNXInpainter;
 
 // Error checking macro - returns -1 on error
@@ -112,6 +114,9 @@ EXPORT ONNXInpainter* onnx_create_session(const char* model_path, int use_gpu) {
     if (!inpainter) return NULL;
 
     memset(inpainter, 0, sizeof(ONNXInpainter));
+    
+    // Initialize mutex for thread safety
+    inpainter->inference_mutex = new std::mutex();
 
     // Create environment
     OrtEnv* env = NULL;
@@ -227,7 +232,7 @@ EXPORT ONNXInpainter* onnx_create_session(const char* model_path, int use_gpu) {
     return inpainter;
 }
 
-// Run inference
+// Run inference with thread safety
 EXPORT int onnx_infer(ONNXInpainter* inpainter,
                      const float* image_data,
                      const float* mask_data,
@@ -240,6 +245,9 @@ EXPORT int onnx_infer(ONNXInpainter* inpainter,
         fprintf(stderr, "Invalid inpainter session\n");
         return -1;
     }
+    
+    // CRITICAL: Lock mutex for thread-safe inference
+    std::lock_guard<std::mutex> lock(*inpainter->inference_mutex);
 
     // Create input tensors
     OrtMemoryInfo* memory_info = NULL;
@@ -335,9 +343,15 @@ EXPORT int onnx_get_input_shape(ONNXInpainter* inpainter, int* shape_out) {
     return inpainter->is_dynamic ? 1 : 0;
 }
 
-// Cleanup
+// Cleanup with mutex destruction
 EXPORT void onnx_destroy_session(ONNXInpainter* inpainter) {
     if (!inpainter) return;
+
+    // Destroy mutex first
+    if (inpainter->inference_mutex) {
+        delete inpainter->inference_mutex;
+        inpainter->inference_mutex = nullptr;
+    }
 
     if (inpainter->session) {
         g_ort->ReleaseSession(inpainter->session);
@@ -386,7 +400,7 @@ typedef struct {
     int label;              // Class label (0=bubble, 1=text_bubble, 2=text_free)
 } Detection;
 
-// Run RT-DETR detection
+// Run RT-DETR detection with thread safety
 EXPORT int onnx_detect_bubbles(
     ONNXInpainter* session,
     const float* image_data,   // RGB image data [H, W, 3]
@@ -402,6 +416,9 @@ EXPORT int onnx_detect_bubbles(
         fprintf(stderr, "Invalid session\n");
         return -1;
     }
+    
+    // CRITICAL: Lock mutex for thread-safe inference
+    std::lock_guard<std::mutex> lock(*session->inference_mutex);
 
     OrtMemoryInfo* memory_info = NULL;
     OrtStatus* status = g_ort->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &memory_info);

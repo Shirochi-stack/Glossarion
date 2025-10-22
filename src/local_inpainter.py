@@ -857,6 +857,9 @@ class LocalInpainter:
 
     def _mp_load_model(self, method, model_path, force_reload=False) -> bool:
         try:
+            # Store model path for worker restart scenarios
+            self._last_model_path = model_path
+            
             resp = self._mp_call({'type': 'load_model', 'method': method, 'model_path': model_path, 'force_reload': bool(force_reload)}, 'load_model_done', timeout=180.0)
             ok = bool(resp.get('success'))
             # Mirror minimal state for compatibility
@@ -871,6 +874,11 @@ class LocalInpainter:
             if self.use_onnx_cpp:
                 logger.info("✅ Worker process using C++ ONNX backend (2x faster)")
             return ok
+        except TimeoutError as e:
+            logger.error(f"Worker load_model timeout: {e}")
+            logger.error("💡 Try disabling worker process in settings if this persists")
+            self.model_loaded = False
+            return False
         except Exception as e:
             logger.error(f"Worker load_model failed: {e}")
             self.model_loaded = False
@@ -884,16 +892,60 @@ class LocalInpainter:
         if not self.model_loaded:
             self._log("No model loaded (worker)", "error")
             return image
-        try:
-            resp = self._mp_call({'type': 'inpaint', 'image': image, 'mask': mask, 'refinement': refinement, 'iterations': iterations}, 'inpaint_result', timeout=600.0)
-            if resp.get('success') and resp.get('result') is not None:
-                return resp['result']
-            else:
-                self._log(f"Worker inpaint failed: {resp.get('error')}", "error")
+        
+        # CRITICAL: Retry with exponential backoff for timeouts
+        max_retries = 2
+        timeout_values = [120.0, 240.0, 480.0]  # Progressive timeouts
+        
+        for attempt in range(max_retries + 1):
+            try:
+                timeout = timeout_values[min(attempt, len(timeout_values) - 1)]
+                resp = self._mp_call(
+                    {'type': 'inpaint', 'image': image, 'mask': mask, 'refinement': refinement, 'iterations': iterations}, 
+                    'inpaint_result', 
+                    timeout=timeout
+                )
+                if resp.get('success') and resp.get('result') is not None:
+                    if attempt > 0:
+                        logger.info(f"✅ Worker inpaint succeeded on retry {attempt}")
+                    return resp['result']
+                else:
+                    error_msg = resp.get('error', 'Unknown error')
+                    logger.error(f"Worker inpaint failed: {error_msg}")
+                    if attempt < max_retries:
+                        logger.warning(f"🔄 Retrying inpaint (attempt {attempt + 1}/{max_retries})...")
+                        continue
+                    return image
+            except TimeoutError as e:
+                logger.error(f"❌ Worker inpaint timeout (attempt {attempt + 1}/{max_retries + 1}): {e}")
+                if attempt < max_retries:
+                    logger.warning(f"🔄 Restarting worker and retrying...")
+                    # CRITICAL: Restart the worker process on timeout
+                    try:
+                        self._stop_worker()
+                        import time
+                        time.sleep(1)  # Brief pause
+                        self._start_worker()
+                        # Reload the model in the new worker
+                        if hasattr(self, 'current_method') and self.current_method:
+                            model_path = getattr(self, '_last_model_path', None)
+                            if model_path:
+                                logger.info(f"🔄 Reloading model in new worker: {self.current_method}")
+                                self._mp_load_model(self.current_method, model_path, force_reload=True)
+                    except Exception as restart_error:
+                        logger.error(f"Failed to restart worker: {restart_error}")
+                        return image
+                    continue
+                else:
+                    logger.error(f"❌ All retry attempts exhausted. Returning original image.")
+                    return image
+            except Exception as e:
+                logger.error(f"Worker inpaint exception (attempt {attempt + 1}): {e}")
+                if attempt < max_retries:
+                    continue
                 return image
-        except Exception as e:
-            logger.error(f"Worker inpaint exception: {e}")
-            return image
+        
+        return image
 
     def _load_config(self):
         try:
