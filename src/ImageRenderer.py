@@ -3793,6 +3793,15 @@ def _update_rectangles_with_recognition(self, recognized_texts: list):
             else:
                 print(f"[DEBUG] Warning: No rectangle match for recognition item {i} (region_index={region_index})")
         
+        # Force scene update to show color changes immediately
+        try:
+            viewer = self.image_preview_widget.viewer
+            viewer._scene.update()
+            viewer.viewport().update()
+            print(f"[DEBUG] Forced scene refresh to show blue rectangles")
+        except Exception as e:
+            print(f"[DEBUG] Failed to refresh scene: {e}")
+        
         print(f"[DEBUG] OCR tooltip setup complete")
         
     except Exception as e:
