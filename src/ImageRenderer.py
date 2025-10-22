@@ -785,13 +785,114 @@ def _rehydrate_text_state_from_persisted(self, image_path: str):
         print(f"[STATE_ISOLATION] Failed to rehydrate state: {e}")
         return (0, 0)
 
+def _validate_and_clean_stale_state(self, image_path: str):
+    """Validate state and clear references to non-existent output files.
+    
+    If cleaned_image_path or rendered_image_path don't exist anymore,
+    clear them from state along with ALL dependent data:
+    - translated_texts
+    - recognized_texts (OCR data)
+    - detection_regions (detection boxes)
+    - viewer_rectangles (manually adjusted boxes)
+    - overlay_rects
+    """
+    try:
+        if not hasattr(self, 'image_state_manager') or not self.image_state_manager:
+            return
+        
+        state = self.image_state_manager.get_state(image_path)
+        if not state:
+            return
+        
+        state_changed = False
+        cleaned_exists = False
+        rendered_exists = False
+        
+        # Check cleaned_image_path
+        cleaned_path = state.get('cleaned_image_path')
+        if cleaned_path:
+            if os.path.exists(cleaned_path):
+                print(f"[STATE_CLEAN] Cleaned image exists: {os.path.basename(cleaned_path)}")
+                cleaned_exists = True
+            else:
+                print(f"[STATE_CLEAN] Cleaned image no longer exists: {os.path.basename(cleaned_path)}")
+                state.pop('cleaned_image_path', None)
+                state_changed = True
+        
+        # Check rendered_image_path (translated output)
+        rendered_path = state.get('rendered_image_path')
+        if rendered_path:
+            if os.path.exists(rendered_path):
+                print(f"[STATE_CLEAN] Rendered/translated image exists: {os.path.basename(rendered_path)}")
+                rendered_exists = True
+            else:
+                print(f"[STATE_CLEAN] Rendered/translated image no longer exists: {os.path.basename(rendered_path)}")
+                state.pop('rendered_image_path', None)
+                state_changed = True
+        
+        # If NEITHER cleaned nor rendered output exists, clear ALL processing state
+        # This is orphaned data from a previous session
+        if not cleaned_exists and not rendered_exists:
+            orphaned_keys = []
+            
+            # Check for orphaned translation data
+            if state.get('translated_texts'):
+                orphaned_keys.append('translated_texts')
+                state.pop('translated_texts', None)
+            
+            # Check for orphaned recognition data
+            if state.get('recognized_texts'):
+                orphaned_keys.append('recognized_texts')
+                state.pop('recognized_texts', None)
+            
+            # Check for orphaned detection regions
+            if state.get('detection_regions'):
+                orphaned_keys.append('detection_regions')
+                state.pop('detection_regions', None)
+            
+            # Check for orphaned viewer rectangles
+            if state.get('viewer_rectangles'):
+                orphaned_keys.append('viewer_rectangles')
+                state.pop('viewer_rectangles', None)
+            
+            # Check for orphaned overlay rects
+            if state.get('overlay_rects'):
+                orphaned_keys.append('overlay_rects')
+                state.pop('overlay_rects', None)
+            
+            if orphaned_keys:
+                print(f"[STATE_CLEAN] No output files exist - clearing orphaned state: {', '.join(orphaned_keys)}")
+                state_changed = True
+        
+        # If only translated output is missing but cleaned exists, just clear translation data
+        elif cleaned_exists and not rendered_exists:
+            if state.get('translated_texts'):
+                print(f"[STATE_CLEAN] Translated output missing but cleaned exists - clearing translated_texts only")
+                state.pop('translated_texts', None)
+                state_changed = True
+        
+        # Save cleaned state if changed
+        if state_changed:
+            self.image_state_manager.set_state(image_path, state, save=True)
+            print(f"[STATE_CLEAN] Cleaned stale state for {os.path.basename(image_path)}")
+        else:
+            print(f"[STATE_CLEAN] No stale state found for {os.path.basename(image_path)}")
+        
+    except Exception as e:
+        print(f"[STATE_CLEAN] Error validating state: {e}")
+        import traceback
+        traceback.print_exc()
+
 def _restore_image_state(self, image_path: str):
     """Restore persisted state for an image (rectangles, overlays, paths)"""
     try:
         if not hasattr(self, 'image_state_manager'):
             return
         
-        # Get saved state
+        # CRITICAL: Validate and clean stale state BEFORE restoration
+        _validate_and_clean_stale_state(self, image_path)
+        
+        # Get saved state (after cleaning)
         state = self.image_state_manager.get_state(image_path)
         if not state:
             print(f"[STATE] No saved state for {os.path.basename(image_path)}")
@@ -1074,7 +1175,10 @@ def _restore_image_state_overlays_only(self, image_path: str):
                 print(f"[STATE_ISOLATION] Clearing stale state before restoration")
                 _clear_cross_image_state(self)
         
-        # Get saved state
+        # CRITICAL: Validate and clean stale state BEFORE restoration
+        _validate_and_clean_stale_state(self, image_path)
+        
+        # Get saved state (after cleaning)
         state = self.image_state_manager.get_state(image_path)
         if not state:
             print(f"[STATE] No saved state for {os.path.basename(image_path)}")
@@ -1175,9 +1279,8 @@ def _restore_image_state_overlays_only(self, image_path: str):
                 # Add context menu to restored rectangles
                 try:
                     rect_item.region_index = idx
-                    # Mark as recognized when blue so selection keeps it blue
-                    if has_text_for_this_rect:
-                        rect_item.is_recognized = True
+                    # CRITICAL: Always set is_recognized based on text state, not just when true
+                    rect_item.is_recognized = has_text_for_this_rect
                     _attach_move_sync_to_rectangle(self, rect_item, idx)
                     _add_context_menu_to_rectangle(self, rect_item, idx)
                 except Exception:
