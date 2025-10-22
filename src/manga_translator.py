@@ -7341,7 +7341,7 @@ class MangaTranslator:
                 return {}
             
             self._log(f"🔍 Raw response type: {type(response_text)}")
-            self._log(f"🔍 Raw response preview: '{response_text[:2000]}...'")
+            self._log(f"🔍 Raw response preview: '{response_text[:]}...'")
             
             # Clean up response_text (handle Python literals, escapes, etc.)
             if response_text.startswith("('") or response_text.startswith('("') or response_text.startswith("('''"):
@@ -7694,74 +7694,92 @@ class MangaTranslator:
                         details={"refusal_message": translation_values[0][:500]}
                     )
 
-            # Key-based mapping (prioritize indexed format as requested in prompt)
+            # OPTIMIZED: Key-based mapping with pre-computed lookups
             self._log(f"📋 Mapping {len(translations)} translations to {len(regions)} regions")
             
             # DEBUG: Log all translation keys for inspection
-            self._log(f"🔍 Available translation keys:", "debug")
-            for key in list(translations.keys())[:20]:  # Show first 20
-                self._log(f"   '{key}'", "debug")
+            if self.manga_settings.get('advanced', {}).get('debug_mode', False):
+                self._log(f"🔍 Available translation keys:", "debug")
+                for key in list(translations.keys())[:20]:  # Show first 20
+                    self._log(f"   '{key}'", "debug")
+            
+            # OPTIMIZATION: Pre-compute all possible keys and their region indices
+            region_key_map = {}  # key -> region_index mapping
+            normalized_texts = []  # Pre-compute normalized versions
             
             for i, region in enumerate(regions):
-                if i % 10 == 0 and self._check_stop():
-                    self._log(f"⏹️ Translation stopped during mapping (processed {i}/{len(regions)} regions)", "warning")
-                    return result
+                # Pre-normalize text once
+                normalized_text = ' '.join(region.text.split())
+                normalized_texts.append(normalized_text)
                 
-                # Get translation using multiple strategies (indexed format is most reliable)
-                translated = ""
-                
-                # CRITICAL: Normalize whitespace in region text for key matching
-                # API might normalize newlines to spaces, so we match against normalized keys
-                normalized_region_text = ' '.join(region.text.split())
-                
-                # Strategy 1: Indexed key format "[N] original_text" (NEW STANDARD - most reliable)
-                # Try both normalized and original keys
-                key = f"[{i}] {region.text}"
-                key_normalized = f"[{i}] {normalized_region_text}"
-                
-                # DEBUG: Log the keys we're trying
-                self._log(f"  🔎 Region {i}: '{region.text[:30]}...'", "debug")
-                self._log(f"     Original key: '{key[:50]}...'", "debug")
-                self._log(f"     Normalized key: '{key_normalized[:50]}...'", "debug")
-                
-                if key in translations:
-                    translated = translations[key]
-                    self._log(f"  ✅ Matched indexed key: '{key[:40]}...'", "debug")
-                elif key_normalized in translations:
-                    translated = translations[key_normalized]
-                    self._log(f"  ✅ Matched normalized indexed key: '{key_normalized[:40]}...'", "debug")
-                # Strategy 2: Direct key match without index (backward compatibility)
-                elif region.text in translations:
-                    translated = translations[region.text]
-                    self._log(f"  ✅ Matched direct key: '{region.text[:40]}...'", "debug")
-                elif normalized_region_text in translations:
-                    translated = translations[normalized_region_text]
-                    self._log(f"  ✅ Matched normalized direct key: '{normalized_region_text[:40]}...'", "debug")
-                # Strategy 3: Position-based fallback (least reliable, only if counts match exactly)
-                elif i < len(translation_values) and len(translation_values) == len(regions):
-                    translated = translation_values[i]
-                    self._log(f"  ⚠️ Using position-based fallback for region {i}", "debug")
-                
-                # Only mark as missing if we genuinely have no translation
-                # NOTE: Keep translation even if it matches original (e.g., numbers, names, SFX)
-                if not translated:
-                    self._log(f"  ⚠️ No translation for region {i}, leaving empty", "warning")
-                    translated = ""
-                
-                # Apply glossary if we have a translation
-                if translated and hasattr(self.main_gui, 'manual_glossary') and self.main_gui.manual_glossary:
-                    for entry in self.main_gui.manual_glossary:
-                        if 'source' in entry and 'target' in entry:
-                            if entry['source'] in translated:
-                                translated = translated.replace(entry['source'], entry['target'])
-                
-                result[region.text] = translated
-                region.translated_text = translated
-                
-                if translated:
-                    all_originals.append(f"[{i+1}] {region.text}")
-                    all_translations.append(f"[{i+1}] {translated}")
-                    self._log(f"  ✅ Translated: '{region.text[:30]}...' → '{translated[:30]}...'", "debug")
+                # Create all possible key variations
+                # Indexed keys (highest priority)
+                region_key_map[f"[{i}] {region.text}"] = i
+                region_key_map[f"[{i}] {normalized_text}"] = i
+                # Direct keys (backward compatibility)
+                region_key_map[region.text] = i
+                region_key_map[normalized_text] = i
+            
+            # OPTIMIZATION: Pre-compile glossary replacements if present
+            glossary_replacements = []
+            if hasattr(self.main_gui, 'manual_glossary') and self.main_gui.manual_glossary:
+                for entry in self.main_gui.manual_glossary:
+                    if 'source' in entry and 'target' in entry and entry['source']:
+                        glossary_replacements.append((entry['source'], entry['target']))
+            
+            # OPTIMIZATION: Single pass through translations to map to regions
+            matched_regions = set()  # Track which regions got translations
+            for key, translated_text in translations.items():
+                if key in region_key_map:
+                    region_idx = region_key_map[key]
+                    if region_idx not in matched_regions:  # Avoid duplicate assignments
+                        region = regions[region_idx]
+                        
+                        # Apply glossary replacements efficiently
+                        if translated_text and glossary_replacements:
+                            for source, target in glossary_replacements:
+                                if source in translated_text:
+                                    translated_text = translated_text.replace(source, target)
+                        
+                        # Assign translation
+                        result[region.text] = translated_text
+                        region.translated_text = translated_text
+                        matched_regions.add(region_idx)
+                        
+                        if translated_text:
+                            all_originals.append(f"[{region_idx+1}] {region.text}")
+                            all_translations.append(f"[{region_idx+1}] {translated_text}")
+                        
+                        # Debug logging only if enabled
+                        if self.manga_settings.get('advanced', {}).get('debug_mode', False):
+                            self._log(f"  ✅ Matched: '{region.text[:30]}...' → '{translated_text[:30]}...'", "debug")
+            
+            # OPTIMIZATION: Handle unmatched regions (position-based fallback)
+            # Only if counts match exactly and we still have unmatched regions
+            if len(matched_regions) < len(regions) and len(translation_values) == len(regions):
+                for i, region in enumerate(regions):
+                    if i not in matched_regions and i < len(translation_values):
+                        translated_text = translation_values[i]
+                        
+                        # Apply glossary replacements
+                        if translated_text and glossary_replacements:
+                            for source, target in glossary_replacements:
+                                if source in translated_text:
+                                    translated_text = translated_text.replace(source, target)
+                        
+                        result[region.text] = translated_text
+                        region.translated_text = translated_text
+                        
+                        if translated_text:
+                            all_originals.append(f"[{i+1}] {region.text}")
+                            all_translations.append(f"[{i+1}] {translated_text}")
+                        
+                        self._log(f"  ⚠️ Using position-based fallback for region {i}", "debug")
+            
+            # Check for stop signal
+            if self._check_stop():
+                self._log(f"⏹️ Translation stopped during mapping", "warning")
+                return result
             
             # Save history if enabled
             if self.history_manager and self.contextual_enabled and all_originals:
@@ -9978,14 +9996,18 @@ class MangaTranslator:
     
     def render_translated_text(self, image: np.ndarray, regions: List[TextRegion]) -> np.ndarray:
         """Enhanced text rendering with customizable backgrounds and styles"""
-        self._log(f"\n🎨 Starting ENHANCED text rendering with custom settings:", "info")
-        self._log(f"  ✅ Using ENHANCED renderer (not the simple version)", "info")
-        self._log(f"  Background: {self.text_bg_style} @ {int(self.text_bg_opacity/255*100)}% opacity", "info")
-        self._log(f"  Text color: RGB{self.text_color}", "info")
-        self._log(f"  Shadow: {'Enabled' if self.shadow_enabled else 'Disabled'}", "info")
-        self._log(f"  Font: {os.path.basename(self.selected_font_style) if self.selected_font_style else 'Default'}", "info")
-        if self.force_caps_lock:  
-            self._log(f"  Force Caps Lock: ENABLED", "info")
+        # OPTIMIZATION: Reduce logging overhead - only log summary
+        if not getattr(self, 'concise_logs', True):  # Default to concise
+            self._log(f"\n🎨 Starting ENHANCED text rendering with custom settings:", "info")
+            self._log(f"  ✅ Using ENHANCED renderer (not the simple version)", "info")
+            self._log(f"  Background: {self.text_bg_style} @ {int(self.text_bg_opacity/255*100)}% opacity", "info")
+            self._log(f"  Text color: RGB{self.text_color}", "info")
+            self._log(f"  Shadow: {'Enabled' if self.shadow_enabled else 'Disabled'}", "info")
+            self._log(f"  Font: {os.path.basename(self.selected_font_style) if self.selected_font_style else 'Default'}", "info")
+            if self.force_caps_lock:  
+                self._log(f"  Force Caps Lock: ENABLED", "info")
+        else:
+            self._log(f"🎨 Rendering {len(regions)} regions...", "info")
         
         # Convert to PIL for text rendering
         import cv2
@@ -9995,17 +10017,32 @@ class MangaTranslator:
         # Get image dimensions for boundary checking
         image_height, image_width = image.shape[:2]
         
-        # Create text mask to get accurate render boundaries
-        # This represents what will actually be inpainted
-        try:
-            text_mask = self.create_text_mask(image, regions)
-            use_mask_for_rendering = True
-            self._log(f"  🎭 Created text mask for accurate render boundaries", "info")
-        except Exception as e:
-            text_mask = None
-            use_mask_for_rendering = False
-            if not getattr(self, 'concise_logs', False):
-                self._log(f"  ⚠️ Failed to create mask, using polygon bounds: {e}", "warning")
+        # OPTIMIZATION: Cache mask creation result
+        if not hasattr(self, '_cached_mask') or not hasattr(self, '_cached_mask_regions'):
+            self._cached_mask = None
+            self._cached_mask_regions = None
+        
+        # Check if we can reuse cached mask
+        regions_hash = hash(tuple((r.bounding_box, r.text) for r in regions))
+        if self._cached_mask_regions == regions_hash:
+            text_mask = self._cached_mask
+            use_mask_for_rendering = text_mask is not None
+        else:
+            # Create text mask to get accurate render boundaries
+            try:
+                text_mask = self.create_text_mask(image, regions)
+                use_mask_for_rendering = True
+                self._cached_mask = text_mask
+                self._cached_mask_regions = regions_hash
+                if not getattr(self, 'concise_logs', True):
+                    self._log(f"  🎭 Created text mask for accurate render boundaries", "info")
+            except Exception as e:
+                text_mask = None
+                use_mask_for_rendering = False
+                self._cached_mask = None
+                self._cached_mask_regions = regions_hash
+                if not getattr(self, 'concise_logs', True):
+                    self._log(f"  ⚠️ Failed to create mask, using polygon bounds: {e}", "warning")
         
         # Only adjust overlapping regions if constraining to bubbles
         if self.constrain_to_bubble:
@@ -10058,6 +10095,10 @@ class MangaTranslator:
             except Exception:
                 max_workers = 4
 
+            # OPTIMIZATION: Pre-compute shared values outside the render function
+            is_using_custom_font = self._is_truly_custom_font()
+            outline_width_factor = self.outline_width_factor
+            
             def _render_one(region, idx):
                 # Build a separate overlay for this region
                 from PIL import Image as _PIL
@@ -10071,31 +10112,39 @@ class MangaTranslator:
                 # Get original bounding box
                 x, y, w, h = region.bounding_box
                 
-                # CRITICAL: Always prefer mask bounds when available (most accurate)
-                # Mask bounds are especially important for Azure/Google without RT-DETR,
-                # where OCR polygons are unreliable.
-                if hasattr(self, 'safe_area_enabled') and not self.safe_area_enabled:
-                    # Bypass safe area completely
-                    render_x, render_y, render_w, render_h = region.bounding_box
-                elif use_mask_for_rendering and text_mask is not None:
-                    # Use mask bounds directly - most accurate method
-                    safe_x, safe_y, safe_w, safe_h = self.get_safe_text_area(
-                        region, 
-                        use_mask_bounds=True, 
-                        full_mask=text_mask
-                    )
-                    render_x, render_y, render_w, render_h = safe_x, safe_y, safe_w, safe_h
-                    render_x, render_y, render_w, render_h = safe_x, safe_y, safe_w, safe_h
-                elif hasattr(region, 'vertices') and region.vertices:
+                # OPTIMIZATION: Cache safe area calculations per region
+                # Check if we've already calculated safe area for this region
+                region_id = id(region)  # Use object ID as cache key
+                if not hasattr(region, '_cached_safe_area'):
+                    # CRITICAL: Always prefer mask bounds when available (most accurate)
+                    # Mask bounds are especially important for Azure/Google without RT-DETR,
+                    # where OCR polygons are unreliable.
                     if hasattr(self, 'safe_area_enabled') and not self.safe_area_enabled:
+                        # Bypass safe area completely
                         render_x, render_y, render_w, render_h = region.bounding_box
-                    else:
-                        # Fallback: use polygon-based safe area (for RT-DETR regions)
-                        safe_x, safe_y, safe_w, safe_h = self.get_safe_text_area(region, use_mask_bounds=False)
+                    elif use_mask_for_rendering and text_mask is not None:
+                        # Use mask bounds directly - most accurate method
+                        safe_x, safe_y, safe_w, safe_h = self.get_safe_text_area(
+                            region, 
+                            use_mask_bounds=True, 
+                            full_mask=text_mask
+                        )
                         render_x, render_y, render_w, render_h = safe_x, safe_y, safe_w, safe_h
+                    elif hasattr(region, 'vertices') and region.vertices:
+                        if hasattr(self, 'safe_area_enabled') and not self.safe_area_enabled:
+                            render_x, render_y, render_w, render_h = region.bounding_box
+                        else:
+                            # Fallback: use polygon-based safe area (for RT-DETR regions)
+                            safe_x, safe_y, safe_w, safe_h = self.get_safe_text_area(region, use_mask_bounds=False)
+                            render_x, render_y, render_w, render_h = safe_x, safe_y, safe_w, safe_h
+                    else:
+                        # Last resort: use simple bounding box
+                        render_x, render_y, render_w, render_h = x, y, w, h
+                    # Cache the result
+                    region._cached_safe_area = (render_x, render_y, render_w, render_h)
                 else:
-                    # Last resort: use simple bounding box
-                    render_x, render_y, render_w, render_h = x, y, w, h
+                    # Use cached value
+                    render_x, render_y, render_w, render_h = region._cached_safe_area
                 
                 # Fit text - use render dimensions for proper sizing
                 # CONSISTENCY FIX: Always use the same text fitting logic regardless of source
@@ -10150,8 +10199,9 @@ class MangaTranslator:
                 max_start_y = render_y + render_h - total_height
                 start_y = max(render_y, min(ideal_start_y, max_start_y))
                 
+                # OPTIMIZATION: Skip debug logging in production (major performance gain)
                 # Debug logging for vertical constraint
-                if not getattr(self, 'concise_logs', False):
+                if self.manga_settings.get('advanced', {}).get('debug_mode', False):
                     end_y = start_y + total_height
                     render_end_y = render_y + render_h
                     overflow = max(0, end_y - render_end_y)
@@ -10449,7 +10499,12 @@ class MangaTranslator:
         # Convert back to numpy array
         result_rgb = np.array(pil_image)
         result = cv2.cvtColor(result_rgb, cv2.COLOR_RGB2BGR)
-        self._log(f"✅ ENHANCED text rendering complete - rendered {region_count} regions", "info")
+        
+        # OPTIMIZATION: Only log if not in concise mode
+        if not getattr(self, 'concise_logs', True):
+            self._log(f"✅ ENHANCED text rendering complete - rendered {region_count} regions", "info")
+        else:
+            self._log(f"✅ Rendered {region_count} regions", "info")
         return result
     
     def _is_free_text_region(self, region) -> bool:
