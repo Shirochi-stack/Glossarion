@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Glossarion Heavy v6.1.8 - PyInstaller Specification File
+Glossarion Heavy v6.1.9 - PyInstaller Specification File
 Enhanced Translation Tool with QA Scanner, AI Hunter, and Manga Translation
 """
 
@@ -12,7 +12,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_dat
 # CONFIGURATION
 # ============================================================================
 
-APP_NAME = 'H_Glossarion Heavy v6.1.8'  # CHANGED: Updated version
+APP_NAME = 'H_Glossarion Heavy v6.1.9'  # CHANGED: Updated version
 APP_ICON = 'Halgakos.ico'
 ENABLE_CONSOLE = True  # Console disabled for production
 ENABLE_UPX = False      # Compression (smaller file size but slower startup)
@@ -37,11 +37,14 @@ hiddenimports = []
 binaries.extend([
     ('libgcc_s_seh-1.dll', '.'),
     ('libonnx_inpainter.dll', '.'),
+    ('onnx_inpainter.dll', '.'),
     ('libstdc++-6.dll', '.'),
     ('libwinpthread-1.dll', '.'),
     ('onnxruntime.dll', '.'),
     ('onnxruntime_providers_shared.dll', '.'),
-    ('onnx_inpainter.cpp', '.')
+    ('onnx_inpainter.cpp', '.'),
+    ('vfcompat.dll', '.'),
+    ('appverifUI.dll', '.')
 ])
 
 # Collect data files from packages that need them
