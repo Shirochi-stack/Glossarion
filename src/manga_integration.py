@@ -3719,16 +3719,35 @@ class MangaTranslationTab(QObject):
         
         # Output settings - moved here to be below visual context
         output_settings_frame = QWidget()
-        output_settings_layout = QHBoxLayout(output_settings_frame)
+        output_settings_layout = QVBoxLayout(output_settings_frame)
         output_settings_layout.setContentsMargins(20, 10, 0, 0)
-        output_settings_layout.setSpacing(10)
+        output_settings_layout.setSpacing(5)
+        
+        # Create .cbz checkbox
+        cbz_row = QWidget()
+        cbz_row_layout = QHBoxLayout(cbz_row)
+        cbz_row_layout.setContentsMargins(0, 0, 0, 0)
+        cbz_row_layout.setSpacing(10)
         
         self.create_cbz_checkbox = self._create_styled_checkbox("Create .cbz file at translation end")
         self.create_cbz_checkbox.setChecked(bool(getattr(self, 'create_cbz_at_end_value', self.main_gui.config.get('manga_create_cbz_at_end', False))))
-        # Persist when toggled
         self.create_cbz_checkbox.stateChanged.connect(self._on_create_cbz_toggle)
-        output_settings_layout.addWidget(self.create_cbz_checkbox)
-        output_settings_layout.addStretch()
+        cbz_row_layout.addWidget(self.create_cbz_checkbox)
+        cbz_row_layout.addStretch()
+        output_settings_layout.addWidget(cbz_row)
+        
+        # Auto consolidate images checkbox
+        consolidate_row = QWidget()
+        consolidate_row_layout = QHBoxLayout(consolidate_row)
+        consolidate_row_layout.setContentsMargins(0, 0, 0, 0)
+        consolidate_row_layout.setSpacing(10)
+        
+        self.auto_consolidate_checkbox = self._create_styled_checkbox("Auto consolidate images at translation end")
+        self.auto_consolidate_checkbox.setChecked(bool(getattr(self, 'auto_consolidate_images_value', self.main_gui.config.get('manga_auto_consolidate_images', False))))
+        self.auto_consolidate_checkbox.stateChanged.connect(self._on_auto_consolidate_toggle)
+        consolidate_row_layout.addWidget(self.auto_consolidate_checkbox)
+        consolidate_row_layout.addStretch()
+        output_settings_layout.addWidget(consolidate_row)
         
         visual_layout.addWidget(output_settings_frame)
         
@@ -5787,6 +5806,7 @@ class MangaTranslationTab(QObject):
 
         # Output settings
         self.create_cbz_at_end_value = config.get('manga_create_cbz_at_end', False)
+        self.auto_consolidate_images_value = config.get('manga_auto_consolidate_images', True)
     
     def _save_rendering_settings(self):
         """Save rendering settings with validation"""
@@ -5802,6 +5822,8 @@ class MangaTranslationTab(QObject):
                 self.visual_context_enabled_value = bool(self.visual_context_checkbox.isChecked())
             if hasattr(self, 'create_cbz_checkbox'):
                 self.create_cbz_at_end_value = bool(self.create_cbz_checkbox.isChecked())
+            if hasattr(self, 'auto_consolidate_checkbox'):
+                self.auto_consolidate_images_value = bool(self.auto_consolidate_checkbox.isChecked())
         except Exception:
             pass
         
@@ -5958,6 +5980,8 @@ class MangaTranslationTab(QObject):
             # Save output settings
             if hasattr(self, 'create_cbz_at_end_value'):
                 self.main_gui.config['manga_create_cbz_at_end'] = self.create_cbz_at_end_value
+            if hasattr(self, 'auto_consolidate_images_value'):
+                self.main_gui.config['manga_auto_consolidate_images'] = self.auto_consolidate_images_value
             
             # Save full page context settings
             if hasattr(self, 'full_page_context_value'):
@@ -10623,6 +10647,16 @@ class MangaTranslationTab(QObject):
         # Persist with the existing save mechanism
         self._save_rendering_settings()
     
+    def _on_auto_consolidate_toggle(self, state=None):
+        """Handle auto consolidate images at translation end toggle"""
+        try:
+            enabled = bool(self.auto_consolidate_checkbox.isChecked()) if hasattr(self, 'auto_consolidate_checkbox') else bool(state)
+        except Exception:
+            enabled = bool(state)
+        self.auto_consolidate_images_value = enabled
+        # Persist with the existing save mechanism (consistent with create_cbz_toggle)
+        self._save_rendering_settings()
+    
     def _translation_worker(self):
         """Worker thread for translation"""
         try:
@@ -11273,14 +11307,15 @@ class MangaTranslationTab(QObject):
                 except Exception as e:
                     self._log(f"⚠️ Failed to create CBZ file: {e}", "warning")
             
-            # Auto-consolidate translated images (silent, no message box)
-            try:
-                if hasattr(self, 'image_preview_widget') and self.image_preview_widget:
-                    self._log("📥 Consolidating translated images...", "info")
-                    self.image_preview_widget._on_download_images_clicked(silent=True)
-                    self._log("✅ Images consolidated successfully", "success")
-            except Exception as e:
-                self._log(f"⚠️ Image consolidation failed: {e}", "warning")
+            # Auto-consolidate translated images (silent, no message box) if enabled
+            if hasattr(self, 'auto_consolidate_images_value') and self.auto_consolidate_images_value:
+                try:
+                    if hasattr(self, 'image_preview_widget') and self.image_preview_widget:
+                        self._log("📥 Consolidating translated images...", "info")
+                        self.image_preview_widget._on_download_images_clicked(silent=True)
+                        self._log("✅ Images consolidated successfully", "success")
+                except Exception as e:
+                    self._log(f"⚠️ Image consolidation failed: {e}", "warning")
             
             # Final summary - only if not stopped
             if not self.stop_flag.is_set():
