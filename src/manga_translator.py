@@ -10101,32 +10101,30 @@ class MangaTranslator:
                     render_x, render_y, render_w, render_h = x, y, w, h
                 
                 # Fit text - use render dimensions for proper sizing
-                # DEBUG: Log which path we're taking
-                print(f"[WRAP_DEBUG] custom_font_size={self.custom_font_size}, font_size_mode={self.font_size_mode}")
-                print(f"[WRAP_DEBUG] render_w={render_w}, render_h={render_h}")
-                print(f"[WRAP_DEBUG] strict_text_wrapping={self.strict_text_wrapping}")
-                print(f"[WRAP_DEBUG] manga_font_size from config={self.main_gui.config.get('manga_font_size', 'NOT SET')}")
+                # CONSISTENCY FIX: Always use the same text fitting logic regardless of source
+                # This ensures "Translate" button and "Start Translation" button produce identical results
+                
+                # Debug: Log settings to verify consistency
+                if not getattr(self, '_logged_wrap_settings', False):
+                    self._log(f"  📝 Text wrap settings: strict={self.strict_text_wrapping}, constrain={self.constrain_to_bubble}", "debug")
+                    self._logged_wrap_settings = True
                 
                 if self.custom_font_size:
-                    # Use custom font size but STILL validate and wrap properly using _pil_word_wrap
-                    print(f"[WRAP_DEBUG] Using custom_font_size path: {self.custom_font_size}")
-                    font_path = self.selected_font_style or self.font_path
+                    # Custom font size mode: use greedy_word_wrap from _pil_word_wrap
+                    font_size = self.custom_font_size
+                    font = self._get_font(font_size)
                     wrapped_text, _ = self._pil_word_wrap(
                         text=tr_text,
-                        font_path=font_path,
+                        font_path=self.selected_font_style or self.font_path,
                         roi_width=render_w,
                         roi_height=render_h,
                         init_font_size=self.custom_font_size,
-                        min_font_size=self.custom_font_size,  # Force this size
+                        min_font_size=self.custom_font_size,
                         draw=draw
                     )
-                    font_size = self.custom_font_size
-                    lines = wrapped_text.split('\n') if wrapped_text else [tr_text]
-                    print(f"[WRAP_DEBUG] After _pil_word_wrap: {len(lines)} lines")
-                elif self.font_size_mode == 'multiplier':
-                    # Pass use_as_is=True since render dimensions are already safe area
-                    font_size, lines = self._fit_text_to_region(tr_text, render_w, render_h, draw, region, use_as_is=True)
+                    lines = wrapped_text.split('\n')
                 else:
+                    # Normal mode: use _fit_text_to_region for optimal sizing
                     # Pass use_as_is=True since render dimensions are already safe area
                     font_size, lines = self._fit_text_to_region(tr_text, render_w, render_h, draw, region, use_as_is=True)
                 # Fonts

@@ -7701,6 +7701,14 @@ def _render_with_manga_translator(self, image_path: str, regions, output_path: s
             print(f"[RENDER] MangaTranslator instance created")
         else:
             print(f"[RENDER] Using existing MangaTranslator instance")
+            # Refresh settings from config to ensure consistency with current GUI settings
+            config = self.main_gui.config if hasattr(self.main_gui, 'config') else {}
+            self._manga_translator.strict_text_wrapping = config.get('manga_strict_text_wrapping', True)
+            self._manga_translator.constrain_to_bubble = config.get('manga_constrain_to_bubble', True)
+            self._manga_translator.custom_font_size = config.get('manga_font_size', None) if config.get('manga_font_size', 0) > 0 else None
+            self._manga_translator.font_size_mode = config.get('manga_font_size_mode', 'fixed')
+            self._manga_translator.font_size_multiplier = config.get('manga_font_size_multiplier', 1.0)
+            print(f"[RENDER] Refreshed settings: strict_wrap={self._manga_translator.strict_text_wrapping}, constrain={self._manga_translator.constrain_to_bubble}")
         
         # Prepare image as numpy BGR array
         if image_bgr is None:
