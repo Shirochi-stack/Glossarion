@@ -714,6 +714,12 @@ def _persist_current_image_state(self):
         self.image_state_manager.set_state(image_path, merged, save=True)
         print(f"[STATE] Saved merged state for {os.path.basename(image_path)} (preserved OCR/translation)")
         
+        # Force immediate flush to disk to ensure state persists across sessions
+        try:
+            self.image_state_manager.flush()
+        except Exception as flush_err:
+            print(f"[STATE] Warning: Failed to flush state: {flush_err}")
+        
     except Exception as e:
         print(f"[STATE] Failed to persist state: {e}")
         import traceback
