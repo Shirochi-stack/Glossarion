@@ -1746,16 +1746,6 @@ class BubbleDetector:
             logger.debug(f"RT-DETR load: Not loaded yet (_rtdetr_onnx_loaded={BubbleDetector._rtdetr_onnx_loaded})")
         
         try:
-            # If singleton mode and already loaded, just attach shared session
-            try:
-                adv = (self.config or {}).get('manga_settings', {}).get('advanced', {}) if isinstance(self.config, dict) else {}
-                singleton = bool(adv.get('use_singleton_models', True))
-            except Exception:
-                singleton = True
-            if singleton and BubbleDetector._rtdetr_onnx_loaded and not force_reload and BubbleDetector._rtdetr_onnx_shared_session is not None:
-                self.rtdetr_onnx_session = BubbleDetector._rtdetr_onnx_shared_session
-                self.rtdetr_onnx_loaded = True
-                return True
 
             repo = model_id or self.rtdetr_onnx_repo
             if hf_hub_download is None:
@@ -1783,27 +1773,11 @@ class BubbleDetector:
             except Exception:
                 pass
 
-            # Session options with reduced memory arena and optional thread limiting in singleton mode
+            # Session options with reduced memory arena
             so = ort.SessionOptions()
             try:
                 so.enable_mem_pattern = False
                 so.enable_cpu_mem_arena = False
-            except Exception:
-                pass
-            # If singleton models mode is enabled in config, limit ORT threading to reduce CPU spikes
-            try:
-                adv = (self.config or {}).get('manga_settings', {}).get('advanced', {}) if isinstance(self.config, dict) else {}
-                if bool(adv.get('use_singleton_models', True)):
-                    so.intra_op_num_threads = 1
-                    so.inter_op_num_threads = 1
-                    try:
-                        so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-                    except Exception:
-                        pass
-                    try:
-                        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
-                    except Exception:
-                        pass
             except Exception:
                 pass
 

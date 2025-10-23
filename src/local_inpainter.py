@@ -733,8 +733,6 @@ class LocalInpainter:
         # Quantization/precision toggle (off by default)
         try:
             adv_cfg = self.config.get('manga_settings', {}).get('advanced', {}) if isinstance(self.config, dict) else {}
-            # Track singleton mode from settings for thread limiting (deprecated - kept for compatibility)
-            self.singleton_mode = bool(adv_cfg.get('use_singleton_models', True))
             env_quant = os.environ.get('MODEL_QUANTIZE', 'false').lower() == 'true'
             self.quantize_enabled = bool(env_quant or adv_cfg.get('quantize_models', False))
             # ONNX quantization is now strictly opt-in (config or env), decoupled from general quantize_models

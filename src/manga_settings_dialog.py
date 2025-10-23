@@ -114,7 +114,6 @@ class MangaSettingsDialog(QDialog):
                 'max_workers': 2,
                 'parallel_panel_translation': False,
                 'panel_max_workers': 2,
-                'use_singleton_models': False,
                 'auto_cleanup_models': False,
                 'unload_models_after_translation': False,
                 'auto_convert_to_onnx': False,  # Disabled by default
@@ -3987,24 +3986,6 @@ class MangaSettingsDialog(QDialog):
         memory_layout.setContentsMargins(8, 8, 8, 6)
         memory_layout.setSpacing(4)
         
-        # Singleton mode checkbox - will connect handler later after panel widgets created
-        self.use_singleton_models_checkbox = self._create_styled_checkbox("Use single model instances (saves RAM, only affects local models)")
-        self.use_singleton_models_checkbox.setChecked(self.settings.get('advanced', {}).get('use_singleton_models', True))
-        self.use_singleton_models_checkbox.toggled.connect(self._toggle_singleton_controls)
-        memory_layout.addWidget(self.use_singleton_models_checkbox)
-        
-        # Singleton note
-        singleton_note = QLabel(
-            "When enabled: One bubble detector & one inpainter shared across all images.\n"
-            "When disabled: Each thread/image can have its own models (uses more RAM).\n"
-            "✅ Batch API translation remains fully functional with singleton mode enabled."
-        )
-        singleton_note_font = QFont('Arial', 9)
-        singleton_note.setFont(singleton_note_font)
-        singleton_note.setStyleSheet("color: gray;")
-        singleton_note.setWordWrap(True)
-        memory_layout.addWidget(singleton_note)
-        
         self.auto_cleanup_models_checkbox = self._create_styled_checkbox("Automatically cleanup models after translation to free RAM")
         self.auto_cleanup_models_checkbox.setChecked(self.settings.get('advanced', {}).get('auto_cleanup_models', False))
         memory_layout.addWidget(self.auto_cleanup_models_checkbox)
@@ -4141,7 +4122,6 @@ class MangaSettingsDialog(QDialog):
         
         # Initialize panel controls state
         self._toggle_panel_controls()
-        self._toggle_singleton_controls()
 
         # ONNX conversion settings
         onnx_group = QGroupBox("ONNX Conversion")
@@ -4348,21 +4328,6 @@ class MangaSettingsDialog(QDialog):
                 self.workers_desc_label.setEnabled(enabled)
                 self.workers_desc_label.setStyleSheet("color: white;" if enabled else "color: gray;")
     
-    def _toggle_singleton_controls(self):
-        """Enable/disable parallel panel translation based on singleton toggle."""
-        # When singleton mode is ENABLED, parallel panel translation should be DISABLED
-        try:
-            singleton_enabled = bool(self.use_singleton_models_checkbox.isChecked())
-        except Exception:
-            singleton_enabled = True  # Default
-        
-        # Disable parallel panel checkbox when singleton is enabled
-        if hasattr(self, 'parallel_panel_checkbox'):
-            self.parallel_panel_checkbox.setEnabled(not singleton_enabled)
-            if singleton_enabled:
-                # Also gray out the label when disabled
-                pass  # The checkbox itself shows as disabled
-    
     def _toggle_panel_controls(self):
         """Enable/disable panel control fields based on parallel panel toggle."""
         try:
@@ -4495,7 +4460,6 @@ class MangaSettingsDialog(QDialog):
             if hasattr(self, 'save_intermediate'): self.save_intermediate.set(1 if adv.get('save_intermediate', False) else 0)
             if hasattr(self, 'parallel_processing'): self.parallel_processing.set(1 if adv.get('parallel_processing', False) else 0)
             if hasattr(self, 'max_workers'): self.max_workers.set(int(adv.get('max_workers', 4)))
-            if hasattr(self, 'use_singleton_models'): self.use_singleton_models.set(bool(adv.get('use_singleton_models', True)))
             if hasattr(self, 'auto_cleanup_models'): self.auto_cleanup_models.set(bool(adv.get('auto_cleanup_models', False)))
             if hasattr(self, 'unload_models_var'): self.unload_models_var.set(bool(adv.get('unload_models_after_translation', False)))
             if hasattr(self, 'parallel_panel_var'): self.parallel_panel_var.set(bool(adv.get('parallel_panel_translation', False)))
@@ -4827,7 +4791,6 @@ class MangaSettingsDialog(QDialog):
                 self.settings['advanced']['preload_local_inpainting_for_panels'] = bool(self.preload_local_panels_checkbox.isChecked())
             
             # Memory management settings
-            self.settings['advanced']['use_singleton_models'] = bool(self.use_singleton_models_checkbox.isChecked())
             self.settings['advanced']['auto_cleanup_models'] = bool(self.auto_cleanup_models_checkbox.isChecked())
             self.settings['advanced']['unload_models_after_translation'] = bool(self.unload_models_checkbox.isChecked() if hasattr(self, 'unload_models_checkbox') else False)
             

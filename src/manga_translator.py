@@ -8768,13 +8768,6 @@ class MangaTranslator:
         """Preload N local inpainting instances sequentially into the shared pool for parallel panel translation.
         Returns the number of instances successfully preloaded.
         """
-        # Respect singleton mode: do not create extra instances/spares
-        if getattr(self, 'use_singleton_models', False):
-            try:
-                self._log("🧰 Skipping local inpainting preload (singleton mode)", "debug")
-            except Exception:
-                pass
-            return 0
         try:
             from local_inpainter import LocalInpainter
         except Exception:
@@ -8885,13 +8878,6 @@ class MangaTranslator:
         Honors advanced toggles for panel/region parallelism to pick a reasonable parallelism.
         Returns number of instances successfully preloaded.
         """
-        # Respect singleton mode: do not create extra instances/spares
-        if getattr(self, 'use_singleton_models', False):
-            try:
-                self._log("🧰 Skipping concurrent local inpainting preload (singleton mode)", "debug")
-            except Exception:
-                pass
-            return 0
         try:
             from local_inpainter import LocalInpainter
         except Exception:
@@ -12890,10 +12876,6 @@ class MangaTranslator:
             model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '') if hasattr(self, 'main_gui') else ''
         except Exception:
             model_path = ''
-        # Singleton path
-        if getattr(self, 'use_singleton_models', False):
-            inp = getattr(MangaTranslator, '_singleton_local_inpainter', None)
-            return (bool(getattr(inp, 'model_loaded', False)), local_method)
         # Thread-local/pooled path
         inp = getattr(self, 'local_inpainter', None)
         if inp is not None and getattr(inp, 'model_loaded', False):
@@ -13761,19 +13743,18 @@ class MangaTranslator:
                 self.inpainter = None
             
             # IMPORTANT: Handle bubble detector cleanup carefully
-            # DO NOT unload if it's a singleton or from a preloaded pool
+            # DO NOT unload if it's from a preloaded pool
             if hasattr(self, 'bubble_detector') and self.bubble_detector:
                 try:
-                    is_singleton = getattr(self, 'use_singleton_bubble_detector', False)
                     # Check if it's from thread-local which might have gotten it from the pool
                     is_from_pool = hasattr(self, '_thread_local') and hasattr(self._thread_local, 'bubble_detector')
                     
-                    if not is_singleton and not is_from_pool:
+                    if not is_from_pool:
                         if hasattr(self.bubble_detector, 'unload'):
                             self.bubble_detector.unload(release_shared=True)
                         self._log("   ✓ Bubble detector unloaded", "debug")
                     else:
-                        self._log("   ✓ Bubble detector reference cleared (pool/singleton instance preserved)", "debug")
+                        self._log("   ✓ Bubble detector reference cleared (pool instance preserved)", "debug")
                     # In all cases, clear our instance reference
                     self.bubble_detector = None
                 except Exception as e:

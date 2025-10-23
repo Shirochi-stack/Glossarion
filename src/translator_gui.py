@@ -9168,7 +9168,6 @@ Important rules:
             manga_advanced_env_mappings = [
                 ('MANGA_AUTO_CLEANUP_MODELS', '1' if manga_adv.get('auto_cleanup_models', False) else '0'),
                 ('MANGA_UNLOAD_MODELS_AFTER_TRANSLATION', '1' if manga_adv.get('unload_models_after_translation', False) else '0'),
-                ('MANGA_USE_SINGLETON_MODELS', '1' if manga_adv.get('use_singleton_models', True) else '0'),
                 ('MANGA_PARALLEL_PROCESSING', '1' if manga_adv.get('parallel_processing', False) else '0'),
                 ('MANGA_MAX_WORKERS', str(manga_adv.get('max_workers', 4))),
                 ('MANGA_PARALLEL_PANEL_TRANSLATION', '1' if manga_adv.get('parallel_panel_translation', False) else '0'),
