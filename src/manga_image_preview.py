@@ -1342,6 +1342,25 @@ class CompactImageViewer(QGraphicsView):
         self._scene.addItem(self.photo)
         self.empty = True
         self._loading = False
+    
+    def enterEvent(self, event):
+        """Give focus to viewer when mouse enters"""
+        self.setFocus()
+        super().enterEvent(event)
+    
+    def keyPressEvent(self, event):
+        """Forward keyboard events to parent widget for navigation"""
+        from PySide6.QtCore import Qt
+        
+        # Forward left/right arrow keys to parent for image navigation
+        if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right):
+            if self.parent():
+                # Forward to parent widget
+                self.parent().keyPressEvent(event)
+                return
+        
+        # Handle other keys normally
+        super().keyPressEvent(event)
 
 
 class MangaImagePreviewWidget(QWidget):
@@ -1366,6 +1385,10 @@ class MangaImagePreviewWidget(QWidget):
         self.translated_folder_path = None  # Path to translated images folder
         self.source_display_mode = 'translated'  # Source tab display: 'translated', 'cleaned', or 'original'
         self.cleaned_images_enabled = True  # Deprecated: kept for compatibility, use source_display_mode instead
+        
+        # Enable keyboard focus for arrow key navigation
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        
         self._build_ui()
     
     def _build_ui(self):
@@ -1489,6 +1512,9 @@ class MangaImagePreviewWidget(QWidget):
         # Source image viewer
         self.viewer = CompactImageViewer()
         self.viewer.setMinimumHeight(300)
+        # Enable focus on viewer so it can receive keyboard events on hover
+        self.viewer.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.viewer.setMouseTracking(True)  # Track mouse for focus
         viewer_layout.addWidget(self.viewer, stretch=1)
         
         # Thumbnail list (right side)
@@ -2409,6 +2435,81 @@ class MangaImagePreviewWidget(QWidget):
         if image_path and os.path.exists(image_path):
             # Per-image overlay isolation: Don't remove overlays when switching - they're managed per-image
             self.load_image(image_path)
+    
+    def keyPressEvent(self, event):
+        """Handle keyboard navigation for switching images"""
+        from PySide6.QtCore import Qt
+        
+        # Check if thumbnail list is enabled (disabled during translation/processing)
+        if hasattr(self, 'thumbnail_list') and not self.thumbnail_list.isEnabled():
+            # Navigation is disabled during processing
+            super().keyPressEvent(event)
+            return
+        
+        # Left arrow key - previous image
+        if event.key() == Qt.Key.Key_Left:
+            self._navigate_to_previous_image()
+            event.accept()
+            return
+        
+        # Right arrow key - next image
+        elif event.key() == Qt.Key.Key_Right:
+            self._navigate_to_next_image()
+            event.accept()
+            return
+        
+        # Pass other keys to parent
+        super().keyPressEvent(event)
+    
+    def _navigate_to_previous_image(self):
+        """Navigate to the previous image in the thumbnail list"""
+        if not self.image_paths or len(self.image_paths) <= 1:
+            return
+        
+        # Find current image index
+        current_index = -1
+        if self.current_image_path:
+            try:
+                current_index = self.image_paths.index(self.current_image_path)
+            except ValueError:
+                pass
+        
+        # Move to previous (wrap around to end if at start)
+        if current_index > 0:
+            new_index = current_index - 1
+        elif current_index == 0:
+            new_index = len(self.image_paths) - 1  # Wrap to last
+        else:
+            new_index = 0  # Default to first if current not found
+        
+        # Load the new image
+        new_path = self.image_paths[new_index]
+        self.load_image(new_path)
+    
+    def _navigate_to_next_image(self):
+        """Navigate to the next image in the thumbnail list"""
+        if not self.image_paths or len(self.image_paths) <= 1:
+            return
+        
+        # Find current image index
+        current_index = -1
+        if self.current_image_path:
+            try:
+                current_index = self.image_paths.index(self.current_image_path)
+            except ValueError:
+                pass
+        
+        # Move to next (wrap around to start if at end)
+        if current_index >= 0 and current_index < len(self.image_paths) - 1:
+            new_index = current_index + 1
+        elif current_index == len(self.image_paths) - 1:
+            new_index = 0  # Wrap to first
+        else:
+            new_index = 0  # Default to first if current not found
+        
+        # Load the new image
+        new_path = self.image_paths[new_index]
+        self.load_image(new_path)
     
     @Slot(str)
     def _on_image_loading_started(self, image_path: str):
