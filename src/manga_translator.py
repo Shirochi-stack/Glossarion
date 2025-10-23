@@ -8899,32 +8899,9 @@ class MangaTranslator:
         key = (local_method, model_path or '')
         created = 0
         
-        # Debug: Log the preload key for tracking
-        try:
-            self._log(f"🔑 Preload using pool key: method={local_method}, path={os.path.basename(model_path) if model_path else 'None'} (normalized)", "debug")
-            self._log(f"🔑 Full pool key: {key}", "debug")
-            # Also log all existing pool keys for comparison
-            with MangaTranslator._inpaint_pool_lock:
-                existing_keys = list(MangaTranslator._inpaint_pool.keys())
-                if existing_keys:
-                    self._log(f"🗄️ Existing pool keys: {existing_keys}", "debug")
-                    # CRITICAL: Show detailed comparison of paths for debugging
-                    for existing_method, existing_path in existing_keys:
-                        method_match = (existing_method == local_method)
-                        path_match = (existing_path == (model_path or ''))
-                        self._log(f"   Compare: method_match={method_match} ('{existing_method}' vs '{local_method}'), path_match={path_match}", "debug")
-                        if not path_match and existing_path and model_path:
-                            # Show character-level diff for path mismatch
-                            self._log(f"      Existing path: '{existing_path}'", "debug")
-                            self._log(f"      Current path:  '{model_path}'", "debug")
-                            # Check for slash differences
-                            if existing_path.replace('/', '\\') == model_path or existing_path.replace('\\', '/') == model_path:
-                                self._log(f"      ⚠️ PATH MISMATCH: Slash direction difference detected!", "warning")
-        except:
-            pass
-        
-        # CRITICAL: Clean up pool entries that don't match current GUI settings
-        # This ensures models are unloaded when user changes the inpainter/detector dropdown
+        # CRITICAL: Clean up pool entries that don't match current GUI settings FIRST
+        # This MUST happen BEFORE checking desired count to ensure stale models are removed
+        # even if the new model already has instances in the pool
         with MangaTranslator._inpaint_pool_lock:
             # Get currently selected settings from GUI
             current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
@@ -8979,7 +8956,9 @@ class MangaTranslator:
         tiling_settings = self.manga_settings.get('tiling', {}) if hasattr(self, 'manga_settings') else {}
         desired = max(0, int(count) - len(spares))
         if desired <= 0:
-            return 0
+            # Already have enough spares - return count to indicate success
+            self._log(f"✅ Already have {len(spares)} spare(s) for {local_method}", "info")
+            return len(spares)
         ctx = " for parallel panels" if int(count) > 1 else ""
         self._log(f"🧰 Preloading {desired} local inpainting instance(s){ctx}", "info")
         # Get worker process setting from config
@@ -9019,6 +8998,28 @@ class MangaTranslator:
                         
                         if model_actually_loaded:
                             with MangaTranslator._inpaint_pool_lock:
+                                # CRITICAL: Verify this model still matches current GUI selection before adding to pool
+                                # This prevents race condition where user switches models while preload is running
+                                current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+                                current_model_path = self.main_gui.config.get(f'manga_{current_method}_model_path', '') if hasattr(self, 'main_gui') else ''
+                                if current_model_path:
+                                    try:
+                                        current_model_path = os.path.abspath(os.path.normpath(current_model_path))
+                                    except Exception:
+                                        pass
+                                current_key = (current_method, current_model_path or '')
+                                
+                                # Only add to pool if this is still the currently selected model
+                                if key != current_key:
+                                    self._log(f"🚫 Skipping preload: model changed during preload (was {key[0]}, now {current_key[0]})", "warning")
+                                    # Unload this instance since it's no longer needed
+                                    try:
+                                        if hasattr(inp, 'unload'):
+                                            inp.unload()
+                                    except Exception:
+                                        pass
+                                    continue  # Skip adding to pool
+                                
                                 rec = MangaTranslator._inpaint_pool.get(key)
                                 if not rec:
                                     # Pool record doesn't exist - create it
@@ -9069,21 +9070,54 @@ class MangaTranslator:
         
         key = (local_method, model_path or '')
         
-        # Debug: Log the preload key for tracking
-        try:
-            self._log(f"🔑 Concurrent preload using pool key: method={local_method}, path={os.path.basename(model_path) if model_path else 'None'} (normalized)", "debug")
-        except:
-            pass
-        # Determine desired number based on existing spares
+        # CRITICAL: Clean up pool entries that don't match current GUI settings FIRST
+        # This MUST happen BEFORE checking desired count to ensure stale models are removed
         with MangaTranslator._inpaint_pool_lock:
+            # Get currently selected settings from GUI
+            current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+            current_model_path = self.main_gui.config.get(f'manga_{current_method}_model_path', '') if hasattr(self, 'main_gui') else ''
+            if current_model_path:
+                try:
+                    current_model_path = os.path.abspath(os.path.normpath(current_model_path))
+                except Exception:
+                    pass
+            current_key = (current_method, current_model_path or '')
+            
+            # Find and clean up all pool entries that DON'T match current settings
+            keys_to_remove = []
+            for pool_key, pool_rec in list(MangaTranslator._inpaint_pool.items()):
+                if pool_key != current_key:  # Not the currently selected model
+                    # Only clean up if nothing is checked out (safe to remove)
+                    checked_out_count = len(pool_rec.get('checked_out', []))
+                    spares_count = len(pool_rec.get('spares', []))
+                    
+                    if checked_out_count == 0 and spares_count > 0:
+                        self._log(f"🧹 Removing {spares_count} unused model(s) that don't match current selection: {pool_key[0]}", "info")
+                        # Unload all spares
+                        for spare in pool_rec.get('spares', []):
+                            try:
+                                if hasattr(spare, 'unload'):
+                                    spare.unload()
+                            except Exception:
+                                pass
+                        keys_to_remove.append(pool_key)
+            
+            # Remove cleaned up entries from pool
+            for old_key in keys_to_remove:
+                MangaTranslator._inpaint_pool.pop(old_key, None)
+            
+            # Now get or create the pool record for current selection
             rec = MangaTranslator._inpaint_pool.get(key)
             if not rec:
                 rec = {'spares': [], 'checked_out': []}
                 MangaTranslator._inpaint_pool[key] = rec
             spares = (rec.get('spares') or [])
+            
         desired = max(0, int(count) - len(spares))
         if desired <= 0:
-            return 0
+            # Already have enough spares - return count to indicate success
+            self._log(f"✅ Already have {len(spares)} spare(s) for {local_method}", "info")
+            return len(spares)
         # Determine max_parallel from advanced settings if not provided
         if max_parallel is None:
             adv = {}
@@ -9148,6 +9182,31 @@ class MangaTranslator:
                     model_actually_loaded = ok and getattr(inp, 'model_loaded', False)
                     if model_actually_loaded:
                         with MangaTranslator._inpaint_pool_lock:
+                            # CRITICAL: Verify this model still matches current GUI selection before adding to pool
+                            # This prevents race condition where user switches models while preload is running
+                            try:
+                                current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+                                current_model_path = self.main_gui.config.get(f'manga_{current_method}_model_path', '') if hasattr(self, 'main_gui') else ''
+                                if current_model_path:
+                                    try:
+                                        current_model_path = os.path.abspath(os.path.normpath(current_model_path))
+                                    except Exception:
+                                        pass
+                                current_key = (current_method, current_model_path or '')
+                                
+                                # Only add to pool if this is still the currently selected model
+                                if key != current_key:
+                                    self._log(f"🚫 Skipping concurrent preload: model changed during preload (was {key[0]}, now {current_key[0]})", "warning")
+                                    # Unload this instance since it's no longer needed
+                                    try:
+                                        if hasattr(inp, 'unload'):
+                                            inp.unload()
+                                    except Exception:
+                                        pass
+                                    return False  # Don't count as success
+                            except Exception:
+                                pass  # If check fails, allow adding to pool (better than losing the instance)
+                            
                             rec2 = MangaTranslator._inpaint_pool.get(key)
                             if not rec2:
                                 # Pool record doesn't exist - create it

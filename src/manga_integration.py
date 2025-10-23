@@ -7446,6 +7446,10 @@ class MangaTranslationTab(QObject):
 
     def _on_local_model_change(self, new_model_type=None):
         """Handle model type change and auto-load if model exists"""
+        # Don't trigger if already loading a model
+        if getattr(self, '_model_loading_in_progress', False):
+            return
+        
         # Get model type from combo box (PySide6)
         if new_model_type is None:
             model_type = self.local_model_combo.currentText()
@@ -7527,6 +7531,11 @@ class MangaTranslationTab(QObject):
         from PySide6.QtWidgets import QMessageBox
         from PySide6.QtCore import QTimer
         
+        # Don't allow if already loading
+        if getattr(self, '_model_loading_in_progress', False):
+            QMessageBox.information(self.dialog, "Loading", "A model is already being loaded. Please wait...")
+            return
+        
         try:
             model_type = self.local_model_type_value if hasattr(self, 'local_model_type_value') else None
             path = self.local_model_path_value if hasattr(self, 'local_model_path_value') else ''
@@ -7542,6 +7551,18 @@ class MangaTranslationTab(QObject):
         """Try to load a model in background thread with proper GUI updates."""
         import threading
         from PySide6.QtWidgets import QApplication
+        
+        # Check if already loading
+        if getattr(self, '_model_loading_in_progress', False):
+            self.main_gui.append_log("⚠️ Model load already in progress, skipping...")
+            return False
+        
+        # Set loading flag
+        self._model_loading_in_progress = True
+        
+        # Disable load button while loading
+        if hasattr(self, 'load_local_model_button'):
+            self.load_local_model_button.setEnabled(False)
         
         # Show loading status immediately
         self.local_model_status_label.setText("⏳ Loading model...")
@@ -7643,6 +7664,13 @@ class MangaTranslationTab(QObject):
     def _handle_model_load_complete(self, method: str, success: bool, error_msg: str = None, show_dialog: bool = False):
         """Handle model load completion on main thread"""
         from PySide6.QtWidgets import QMessageBox
+        
+        # Clear loading flag
+        self._model_loading_in_progress = False
+        
+        # Re-enable load button
+        if hasattr(self, 'load_local_model_button'):
+            self.load_local_model_button.setEnabled(True)
         
         print(f"DEBUG: Updating UI after load, success={success}")
         
