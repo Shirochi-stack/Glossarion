@@ -1143,7 +1143,7 @@ class MangaTranslationTab(QObject):
                 if model_id not in MangaTranslationTab._preload_completed_models:
                     with MangaTranslator._detector_pool_lock:
                         rec = MangaTranslator._detector_pool.get(key)
-                        if not rec or (not rec.get('spares') and not rec.get('loaded')):
+                        if not rec or not rec.get('spares'):
                             detector_name = 'RT-DETR ONNX' if detector_type == 'rtdetr_onnx' else 'RT-DETR' if detector_type == 'rtdetr' else 'YOLO'
                             models_to_load.append(('detector', detector_type, detector_name, model_url))
             
@@ -1162,7 +1162,7 @@ class MangaTranslationTab(QObject):
                 if model_id not in MangaTranslationTab._preload_completed_models:
                     with MangaTranslator._inpaint_pool_lock:
                         rec = MangaTranslator._inpaint_pool.get(key)
-                        if not rec or (not rec.get('loaded') and not rec.get('spares')):
+                        if not rec or not rec.get('spares'):
                             models_to_load.append(('inpainter', local_method, local_method.capitalize(), model_path))
         except Exception as e:
             print(f"Error checking models: {e}")
@@ -1225,10 +1225,11 @@ class MangaTranslationTab(QObject):
                             with MangaTranslator._detector_pool_lock:
                                 rec = MangaTranslator._detector_pool.get(key)
                                 if not rec:
-                                    rec = {'spares': [], 'loaded': True}
+                                    rec = {'spares': [], 'checked_out': []}
                                     MangaTranslator._detector_pool[key] = rec
+                                if 'checked_out' not in rec:
+                                    rec['checked_out'] = []
                                 rec['spares'].append(bd)
-                                rec['loaded'] = True
                             print(f"  ✓ {model_name} loaded")
                             loaded_count += 1
                             
@@ -1265,14 +1266,11 @@ class MangaTranslationTab(QObject):
                                     with MangaTranslator._inpaint_pool_lock:
                                         rec = MangaTranslator._inpaint_pool.get(key)
                                         if not rec:
-                                            import threading
-                                            rec = {'spares': [], 'loaded': True, 'event': threading.Event(), 'inpainter': None, 'checked_out': []}
+                                            rec = {'spares': [], 'checked_out': []}
                                             MangaTranslator._inpaint_pool[key] = rec
+                                        if 'checked_out' not in rec:
+                                            rec['checked_out'] = []
                                         rec['spares'].append(inp)
-                                        rec['loaded'] = True
-                                        # Ensure event exists and is set
-                                        if 'event' in rec and rec['event']:
-                                            rec['event'].set()
                                     print(f"  ✓ {model_name} loaded")
                                     loaded_count += 1
                                 else:

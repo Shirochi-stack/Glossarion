@@ -1889,33 +1889,23 @@ class MangaTranslator:
                         pass
                     self.inpainter = None
 
-                # Release any shared inpainters in the global pool
+                # Clear preload pool - unload all spare instances
                 with MangaTranslator._inpaint_pool_lock:
                     for key, rec in list(MangaTranslator._inpaint_pool.items()):
                         try:
-                            inp = rec.get('inpainter') if isinstance(rec, dict) else None
-                            if inp is not None:
+                            # Unload all spare instances
+                            for spare in rec.get('spares') or []:
                                 try:
-                                    if hasattr(inp, 'unload'):
-                                        inp.unload()
-                                        self._log(f"      ✓ Unloaded pooled inpainter: {key}", "debug")
+                                    if hasattr(spare, 'unload'):
+                                        spare.unload()
                                 except Exception:
                                     pass
-                            # Drop any spare instances as well
-                            try:
-                                for spare in rec.get('spares') or []:
-                                    try:
-                                        if hasattr(spare, 'unload'):
-                                            spare.unload()
-                                    except Exception:
-                                        pass
-                                rec['spares'] = []
-                            except Exception:
-                                pass
+                            rec['spares'] = []
+                            rec['checked_out'] = []
                         except Exception:
                             pass
                     MangaTranslator._inpaint_pool.clear()
-                    self._log("      ✓ Cleared inpainter pool", "debug")
+                    self._log("      ✓ Cleared inpainter preload pool", "debug")
 
                 # Release process-wide shared inpainter
                 if hasattr(MangaTranslator, '_shared_local_inpainter'):
@@ -8708,11 +8698,10 @@ class MangaTranslator:
                 pass
             return inp
         
-        # FIRST: Try to check out a spare instance if available (for true parallelism)
-        # Don't pop it - instead mark it as 'in use' so it stays in memory
+        # Try to check out a spare instance from the preload pool
         with MangaTranslator._inpaint_pool_lock:
             rec = MangaTranslator._inpaint_pool.get(key)
-            # DEBUG: Log current pool state at checkout time - USE PRINT TO BYPASS LOGGING
+            # DEBUG: Log current pool state at checkout time
             if rec:
                 spares_count = len(rec.get('spares', []))
                 checked_out_count = len(rec.get('checked_out', []))
@@ -8750,142 +8739,54 @@ class MangaTranslator:
                 
                 # No available spares - all are checked out
                 if spares:
-                    self._log(f"⏳ All {len(spares)} spare inpainters are in use, will use shared instance", "debug")
+                    self._log(f"⏳ All {len(spares)} spare inpainters are in use - creating new instance", "warning")
         
-        # FALLBACK: Use the shared instance
-        rec = MangaTranslator._inpaint_pool.get(key)
-        if rec and rec.get('loaded') and rec.get('inpainter'):
-            # Already loaded - ensure worker matches current setting
-            return _reconcile_worker(rec['inpainter'])
-        # Create or wait for loader
-        with MangaTranslator._inpaint_pool_lock:
-            rec = MangaTranslator._inpaint_pool.get(key)
-            if rec and rec.get('loaded') and rec.get('inpainter'):
-                # Already loaded - ensure worker matches current setting
-                return _reconcile_worker(rec['inpainter'])
-            if not rec:
-                # Register loading record with spares list initialized
-                rec = {'inpainter': None, 'loaded': False, 'event': threading.Event(), 'spares': [], 'checked_out': []}
-                MangaTranslator._inpaint_pool[key] = rec
-                is_loader = True
-            else:
-                is_loader = False
-                # Ensure event exists in legacy records
-                if 'event' not in rec:
-                    rec['event'] = threading.Event()
-            event = rec['event']
-        # Loader performs heavy work without holding the lock
-        if is_loader:
+        # No pool or no spares available - create a new instance on-demand
+        self._log(f"📦 Creating new inpainter instance for {local_method}", "info")
+        try:
+            # Get worker process setting from config
+            disable_worker = False
             try:
-                # Get worker process setting from config (default: False = disabled)
-                disable_worker = False
+                disable_worker = bool(
+                    self.manga_settings.get('inpainting', {}).get('disable_worker_process', False)
+                )
+            except Exception:
+                pass
+            inp = LocalInpainter(enable_worker_process=not disable_worker)
+            # Apply tiling settings
+            tiling_settings = self.manga_settings.get('tiling', {})
+            inp.tiling_enabled = tiling_settings.get('enabled', False)
+            inp.tile_size = tiling_settings.get('tile_size', 512)
+            inp.tile_overlap = tiling_settings.get('tile_overlap', 64)
+            # Ensure model path
+            if not model_path or not os.path.exists(model_path):
                 try:
-                    disable_worker = bool(
-                        self.manga_settings.get('inpainting', {}).get('disable_worker_process', False)
-                    )
-                except Exception:
-                    pass
-                inp = LocalInpainter(enable_worker_process=not disable_worker)
-                # Apply tiling settings once to the shared instance
-                tiling_settings = self.manga_settings.get('tiling', {})
-                inp.tiling_enabled = tiling_settings.get('enabled', False)
-                inp.tile_size = tiling_settings.get('tile_size', 512)
-                inp.tile_overlap = tiling_settings.get('tile_overlap', 64)
-                # Ensure model path
-                if not model_path or not os.path.exists(model_path):
-                    try:
-                        model_path = inp.download_jit_model(local_method)
-                    except Exception as e:
-                        self._log(f"⚠️ JIT download failed: {e}", "warning")
-                        model_path = None
-                # Load model - NEVER force reload for first-time shared pool loading
-                loaded_ok = False
-                if model_path and os.path.exists(model_path):
-                    try:
-                        self._log(f"📦 Loading inpainter model...", "debug")
-                        self._log(f"   Method: {local_method}", "debug")
-                        self._log(f"   Path: {model_path}", "debug")
-                        # Only force reload if explicitly requested AND this is not the first load
-                        # For shared pool, we should never force reload on initial load
-                        loaded_ok = inp.load_model_with_retry(local_method, model_path, force_reload=force_reload)
-                        if not loaded_ok:
-                            # Retry with force_reload if initial load failed
-                            self._log(f"🔄 Initial load failed, retrying with force_reload=True", "warning")
-                            loaded_ok = inp.load_model_with_retry(local_method, model_path, force_reload=True)
-                            if not loaded_ok:
-                                self._log(f"❌ Both load attempts failed", "error")
-                                # Check file validity
-                                try:
-                                    size_mb = os.path.getsize(model_path) / (1024 * 1024)
-                                    self._log(f"   File size: {size_mb:.2f} MB", "info")
-                                    if size_mb < 1:
-                                        self._log(f"   ⚠️ File may be corrupted (too small)", "warning")
-                                except Exception:
-                                    self._log(f"   ⚠️ Could not read model file", "warning")
-                    except Exception as e:
-                        self._log(f"⚠️ Inpainter load exception: {e}", "warning")
-                        import traceback
-                        self._log(traceback.format_exc(), "debug")
-                        loaded_ok = False
-                elif not model_path:
-                    self._log(f"⚠️ No model path configured for {local_method}", "warning")
-                elif not os.path.exists(model_path):
-                    self._log(f"⚠️ Model file does not exist: {model_path}", "warning")
-                # Publish result
-                with MangaTranslator._inpaint_pool_lock:
-                    rec = MangaTranslator._inpaint_pool.get(key) or rec
-                    rec['inpainter'] = inp
-                    rec['loaded'] = bool(loaded_ok)
-                    if 'event' in rec and rec['event']:
-                        rec['event'].set()
-                return _reconcile_worker(inp)
-            except Exception as e:
-                with MangaTranslator._inpaint_pool_lock:
-                    rec = MangaTranslator._inpaint_pool.get(key) or rec
-                    rec['inpainter'] = None
-                    rec['loaded'] = False
-                    if 'event' in rec and rec['event']:
-                        rec['event'].set()
-                self._log(f"⚠️ Shared inpainter setup failed: {e}", "warning")
-                return None
-        else:
-            # Wait for loader to finish (without holding the lock)
-            success = event.wait(timeout=120)
-            if not success:
-                self._log(f"⏱️ Timeout waiting for inpainter to load (120s)", "warning")
-                return None
-            
-            # Check if load was successful
-            rec2 = MangaTranslator._inpaint_pool.get(key)
-            if not rec2:
-                self._log(f"⚠️ Inpainter pool record disappeared after load", "warning")
-                return None
-            
-            inp = rec2.get('inpainter')
-            loaded = rec2.get('loaded', False)
-            
-            if inp and loaded:
-                # Successfully loaded by another thread
-                return inp
-            elif inp and not loaded:
-                # Inpainter created but model failed to load
-                # Try to load it ourselves
-                self._log(f"⚠️ Inpainter exists but model not loaded, attempting to load", "debug")
-                if model_path and os.path.exists(model_path):
-                    try:
+                    model_path = inp.download_jit_model(local_method)
+                except Exception as e:
+                    self._log(f"⚠️ JIT download failed: {e}", "warning")
+                    return None
+            # Load model
+            if model_path and os.path.exists(model_path):
+                try:
+                    self._log(f"📦 Loading inpainter model: {local_method}", "debug")
+                    loaded_ok = inp.load_model_with_retry(local_method, model_path, force_reload=force_reload)
+                    if not loaded_ok:
+                        self._log(f"🔄 Load failed, retrying with force_reload=True", "warning")
                         loaded_ok = inp.load_model_with_retry(local_method, model_path, force_reload=True)
-                        if loaded_ok:
-                            # Update the pool record
-                            with MangaTranslator._inpaint_pool_lock:
-                                rec2['loaded'] = True
-                            self._log(f"✅ Successfully loaded model on retry in waiting thread", "info")
-                            return inp
-                    except Exception as e:
-                        self._log(f"❌ Failed to load in waiting thread: {e}", "warning")
-                return _reconcile_worker(inp)  # Return anyway, inpaint will no-op
+                    if loaded_ok:
+                        return _reconcile_worker(inp)
+                    else:
+                        self._log(f"❌ Failed to load inpainter model", "error")
+                        return None
+                except Exception as e:
+                    self._log(f"⚠️ Inpainter load exception: {e}", "warning")
+                    return None
             else:
-                self._log(f"⚠️ Loader thread failed to create inpainter", "warning")
+                self._log(f"⚠️ Model path not found: {model_path}", "warning")
                 return None
+        except Exception as e:
+            self._log(f"⚠️ Failed to create inpainter: {e}", "warning")
+            return None
 
     @classmethod
     def _count_preloaded_inpainters(cls) -> int:
@@ -8934,46 +8835,11 @@ class MangaTranslator:
         except:
             pass
         
-        # FIRST: Ensure the shared instance is initialized and ready
-        # This prevents race conditions when spare instances run out
-        with MangaTranslator._inpaint_pool_lock:
-            rec = MangaTranslator._inpaint_pool.get(key)
-            if not rec or not rec.get('loaded') or not rec.get('inpainter'):
-                # Need to create the shared instance
-                if not rec:
-                    rec = {'inpainter': None, 'loaded': False, 'event': threading.Event(), 'spares': [], 'checked_out': []}
-                    MangaTranslator._inpaint_pool[key] = rec
-                    need_init_shared = True
-                else:
-                    need_init_shared = not (rec.get('loaded') and rec.get('inpainter'))
-            else:
-                need_init_shared = False
-        
-        if need_init_shared:
-            self._log(f"📦 Initializing shared inpainter instance first...", "info")
-            try:
-                shared_inp = self._get_or_init_shared_local_inpainter(local_method, model_path, force_reload=False)
-                if shared_inp and getattr(shared_inp, 'model_loaded', False):
-                    self._log(f"✅ Shared instance initialized and model loaded", "info")
-                    # Verify the pool record is updated
-                    with MangaTranslator._inpaint_pool_lock:
-                        rec_check = MangaTranslator._inpaint_pool.get(key)
-                        if rec_check:
-                            self._log(f"   Pool record: loaded={rec_check.get('loaded')}, has_inpainter={rec_check.get('inpainter') is not None}", "debug")
-                else:
-                    self._log(f"⚠️ Shared instance initialization returned but model not loaded", "warning")
-                    if shared_inp:
-                        self._log(f"   Instance exists but model_loaded={getattr(shared_inp, 'model_loaded', 'ATTR_MISSING')}", "debug")
-            except Exception as e:
-                self._log(f"⚠️ Shared instance initialization failed: {e}", "warning")
-                import traceback
-                self._log(traceback.format_exc(), "debug")
-        
         # Ensure pool record and spares list exist
         with MangaTranslator._inpaint_pool_lock:
             rec = MangaTranslator._inpaint_pool.get(key)
             if not rec:
-                rec = {'inpainter': None, 'loaded': False, 'event': threading.Event(), 'spares': [], 'checked_out': []}
+                rec = {'spares': [], 'checked_out': []}
                 MangaTranslator._inpaint_pool[key] = rec
                 self._log(f"🔍 PRELOAD DEBUG: Created new pool record, spares=[], checked_out=[]", "info")
             else:
@@ -8982,6 +8848,8 @@ class MangaTranslator:
                 self._log(f"🔍 PRELOAD DEBUG: Existing pool record found: {current_spares_count} spares, {current_checked_out_count} checked out", "info")
             if 'spares' not in rec or rec['spares'] is None:
                 rec['spares'] = []
+            if 'checked_out' not in rec:
+                rec['checked_out'] = []
             spares = rec.get('spares')
         # Prepare tiling settings
         tiling_settings = self.manga_settings.get('tiling', {}) if hasattr(self, 'manga_settings') else {}
@@ -9027,11 +8895,13 @@ class MangaTranslator:
                             rec = MangaTranslator._inpaint_pool.get(key)
                             if not rec:
                                 # Pool record doesn't exist - create it
-                                rec = {'inpainter': None, 'loaded': False, 'event': threading.Event(), 'spares': [], 'checked_out': []}
+                                rec = {'spares': [], 'checked_out': []}
                                 MangaTranslator._inpaint_pool[key] = rec
                             # Ensure spares list exists
                             if 'spares' not in rec or rec['spares'] is None:
                                 rec['spares'] = []
+                            if 'checked_out' not in rec:
+                                rec['checked_out'] = []
                             # Append to existing spares list (don't replace the record!)
                             rec['spares'].append(inp)
                         created += 1
@@ -9084,7 +8954,7 @@ class MangaTranslator:
         with MangaTranslator._inpaint_pool_lock:
             rec = MangaTranslator._inpaint_pool.get(key)
             if not rec:
-                rec = {'inpainter': None, 'loaded': False, 'event': threading.Event(), 'spares': [], 'checked_out': []}
+                rec = {'spares': [], 'checked_out': []}
                 MangaTranslator._inpaint_pool[key] = rec
             spares = (rec.get('spares') or [])
         desired = max(0, int(count) - len(spares))
@@ -9155,11 +9025,13 @@ class MangaTranslator:
                             rec2 = MangaTranslator._inpaint_pool.get(key)
                             if not rec2:
                                 # Pool record doesn't exist - create it
-                                rec2 = {'inpainter': None, 'loaded': False, 'event': threading.Event(), 'spares': [], 'checked_out': []}
+                                rec2 = {'spares': [], 'checked_out': []}
                                 MangaTranslator._inpaint_pool[key] = rec2
                             # Ensure spares list exists
                             if 'spares' not in rec2 or rec2['spares'] is None:
                                 rec2['spares'] = []
+                            if 'checked_out' not in rec2:
+                                rec2['checked_out'] = []
                             # Append to existing spares list (don't replace the record!)
                             rec2['spares'].append(inp)
                         return True
@@ -9363,16 +9235,6 @@ class MangaTranslator:
                                 loaded_ok = inp_shared.load_model_with_retry(local_method, model_path, force_reload=True)
                                 if loaded_ok and getattr(inp_shared, 'model_loaded', False):
                                     self._log(f"✅ Model loaded successfully on retry", "info")
-                                    # CRITICAL: Update the pool record so future requests don't need to retry
-                                    key = (local_method, os.path.abspath(os.path.normpath(model_path)) if model_path else '')
-                                    try:
-                                        with MangaTranslator._inpaint_pool_lock:
-                                            rec = MangaTranslator._inpaint_pool.get(key)
-                                            if rec:
-                                                rec['loaded'] = True
-                                                self._log(f"🔄 Updated pool record: loaded=True", "debug")
-                                    except Exception as e:
-                                        self._log(f"⚠️ Failed to update pool record: {e}", "debug")
                                     return True
                                 else:
                                     self._log(f"❌ Model still not loaded after retry", "error")
@@ -12818,12 +12680,6 @@ class MangaTranslator:
                                     available = len(spares) - len(checked_out)
                                     self._log(f"🎨 Using preloaded local inpainting instance ({len(checked_out)}/{len(spares)} in use, {available} available)", "info")
                                     return tl.local_inpainters[key]
-                        
-                        # If there's a fully loaded shared instance but no available spares, use it as a last resort
-                        if rec.get('loaded') and rec.get('inpainter') is not None:
-                            tl.local_inpainters[key] = rec.get('inpainter')
-                            self._log("🎨 Using shared preloaded inpainting instance", "info")
-                            return tl.local_inpainters[key]
             except Exception:
                 pass
             
@@ -12871,22 +12727,6 @@ class MangaTranslator:
                     tl2.local_inpainters = {}
                 if getattr(inp, 'model_loaded', False):
                     tl2.local_inpainters[key] = inp
-                    
-                    # Store this loaded instance info in the pool for future reuse
-                    try:
-                        with MangaTranslator._inpaint_pool_lock:
-                            if key not in MangaTranslator._inpaint_pool:
-                                MangaTranslator._inpaint_pool[key] = {'inpainter': None, 'loaded': False, 'event': threading.Event(), 'spares': []}
-                            # Mark that we have a loaded instance available
-                            MangaTranslator._inpaint_pool[key]['loaded'] = True
-                            MangaTranslator._inpaint_pool[key]['inpainter'] = inp  # Store reference
-                            # Ensure event exists and set it
-                            if 'event' not in MangaTranslator._inpaint_pool[key]:
-                                MangaTranslator._inpaint_pool[key]['event'] = threading.Event()
-                            if MangaTranslator._inpaint_pool[key]['event']:
-                                MangaTranslator._inpaint_pool[key]['event'].set()
-                    except Exception:
-                        pass
                 else:
                     # Ensure future calls will attempt a fresh init instead of using a half-initialized instance
                     tl2.local_inpainters[key] = None
@@ -13240,10 +13080,8 @@ class MangaTranslator:
         try:
             key = (local_method, model_path or '')
             rec = MangaTranslator._inpaint_pool.get(key)
-            # Consider the shared 'inpainter' loaded or any spare that is model_loaded
+            # Check if any spare in the preload pool is model_loaded
             if rec:
-                if rec.get('loaded') and rec.get('inpainter') is not None and getattr(rec['inpainter'], 'model_loaded', False):
-                    return True, local_method
                 for spare in rec.get('spares') or []:
                     if getattr(spare, 'model_loaded', False):
                         return True, local_method

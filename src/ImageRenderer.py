@@ -4860,8 +4860,8 @@ def _handle_clean_this_rectangle(self, region_index: int, rect_item):
         self._log(f"❌ Failed to start rectangle cleaning: {str(e)}", "error")
 
 def _get_or_create_shared_inpainter(self, method: str, model_path: str):
-    """Get or create a LocalInpainter via MangaTranslator's shared pool (with reuse).
-    Prefer checking out a spare or using the shared instance; avoid new loads when possible.
+    """Get or create a LocalInpainter via MangaTranslator's preload pool.
+    Checks out a spare instance from the pool, or creates a new one if none available.
     """
     try:
         import os
@@ -4960,9 +4960,10 @@ def _preload_shared_bubble_detector(self):
         print(f"[PRELOAD_DETECTOR] Traceback: {traceback.format_exc()}")
 
 def _preload_shared_inpainter(self):
-    """Preload the shared inpainter with current settings if not already loaded"""
+    """Preload inpainter into the pool for fast access on first use"""
     try:
         import os
+        from manga_translator import MangaTranslator
         
         # Get current inpainting settings
         inpaint_method = self.main_gui.config.get('manga_inpaint_method', 'local')
@@ -4972,16 +4973,24 @@ def _preload_shared_inpainter(self):
             print(f"[PRELOAD_INPAINTER] Skipping preload - method is {inpaint_method}, not local")
             return
         
-        # Check if already loaded
-        if (self._shared_inpainter is not None and 
-            self._shared_inpainter_method == local_model and
-            hasattr(self._shared_inpainter, 'model_loaded') and 
-            self._shared_inpainter.model_loaded):
-            print(f"[PRELOAD_INPAINTER] {local_model} inpainter already loaded")
-            return
-        
         # Get model path
         model_path = self.main_gui.config.get(f'manga_{local_model}_model_path', '')
+        
+        # Normalize path
+        if model_path:
+            try:
+                model_path = os.path.abspath(os.path.normpath(model_path))
+            except Exception:
+                pass
+        
+        key = (local_model, model_path or '')
+        
+        # Check if already in pool
+        with MangaTranslator._inpaint_pool_lock:
+            rec = MangaTranslator._inpaint_pool.get(key)
+            if rec and rec.get('spares'):
+                print(f"[PRELOAD_INPAINTER] {local_model} already in pool ({len(rec['spares'])} instance(s))")
+                return
         
         # Try to download if path not found
         if not model_path or not os.path.exists(model_path):
@@ -4999,13 +5008,41 @@ def _preload_shared_inpainter(self):
                 return
         
         if model_path and os.path.exists(model_path):
-            print(f"[PRELOAD_INPAINTER] Preloading {local_model} inpainter...")
-            inpainter = _get_or_create_shared_inpainter(self, local_model, model_path)
-            if inpainter:
-                print(f"[PRELOAD_INPAINTER] Successfully preloaded {local_model} inpainter")
+            print(f"[PRELOAD_INPAINTER] Preloading {local_model} inpainter into pool...")
+            
+            # Create a temporary translator to use preload_local_inpainters
+            try:
+                ocr_config = _get_ocr_config(self, )
+            except Exception:
+                ocr_config = {}
+            
+            try:
+                from unified_api_client import UnifiedClient
+                api_key = self.main_gui.config.get('api_key', '') or 'dummy'
+                model = self.main_gui.config.get('model', 'gpt-4o-mini')
+                uc = UnifiedClient(model=model, api_key=api_key)
+            except Exception:
+                uc = None
+            
+            def _cb(msg, level='info'):
+                try:
+                    if hasattr(self, '_log'):
+                        self._log(msg, level)
+                    else:
+                        print(f"[GUI] {level.upper()}: {msg}")
+                except Exception:
+                    pass
+            
+            mt = MangaTranslator(ocr_config=ocr_config, unified_client=uc, main_gui=self.main_gui, log_callback=_cb, skip_inpainter_init=True)
+            
+            # Preload 1 inpainter instance into the pool
+            print(f"[PRELOAD_INPAINTER] Calling preload_local_inpainters for {local_model}...")
+            created = mt.preload_local_inpainters(local_model, model_path, 1)
+            if created > 0:
+                print(f"[PRELOAD_INPAINTER] Successfully preloaded {created} inpainter instance(s)")
                 self._log(f"🎯 Preloaded {local_model.upper()} inpainting model", "info")
             else:
-                print(f"[PRELOAD_INPAINTER] Failed to preload {local_model} inpainter")
+                print(f"[PRELOAD_INPAINTER] No instances preloaded (may already exist in pool)")
         
     except Exception as e:
         print(f"[PRELOAD_INPAINTER] Error during preload: {e}")
