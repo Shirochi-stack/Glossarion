@@ -3281,9 +3281,23 @@ class MangaTranslator:
                             if cv_image is None:
                                 self._log("⚠️ Failed to load image, falling back to full-page OCR", "warning")
                             else:
-                                # START EARLY INPAINTING after RT-DETR detection
+                                # Check out inpainter BEFORE starting early inpainting to avoid pool exhaustion
+                                early_inpainter = None
+                                if not getattr(self, 'skip_inpainting', False):
+                                    try:
+                                        local_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+                                        model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '')
+                                        early_inpainter = self._get_thread_local_inpainter(local_method, model_path)
+                                        if early_inpainter:
+                                            self._log("🎨 Checked out inpainter for early inpainting (avoiding pool contention)", "debug")
+                                        else:
+                                            self._log("⚠️ No inpainter available for early inpainting", "debug")
+                                    except Exception as inp_err:
+                                        self._log(f"⚠️ Failed to check out inpainter: {inp_err}", "debug")
+                                
+                                # START EARLY INPAINTING after RT-DETR detection (with pre-checked-out inpainter)
                                 self._inpainting_future = self._start_early_inpainting_if_needed(
-                                    rtdetr_detections, cv_image, ocr_settings, image_path
+                                    rtdetr_detections, cv_image, ocr_settings, image_path, early_inpainter
                                 )
                                 # Define worker function for concurrent OCR
                                 def ocr_region_google(region_data):
@@ -3760,8 +3774,22 @@ class MangaTranslator:
                                     pil_image = PILImage.open(image_path)
                                     image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
                             
+                            # Check out inpainter BEFORE starting early inpainting to avoid pool exhaustion
+                            early_inpainter = None
+                            if not getattr(self, 'skip_inpainting', False):
+                                try:
+                                    local_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+                                    model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '')
+                                    early_inpainter = self._get_thread_local_inpainter(local_method, model_path)
+                                    if early_inpainter:
+                                        self._log("🎨 Checked out inpainter for early inpainting (avoiding pool contention)", "debug")
+                                    else:
+                                        self._log("⚠️ No inpainter available for early inpainting", "debug")
+                                except Exception as inp_err:
+                                    self._log(f"⚠️ Failed to check out inpainter: {inp_err}", "debug")
+                            
                             self._inpainting_future = self._start_early_inpainting_if_needed(
-                                rtdetr_detections, image, ocr_settings, image_path
+                                rtdetr_detections, image, ocr_settings, image_path, early_inpainter
                             )
                             
                             # Step 1: Run OCR on FULL IMAGE (comic-translate approach)
@@ -4635,10 +4663,21 @@ class MangaTranslator:
                         # Get regions from bubble detector
                         rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
                         if rtdetr_detections:
+                            # Check out inpainter BEFORE starting early inpainting to avoid pool exhaustion
+                            early_inpainter = None
+                            if not getattr(self, 'skip_inpainting', False):
+                                try:
+                                    local_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+                                    model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '')
+                                    early_inpainter = self._get_thread_local_inpainter(local_method, model_path)
+                                    if early_inpainter:
+                                        self._log("🎨 Checked out inpainter for early inpainting (avoiding pool contention)", "debug")
+                                except Exception:
+                                    pass
                             
                             # START EARLY INPAINTING after RT-DETR detection
                             self._inpainting_future = self._start_early_inpainting_if_needed(
-                                rtdetr_detections, image, ocr_settings, image_path
+                                rtdetr_detections, image, ocr_settings, image_path, early_inpainter
                             )
                             
                             # Process only text-containing regions
@@ -4695,10 +4734,21 @@ class MangaTranslator:
                         # Get regions from bubble detector
                         rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
                         if rtdetr_detections:
+                            # Check out inpainter BEFORE starting early inpainting to avoid pool exhaustion
+                            early_inpainter = None
+                            if not getattr(self, 'skip_inpainting', False):
+                                try:
+                                    local_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+                                    model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '')
+                                    early_inpainter = self._get_thread_local_inpainter(local_method, model_path)
+                                    if early_inpainter:
+                                        self._log("🎨 Checked out inpainter for early inpainting (avoiding pool contention)", "debug")
+                                except Exception:
+                                    pass
                             
                             # START EARLY INPAINTING after RT-DETR detection
                             self._inpainting_future = self._start_early_inpainting_if_needed(
-                                rtdetr_detections, image, ocr_settings, image_path
+                                rtdetr_detections, image, ocr_settings, image_path, early_inpainter
                             )
                             
                             # Process only text-containing regions
@@ -4788,10 +4838,21 @@ class MangaTranslator:
                         # Get regions from bubble detector
                         rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
                         if rtdetr_detections:
+                            # Check out inpainter BEFORE starting early inpainting to avoid pool exhaustion
+                            early_inpainter = None
+                            if not getattr(self, 'skip_inpainting', False):
+                                try:
+                                    local_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+                                    model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '')
+                                    early_inpainter = self._get_thread_local_inpainter(local_method, model_path)
+                                    if early_inpainter:
+                                        self._log("🎨 Checked out inpainter for early inpainting (avoiding pool contention)", "debug")
+                                except Exception:
+                                    pass
                             
                             # START EARLY INPAINTING after RT-DETR detection
                             self._inpainting_future = self._start_early_inpainting_if_needed(
-                                rtdetr_detections, image, ocr_settings, image_path
+                                rtdetr_detections, image, ocr_settings, image_path, early_inpainter
                             )
                             
                             # Process only text-containing regions
@@ -4877,10 +4938,21 @@ class MangaTranslator:
                         # Get regions from bubble detector
                         rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
                         if rtdetr_detections:
+                            # Check out inpainter BEFORE starting early inpainting to avoid pool exhaustion
+                            early_inpainter = None
+                            if not getattr(self, 'skip_inpainting', False):
+                                try:
+                                    local_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+                                    model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '')
+                                    early_inpainter = self._get_thread_local_inpainter(local_method, model_path)
+                                    if early_inpainter:
+                                        self._log("🎨 Checked out inpainter for early inpainting (avoiding pool contention)", "debug")
+                                except Exception:
+                                    pass
                             
                             # START EARLY INPAINTING after RT-DETR detection
                             self._inpainting_future = self._start_early_inpainting_if_needed(
-                                rtdetr_detections, image, ocr_settings, image_path
+                                rtdetr_detections, image, ocr_settings, image_path, early_inpainter
                             )
                             
                             # Process only text-containing regions
@@ -4950,10 +5022,21 @@ class MangaTranslator:
                         # Get regions from bubble detector
                         rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
                         if rtdetr_detections:
+                            # Check out inpainter BEFORE starting early inpainting to avoid pool exhaustion
+                            early_inpainter = None
+                            if not getattr(self, 'skip_inpainting', False):
+                                try:
+                                    local_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+                                    model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '')
+                                    early_inpainter = self._get_thread_local_inpainter(local_method, model_path)
+                                    if early_inpainter:
+                                        self._log("🎨 Checked out inpainter for early inpainting (avoiding pool contention)", "debug")
+                                except Exception:
+                                    pass
                             
                             # START EARLY INPAINTING after RT-DETR detection
                             self._inpainting_future = self._start_early_inpainting_if_needed(
-                                rtdetr_detections, image, ocr_settings, image_path
+                                rtdetr_detections, image, ocr_settings, image_path, early_inpainter
                             )
                             
                             # Process only text-containing regions
@@ -5023,10 +5106,21 @@ class MangaTranslator:
                         # Get regions from bubble detector
                         rtdetr_detections = self._load_bubble_detector(ocr_settings, image_path)
                         if rtdetr_detections:
+                            # Check out inpainter BEFORE starting early inpainting to avoid pool exhaustion
+                            early_inpainter = None
+                            if not getattr(self, 'skip_inpainting', False):
+                                try:
+                                    local_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+                                    model_path = self.main_gui.config.get(f'manga_{local_method}_model_path', '')
+                                    early_inpainter = self._get_thread_local_inpainter(local_method, model_path)
+                                    if early_inpainter:
+                                        self._log("🎨 Checked out inpainter for early inpainting (avoiding pool contention)", "debug")
+                                except Exception:
+                                    pass
                             
                             # START EARLY INPAINTING after RT-DETR detection
                             self._inpainting_future = self._start_early_inpainting_if_needed(
-                                rtdetr_detections, image, ocr_settings, image_path
+                                rtdetr_detections, image, ocr_settings, image_path, early_inpainter
                             )
                             
                             # Process only text-containing regions
@@ -5047,11 +5141,6 @@ class MangaTranslator:
                                     all_regions = merge_overlapping_boxes(all_regions, containment_threshold=0.3, overlap_threshold=0.5)
                                     if len(all_regions) < original_count:
                                         self._log(f"✅ Merged {original_count} RT-DETR blocks → {len(all_regions)} unique blocks (removed {original_count - len(all_regions)} overlaps)")
-                                
-                                # START EARLY INPAINTING after RT-DETR detection
-                                self._inpainting_future = self._start_early_inpainting_if_needed(
-                                    rtdetr_detections, image, ocr_settings, image_path
-                                )
                                 
                                 # Step 1: Run OCR on FULL IMAGE (comic-translate approach)
                                 # This is MUCH better for Azure Document Intelligence:
@@ -5555,9 +5644,16 @@ class MangaTranslator:
         
         return languages
 
-    def _start_early_inpainting_if_needed(self, rtdetr_detections, image, ocr_settings, image_path):
+    def _start_early_inpainting_if_needed(self, rtdetr_detections, image, ocr_settings, image_path, inpainter=None):
         """Start inpainting in background immediately after RT-DETR detection.
         This runs concurrently with OCR for maximum speed.
+        
+        Args:
+            rtdetr_detections: Detection results from RT-DETR
+            image: The image to inpaint
+            ocr_settings: OCR configuration
+            image_path: Path to the image
+            inpainter: Optional pre-checked-out inpainter instance to reuse
         """
         if getattr(self, 'skip_inpainting', False) or not rtdetr_detections:
             return None
@@ -5608,16 +5704,20 @@ class MangaTranslator:
             self._log(f"   ✅ Mask created in {time.time() - mask_start:.1f}s")
             
             # Start inpainting in background thread IMMEDIATELY
-            # Use normal inpaint_regions which will checkout from pool
+            # Pass the pre-checked-out inpainter to avoid pool exhaustion
             import concurrent.futures
             self._inpainting_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             self._inpainting_start_time = time.time()  # Track when inpainting started
             self._inpainting_future = self._inpainting_executor.submit(
                 self.inpaint_regions, 
                 image.copy(), 
-                mask
+                mask,
+                inpainter  # Pass the pre-checked-out inpainter
             )
-            self._log("   🚀 EARLY INPAINTING STARTED (running concurrently with OCR)")
+            if inpainter:
+                self._log("   🚀 EARLY INPAINTING STARTED (reusing checked-out inpainter, running concurrently with OCR)")
+            else:
+                self._log("   🚀 EARLY INPAINTING STARTED (will check out from pool, running concurrently with OCR)")
             return self._inpainting_future
             
         except Exception as e:
@@ -9394,8 +9494,14 @@ class MangaTranslator:
             return False
 
 
-    def inpaint_regions(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
-        """Inpaint using configured method (cloud, local, or hybrid)"""
+    def inpaint_regions(self, image: np.ndarray, mask: np.ndarray, inpainter=None) -> np.ndarray:
+        """Inpaint using configured method (cloud, local, or hybrid)
+        
+        Args:
+            image: The image to inpaint
+            mask: The mask indicating regions to inpaint
+            inpainter: Optional pre-checked-out inpainter instance to reuse (avoids pool exhaustion)
+        """
         # Primary source of truth is the runtime flags set by the UI.
         if getattr(self, 'skip_inpainting', False):
             self._log("   ⏭️ Skipping inpainting (preserving original art)", "info")
@@ -9427,8 +9533,12 @@ class MangaTranslator:
         # Get iterations setting (from auto_iterations logic or config)
         iterations = getattr(self, '_current_inpainter_iterations', 1)
         
-        # Use a thread-local inpainter instance
-        inp = self._get_thread_local_inpainter(local_method, model_path)
+        # Use provided inpainter if available, otherwise get from thread-local pool
+        if inpainter is not None:
+            inp = inpainter
+            self._log("   🎨 Using pre-checked-out inpainter instance (avoiding pool contention)", "info")
+        else:
+            inp = self._get_thread_local_inpainter(local_method, model_path)
         if inp and getattr(inp, 'model_loaded', False):
             self._log("   🧽 Using local inpainting", "info")
             # Only use lock if enabled (singleton mode or non-parallel translation)
