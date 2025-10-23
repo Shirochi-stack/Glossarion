@@ -325,13 +325,28 @@ def _on_detect_text_clicked(self):
 def _run_detect_background(self, image_path: str, detection_config: dict):
     """Run the actual detection process in background thread"""
     detector = None  # Initialize for cleanup
+    temp_translator = None  # Track temporary translator for pool cleanup
     try:
         import cv2
         from bubble_detector import BubbleDetector
+        from manga_translator import MangaTranslator
+        from unified_api_client import UnifiedClient
         
-        # Create bubble detector (should use pool-aware method instead)
-        # TODO: Replace with pool-aware checkout similar to inpainter
-        detector = BubbleDetector()
+        # Use pool-aware detector checkout like we do for inpainter
+        try:
+            ocr_config = _get_ocr_config(self, ) if hasattr(self, 'main_gui') else {}
+            api_key = self.main_gui.config.get('api_key', '') or 'dummy'
+            model = self.main_gui.config.get('model', 'gpt-4o-mini')
+            uc = UnifiedClient(model=model, api_key=api_key)
+            temp_translator = MangaTranslator(ocr_config=ocr_config, unified_client=uc, main_gui=self.main_gui, log_callback=lambda m, l: None, skip_inpainter_init=True)
+            # Use the translator's pool-aware method to get detector
+            detector = temp_translator._get_thread_bubble_detector()
+            # Immediately update GUI pool tracker after checkout
+            self.update_queue.put(('update_pool_tracker', None))
+        except Exception as e:
+            print(f"[DETECT] Failed to get detector from pool, creating standalone: {e}")
+            detector = BubbleDetector()
+            temp_translator = None
         
         # Extract settings from config
         detector_type = detection_config['detector_type']
@@ -529,12 +544,14 @@ def _run_detect_background(self, image_path: str, detection_config: dict):
         self._log(f"❌ Background detection failed: {str(e)}", "error")
         print(f"Background detect error traceback: {traceback.format_exc()}")
     finally:
-        # Cleanup: explicitly unload detector to free resources
+        # Return detector to pool if checked out via temporary translator
         try:
-            if detector and hasattr(detector, 'unload'):
-                detector.unload(release_shared=True)
-        except Exception:
-            pass
+            if temp_translator is not None:
+                temp_translator._return_bubble_detector_to_pool()
+                # Immediately update GUI pool tracker after return
+                self.update_queue.put(('update_pool_tracker', None))
+        except Exception as e:
+            print(f"[DETECT] Failed to return detector to pool: {e}")
         # Always restore the button using thread-safe update queue
         self.update_queue.put(('detect_button_restore', None))
 
@@ -1974,6 +1991,8 @@ def _run_clean_background(self, image_path: str, regions: list):
                     uc = UnifiedClient(model=model, api_key=api_key)
                     temp_translator = MangaTranslator(ocr_config=ocr_config, unified_client=uc, main_gui=self.main_gui, log_callback=lambda m, l: None, skip_inpainter_init=True)
                     inpainter = temp_translator._get_or_init_shared_local_inpainter(local_model, resolved_model_path, force_reload=False)
+                    # Immediately update GUI pool tracker after checkout
+                    self.update_queue.put(('update_pool_tracker', None))
                 except Exception as e:
                     print(f"[CLEAN] Failed to create translator/inpainter: {e}")
                     inpainter = None
@@ -2046,6 +2065,8 @@ def _run_clean_background(self, image_path: str, regions: list):
         try:
             if temp_translator is not None:
                 temp_translator._return_inpainter_to_pool()
+                # Immediately update GUI pool tracker after return
+                self.update_queue.put(('update_pool_tracker', None))
         except Exception as e:
             print(f"[CLEAN] Failed to return inpainter to pool: {e}")
         
@@ -2149,12 +2170,28 @@ def _run_detection_sync(self, image_path: str, detection_config: dict) -> list:
         list: List of region dictionaries, or empty list if detection failed
     """
     detector = None  # Initialize for cleanup
+    temp_translator = None  # Track temporary translator for pool cleanup
     try:
         import cv2
         from bubble_detector import BubbleDetector
+        from manga_translator import MangaTranslator
+        from unified_api_client import UnifiedClient
         
-        # Create bubble detector
-        detector = BubbleDetector()
+        # Use pool-aware detector checkout
+        try:
+            ocr_config = _get_ocr_config(self, ) if hasattr(self, 'main_gui') else {}
+            api_key = self.main_gui.config.get('api_key', '') or 'dummy'
+            model = self.main_gui.config.get('model', 'gpt-4o-mini')
+            uc = UnifiedClient(model=model, api_key=api_key)
+            temp_translator = MangaTranslator(ocr_config=ocr_config, unified_client=uc, main_gui=self.main_gui, log_callback=lambda m, l: None, skip_inpainter_init=True)
+            detector = temp_translator._get_thread_bubble_detector()
+            # Immediately update GUI pool tracker after checkout
+            if hasattr(self, 'update_queue'):
+                self.update_queue.put(('update_pool_tracker', None))
+        except Exception as e:
+            print(f"[DETECT_SYNC] Failed to get detector from pool, creating standalone: {e}")
+            detector = BubbleDetector()
+            temp_translator = None
         
         # Extract settings from config
         detector_type = detection_config['detector_type']
@@ -2329,12 +2366,15 @@ def _run_detection_sync(self, image_path: str, detection_config: dict) -> list:
         print(f"[DETECT_SYNC] Traceback: {traceback.format_exc()}")
         return []
     finally:
-        # Cleanup: explicitly unload detector to free resources
+        # Return detector to pool if checked out via temporary translator
         try:
-            if detector and hasattr(detector, 'unload'):
-                detector.unload(release_shared=True)
-        except Exception:
-            pass
+            if temp_translator is not None:
+                temp_translator._return_bubble_detector_to_pool()
+                # Immediately update GUI pool tracker after return
+                if hasattr(self, 'update_queue'):
+                    self.update_queue.put(('update_pool_tracker', None))
+        except Exception as e:
+            print(f"[DETECT_SYNC] Failed to return detector to pool: {e}")
 
 def _run_inpainting_sync(self, image_path: str, regions: list) -> str:
     """Run inpainting synchronously (for Translate button) and return cleaned image path

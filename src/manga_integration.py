@@ -9198,6 +9198,13 @@ class MangaTranslationTab(QObject):
                     except Exception as e:
                         self._log(f"❌ Failed to restore detect button: {str(e)}", "error")
                 
+                elif update[0] == 'update_pool_tracker':
+                    # Immediately update pool tracker label
+                    try:
+                        self._update_pool_tracker_label()
+                    except Exception as e:
+                        print(f"[POOL_TRACKER] Failed to update: {e}")
+                
                 elif update[0] == 'recognize_results':
                     _, results = update
                     # Process recognition results
