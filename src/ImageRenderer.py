@@ -2386,6 +2386,7 @@ def _run_inpainting_sync(self, image_path: str, regions: list) -> str:
     Returns:
         str: Path to cleaned image, or None if inpainting failed
     """
+    temp_translator = None  # Track temporary translator for pool cleanup
     try:
         import cv2
         import numpy as np
@@ -2492,11 +2493,26 @@ def _run_inpainting_sync(self, image_path: str, regions: list) -> str:
                     print(f"[INPAINT_SYNC] Model download failed: {e}")
                     resolved_model_path = None
             
-            # Use shared inpainter to avoid reloading model every time
+            # Use shared inpainter via pool - track translator for cleanup
             if resolved_model_path and os.path.exists(resolved_model_path):
-                inpainter = _get_or_create_shared_inpainter(self, local_model, resolved_model_path)
+                try:
+                    from manga_translator import MangaTranslator
+                    from unified_api_client import UnifiedClient
+                    ocr_config = _get_ocr_config(self, ) if hasattr(self, 'main_gui') else {}
+                    api_key = self.main_gui.config.get('api_key', '') or 'dummy'
+                    model = self.main_gui.config.get('model', 'gpt-4o-mini')
+                    uc = UnifiedClient(model=model, api_key=api_key)
+                    temp_translator = MangaTranslator(ocr_config=ocr_config, unified_client=uc, main_gui=self.main_gui, log_callback=lambda m, l: None, skip_inpainter_init=True)
+                    inpainter = temp_translator._get_or_init_shared_local_inpainter(local_model, resolved_model_path, force_reload=False)
+                    # Immediately update GUI pool tracker after checkout
+                    if hasattr(self, 'update_queue'):
+                        self.update_queue.put(('update_pool_tracker', None))
+                except Exception as e:
+                    print(f"[INPAINT_SYNC] Failed to create translator/inpainter: {e}")
+                    return None
+                
                 if not inpainter:
-                    print(f"[INPAINT_SYNC] Failed to get/create shared inpainter")
+                    print(f"[INPAINT_SYNC] Failed to get shared inpainter")
                     return None
             else:
                 print(f"[INPAINT_SYNC] No valid model path for {local_model}")
@@ -2533,6 +2549,16 @@ def _run_inpainting_sync(self, image_path: str, regions: list) -> str:
         print(f"[INPAINT_SYNC] Synchronous inpainting failed: {str(e)}")
         print(f"[INPAINT_SYNC] Traceback: {traceback.format_exc()}")
         return None
+    finally:
+        # Return inpainter to pool if checked out via temporary translator
+        try:
+            if temp_translator is not None:
+                temp_translator._return_inpainter_to_pool()
+                # Immediately update GUI pool tracker after return
+                if hasattr(self, 'update_queue'):
+                    self.update_queue.put(('update_pool_tracker', None))
+        except Exception as e:
+            print(f"[INPAINT_SYNC] Failed to return inpainter to pool: {e}")
 
 def _run_ocr_on_regions(self, image_path: str, regions: list, ocr_config: dict) -> list:
     """Run OCR on regions and return recognized texts
