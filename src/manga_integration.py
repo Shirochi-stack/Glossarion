@@ -10720,6 +10720,10 @@ class MangaTranslationTab(QObject):
     
     def _translation_worker(self):
         """Worker thread for translation"""
+        # Track start time for performance reporting
+        import time
+        translation_start_time = time.time()
+        
         try:
             # Defensive: ensure translator exists before using it (legacy callers may start this worker early)
             if not hasattr(self, 'translator') or self.translator is None:
@@ -11360,11 +11364,20 @@ class MangaTranslationTab(QObject):
             
             # Final summary - only if not stopped
             if not self.stop_flag.is_set():
+                # Calculate elapsed time
+                elapsed_time = time.time() - translation_start_time
+                minutes = int(elapsed_time // 60)
+                seconds = elapsed_time % 60
+                
                 self._log(f"\n{'='*60}", "info")
                 self._log(f"📊 Translation Summary:", "info")
                 self._log(f"   Total files: {self.total_files}", "info")
                 self._log(f"   ✅ Successful: {self.completed_files}", "success")
                 self._log(f"   ❌ Failed: {self.failed_files}", "error" if self.failed_files > 0 else "info")
+                if minutes > 0:
+                    self._log(f"   ⏱️ Total time: {minutes}m {seconds:.1f}s", "info")
+                else:
+                    self._log(f"   ⏱️ Total time: {seconds:.1f}s", "info")
                 self._log(f"{'='*60}\n", "info")
                 
                 self._update_progress(
