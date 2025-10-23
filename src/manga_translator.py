@@ -2956,7 +2956,8 @@ class MangaTranslator:
         return False
 
     def _load_bubble_detector(self, ocr_settings, image_path):
-        """Load bubble detector with appropriate model based on settings
+        """Load bubble detector with appropriate model based on settings.
+        Optimized to check pool for preloaded instances before attempting load.
         
         Returns:
             dict: Detection results or None if failed
@@ -2965,24 +2966,37 @@ class MangaTranslator:
         model_path = ocr_settings.get('bubble_model_path', '')
         confidence = ocr_settings.get('bubble_confidence', 0.3)
         
+        # OPTIMIZATION: Get detector from pool (may already be loaded)
         bd = self._get_thread_bubble_detector()
         
+        # OPTIMIZATION: Check if detector is already loaded from pool before calling load
+        # This avoids redundant load checks inside the detector itself
         if detector_type == 'rtdetr_onnx' or 'RTEDR_onnx' in str(detector_type):
-            # Load RT-DETR ONNX model
-            if bd.load_rtdetr_onnx_model(model_id=ocr_settings.get('rtdetr_model_url') or model_path):
-                return bd.detect_with_rtdetr_onnx(
-                    image_path=image_path,
-                    confidence=ocr_settings.get('rtdetr_confidence', confidence),
-                    return_all_bubbles=False
-                )
+            # Check if RT-DETR ONNX is already loaded (from pool or previous load)
+            already_loaded = getattr(bd, 'rtdetr_onnx_loaded', False)
+            if not already_loaded:
+                # Load RT-DETR ONNX model
+                if not bd.load_rtdetr_onnx_model(model_id=ocr_settings.get('rtdetr_model_url') or model_path):
+                    return None
+            # Model is loaded (either from pool or just loaded), run detection
+            return bd.detect_with_rtdetr_onnx(
+                image_path=image_path,
+                confidence=ocr_settings.get('rtdetr_confidence', confidence),
+                return_all_bubbles=False
+            )
         elif detector_type == 'rtdetr' or 'RT-DETR' in str(detector_type):
-            # Load RT-DETR (PyTorch) model
-            if bd.load_rtdetr_model(model_id=ocr_settings.get('rtdetr_model_url') or model_path):
-                return bd.detect_with_rtdetr(
-                    image_path=image_path,
-                    confidence=ocr_settings.get('rtdetr_confidence', confidence),
-                    return_all_bubbles=False
-                )
+            # Check if RT-DETR PyTorch is already loaded
+            already_loaded = getattr(bd, 'rtdetr_loaded', False)
+            if not already_loaded:
+                # Load RT-DETR (PyTorch) model
+                if not bd.load_rtdetr_model(model_id=ocr_settings.get('rtdetr_model_url') or model_path):
+                    return None
+            # Model is loaded, run detection
+            return bd.detect_with_rtdetr(
+                image_path=image_path,
+                confidence=ocr_settings.get('rtdetr_confidence', confidence),
+                return_all_bubbles=False
+            )
         elif detector_type == 'custom':
             # Custom model - try to determine type from path
             custom_path = ocr_settings.get('custom_model_path', model_path)
@@ -3008,16 +3022,21 @@ class MangaTranslator:
                     }
         else:
             # Standard YOLO model
-            if model_path and bd.load_model(model_path):
-                detections = bd.detect_bubbles(
-                    image_path,
-                    confidence=confidence
-                )
-                return {
-                    'text_bubbles': detections if detections else [],
-                    'text_free': [],
-                    'bubbles': []
-                }
+            # Check if YOLO is already loaded
+            already_loaded = getattr(bd, 'model_loaded', False) and getattr(bd, 'model', None) is not None
+            if not already_loaded:
+                if not (model_path and bd.load_model(model_path)):
+                    return None
+            # Model is loaded, run detection
+            detections = bd.detect_bubbles(
+                image_path,
+                confidence=confidence
+            )
+            return {
+                'text_bubbles': detections if detections else [],
+                'text_free': [],
+                'bubbles': []
+            }
         return None
             
     def _ensure_google_client(self):
