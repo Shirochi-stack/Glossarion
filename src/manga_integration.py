@@ -2859,6 +2859,7 @@ class MangaTranslationTab(QObject):
     def _build_pyside6_interface(self, main_layout):
         # Import QSizePolicy for layout management
         from PySide6.QtWidgets import QSizePolicy
+        from PySide6.QtCore import QTimer
         
         # Apply global stylesheet for checkboxes and radio buttons
         checkbox_radio_style = """
@@ -5126,7 +5127,6 @@ class MangaTranslationTab(QObject):
         progress_frame_layout.addWidget(self.pool_tracker_label)
         
         # Start auto-update timer for pool tracker (update every 2 seconds)
-        from PySide6.QtCore import QTimer
         self.pool_update_timer = QTimer()
         self.pool_update_timer.timeout.connect(self._update_pool_tracker_label)
         self.pool_update_timer.start(2000)  # Update every 2 seconds
@@ -6413,28 +6413,36 @@ class MangaTranslationTab(QObject):
         try:
             from manga_translator import MangaTranslator
             
-            # Count bubble detectors in pool
-            detector_count = 0
+            # Count bubble detectors in pool (total and available)
+            detector_total = 0
+            detector_in_use = 0
             try:
                 with MangaTranslator._detector_pool_lock:
                     for rec in MangaTranslator._detector_pool.values():
                         spares = rec.get('spares', [])
-                        detector_count += len(spares)
+                        checked_out = rec.get('checked_out', [])
+                        detector_total += len(spares)
+                        detector_in_use += len(checked_out)
             except Exception:
                 pass
             
-            # Count inpainters in pool
-            inpainter_count = 0
+            # Count inpainters in pool (total and available)
+            inpainter_total = 0
+            inpainter_in_use = 0
             try:
                 with MangaTranslator._inpaint_pool_lock:
                     for rec in MangaTranslator._inpaint_pool.values():
                         spares = rec.get('spares', [])
-                        inpainter_count += len(spares)
+                        checked_out = rec.get('checked_out', [])
+                        inpainter_total += len(spares)
+                        inpainter_in_use += len(checked_out)
             except Exception:
                 pass
             
-            # Build pool text
-            pool_text = f"• Pool: 🤖 {detector_count} | 🎨 {inpainter_count}"
+            # Build pool text with available/total counts
+            detector_avail = detector_total - detector_in_use
+            inpainter_avail = inpainter_total - inpainter_in_use
+            pool_text = f"• Pool: 🤖 {detector_avail}/{detector_total} | 🎨 {inpainter_avail}/{inpainter_total}"
             
             if hasattr(self, 'pool_tracker_label'):
                 self.pool_tracker_label.setText(pool_text)

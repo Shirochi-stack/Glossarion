@@ -708,15 +708,15 @@ class MangaTranslator:
             with MangaTranslator._inpaint_pool_lock:
                 key = self._inpainter_pool_key
                 
-                # DEBUG: Log the key we're returning to and all keys in pool
+                # DEBUG: Log the inpainter model we're returning to pool
                 try:
                     method, path = key
                     path_basename = os.path.basename(path) if path else 'None'
-                    self._log(f"🔑 Return key: {method}/{path_basename}", "info")
+                    self._log(f"🔑 Return inpainter model: {method}/{path_basename}", "info")
                     
-                    # Show all keys in pool for comparison
+                    # Show all inpainter models in pool for comparison
                     all_keys = list(MangaTranslator._inpaint_pool.keys())
-                    self._log(f"📊 Pool has {len(all_keys)} key(s)", "info")
+                    self._log(f"📊 Pool has {len(all_keys)} inpainter model(s)", "info")
                     for pool_method, pool_path in all_keys:
                         pool_rec = MangaTranslator._inpaint_pool.get((pool_method, pool_path))
                         pool_spares = len(pool_rec.get('spares', [])) if pool_rec else 0
@@ -781,6 +781,23 @@ class MangaTranslator:
         try:
             with MangaTranslator._detector_pool_lock:
                 key = self._bubble_detector_pool_key
+                
+                # DEBUG: Log the detector model we're returning to pool
+                try:
+                    det_type, model_id = key
+                    self._log(f"🔑 Return bubble detector model: {det_type}", "info")
+                    
+                    # Show all detector models in pool for comparison
+                    all_keys = list(MangaTranslator._detector_pool.keys())
+                    self._log(f"📊 Pool has {len(all_keys)} detector model(s)", "info")
+                    for pool_det_type, pool_model_id in all_keys:
+                        pool_rec = MangaTranslator._detector_pool.get((pool_det_type, pool_model_id))
+                        pool_spares = len(pool_rec.get('spares', [])) if pool_rec else 0
+                        pool_checked = len(pool_rec.get('checked_out', [])) if pool_rec else 0
+                        self._log(f"   - {pool_det_type}: {pool_spares} spares, {pool_checked} checked out", "info")
+                except Exception as e:
+                    self._log(f"   Debug error: {e}", "info")
+                
                 rec = MangaTranslator._detector_pool.get(key)
                 if rec and 'checked_out' in rec:
                     checked_out = rec['checked_out']
@@ -788,8 +805,17 @@ class MangaTranslator:
                         checked_out.remove(self._checked_out_bubble_detector)
                         # The spares list stays static - only track checked_out
                         spares_list = rec.get('spares', [])
-                        available_count = len(spares_list) - len(checked_out)
-                        self._log(f"🔄 Returned bubble detector to pool ({len(checked_out)}/{len(spares_list)} in use, {available_count} available)", "info")
+                        total_spares = len(spares_list)
+                        checked_out_count = len(checked_out)
+                        available_count = total_spares - checked_out_count
+                        # Debug: count how many spares are actually valid
+                        valid_spares = sum(1 for s in spares_list if s is not None)
+                        # Also log the pool key for debugging
+                        try:
+                            det_type, model_id = key
+                            self._log(f"🔄 Returned bubble detector to pool [model: {det_type}] ({checked_out_count}/{total_spares} in use, {available_count} available, {valid_spares} valid)", "info")
+                        except:
+                            self._log(f"🔄 Returned bubble detector to pool ({checked_out_count}/{total_spares} in use, {available_count} available, {valid_spares} valid)", "info")
             # Clear the references
             self._checked_out_bubble_detector = None
             self._bubble_detector_pool_key = None
