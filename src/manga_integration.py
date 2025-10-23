@@ -11092,7 +11092,7 @@ class MangaTranslationTab(QObject):
                                 # CRITICAL: Verify all detected regions got translated
                                 # Partial failures indicate inpainting or rendering issues
                                 if has_translations and regions:
-                                    translated_count = sum(1 for r in regions if r.get('translated_text', '').strip())
+                                    translated_count = sum(1 for r in regions if (r.get('translated_text') or '').strip())
                                     detected_count = len(regions)
                                     completion_rate = translated_count / detected_count if detected_count > 0 else 0
                                     
