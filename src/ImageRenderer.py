@@ -2520,6 +2520,7 @@ def _run_inpainting_sync(self, image_path: str, regions: list) -> str:
             if resolved_model_path and os.path.exists(resolved_model_path):
                 try:
                     from manga_translator import MangaTranslator
+                    from local_inpainter import LocalInpainter
                     
                     # Normalize model path to match pool key
                     resolved_model_path = os.path.abspath(os.path.normpath(resolved_model_path))
@@ -2529,6 +2530,30 @@ def _run_inpainting_sync(self, image_path: str, regions: list) -> str:
                     inpainter = None
                     with MangaTranslator._inpaint_pool_lock:
                         rec = MangaTranslator._inpaint_pool.get(key)
+                        
+                        # If pool doesn't exist or has no spares, initialize it
+                        if not rec or not rec.get('spares'):
+                            print(f"[INPAINT_SYNC] Pool not initialized for {local_model}, initializing now...")
+                            # Create a new inpainter and add it to the pool
+                            new_inpainter = LocalInpainter()
+                            if new_inpainter.load_model(local_model, resolved_model_path):
+                                # Initialize pool record if needed
+                                if not rec:
+                                    MangaTranslator._inpaint_pool[key] = {
+                                        'spares': [],
+                                        'checked_out': [],
+                                        'model_type': local_model,
+                                        'model_path': resolved_model_path
+                                    }
+                                    rec = MangaTranslator._inpaint_pool[key]
+                                
+                                # Add to spares
+                                rec['spares'].append(new_inpainter)
+                                print(f"[INPAINT_SYNC] Initialized pool with 1 inpainter for {local_model}")
+                            else:
+                                print(f"[INPAINT_SYNC] Failed to load inpainter model")
+                        
+                        # Now try to check out from pool
                         if rec and rec.get('spares'):
                             spares = rec.get('spares', [])
                             checked_out = rec.setdefault('checked_out', [])
@@ -2542,9 +2567,9 @@ def _run_inpainting_sync(self, image_path: str, regions: list) -> str:
                                     break
                             
                             if not inpainter:
-                                print(f"[INPAINT_SYNC] All {len(spares)} inpainters are checked out")
+                                print(f"[INPAINT_SYNC] All {len(spares)} inpainters are checked out, waiting...")
                         else:
-                            print(f"[INPAINT_SYNC] No inpainter pool found for {local_model}")
+                            print(f"[INPAINT_SYNC] Failed to initialize pool for {local_model}")
                     
                     if inpainter:
                         # Store key for return
