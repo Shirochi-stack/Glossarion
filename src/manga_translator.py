@@ -5555,42 +5555,9 @@ class MangaTranslator:
         
         return languages
 
-    def _early_inpaint_with_instance(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
-        """Early inpainting worker that reuses an already-checked-out inpainter instance.
-        This avoids pool contention when early inpainting runs concurrently with OCR.
-        """
-        try:
-            # Get the pre-checked-out instance that was stored for us
-            inp = getattr(self, '_early_inpaint_instance', None)
-            
-            if inp and getattr(inp, 'model_loaded', False):
-                self._log("   🎨 Early inpainting using pre-checked-out instance", "debug")
-                iterations = getattr(self, '_current_inpainter_iterations', 1)
-                # Use lock if enabled (singleton mode)
-                lock = getattr(self, '_inpaint_lock', None)
-                if lock:
-                    with lock:
-                        return inp.inpaint(image, mask, iterations=iterations)
-                else:
-                    return inp.inpaint(image, mask, iterations=iterations)
-            else:
-                # Fallback to regular inpaint_regions if no instance was provided
-                self._log("   ⚠️ No pre-checked-out instance, falling back to pool checkout", "warning")
-                return self.inpaint_regions(image, mask)
-        except Exception as e:
-            self._log(f"   ⚠️ Early inpainting failed: {e}", "warning")
-            return image.copy()  # Return original if inpainting fails
-    
-    def _start_early_inpainting_if_needed(self, rtdetr_detections, image, ocr_settings, image_path, inpainter_instance=None):
+    def _start_early_inpainting_if_needed(self, rtdetr_detections, image, ocr_settings, image_path):
         """Start inpainting in background immediately after RT-DETR detection.
         This runs concurrently with OCR for maximum speed.
-        
-        Args:
-            rtdetr_detections: RT-DETR detection results
-            image: Image to inpaint
-            ocr_settings: OCR settings
-            image_path: Path to image file
-            inpainter_instance: Optional already-checked-out inpainter to reuse (avoids pool contention)
         """
         if getattr(self, 'skip_inpainting', False) or not rtdetr_detections:
             return None
@@ -5641,14 +5608,12 @@ class MangaTranslator:
             self._log(f"   ✅ Mask created in {time.time() - mask_start:.1f}s")
             
             # Start inpainting in background thread IMMEDIATELY
-            # Store the inpainter instance for the background thread to use
-            self._early_inpaint_instance = inpainter_instance
-            
+            # Use normal inpaint_regions which will checkout from pool
             import concurrent.futures
             self._inpainting_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             self._inpainting_start_time = time.time()  # Track when inpainting started
             self._inpainting_future = self._inpainting_executor.submit(
-                self._early_inpaint_with_instance, 
+                self.inpaint_regions, 
                 image.copy(), 
                 mask
             )
@@ -9185,25 +9150,51 @@ class MangaTranslator:
                 
                 self._log(f"Using local method: {local_method} (loaded from config)", "info")
                 
-                # CRITICAL FIX: Don't checkout inpainter during initialization
-                # This causes pool exhaustion when early inpainting runs concurrently
-                # Just verify that an inpainter exists in the pool
-                key = (local_method, os.path.abspath(os.path.normpath(model_path)) if model_path else '')
-                with MangaTranslator._inpaint_pool_lock:
-                    rec = MangaTranslator._inpaint_pool.get(key)
-                    if rec and rec.get('spares'):
-                        spares = rec.get('spares', [])
-                        available_count = len([s for s in spares if s and getattr(s, 'model_loaded', False)])
-                        if available_count > 0:
-                            self._log(f"✅ Inpainter pool ready: {available_count} instance(s) available", "info")
-                            # Don't checkout - leave it in pool for actual inpainting calls
-                            inp_shared = spares[0]  # Just for reference, not checkout
-                        else:
-                            self._log(f"⚠️ Pool exists but no loaded instances available", "warning")
-                            inp_shared = None
+                # CRITICAL FIX: Wait for any ongoing preload to complete
+                # This prevents "create on demand" when models are still loading
+                if hasattr(self, '_inpaint_preload_event') and self._inpaint_preload_event and not self._inpaint_preload_event.is_set():
+                    self._log("⏳ Waiting for inpainter preload to complete...", "info")
+                    # Wait with generous timeout
+                    waited = self._inpaint_preload_event.wait(timeout=120)  # 2 minutes
+                    if waited:
+                        self._log("✅ Preload completed", "info")
                     else:
-                        self._log(f"⚠️ No inpainter pool found - will need to create on demand", "warning")
-                        inp_shared = None
+                        self._log("⚠️ Preload timeout - proceeding anyway", "warning")
+                
+                # CRITICAL FIX: Poll pool with timeout to wait for models loading from GUI
+                # Don't immediately fall back to "create on demand"
+                key = (local_method, os.path.abspath(os.path.normpath(model_path)) if model_path else '')
+                inp_shared = None
+                poll_timeout = 30  # 30 seconds max wait
+                poll_interval = 0.5  # Check every 500ms
+                import time
+                start_time = time.time()
+                
+                while time.time() - start_time < poll_timeout:
+                    with MangaTranslator._inpaint_pool_lock:
+                        rec = MangaTranslator._inpaint_pool.get(key)
+                        if rec and rec.get('spares'):
+                            spares = rec.get('spares', [])
+                            available_count = len([s for s in spares if s and getattr(s, 'model_loaded', False)])
+                            if available_count > 0:
+                                self._log(f"✅ Inpainter pool ready: {available_count} instance(s) available", "info")
+                                # Don't checkout - leave it in pool for actual inpainting calls
+                                inp_shared = spares[0]  # Just for reference, not checkout
+                                break
+                    
+                    # No models yet - wait a bit and retry
+                    if inp_shared is None:
+                        elapsed = time.time() - start_time
+                        if elapsed < 2:  # Only log if we've been waiting a bit
+                            pass  # Silent for first 2 seconds
+                        elif elapsed < poll_timeout:
+                            if int(elapsed) % 5 == 0:  # Log every 5 seconds
+                                self._log(f"⏳ Still waiting for inpainter pool... ({int(elapsed)}s)", "info")
+                        time.sleep(poll_interval)
+                
+                # After polling, check final state
+                if inp_shared is None:
+                    self._log(f"⚠️ No inpainter pool found after {poll_timeout}s - will create on demand", "warning")
                 
                 # Initialize need_reload flag
                 need_reload = False
