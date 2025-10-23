@@ -3538,39 +3538,62 @@ def _run_full_translate_pipeline(self, image_path: str, regions: list):
         self.update_queue.put(('translate_button_restore', None))
 
 def _run_translate_background(self, recognized_texts: list, image_path: str):
-    """Run translation in background thread"""
+    """Run translation in background thread with concurrent inpainting and translation"""
     try:
-        # STEP 1: Inpaint and save cleaned image to isolated folder (so it can be shown in Output tab before render)
-        self._log(f"🧽 Running automatic inpainting before translation...", "info")
-        regions = []
-        for text_data in recognized_texts:
-            bbox = text_data['bbox']
-            region_dict = {
-                'bbox': bbox,
-                'coords': [[bbox[0], bbox[1]], [bbox[0] + bbox[2], bbox[1]], [bbox[0] + bbox[2], bbox[1] + bbox[3]], [bbox[0], bbox[1] + bbox[3]]],
-                'confidence': text_data.get('confidence', 1.0),
-                'shape': 'ellipse' if getattr(self, '_use_circle_shapes', False) else 'rect'
-            }
-            regions.append(region_dict)
+        import threading
+        
+        # CONCURRENT EXECUTION: Start both inpainting and translation in parallel
+        # Translation will start immediately while inpainting runs in background
+        
+        # Shared state for inpainting result
+        inpaint_result = {'cleaned_path': None, 'completed': False}
+        inpaint_lock = threading.Lock()
+        
+        def run_inpainting_concurrent():
+            """Run inpainting in parallel with translation"""
+            try:
+                self._log(f"🧽 Running automatic inpainting (concurrent)...", "info")
+                regions = []
+                for text_data in recognized_texts:
+                    bbox = text_data['bbox']
+                    region_dict = {
+                        'bbox': bbox,
+                        'coords': [[bbox[0], bbox[1]], [bbox[0] + bbox[2], bbox[1]], [bbox[0] + bbox[2], bbox[1] + bbox[3]], [bbox[0], bbox[1] + bbox[3]]],
+                        'confidence': text_data.get('confidence', 1.0),
+                        'shape': 'ellipse' if getattr(self, '_use_circle_shapes', False) else 'rect'
+                    }
+                    regions.append(region_dict)
 
-        cleaned_image_path = _run_inpainting_sync(self, image_path, regions)
+                cleaned_image_path = _run_inpainting_sync(self, image_path, regions)
 
-        if cleaned_image_path and os.path.exists(cleaned_image_path):
-            print(f"[TRANSLATE] Inpainting successful: {os.path.basename(cleaned_image_path)}")
-            self._log(f"✅ Inpainting complete!", "success")
-            self._cleaned_image_path = cleaned_image_path
-            # Show cleaned image in Output tab (no auto switch)
-            # Show cleaned only if it's the current image once handled on main thread
-            self.update_queue.put(('preview_update', {
-                'translated_path': cleaned_image_path,
-                'source_path': image_path
-            }))
-        else:
-            print(f"[TRANSLATE] Inpainting failed or returned no path")
-            self._log(f"⚠️ Inpainting failed, using original image", "warning")
-            cleaned_image_path = None
-
-        # STEP 2: Translation
+                with inpaint_lock:
+                    if cleaned_image_path and os.path.exists(cleaned_image_path):
+                        print(f"[TRANSLATE_CONCURRENT] Inpainting successful: {os.path.basename(cleaned_image_path)}")
+                        self._log(f"✅ Inpainting complete!", "success")
+                        self._cleaned_image_path = cleaned_image_path
+                        inpaint_result['cleaned_path'] = cleaned_image_path
+                        # Show cleaned image in Output tab (no auto switch)
+                        self.update_queue.put(('preview_update', {
+                            'translated_path': cleaned_image_path,
+                            'source_path': image_path
+                        }))
+                    else:
+                        print(f"[TRANSLATE_CONCURRENT] Inpainting failed or returned no path")
+                        self._log(f"⚠️ Inpainting failed, using original image", "warning")
+                    inpaint_result['completed'] = True
+            except Exception as e:
+                print(f"[TRANSLATE_CONCURRENT] Inpainting error: {e}")
+                import traceback
+                traceback.print_exc()
+                with inpaint_lock:
+                    inpaint_result['completed'] = True
+        
+        # Start inpainting in background thread (non-blocking)
+        inpaint_thread = threading.Thread(target=run_inpainting_concurrent, daemon=True)
+        inpaint_thread.start()
+        print(f"[TRANSLATE_CONCURRENT] Started inpainting in parallel thread")
+        
+        # STEP 1: Translation (runs immediately without waiting for inpainting)
         full_page_context_enabled = False
         if hasattr(self, '_batch_full_page_context_enabled'):
             full_page_context_enabled = bool(self._batch_full_page_context_enabled)
@@ -3587,7 +3610,19 @@ def _run_translate_background(self, recognized_texts: list, image_path: str):
         else:
             self._log(f"📝 Using individual translation for {len(recognized_texts)} regions", "info")
             translated_texts = _translate_individually(self, recognized_texts, image_path)
-
+        
+        print(f"[TRANSLATE_CONCURRENT] Translation completed, checking inpainting status...")
+        
+        # Wait for inpainting to complete (if not already done) to determine render path
+        # This doesn't block the translation API calls - those already happened above
+        inpaint_thread.join(timeout=30)  # Wait up to 30 seconds for inpainting
+        
+        with inpaint_lock:
+            cleaned_image_path = inpaint_result.get('cleaned_path')
+            if not inpaint_result['completed']:
+                print(f"[TRANSLATE_CONCURRENT] Inpainting still running after translation, will use original image")
+                self._log(f"⏱️ Inpainting still running, rendering on original image", "info")
+        
         # Send results to main thread with render image path
         render_image_path = cleaned_image_path if cleaned_image_path else image_path
         self.update_queue.put(('translate_results', {
