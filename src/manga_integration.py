@@ -757,16 +757,6 @@ class MangaTranslationTab(QObject):
             adv_cfg = self.main_gui.config.get('manga_settings', {}).get('advanced', {})
         except Exception:
             adv_cfg = {}
-        # In singleton mode, reduce OpenCV thread usage to avoid CPU spikes
-        try:
-            if bool(adv_cfg.get('use_singleton_models', False)):
-                import cv2 as _cv2
-                try:
-                    _cv2.setNumThreads(1)
-                except Exception:
-                    pass
-        except Exception:
-            pass
         # Do NOT preload big local models by default to avoid startup crashes
         self.preload_local_models_on_open = bool(adv_cfg.get('preload_local_models_on_open', False))
         
@@ -10768,13 +10758,6 @@ class MangaTranslationTab(QObject):
             # Decouple from global parallel processing: panel concurrency is governed ONLY by panel settings
             effective_workers = requested_panel_workers if (panel_parallel and len(self.selected_files) > 1) else 1
 
-            # Hint translator about preferred BD ownership: use singleton only when not using panel parallelism
-            try:
-                if hasattr(self, 'translator') and self.translator:
-                    self.translator.use_singleton_bubble_detector = not (panel_parallel and effective_workers > 1)
-            except Exception:
-                pass
-
             # Model preloading phase
             self._log("🔧 Model preloading phase", "info")
             # Log current counters (diagnostic)
@@ -10793,11 +10776,6 @@ class MangaTranslationTab(QObject):
                     and hasattr(self, 'translator')
                     and self.translator
                 ):
-                    # For parallel panel translation, prefer thread-local detectors (avoid singleton for concurrency)
-                    try:
-                        self.translator.use_singleton_bubble_detector = False
-                    except Exception:
-                        pass
                     desired_bd = min(int(effective_workers), max(1, int(len(self.selected_files) or 1)))
                     self._log(f"🧰 Preloading bubble detector instances for {desired_bd} panel worker(s)...", "info")
                     try:
@@ -10899,14 +10877,6 @@ class MangaTranslationTab(QObject):
 
                         translator = MangaTranslator(ocr_config, self.main_gui.client, self.main_gui, log_callback=self._log)
                         translator.set_stop_flag(self.stop_flag)
-                        
-                        # CRITICAL: Disable singleton bubble detector for parallel panel processing
-                        # Each panel should use pool-based detectors for true parallelism
-                        try:
-                            translator.use_singleton_bubble_detector = False
-                            self._log(f"   🤖 Panel translator: bubble detector pool mode enabled", "debug")
-                        except Exception:
-                            pass
                         
                         # Ensure parallel processing settings are properly applied to each panel translator
                         # The web UI maps parallel_panel_translation to parallel_processing for MangaTranslator compatibility
