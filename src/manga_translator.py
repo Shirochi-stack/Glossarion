@@ -916,98 +916,22 @@ class MangaTranslator:
         except Exception:
             self.batch_mode = False
         
-        # CRITICAL: Redirect print() to our log callback BEFORE any heavy operations
-        # This ensures UnifiedClient's print statements go to manga log, not main GUI log
+        # Store references for print hijacking (will be activated on demand, not during init)
         import builtins
         import sys
         self._original_print = builtins.print
         self._original_stdout = sys.stdout
         self._original_stderr = sys.stderr
         
-        # Store the callback in thread-local storage accessible by all threads
+        # Store the callback for later use
         import threading
         if not hasattr(builtins, '_manga_log_callbacks'):
             builtins._manga_log_callbacks = {}
         builtins._manga_log_callbacks[id(self)] = log_callback
         
-        # Create a custom print function that routes to our log callback
-        # This function is installed GLOBALLY so it works in all threads
-        def manga_print(*args, **kwargs):
-            """Custom print that redirects to manga log callback (thread-safe)"""
-            # Convert args to string
-            message = ' '.join(str(arg) for arg in args)
-            
-            # Try to find an active manga log callback
-            callback_found = False
-            if hasattr(builtins, '_manga_log_callbacks'):
-                # Try to use the most recently created callback (last in dict)
-                # This works because dict maintains insertion order in Python 3.7+
-                for translator_id, callback in reversed(list(builtins._manga_log_callbacks.items())):
-                    if callback:
-                        try:
-                            # Determine log level from message content
-                            level = 'info'
-                            if '❌' in message or 'ERROR' in message or 'Error' in message:
-                                level = 'error'
-                            elif '⚠️' in message or 'WARNING' in message or 'Warning' in message:
-                                level = 'warning'
-                            elif '🔍' in message or 'DEBUG' in message:
-                                level = 'debug'
-                            elif '✅' in message or '🔑' in message or '📤' in message:
-                                level = 'info'
-                            
-                            # Clean up DEBUG prefixes
-                            message = message.replace('[DEBUG] ', '')
-                            
-                            callback(message, level)
-                            callback_found = True
-                            break
-                        except Exception:
-                            # If callback fails, try next one
-                            continue
-            
-            # Fallback to original print if no callback worked
-            if not callback_found:
-                try:
-                    # Try to get original print from the first manga translator instance
-                    if hasattr(MangaTranslator, '_original_print_backup'):
-                        MangaTranslator._original_print_backup(*args, **kwargs)
-                    else:
-                        # Ultimate fallback - use __builtins__
-                        import sys
-                        sys.__stdout__.write(str(message) + '\n')
-                except Exception:
-                    pass
-        
         # Store original print as class variable for fallback (only once)
         if not hasattr(MangaTranslator, '_original_print_backup'):
             MangaTranslator._original_print_backup = builtins.print
-        
-        # Replace built-in print GLOBALLY (affects all threads)
-        builtins.print = manga_print
-        
-        # CRITICAL: Also patch the UnifiedClient module's print directly
-        # Python may cache the print function in the module namespace
-        try:
-            import unified_api_client
-            import sys
-            
-            # Get the module object
-            uc_module = sys.modules.get('unified_api_client')
-            if uc_module:
-                # Inject our custom print into the module's globals
-                # This ensures any code in that module using 'print' will use ours
-                uc_module.__dict__['print'] = manga_print
-                self._log("✅ Injected manga_print into unified_api_client module namespace", "debug")
-            
-            # Also try to patch any existing print references
-            if hasattr(unified_api_client, 'print'):
-                unified_api_client.print = manga_print
-        except Exception as e:
-            self._log(f"⚠️ Warning: Could not patch unified_api_client print: {e}", "debug")
-        
-        # Set up stdout capture to redirect prints to GUI
-        self._setup_stdout_capture()
         
         # Pass log callback to unified client
         self.client = unified_client
