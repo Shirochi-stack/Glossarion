@@ -3466,85 +3466,138 @@ class MangaSettingsDialog(QDialog):
             return False
 
     def _load_rtdetr_model(self):
-        """Load selected model"""
+        """Load selected model using preload pool to prevent memory leaks"""
         try:
-            from bubble_detector import BubbleDetector
+            from manga_translator import MangaTranslator
             from PySide6.QtWidgets import QApplication
+            from PySide6.QtCore import QTimer
+            import threading
             
             self.rtdetr_status_label.setText("Loading...")
             self.rtdetr_status_label.setStyleSheet("color: orange;")
             QApplication.processEvents()
             
-            bd = BubbleDetector()
             detector = self.detector_type_combo.currentText()
             model_path = self.bubble_model_entry.text()
             
-            if 'RTEDR_onnx' in detector:
-                # RT-DETR (ONNX) uses repo id directly
-                if bd.load_rtdetr_onnx_model(model_id=model_path):
-                    self.rtdetr_status_label.setText("✅ Ready")
-                    self.rtdetr_status_label.setStyleSheet("color: green;")
-                    self._show_styled_messagebox(QMessageBox.Information, "Success", "RTEDR_onnx model loaded successfully!")
-                else:
-                    self.rtdetr_status_label.setText("❌ Failed")
-                    self.rtdetr_status_label.setStyleSheet("color: red;")
-            elif 'RT-DETR' in detector:
-                # RT-DETR uses model_id directly
-                if bd.load_rtdetr_model(model_id=model_path):
-                    self.rtdetr_status_label.setText("✅ Ready")
-                    self.rtdetr_status_label.setStyleSheet("color: green;")
-                    self._show_styled_messagebox(QMessageBox.Information, "Success", "RT-DETR model loaded successfully!")
-                else:
-                    self.rtdetr_status_label.setText("❌ Failed")
-                    self.rtdetr_status_label.setStyleSheet("color: red;")
-            else:
-                # YOLOv8 - CHECK LOCAL MODELS FOLDER FIRST
-                if model_path.startswith('ogkalu/'):
-                    # It's a HuggingFace ID - check if already downloaded
-                    filename_map = {
-                        'ogkalu/comic-speech-bubble-detector-yolov8m': 'comic-speech-bubble-detector.pt',
-                        'ogkalu/comic-text-segmenter-yolov8m': 'comic-text-segmenter.pt',
-                        'ogkalu/manga-text-detector-yolov8s': 'manga-text-detector.pt'
-                    }
-                    
-                    filename = filename_map.get(model_path, 'model.pt')
-                    local_path = os.path.join('models', filename)
-                    
-                    # Check if it exists locally
-                    if os.path.exists(local_path):
-                        # Use the local file
-                        model_path = local_path
-                        self.bubble_model_entry.setText(local_path)  # Update the field
-                    else:
-                        # Not downloaded yet
-                        self._show_styled_messagebox(QMessageBox.Warning, "Download Required", 
-                            "Model not found locally.\nPlease download it first using the Download button.")
-                        self.rtdetr_status_label.setText("❌ Not downloaded")
-                        self.rtdetr_status_label.setStyleSheet("color: orange;")
-                        return
+            # Map display names to internal detector types
+            detector_type_map = {
+                'RTEDR_onnx': 'rtdetr_onnx',
+                'RT-DETR': 'rtdetr',
+                'YOLOv8 Speech': 'yolo',
+                'Custom Model': 'custom'
+            }
+            detector_type = detector_type_map.get(detector, 'rtdetr_onnx')
+            
+            # For YOLOv8, check if we need to resolve the model path
+            if detector_type == 'yolo' and model_path.startswith('ogkalu/'):
+                # It's a HuggingFace ID - check if already downloaded
+                filename_map = {
+                    'ogkalu/comic-speech-bubble-detector-yolov8m': 'comic-speech-bubble-detector.pt',
+                    'ogkalu/comic-text-segmenter-yolov8m': 'comic-text-segmenter.pt',
+                    'ogkalu/manga-text-detector-yolov8s': 'manga-text-detector.pt'
+                }
                 
-                # Now model_path should be a local file
+                filename = filename_map.get(model_path, 'model.pt')
+                local_path = os.path.join('models', filename)
+                
+                # Check if it exists locally
+                if os.path.exists(local_path):
+                    # Use the local file
+                    model_path = local_path
+                    self.bubble_model_entry.setText(local_path)  # Update the field
+                else:
+                    # Not downloaded yet
+                    self._show_styled_messagebox(QMessageBox.Warning, "Download Required", 
+                        "Model not found locally.\nPlease download it first using the Download button.")
+                    self.rtdetr_status_label.setText("❌ Not downloaded")
+                    self.rtdetr_status_label.setStyleSheet("color: orange;")
+                    return
+            
+            # For local files, verify existence
+            if detector_type == 'yolo' or detector_type == 'custom':
                 if not os.path.exists(model_path):
                     self._show_styled_messagebox(QMessageBox.Critical, "Error", f"Model file not found: {model_path}")
                     self.rtdetr_status_label.setText("❌ File not found")
                     self.rtdetr_status_label.setStyleSheet("color: red;")
                     return
-                
-                # Load the YOLOv8 model from local file
-                if bd.load_model(model_path):
-                    self.rtdetr_status_label.setText("✅ Ready")
-                    self.rtdetr_status_label.setStyleSheet("color: green;")
-                    self._show_styled_messagebox(QMessageBox.Information, "Success", "YOLOv8 model loaded successfully!")
+            
+            # Prepare OCR config with the detector settings
+            ocr_config = {
+                'detector_type': detector_type,
+                'bubble_model_path': model_path,
+                'rtdetr_model_url': model_path,
+            }
+            
+            # Track result in a dict that can be accessed from timer
+            load_result = {'done': False, 'success': False, 'detector': detector}
+            
+            # Load model in background thread using preload pool
+            def load_in_background():
+                try:
+                    # Create minimal translator with dummy config to access preload pool
+                    try:
+                        from unified_api_client import UnifiedClient
+                        api_key = self.main_gui.config.get('api_key', '') or 'dummy'
+                        model = self.main_gui.config.get('model', 'gpt-4o-mini')
+                        uc = UnifiedClient(model=model, api_key=api_key)
+                    except Exception:
+                        uc = None
                     
-                    # Auto-convert to ONNX if enabled
-                    if os.environ.get('AUTO_CONVERT_TO_ONNX', 'true').lower() == 'true':
-                        onnx_path = model_path.replace('.pt', '.onnx')
-                        if not os.path.exists(onnx_path):
-                            if bd.convert_to_onnx(model_path, onnx_path):
-                                logger.info(f"✅ Converted to ONNX: {onnx_path}")
+                    import sys
+                    def log_cb(msg, level='info'):
+                        sys.stdout.write(f"[BUBBLE_LOAD] {level.upper()}: {msg}\n")
+                        sys.stdout.flush()
+                    
+                    mt = MangaTranslator(
+                        ocr_config=ocr_config,
+                        unified_client=uc,
+                        main_gui=self.main_gui,
+                        log_callback=log_cb,
+                        skip_inpainter_init=True,
+                        skip_ocr_init=True
+                    )
+                    
+                    # Preload 1 detector into the pool
+                    created = mt.preload_bubble_detectors(ocr_config, 1)
+                    
+                    if created > 0:
+                        print(f"[BUBBLE_LOAD] Successfully preloaded {detector} detector")
+                        load_result['success'] = True
+                    else:
+                        print(f"[BUBBLE_LOAD] Failed to preload {detector} detector")
+                        load_result['success'] = False
+                    
+                except Exception as e:
+                    print(f"[BUBBLE_LOAD] Error: {e}")
+                    import traceback
+                    print(traceback.format_exc())
+                    load_result['success'] = False
+                finally:
+                    load_result['done'] = True
+            
+            # Start background loading
+            thread = threading.Thread(target=load_in_background, daemon=True)
+            thread.start()
+            
+            # Poll for completion using QTimer (safer than QMetaObject.invokeMethod)
+            check_timer = QTimer()
+            
+            def check_complete():
+                if load_result['done']:
+                    check_timer.stop()
+                    # Update UI on main thread
+                    if load_result['success']:
+                        self.rtdetr_status_label.setText("✅ Ready")
+                        self.rtdetr_status_label.setStyleSheet("color: green;")
+                    else:
+                        self.rtdetr_status_label.setText("❌ Failed")
+                        self.rtdetr_status_label.setStyleSheet("color: red;")
                 else:
-                    self.rtdetr_status_label.setText("❌ Failed")
-                    self.rtdetr_status_label.setStyleSheet("color: red;")
+                    QApplication.processEvents()
+            
+            check_timer.timeout.connect(check_complete)
+            check_timer.start(100)  # Check every 100ms
                 
         except ImportError:
             self.rtdetr_status_label.setText("❌ Missing deps")

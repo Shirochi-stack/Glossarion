@@ -7552,17 +7552,66 @@ class MangaTranslationTab(QObject):
         load_result = {'success': False, 'error_msg': None, 'done': False}
         
         def load_in_background():
-            """Background thread for model loading"""
+            """Background thread for model loading - preload into pool"""
             try:
-                # Use the shared inpainter from pool instead of creating new instance
-                test_inpainter = ImageRenderer._get_or_create_shared_inpainter(self, method, model_path)
-                if not test_inpainter:
-                    raise Exception("Failed to get shared inpainter from pool")
-                success = True  # Already loaded by _get_or_create_shared_inpainter
-                print(f"DEBUG: Model loading completed, success={success}")
-                load_result['success'] = success
+                # Normalize model path
+                import os
+                normalized_path = model_path
+                if model_path:
+                    try:
+                        normalized_path = os.path.abspath(os.path.normpath(model_path))
+                    except Exception:
+                        pass
+                
+                # Create a minimal translator to access the preload system
+                from manga_translator import MangaTranslator
+                
+                # Get OCR config
+                try:
+                    from ImageRenderer import _get_ocr_config
+                    ocr_config = _get_ocr_config(self)
+                except Exception:
+                    ocr_config = {}
+                
+                # Get unified client
+                try:
+                    from unified_api_client import UnifiedClient
+                    api_key = self.main_gui.config.get('api_key', '') or 'dummy'
+                    model_name = self.main_gui.config.get('model', 'gpt-4o-mini')
+                    uc = UnifiedClient(model=model_name, api_key=api_key)
+                except Exception:
+                    uc = None
+                
+                # Logging callback - use sys.stdout.write to avoid recursion
+                import sys
+                def log_cb(msg, level='info'):
+                    sys.stdout.write(f"[INPAINT_LOAD] {level.upper()}: {msg}\n")
+                    sys.stdout.flush()
+                
+                # Create translator instance
+                mt = MangaTranslator(
+                    ocr_config=ocr_config,
+                    unified_client=uc,
+                    main_gui=self.main_gui,
+                    log_callback=log_cb,
+                    skip_inpainter_init=True
+                )
+                
+                # Preload 1 inpainter into the pool
+                created = mt.preload_local_inpainters(method, normalized_path, 1)
+                
+                if created > 0:
+                    print(f"[INPAINT_LOAD] Successfully preloaded {method} inpainter")
+                    load_result['success'] = True
+                else:
+                    print(f"[INPAINT_LOAD] Failed to preload {method} inpainter")
+                    load_result['success'] = False
+                    load_result['error_msg'] = "Preload returned 0 instances"
+                    
             except Exception as e:
-                print(f"DEBUG: Model loading exception: {e}")
+                print(f"[INPAINT_LOAD] Error: {e}")
+                import traceback
+                print(traceback.format_exc())
                 load_result['error_msg'] = str(e)
                 load_result['success'] = False
             finally:

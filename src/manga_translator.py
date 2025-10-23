@@ -838,7 +838,7 @@ class MangaTranslator:
                 pass
     
     
-    def __init__(self, ocr_config: dict, unified_client, main_gui, log_callback=None, skip_inpainter_init: bool = False):
+    def __init__(self, ocr_config: dict, unified_client, main_gui, log_callback=None, skip_inpainter_init: bool = False, skip_ocr_init: bool = False):
         """Initialize with OCR configuration and API client from main GUI
         
         Args:
@@ -850,6 +850,7 @@ class MangaTranslator:
                     'azure_endpoint': str (if azure)
                 }
             skip_inpainter_init: If True, skip automatic inpainter initialization (for pool access only)
+            skip_ocr_init: If True, skip OCR provider initialization (for bubble detector preload only)
         """
         # CRITICAL: Set thread limits FIRST before any heavy library operations
         # This must happen before cv2, torch, numpy operations
@@ -882,6 +883,7 @@ class MangaTranslator:
         
         # Store init flags
         self._skip_inpainter_init = skip_inpainter_init
+        self._skip_ocr_init = skip_ocr_init
         
         # Initialize batch_mode early so _log can check it
         try:
@@ -1102,71 +1104,79 @@ class MangaTranslator:
         # Cache for processed images - DEPRECATED/UNUSED (kept for backward compatibility)
         # DO NOT USE THIS FOR TEXT DATA - IT CAN LEAK BETWEEN IMAGES
         self.cache = {}
-        # Determine OCR provider
-        self.ocr_provider = ocr_config.get('provider', 'google')
+        
+        # Skip OCR initialization if requested (e.g., when only preloading bubble detectors)
+        if not skip_ocr_init:
+            # Determine OCR provider
+            self.ocr_provider = ocr_config.get('provider', 'google')
 
-        if self.ocr_provider == 'google':
-            if not GOOGLE_CLOUD_VISION_AVAILABLE:
-                raise ImportError("Google Cloud Vision required. Install with: pip install google-cloud-vision")
-            
-            google_path = ocr_config.get('google_credentials_path')
-            if not google_path:
-                raise ValueError("Google credentials path required")
+            if self.ocr_provider == 'google':
+                if not GOOGLE_CLOUD_VISION_AVAILABLE:
+                    raise ImportError("Google Cloud Vision required. Install with: pip install google-cloud-vision")
                 
-            os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = google_path
-            self.vision_client = vision.ImageAnnotatorClient()
-            
-        elif self.ocr_provider == 'azure':
-            # Import Azure libraries
-            try:
-                from azure.ai.vision.imageanalysis import ImageAnalysisClient
-                from azure.core.credentials import AzureKeyCredential
-                self.azure_client_class = ImageAnalysisClient
-                self.azure_cred_class = AzureKeyCredential
-            except ImportError:
-                raise ImportError("Azure Computer Vision required. Install with: pip install azure-ai-vision-imageanalysis")
-            
-            azure_key = ocr_config.get('azure_key')
-            azure_endpoint = ocr_config.get('azure_endpoint')
-            
-            if not azure_key or not azure_endpoint:
-                raise ValueError("Azure key and endpoint required")
-            
-            # OPTIMIZATION: Configure Azure client with better connection settings
-            try:
-                from azure.core.pipeline.policies import RetryPolicy
-                # Create retry policy with shorter timeouts
-                retry_policy = RetryPolicy(
-                    retry_total=3,
-                    retry_backoff_factor=1,
-                    retry_backoff_max=10,
-                    retry_on_status_codes=[429, 500, 502, 503, 504]  # Retry on rate limit and server errors
-                )
+                google_path = ocr_config.get('google_credentials_path')
+                if not google_path:
+                    raise ValueError("Google credentials path required")
+                    
+                os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = google_path
+                self.vision_client = vision.ImageAnnotatorClient()
                 
-                # Create client with custom retry policy
-                self.vision_client = self.azure_client_class(
-                    endpoint=azure_endpoint,
-                    credential=self.azure_cred_class(azure_key),
-                    retry_policy=retry_policy
-                )
-            except Exception:
-                # Fallback to standard client creation
-                self.vision_client = self.azure_client_class(
-                    endpoint=azure_endpoint,
-                    credential=self.azure_cred_class(azure_key)
-                )
+            elif self.ocr_provider == 'azure':
+                # Import Azure libraries
+                try:
+                    from azure.ai.vision.imageanalysis import ImageAnalysisClient
+                    from azure.core.credentials import AzureKeyCredential
+                    self.azure_client_class = ImageAnalysisClient
+                    self.azure_cred_class = AzureKeyCredential
+                except ImportError:
+                    raise ImportError("Azure Computer Vision required. Install with: pip install azure-ai-vision-imageanalysis")
+                
+                azure_key = ocr_config.get('azure_key')
+                azure_endpoint = ocr_config.get('azure_endpoint')
+                
+                if not azure_key or not azure_endpoint:
+                    raise ValueError("Azure key and endpoint required")
+                
+                # OPTIMIZATION: Configure Azure client with better connection settings
+                try:
+                    from azure.core.pipeline.policies import RetryPolicy
+                    # Create retry policy with shorter timeouts
+                    retry_policy = RetryPolicy(
+                        retry_total=3,
+                        retry_backoff_factor=1,
+                        retry_backoff_max=10,
+                        retry_on_status_codes=[429, 500, 502, 503, 504]  # Retry on rate limit and server errors
+                    )
+                    
+                    # Create client with custom retry policy
+                    self.vision_client = self.azure_client_class(
+                        endpoint=azure_endpoint,
+                        credential=self.azure_cred_class(azure_key),
+                        retry_policy=retry_policy
+                    )
+                except Exception:
+                    # Fallback to standard client creation
+                    self.vision_client = self.azure_client_class(
+                        endpoint=azure_endpoint,
+                        credential=self.azure_cred_class(azure_key)
+                    )
+            else:
+                # New OCR providers handled by OCR manager
+                try:
+                    from ocr_manager import OCRManager
+                    self.ocr_manager = OCRManager(log_callback=log_callback)
+                    print(f"Initialized OCR Manager for {self.ocr_provider}")
+                    # Initialize OCR manager with stop flag awareness
+                    if hasattr(self.ocr_manager, 'reset_stop_flags'):
+                        self.ocr_manager.reset_stop_flags()
+                except Exception as _e:
+                    self.ocr_manager = None
+                    self._log(f"Failed to initialize OCRManager: {str(_e)}", "error")
         else:
-            # New OCR providers handled by OCR manager
-            try:
-                from ocr_manager import OCRManager
-                self.ocr_manager = OCRManager(log_callback=log_callback)
-                print(f"Initialized OCR Manager for {self.ocr_provider}")
-                # Initialize OCR manager with stop flag awareness
-                if hasattr(self.ocr_manager, 'reset_stop_flags'):
-                    self.ocr_manager.reset_stop_flags()
-            except Exception as _e:
-                self.ocr_manager = None
-                self._log(f"Failed to initialize OCRManager: {str(_e)}", "error")
+            # OCR initialization skipped - set defaults
+            self.ocr_provider = ocr_config.get('provider', 'google')
+            self.vision_client = None
+            self.ocr_manager = None
         
         self.client = unified_client
         self.main_gui = main_gui
