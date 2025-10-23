@@ -3594,18 +3594,6 @@ class MangaTranslationTab(QObject):
         self.multi_key_label.setStyleSheet(f"color: {multi_key_color};")
         api_status_layout.addWidget(self.multi_key_label)
         
-        # Pool tracker (separate line below)
-        self.pool_tracker_label = QLabel()
-        self.pool_tracker_label.setFont(model_font)
-        self.pool_tracker_label.setStyleSheet("color: #17a2b8;")
-        self._update_pool_tracker_label()
-        api_status_layout.addWidget(self.pool_tracker_label)
-        
-        # Start auto-update timer for pool tracker (update every 2 seconds)
-        from PySide6.QtCore import QTimer
-        self.pool_update_timer = QTimer()
-        self.pool_update_timer.timeout.connect(self._update_pool_tracker_label)
-        self.pool_update_timer.start(2000)  # Update every 2 seconds
         
         context_info_layout.addWidget(api_status_frame)
         context_frame_layout.addWidget(context_info)
@@ -5128,6 +5116,20 @@ class MangaTranslationTab(QObject):
         self.current_file_label.setFont(current_file_font)
         self.current_file_label.setStyleSheet("color: lightgray;")
         progress_frame_layout.addWidget(self.current_file_label)
+        
+        # Pool tracker (shows loaded model instances)
+        self.pool_tracker_label = QLabel()
+        pool_tracker_font = QFont('Arial', 9)
+        self.pool_tracker_label.setFont(pool_tracker_font)
+        self.pool_tracker_label.setStyleSheet("color: #17a2b8;")
+        self._update_pool_tracker_label()
+        progress_frame_layout.addWidget(self.pool_tracker_label)
+        
+        # Start auto-update timer for pool tracker (update every 2 seconds)
+        from PySide6.QtCore import QTimer
+        self.pool_update_timer = QTimer()
+        self.pool_update_timer.timeout.connect(self._update_pool_tracker_label)
+        self.pool_update_timer.start(2000)  # Update every 2 seconds
         
         main_layout.addWidget(progress_frame)
         
