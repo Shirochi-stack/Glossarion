@@ -1585,10 +1585,14 @@ class MangaTranslator:
                     except Exception:
                         pass
                 # Return thread-local bubble detector to pool (DO NOT unload)
+                # BUT: Do NOT return if using singleton mode (singleton stays checked out permanently)
                 if hasattr(tl, 'bubble_detector') and tl.bubble_detector is not None:
                     try:
-                        # Return to pool for reuse WITHOUT touching global CUDA caches
-                        self._return_bubble_detector_to_pool()
+                        # Only return to pool if NOT using singleton mode
+                        using_singleton = getattr(self, 'use_singleton_bubble_detector', False) or (hasattr(self, 'use_singleton_models') and self.use_singleton_models)
+                        if not using_singleton:
+                            # Return to pool for reuse WITHOUT touching global CUDA caches
+                            self._return_bubble_detector_to_pool()
                         # Keep thread-local reference intact for reuse in next image
                         # Only clear if we're truly shutting down the thread
                     except Exception:
@@ -12507,13 +12511,25 @@ class MangaTranslator:
                         if rec and isinstance(rec, dict):
                             spares = rec.get('spares') or []
                             self._log(f"[DEBUG] Found pool record with {len(spares)} spares", "debug")
-                            # For singleton mode, we can use a pool instance without checking it out
-                            # since the singleton will keep it loaded permanently
+                            # For singleton mode, check out the detector from the pool
+                            # This ensures the pool tracker shows it as "in use"
                             if spares:
-                                # Just use the first spare (don't pop or check out)
-                                # Singleton will keep it loaded, pool can still track it
-                                bd = spares[0]
-                                self._log(f"🤖 Using pool bubble detector for singleton (no check-out needed)", "info")
+                                # Initialize checked_out list if it doesn't exist
+                                if 'checked_out' not in rec:
+                                    rec['checked_out'] = []
+                                checked_out = rec['checked_out']
+                                
+                                # Check out the first available spare
+                                for spare in spares:
+                                    if spare not in checked_out and spare:
+                                        checked_out.append(spare)
+                                        bd = spare
+                                        # Store references for later return (even though singleton won't return it)
+                                        self._checked_out_bubble_detector = spare
+                                        self._bubble_detector_pool_key = key
+                                        available = len(spares) - len(checked_out)
+                                        self._log(f"🤖 Checked out pool bubble detector for singleton ({len(checked_out)}/{len(spares)} in use, {available} available)", "info")
+                                        break
                         else:
                             self._log(f"[DEBUG] No pool record found for key: {key}", "debug")
                 except Exception as e:
