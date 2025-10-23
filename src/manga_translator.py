@@ -8951,36 +8951,43 @@ class MangaTranslator:
                         self._log(f"⚠️ Preload JIT download failed: {e}", "warning")
                         resolved = None
                 if resolved and os.path.exists(resolved):
-                    ok = inp.load_model_with_retry(local_method, resolved, force_reload=False)
-                    # CRITICAL: Verify model_loaded attribute after load
-                    model_actually_loaded = ok and getattr(inp, 'model_loaded', False)
-                    if not model_actually_loaded:
-                        # Debug why model wasn't loaded
-                        self._log(f"🔍 Preload check: load_model_with_retry={ok}, model_loaded={getattr(inp, 'model_loaded', 'ATTR_MISSING')}", "debug")
-                        if hasattr(inp, 'session'):
-                            self._log(f"   Inpainter has session: {inp.session is not None}", "debug")
-                    
-                    if model_actually_loaded:
-                        with MangaTranslator._inpaint_pool_lock:
-                            rec = MangaTranslator._inpaint_pool.get(key)
-                            if not rec:
-                                # Pool record doesn't exist - create it
-                                rec = {'spares': [], 'checked_out': []}
-                                MangaTranslator._inpaint_pool[key] = rec
-                            # Ensure spares list exists
-                            if 'spares' not in rec or rec['spares'] is None:
-                                rec['spares'] = []
-                            if 'checked_out' not in rec:
-                                rec['checked_out'] = []
-                            # Append to existing spares list (don't replace the record!)
-                            rec['spares'].append(inp)
-                        created += 1
-                        self._log(f"✅ Preloaded spare {created}: model_loaded={getattr(inp, 'model_loaded', False)}", "debug")
-                    else:
-                        if ok:
-                            self._log(f"⚠️ Preload: load_model_with_retry returned True but model_loaded is False or missing", "warning")
+                    try:
+                        ok = inp.load_model_with_retry(local_method, resolved, force_reload=False)
+                        # CRITICAL: Verify model_loaded attribute after load
+                        model_actually_loaded = ok and getattr(inp, 'model_loaded', False)
+                        if not model_actually_loaded:
+                            # Debug why model wasn't loaded
+                            self._log(f"🔍 Preload check: load_model_with_retry={ok}, model_loaded={getattr(inp, 'model_loaded', 'ATTR_MISSING')}", "debug")
+                            if hasattr(inp, 'session'):
+                                self._log(f"   Inpainter has session: {inp.session is not None}", "debug")
+                            if hasattr(inp, 'onnx_session'):
+                                self._log(f"   Inpainter has onnx_session: {inp.onnx_session is not None}", "debug")
+                        
+                        if model_actually_loaded:
+                            with MangaTranslator._inpaint_pool_lock:
+                                rec = MangaTranslator._inpaint_pool.get(key)
+                                if not rec:
+                                    # Pool record doesn't exist - create it
+                                    rec = {'spares': [], 'checked_out': []}
+                                    MangaTranslator._inpaint_pool[key] = rec
+                                # Ensure spares list exists
+                                if 'spares' not in rec or rec['spares'] is None:
+                                    rec['spares'] = []
+                                if 'checked_out' not in rec:
+                                    rec['checked_out'] = []
+                                # Append to existing spares list (don't replace the record!)
+                                rec['spares'].append(inp)
+                            created += 1
+                            self._log(f"✅ Preloaded spare {created}: model_loaded={getattr(inp, 'model_loaded', False)}", "debug")
                         else:
-                            self._log(f"⚠️ Preload: load_model_with_retry returned False", "warning")
+                            if ok:
+                                self._log(f"⚠️ Preload: load_model_with_retry returned True but model_loaded is False or missing", "warning")
+                            else:
+                                self._log(f"⚠️ Preload: load_model_with_retry returned False for {local_method} model at {resolved}", "warning")
+                    except Exception as load_err:
+                        self._log(f"❌ Preload: Exception during load_model_with_retry: {load_err}", "error")
+                        import traceback
+                        self._log(f"Traceback: {traceback.format_exc()}", "debug")
                 else:
                     self._log("⚠️ Preload skipped: no model path available", "warning")
             except Exception as e:
