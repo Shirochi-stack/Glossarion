@@ -940,6 +940,12 @@ class MangaTranslationTab(QObject):
         try:
             print("[CLEANUP] Starting MangaTranslationTab cleanup...")
             
+            # Stop pool update timer
+            if hasattr(self, 'pool_update_timer') and self.pool_update_timer:
+                print("[CLEANUP] Stopping pool update timer...")
+                self.pool_update_timer.stop()
+                self.pool_update_timer = None
+            
             # Shutdown parallel save system and its ThreadPoolExecutor
             if hasattr(self, '_parallel_save_system') and self._parallel_save_system:
                 print("[CLEANUP] Shutting down parallel save system...")
@@ -3578,7 +3584,7 @@ class MangaTranslationTab(QObject):
         self.model_label.setFont(model_font)
         api_status_layout.addWidget(self.model_label)
         
-        # Multi-key status display
+        # Multi-key status
         multi_key_enabled = self.main_gui.config.get('use_multi_api_keys', False)
         multi_key_text = "• Multi-Key: ON" if multi_key_enabled else "• Multi-Key: OFF"
         multi_key_color = "green" if multi_key_enabled else "gray"
@@ -3587,6 +3593,19 @@ class MangaTranslationTab(QObject):
         self.multi_key_label.setFont(model_font)
         self.multi_key_label.setStyleSheet(f"color: {multi_key_color};")
         api_status_layout.addWidget(self.multi_key_label)
+        
+        # Pool tracker (separate line below)
+        self.pool_tracker_label = QLabel()
+        self.pool_tracker_label.setFont(model_font)
+        self.pool_tracker_label.setStyleSheet("color: #17a2b8;")
+        self._update_pool_tracker_label()
+        api_status_layout.addWidget(self.pool_tracker_label)
+        
+        # Start auto-update timer for pool tracker (update every 2 seconds)
+        from PySide6.QtCore import QTimer
+        self.pool_update_timer = QTimer()
+        self.pool_update_timer.timeout.connect(self._update_pool_tracker_label)
+        self.pool_update_timer.start(2000)  # Update every 2 seconds
         
         context_info_layout.addWidget(api_status_frame)
         context_frame_layout.addWidget(context_info)
@@ -6387,9 +6406,43 @@ class MangaTranslationTab(QObject):
         # Show dialog
         dialog.exec()
     
+    def _update_pool_tracker_label(self):
+        """Update the pool tracker label with current preload pool status"""
+        try:
+            from manga_translator import MangaTranslator
+            
+            # Count bubble detectors in pool
+            detector_count = 0
+            try:
+                with MangaTranslator._detector_pool_lock:
+                    for rec in MangaTranslator._detector_pool.values():
+                        spares = rec.get('spares', [])
+                        detector_count += len(spares)
+            except Exception:
+                pass
+            
+            # Count inpainters in pool
+            inpainter_count = 0
+            try:
+                with MangaTranslator._inpaint_pool_lock:
+                    for rec in MangaTranslator._inpaint_pool.values():
+                        spares = rec.get('spares', [])
+                        inpainter_count += len(spares)
+            except Exception:
+                pass
+            
+            # Build pool text
+            pool_text = f"• Pool: 🤖 {detector_count} | 🎨 {inpainter_count}"
+            
+            if hasattr(self, 'pool_tracker_label'):
+                self.pool_tracker_label.setText(pool_text)
+        except Exception as e:
+            print(f"[POOL_TRACKER] Error updating: {e}")
+    
     def _refresh_context_settings_with_feedback(self):
-        """Refresh context settings from main GUI with visual feedback"""
-        from PySide6.QtCore import QTimer
+        """Refresh context settings from main GUI and show feedback"""
+        self._refresh_context_settings()
+        self._update_pool_tracker_label()  # Also update pool tracker
         
         # Store original button state
         original_text = self.refresh_btn.text()
