@@ -12755,6 +12755,22 @@ class MangaTranslator:
         """Get or create a LocalInpainter using pool system.
         Loads the requested model if needed.
         """
+        # Normalize the model path to ensure key consistency
+        if model_path:
+            try:
+                model_path = os.path.abspath(os.path.normpath(model_path))
+            except Exception:
+                pass
+        
+        key = (local_method or 'anime', model_path or '')
+        
+        # OPTIMIZATION: Check if we already have this exact instance checked out
+        # This prevents re-checking out the same instance multiple times per panel
+        if hasattr(self, '_checked_out_inpainter') and hasattr(self, '_inpainter_pool_key'):
+            if self._inpainter_pool_key == key and self._checked_out_inpainter is not None:
+                # Already have this exact model checked out - reuse it!
+                return self._checked_out_inpainter
+        
         # Use thread-local instance with pool checkout
         # Ensure thread-local storage exists and has a dict
         tl = getattr(self, '_thread_local', None)
@@ -12763,44 +12779,46 @@ class MangaTranslator:
             tl = self._thread_local
         if not hasattr(tl, 'local_inpainters') or getattr(tl, 'local_inpainters', None) is None:
             tl.local_inpainters = {}
-        key = (local_method or 'anime', model_path or '')
-        if key not in tl.local_inpainters or tl.local_inpainters[key] is None:
-            # First, try to check out a preloaded spare instance from the shared pool
-            # DO NOT pop from spares - use the checkout mechanism to track usage properly
-            try:
-                with MangaTranslator._inpaint_pool_lock:
-                    rec = MangaTranslator._inpaint_pool.get(key)
-                    if rec and isinstance(rec, dict):
-                        spares = rec.get('spares') or []
-                        # Initialize checked_out list if it doesn't exist
-                        if 'checked_out' not in rec:
-                            rec['checked_out'] = []
-                        checked_out = rec['checked_out']
-                        
-                        # Look for an available spare (not already checked out)
-                        if spares:
-                            for spare in spares:
-                                if spare not in checked_out and spare and getattr(spare, 'model_loaded', False):
-                                    # Mark as checked out (don't remove from spares!)
-                                    checked_out.append(spare)
-                                    tl.local_inpainters[key] = spare
-                                    # Store reference for later return
-                                    self._checked_out_inpainter = spare
-                                    self._inpainter_pool_key = key
-                                    available = len(spares) - len(checked_out)
-                                    self._log(f"🎨 Using preloaded local inpainting instance ({len(checked_out)}/{len(spares)} in use, {available} available)", "info")
-                                    return tl.local_inpainters[key]
-            except Exception:
-                pass
-            
-            # No preloaded instance available - this is a problem!
-            # DO NOT create temporary instances that load models - they cause memory leaks
-            self._log("⚠️ No inpainter available in pool - all instances checked out!", "warning")
-            self._log("🚨 MEMORY LEAK PREVENTION: Refusing to create temporary inpainter instance", "warning")
-            self._log("💡 Solution: Increase preload count or reduce parallel translation threads", "info")
-            # Return None to signal unavailability - caller must handle gracefully
-            return None
-        return getattr(self._thread_local, 'local_inpainters', {}).get(key)
+        
+        # Check thread-local cache first
+        if key in tl.local_inpainters and tl.local_inpainters[key] is not None:
+            # Already cached in this thread - return it
+            return tl.local_inpainters[key]
+        
+        # Not cached - try to check out from pool
+        try:
+            with MangaTranslator._inpaint_pool_lock:
+                rec = MangaTranslator._inpaint_pool.get(key)
+                if rec and isinstance(rec, dict):
+                    spares = rec.get('spares') or []
+                    # Initialize checked_out list if it doesn't exist
+                    if 'checked_out' not in rec:
+                        rec['checked_out'] = []
+                    checked_out = rec['checked_out']
+                    
+                    # Look for an available spare (not already checked out)
+                    if spares:
+                        for spare in spares:
+                            if spare not in checked_out and spare and getattr(spare, 'model_loaded', False):
+                                # Mark as checked out (don't remove from spares!)
+                                checked_out.append(spare)
+                                tl.local_inpainters[key] = spare
+                                # Store reference for later return
+                                self._checked_out_inpainter = spare
+                                self._inpainter_pool_key = key
+                                available = len(spares) - len(checked_out)
+                                self._log(f"🎨 Using preloaded local inpainting instance ({len(checked_out)}/{len(spares)} in use, {available} available)", "info")
+                                return tl.local_inpainters[key]
+        except Exception:
+            pass
+        
+        # No preloaded instance available - this is a problem!
+        # DO NOT create temporary instances that load models - they cause memory leaks
+        self._log("⚠️ No inpainter available in pool - all instances checked out!", "warning")
+        self._log("🚨 MEMORY LEAK PREVENTION: Refusing to create temporary inpainter instance", "warning")
+        self._log("💡 Solution: Increase preload count or reduce parallel translation threads", "info")
+        # Return None to signal unavailability - caller must handle gracefully
+        return None
     
     def translate_regions(self, regions: List[TextRegion], image_path: str) -> List[TextRegion]:
         """Translate all text regions with API delay"""
