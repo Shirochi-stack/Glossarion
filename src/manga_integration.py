@@ -7597,8 +7597,8 @@ class MangaTranslationTab(QObject):
                     skip_inpainter_init=True
                 )
                 
-                # Preload 1 inpainter into the pool
-                created = mt.preload_local_inpainters(method, normalized_path, 1)
+                # Preload 1 inpainter into the pool (concurrent for faster loading)
+                created = mt.preload_local_inpainters_concurrent(method, normalized_path, 1)
                 
                 if created > 0:
                     print(f"[INPAINT_LOAD] Successfully preloaded {method} inpainter")
@@ -10870,8 +10870,8 @@ class MangaTranslationTab(QObject):
                     try:
                         import time as _time
                         t0 = _time.time()
-                        # Use synchronous preload to ensure instances are ready before panel processing starts
-                        self.translator.preload_local_inpainters(local_method, model_path, desired_inp)
+                        # Use concurrent preload for faster startup when loading multiple instances
+                        self.translator.preload_local_inpainters_concurrent(local_method, model_path, desired_inp)
                         dt = _time.time() - t0
                         self._log(f"⏱️ Local inpainting preload finished in {dt:.2f}s", "info")
                     except Exception as _e:

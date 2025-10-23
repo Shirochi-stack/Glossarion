@@ -5285,9 +5285,9 @@ def _preload_shared_inpainter(self):
             
             mt = MangaTranslator(ocr_config=ocr_config, unified_client=uc, main_gui=self.main_gui, log_callback=_cb, skip_inpainter_init=True)
             
-            # Preload 1 inpainter instance into the pool
-            print(f"[PRELOAD_INPAINTER] Calling preload_local_inpainters for {local_model}...")
-            created = mt.preload_local_inpainters(local_model, model_path, 1)
+            # Preload 1 inpainter instance into the pool (use concurrent for faster loading)
+            print(f"[PRELOAD_INPAINTER] Calling preload_local_inpainters_concurrent for {local_model}...")
+            created = mt.preload_local_inpainters_concurrent(local_model, model_path, 1)
             if created > 0:
                 print(f"[PRELOAD_INPAINTER] Successfully preloaded {created} inpainter instance(s)")
                 self._log(f"🎯 Preloaded {local_model.upper()} inpainting model", "info")

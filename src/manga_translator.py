@@ -9102,8 +9102,10 @@ class MangaTranslator:
                 except Exception:
                     max_parallel = 2
             else:
-                max_parallel = 1
-        max_parallel = max(1, min(int(max_parallel), int(desired)))
+                # Even without parallel processing enabled, use 2 workers for preload
+                # This makes preload 2x faster with no downside (models load independently)
+                max_parallel = 2
+        max_parallel = max(2, min(int(max_parallel), int(desired)))  # Minimum 2 for concurrent preload
         ctx = " for parallel panels" if int(count) > 1 else ""
         self._log(f"🧰 Preloading {desired} local inpainting instance(s){ctx} (parallel={max_parallel})", "info")
         # Resolve model path once
