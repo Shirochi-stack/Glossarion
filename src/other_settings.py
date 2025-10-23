@@ -6141,23 +6141,23 @@ def on_profile_select(self, event=None):
     # Get the current profile name from the combobox
     name = self.profile_menu.currentText() if hasattr(self, 'profile_menu') else self.profile_var
     
-    # Skip if this is the same profile already selected (avoids unnecessary text replacement)
-    if hasattr(self, 'profile_var') and self.profile_var == name:
+    # Skip if the name is empty or whitespace only
+    if not name or not name.strip():
         return
     
-    # Update profile_var to match
-    self.profile_var = name
-    
-    prompt = self.prompt_profiles.get(name, "")
-    
-    # Only update the text if it's actually different from what's currently in the text area
-    current_text = self.prompt_text.toPlainText().strip()
-    if current_text != prompt.strip():
-        # PySide6: Clear and set QTextEdit content
-        self.prompt_text.clear()
-        self.prompt_text.setPlainText(prompt)
-    
-    self.config['active_profile'] = name
+    # Only update if the profile actually exists in prompt_profiles
+    # This prevents switching to non-existent profiles while typing
+    if name in self.prompt_profiles:
+        prompt = self.prompt_profiles.get(name, "")
+        current_text = self.prompt_text.toPlainText().strip()
+        if current_text != prompt.strip():
+            # PySide6: Clear and set QTextEdit content
+            self.prompt_text.clear()
+            self.prompt_text.setPlainText(prompt)
+        
+        # Update profile_var to match only when profile exists
+        self.profile_var = name
+        self.config['active_profile'] = name
 
 def save_profile(self):
     """Save current prompt under selected profile and persist."""

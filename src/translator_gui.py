@@ -2266,6 +2266,7 @@ Recent translations to summarize:
         # Connect signals for profile selection
         self.profile_menu.currentIndexChanged.connect(lambda: self.on_profile_select())
         self.profile_menu.lineEdit().returnPressed.connect(lambda: self.on_profile_select())
+        self.profile_menu.lineEdit().textChanged.connect(lambda: self.on_profile_select())
         
         # Create a horizontal layout for profile buttons to keep them close together
         profile_buttons_widget = QWidget()
