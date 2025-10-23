@@ -1985,14 +1985,37 @@ def _run_clean_background(self, image_path: str, regions: list):
                 try:
                     from manga_translator import MangaTranslator
                     from unified_api_client import UnifiedClient
+                    import time
+                    
                     ocr_config = _get_ocr_config(self, ) if hasattr(self, 'main_gui') else {}
                     api_key = self.main_gui.config.get('api_key', '') or 'dummy'
                     model = self.main_gui.config.get('model', 'gpt-4o-mini')
                     uc = UnifiedClient(model=model, api_key=api_key)
                     temp_translator = MangaTranslator(ocr_config=ocr_config, unified_client=uc, main_gui=self.main_gui, log_callback=lambda m, l: None, skip_inpainter_init=True)
-                    inpainter = temp_translator._get_or_init_shared_local_inpainter(local_model, resolved_model_path, force_reload=False)
-                    # Immediately update GUI pool tracker after checkout
-                    self.update_queue.put(('update_pool_tracker', None))
+                    
+                    # POLL for inpainter with timeout (same as translator initialization)
+                    inpainter = None
+                    poll_timeout = 30  # 30 seconds
+                    poll_interval = 0.5  # Check every 500ms
+                    start_time = time.time()
+                    
+                    while time.time() - start_time < poll_timeout:
+                        inpainter = temp_translator._get_or_init_shared_local_inpainter(local_model, resolved_model_path, force_reload=False)
+                        if inpainter:
+                            break
+                        
+                        # No inpainter yet - wait and retry
+                        elapsed = time.time() - start_time
+                        if elapsed >= 2 and int(elapsed) % 5 == 0:  # Log every 5 seconds after first 2s
+                            self._log(f"⏳ Waiting for inpainter pool... ({int(elapsed)}s)", "info")
+                        time.sleep(poll_interval)
+                    
+                    if inpainter:
+                        # Immediately update GUI pool tracker after checkout
+                        self.update_queue.put(('update_pool_tracker', None))
+                    else:
+                        self._log(f"⚠️ No inpainter available after {poll_timeout}s timeout", "warning")
+                        
                 except Exception as e:
                     print(f"[CLEAN] Failed to create translator/inpainter: {e}")
                     inpainter = None
@@ -2498,6 +2521,32 @@ def _run_inpainting_sync(self, image_path: str, regions: list) -> str:
                 try:
                     from manga_translator import MangaTranslator
                     from unified_api_client import UnifiedClient
+                    import time
+                    
+                    # Wait for inpainter pool to be available (if preloading)
+                    print(f"[INPAINT_SYNC] Checking inpainter pool availability...")
+                    max_wait_time = 30  # seconds
+                    poll_interval = 0.5  # seconds
+                    start_time = time.time()
+                    pool_ready = False
+                    
+                    while time.time() - start_time < max_wait_time:
+                        try:
+                            from local_inpainter import LocalInpainter
+                            if hasattr(LocalInpainter, '_instance_pool') and LocalInpainter._instance_pool:
+                                available = [inst for inst in LocalInpainter._instance_pool if not inst.get('checked_out', False)]
+                                if available:
+                                    print(f"[INPAINT_SYNC] Inpainter pool ready ({len(available)} available)")
+                                    pool_ready = True
+                                    break
+                            time.sleep(poll_interval)
+                        except Exception as poll_err:
+                            print(f"[INPAINT_SYNC] Pool check error: {poll_err}")
+                            time.sleep(poll_interval)
+                    
+                    if not pool_ready:
+                        print(f"[INPAINT_SYNC] Inpainter pool not ready after {max_wait_time}s, proceeding anyway")
+                    
                     ocr_config = _get_ocr_config(self, ) if hasattr(self, 'main_gui') else {}
                     api_key = self.main_gui.config.get('api_key', '') or 'dummy'
                     model = self.main_gui.config.get('model', 'gpt-4o-mini')
