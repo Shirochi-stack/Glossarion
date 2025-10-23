@@ -8902,6 +8902,24 @@ class MangaTranslator:
         # Debug: Log the preload key for tracking
         try:
             self._log(f"🔑 Preload using pool key: method={local_method}, path={os.path.basename(model_path) if model_path else 'None'} (normalized)", "debug")
+            self._log(f"🔑 Full pool key: {key}", "debug")
+            # Also log all existing pool keys for comparison
+            with MangaTranslator._inpaint_pool_lock:
+                existing_keys = list(MangaTranslator._inpaint_pool.keys())
+                if existing_keys:
+                    self._log(f"🗄️ Existing pool keys: {existing_keys}", "debug")
+                    # CRITICAL: Show detailed comparison of paths for debugging
+                    for existing_method, existing_path in existing_keys:
+                        method_match = (existing_method == local_method)
+                        path_match = (existing_path == (model_path or ''))
+                        self._log(f"   Compare: method_match={method_match} ('{existing_method}' vs '{local_method}'), path_match={path_match}", "debug")
+                        if not path_match and existing_path and model_path:
+                            # Show character-level diff for path mismatch
+                            self._log(f"      Existing path: '{existing_path}'", "debug")
+                            self._log(f"      Current path:  '{model_path}'", "debug")
+                            # Check for slash differences
+                            if existing_path.replace('/', '\\') == model_path or existing_path.replace('\\', '/') == model_path:
+                                self._log(f"      ⚠️ PATH MISMATCH: Slash direction difference detected!", "warning")
         except:
             pass
         
@@ -8916,6 +8934,18 @@ class MangaTranslator:
                 current_spares_count = len(rec.get('spares', []))
                 current_checked_out_count = len(rec.get('checked_out', []))
                 self._log(f"🔍 PRELOAD DEBUG: Existing pool record found: {current_spares_count} spares, {current_checked_out_count} checked out", "info")
+                
+                # CRITICAL: Clean up stale/duplicate pool entries
+                # If we have existing spares but none are checked out, assume they're stale and unload them
+                if current_spares_count > 0 and current_checked_out_count == 0:
+                    self._log(f"🧹 Cleaning up {current_spares_count} stale inpainter instance(s) (none in use)", "info")
+                    for old_spare in rec.get('spares', []):
+                        try:
+                            if hasattr(old_spare, 'unload'):
+                                old_spare.unload()
+                        except Exception:
+                            pass
+                    rec['spares'] = []  # Clear the stale spares
             if 'spares' not in rec or rec['spares'] is None:
                 rec['spares'] = []
             if 'checked_out' not in rec:
