@@ -12705,50 +12705,72 @@ class MangaTranslator:
     def _get_thread_bubble_detector(self):
         """Get or initialize bubble detector using pool system.
         Will check out a preloaded detector if available for current settings.
+        Polls and waits if all instances are checked out.
         """
         # Use thread-local instance with pool checkout
         if not hasattr(self, '_thread_local') or getattr(self, '_thread_local', None) is None:
             self._thread_local = threading.local()
         if not hasattr(self._thread_local, 'bubble_detector') or self._thread_local.bubble_detector is None:
             from bubble_detector import BubbleDetector
+            import time
+            
+            # Get key for pool lookup
+            ocr_settings = self.main_gui.config.get('manga_settings', {}).get('ocr', {}) if hasattr(self, 'main_gui') else {}
+            det_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
+            model_id = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path') or ''
+            key = (det_type, model_id)
+            
+            # Polling parameters
+            max_wait_time = 60  # Maximum 60 seconds
+            poll_interval = 0.5  # Check every 0.5 seconds
+            elapsed = 0
+            
             # Try to check out a preloaded spare for the current detector settings
-            try:
-                ocr_settings = self.main_gui.config.get('manga_settings', {}).get('ocr', {}) if hasattr(self, 'main_gui') else {}
-                det_type = ocr_settings.get('detector_type', 'rtdetr_onnx')
-                model_id = ocr_settings.get('rtdetr_model_url') or ocr_settings.get('bubble_model_path') or ''
-                key = (det_type, model_id)
-                with MangaTranslator._detector_pool_lock:
-                    rec = MangaTranslator._detector_pool.get(key)
-                    if rec and isinstance(rec, dict):
-                        spares = rec.get('spares') or []
-                        # Initialize checked_out list if it doesn't exist
-                        if 'checked_out' not in rec:
-                            rec['checked_out'] = []
-                        checked_out = rec['checked_out']
-                        
-                        # Look for an available spare (not checked out)
-                        if spares:
-                            for spare in spares:
-                                if spare not in checked_out and spare:
-                                    # Check out this spare instance
-                                    checked_out.append(spare)
-                                    self._thread_local.bubble_detector = spare
-                                    # Store references for later return
-                                    self._checked_out_bubble_detector = spare
-                                    self._bubble_detector_pool_key = key
-                                    available = len(spares) - len(checked_out)
-                                    self._log(f"🤖 Checked out bubble detector from pool ({len(checked_out)}/{len(spares)} in use, {available} available)", "info")
-                                    break
-            except Exception:
-                pass
-            # If still not set, NO pool instances available - this is a problem!
-            # DO NOT create temporary instances that load models - they cause memory leaks
-            if not hasattr(self._thread_local, 'bubble_detector') or self._thread_local.bubble_detector is None:
-                self._log("⚠️ No bubble detector available in pool - all instances checked out!", "warning")
-                self._log("🚨 MEMORY LEAK PREVENTION: Refusing to create temporary detector instance", "warning")
-                self._log("💡 Solution: Increase preload count or reduce parallel translation threads", "info")
-                # Return None to signal unavailability - caller must handle gracefully
-                return None
+            while elapsed < max_wait_time:
+                try:
+                    # Check stop flag during wait
+                    if self._check_stop():
+                        self._log("⏹️ Translation stopped while waiting for bubble detector", "warning")
+                        return None
+                    
+                    with MangaTranslator._detector_pool_lock:
+                        rec = MangaTranslator._detector_pool.get(key)
+                        if rec and isinstance(rec, dict):
+                            spares = rec.get('spares') or []
+                            # Initialize checked_out list if it doesn't exist
+                            if 'checked_out' not in rec:
+                                rec['checked_out'] = []
+                            checked_out = rec['checked_out']
+                            
+                            # Look for an available spare (not checked out)
+                            if spares:
+                                for spare in spares:
+                                    if spare not in checked_out and spare:
+                                        # Check out this spare instance
+                                        checked_out.append(spare)
+                                        self._thread_local.bubble_detector = spare
+                                        # Store references for later return
+                                        self._checked_out_bubble_detector = spare
+                                        self._bubble_detector_pool_key = key
+                                        available = len(spares) - len(checked_out)
+                                        if elapsed > 0:
+                                            self._log(f"🤖 Checked out bubble detector after {elapsed:.1f}s wait ({len(checked_out)}/{len(spares)} in use)", "info")
+                                        else:
+                                            self._log(f"🤖 Checked out bubble detector from pool ({len(checked_out)}/{len(spares)} in use, {available} available)", "info")
+                                        return self._thread_local.bubble_detector
+                except Exception:
+                    pass
+                
+                # No instance available yet - wait and retry
+                if elapsed == 0:
+                    self._log("⏳ All bubble detector instances in use - waiting for one to become available...", "info")
+                time.sleep(poll_interval)
+                elapsed += poll_interval
+            
+            # Timeout - no instance became available
+            self._log(f"⚠️ Timeout waiting for bubble detector after {max_wait_time}s", "warning")
+            self._log("💡 Solution: Increase preload count or reduce parallel translation threads", "info")
+            return None
         return self._thread_local.bubble_detector
     
     def _get_thread_local_inpainter(self, local_method: str, model_path: str):
@@ -12785,39 +12807,56 @@ class MangaTranslator:
             # Already cached in this thread - return it
             return tl.local_inpainters[key]
         
-        # Not cached - try to check out from pool
-        try:
-            with MangaTranslator._inpaint_pool_lock:
-                rec = MangaTranslator._inpaint_pool.get(key)
-                if rec and isinstance(rec, dict):
-                    spares = rec.get('spares') or []
-                    # Initialize checked_out list if it doesn't exist
-                    if 'checked_out' not in rec:
-                        rec['checked_out'] = []
-                    checked_out = rec['checked_out']
-                    
-                    # Look for an available spare (not already checked out)
-                    if spares:
-                        for spare in spares:
-                            if spare not in checked_out and spare and getattr(spare, 'model_loaded', False):
-                                # Mark as checked out (don't remove from spares!)
-                                checked_out.append(spare)
-                                tl.local_inpainters[key] = spare
-                                # Store reference for later return
-                                self._checked_out_inpainter = spare
-                                self._inpainter_pool_key = key
-                                available = len(spares) - len(checked_out)
-                                self._log(f"🎨 Using preloaded local inpainting instance ({len(checked_out)}/{len(spares)} in use, {available} available)", "info")
-                                return tl.local_inpainters[key]
-        except Exception:
-            pass
+        # Not cached - try to check out from pool with polling
+        import time
+        max_wait_time = 60  # Maximum 60 seconds
+        poll_interval = 0.5  # Check every 0.5 seconds
+        elapsed = 0
         
-        # No preloaded instance available - this is a problem!
-        # DO NOT create temporary instances that load models - they cause memory leaks
-        self._log("⚠️ No inpainter available in pool - all instances checked out!", "warning")
-        self._log("🚨 MEMORY LEAK PREVENTION: Refusing to create temporary inpainter instance", "warning")
+        while elapsed < max_wait_time:
+            # Check stop flag during wait
+            if self._check_stop():
+                self._log("⏹️ Translation stopped while waiting for inpainter", "warning")
+                return None
+            
+            try:
+                with MangaTranslator._inpaint_pool_lock:
+                    rec = MangaTranslator._inpaint_pool.get(key)
+                    if rec and isinstance(rec, dict):
+                        spares = rec.get('spares') or []
+                        # Initialize checked_out list if it doesn't exist
+                        if 'checked_out' not in rec:
+                            rec['checked_out'] = []
+                        checked_out = rec['checked_out']
+                        
+                        # Look for an available spare (not already checked out)
+                        if spares:
+                            for spare in spares:
+                                if spare not in checked_out and spare and getattr(spare, 'model_loaded', False):
+                                    # Mark as checked out (don't remove from spares!)
+                                    checked_out.append(spare)
+                                    tl.local_inpainters[key] = spare
+                                    # Store reference for later return
+                                    self._checked_out_inpainter = spare
+                                    self._inpainter_pool_key = key
+                                    available = len(spares) - len(checked_out)
+                                    if elapsed > 0:
+                                        self._log(f"🎨 Checked out inpainter after {elapsed:.1f}s wait ({len(checked_out)}/{len(spares)} in use)", "info")
+                                    else:
+                                        self._log(f"🎨 Using preloaded local inpainting instance ({len(checked_out)}/{len(spares)} in use, {available} available)", "info")
+                                    return tl.local_inpainters[key]
+            except Exception:
+                pass
+            
+            # No instance available yet - wait and retry
+            if elapsed == 0:
+                self._log("⏳ All inpainter instances in use - waiting for one to become available...", "info")
+            time.sleep(poll_interval)
+            elapsed += poll_interval
+        
+        # Timeout - no instance became available
+        self._log(f"⚠️ Timeout waiting for inpainter after {max_wait_time}s", "warning")
         self._log("💡 Solution: Increase preload count or reduce parallel translation threads", "info")
-        # Return None to signal unavailability - caller must handle gracefully
         return None
     
     def translate_regions(self, regions: List[TextRegion], image_path: str) -> List[TextRegion]:

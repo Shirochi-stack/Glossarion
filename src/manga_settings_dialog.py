@@ -4135,7 +4135,7 @@ class MangaSettingsDialog(QDialog):
         
         # Worker process control
         self.disable_worker_process_checkbox = self._create_styled_checkbox("Disable local inpainter worker process (may reduce concurrency issues)")
-        self.disable_worker_process_checkbox.setChecked(self.settings.get('inpainting', {}).get('disable_worker_process', True))
+        self.disable_worker_process_checkbox.setChecked(self.settings.get('inpainting', {}).get('disable_worker_process', False))
         inpaint_perf_layout.addWidget(self.disable_worker_process_checkbox)
 
         # Max concurrent panels
