@@ -8923,29 +8923,53 @@ class MangaTranslator:
         except:
             pass
         
-        # Ensure pool record and spares list exist
+        # CRITICAL: Clean up pool entries that don't match current GUI settings
+        # This ensures models are unloaded when user changes the inpainter/detector dropdown
         with MangaTranslator._inpaint_pool_lock:
+            # Get currently selected settings from GUI
+            current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+            current_model_path = self.main_gui.config.get(f'manga_{current_method}_model_path', '') if hasattr(self, 'main_gui') else ''
+            if current_model_path:
+                try:
+                    current_model_path = os.path.abspath(os.path.normpath(current_model_path))
+                except Exception:
+                    pass
+            current_key = (current_method, current_model_path or '')
+            
+            # Find and clean up all pool entries that DON'T match current settings
+            keys_to_remove = []
+            for pool_key, pool_rec in list(MangaTranslator._inpaint_pool.items()):
+                if pool_key != current_key:  # Not the currently selected model
+                    # Only clean up if nothing is checked out (safe to remove)
+                    checked_out_count = len(pool_rec.get('checked_out', []))
+                    spares_count = len(pool_rec.get('spares', []))
+                    
+                    if checked_out_count == 0 and spares_count > 0:
+                        self._log(f"🧹 Removing {spares_count} unused model(s) that don't match current selection: {pool_key[0]}", "info")
+                        # Unload all spares
+                        for spare in pool_rec.get('spares', []):
+                            try:
+                                if hasattr(spare, 'unload'):
+                                    spare.unload()
+                            except Exception:
+                                pass
+                        keys_to_remove.append(pool_key)
+            
+            # Remove cleaned up entries from pool
+            for old_key in keys_to_remove:
+                MangaTranslator._inpaint_pool.pop(old_key, None)
+            
+            # Now ensure the current pool record exists
             rec = MangaTranslator._inpaint_pool.get(key)
             if not rec:
                 rec = {'spares': [], 'checked_out': []}
                 MangaTranslator._inpaint_pool[key] = rec
-                self._log(f"🔍 PRELOAD DEBUG: Created new pool record, spares=[], checked_out=[]", "info")
+                self._log(f"🔍 PRELOAD DEBUG: Created new pool record for current selection, spares=[], checked_out=[]", "info")
             else:
                 current_spares_count = len(rec.get('spares', []))
                 current_checked_out_count = len(rec.get('checked_out', []))
-                self._log(f"🔍 PRELOAD DEBUG: Existing pool record found: {current_spares_count} spares, {current_checked_out_count} checked out", "info")
-                
-                # CRITICAL: Clean up stale/duplicate pool entries
-                # If we have existing spares but none are checked out, assume they're stale and unload them
-                if current_spares_count > 0 and current_checked_out_count == 0:
-                    self._log(f"🧹 Cleaning up {current_spares_count} stale inpainter instance(s) (none in use)", "info")
-                    for old_spare in rec.get('spares', []):
-                        try:
-                            if hasattr(old_spare, 'unload'):
-                                old_spare.unload()
-                        except Exception:
-                            pass
-                    rec['spares'] = []  # Clear the stale spares
+                self._log(f"🔍 PRELOAD DEBUG: Existing pool record found for current selection: {current_spares_count} spares, {current_checked_out_count} checked out", "info")
+            
             if 'spares' not in rec or rec['spares'] is None:
                 rec['spares'] = []
             if 'checked_out' not in rec:
