@@ -11422,8 +11422,8 @@ class MangaTranslator:
                     # Apply Qt rendering overhead (40% wider) to match actual rendering
                     width, height = eval_metrics(wrapped, test_font, apply_qt_overhead=True)
                     
-                    print(f"[COMPACT DEBUG] font_size={mid}, width={width:.1f} (with Qt overhead), roi_width={roi_width}, height={height:.1f}, roi_height={roi_height}")
-                    print(f"[COMPACT DEBUG] wrapped text:\n{wrapped}\n")
+                    #print(f"[COMPACT DEBUG] font_size={mid}, width={width:.1f} (with Qt overhead), roi_width={roi_width}, height={height:.1f}, roi_height={roi_height}")
+                    #print(f"[COMPACT DEBUG] wrapped text:\n{wrapped}\n")
                     
                     # Compact mode: STRICT - no overflow allowed
                     if width <= roi_width and height <= roi_height:
@@ -11431,11 +11431,11 @@ class MangaTranslator:
                         best_font_size = mid
                         best_wrapped = wrapped
                         low = mid + 1
-                        print(f"[COMPACT DEBUG] -> FITS, trying larger")
+                        #print(f"[COMPACT DEBUG] -> FITS, trying larger")
                     else:
                         # Too large, try smaller
                         high = mid - 1
-                        print(f"[COMPACT DEBUG] -> TOO LARGE, trying smaller")
+                        #print(f"[COMPACT DEBUG] -> TOO LARGE, trying smaller")
                 
                 return best_wrapped, int(best_font_size)
             
