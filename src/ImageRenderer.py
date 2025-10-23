@@ -324,11 +324,13 @@ def _on_detect_text_clicked(self):
 
 def _run_detect_background(self, image_path: str, detection_config: dict):
     """Run the actual detection process in background thread"""
+    detector = None  # Initialize for cleanup
     try:
         import cv2
         from bubble_detector import BubbleDetector
         
-        # Create bubble detector
+        # Create bubble detector (should use pool-aware method instead)
+        # TODO: Replace with pool-aware checkout similar to inpainter
         detector = BubbleDetector()
         
         # Extract settings from config
@@ -527,6 +529,12 @@ def _run_detect_background(self, image_path: str, detection_config: dict):
         self._log(f"❌ Background detection failed: {str(e)}", "error")
         print(f"Background detect error traceback: {traceback.format_exc()}")
     finally:
+        # Cleanup: explicitly unload detector to free resources
+        try:
+            if detector and hasattr(detector, 'unload'):
+                detector.unload(release_shared=True)
+        except Exception:
+            pass
         # Always restore the button using thread-safe update queue
         self.update_queue.put(('detect_button_restore', None))
 
@@ -1824,6 +1832,8 @@ def _run_clean_background(self, image_path: str, regions: list):
     """Run the actual cleaning process in background thread with explicit memory cleanup"""
     image = None  # Initialize for cleanup in finally block
     mask = None
+    inpainter = None  # Track for pool return
+    temp_translator = None  # Track temporary translator for pool cleanup
     try:
         import cv2
         import numpy as np
@@ -1951,10 +1961,24 @@ def _run_clean_background(self, image_path: str, regions: list):
                     self._log(f"⚠️ Model download failed: {e}", "warning")
                     resolved_model_path = None
             
-            # Use shared inpainter from pool
+            # Use shared inpainter from pool - track the temporary translator for cleanup
             if resolved_model_path and os.path.exists(resolved_model_path):
                 self._log(f"🎨 Using shared inpainter from pool: {os.path.basename(resolved_model_path)}", "info")
-                inpainter = _get_or_create_shared_inpainter(self, local_model, resolved_model_path)
+                # Create translator for pool access and track it for cleanup
+                try:
+                    from manga_translator import MangaTranslator
+                    from unified_api_client import UnifiedClient
+                    ocr_config = _get_ocr_config(self, ) if hasattr(self, 'main_gui') else {}
+                    api_key = self.main_gui.config.get('api_key', '') or 'dummy'
+                    model = self.main_gui.config.get('model', 'gpt-4o-mini')
+                    uc = UnifiedClient(model=model, api_key=api_key)
+                    temp_translator = MangaTranslator(ocr_config=ocr_config, unified_client=uc, main_gui=self.main_gui, log_callback=lambda m, l: None, skip_inpainter_init=True)
+                    inpainter = temp_translator._get_or_init_shared_local_inpainter(local_model, resolved_model_path, force_reload=False)
+                except Exception as e:
+                    print(f"[CLEAN] Failed to create translator/inpainter: {e}")
+                    inpainter = None
+                    temp_translator = None
+                
                 if not inpainter:
                     self._log(f"❌ Failed to get shared inpainter", "error")
                     self.update_queue.put(('clean_button_restore', None))
@@ -2018,6 +2042,13 @@ def _run_clean_background(self, image_path: str, regions: list):
         self._log(f"❌ Background cleaning failed: {str(e)}", "error")
         print(f"Background clean error traceback: {traceback.format_exc()}")
     finally:
+        # Return inpainter to pool if checked out via temporary translator
+        try:
+            if temp_translator is not None:
+                temp_translator._return_inpainter_to_pool()
+        except Exception as e:
+            print(f"[CLEAN] Failed to return inpainter to pool: {e}")
+        
         # MEMORY CLEANUP: Explicitly delete numpy arrays to free RAM
         try:
             if 'image' in locals() and image is not None:
@@ -2117,6 +2148,7 @@ def _run_detection_sync(self, image_path: str, detection_config: dict) -> list:
     Returns:
         list: List of region dictionaries, or empty list if detection failed
     """
+    detector = None  # Initialize for cleanup
     try:
         import cv2
         from bubble_detector import BubbleDetector
@@ -2296,6 +2328,13 @@ def _run_detection_sync(self, image_path: str, detection_config: dict) -> list:
         print(f"[DETECT_SYNC] Synchronous detection failed: {str(e)}")
         print(f"[DETECT_SYNC] Traceback: {traceback.format_exc()}")
         return []
+    finally:
+        # Cleanup: explicitly unload detector to free resources
+        try:
+            if detector and hasattr(detector, 'unload'):
+                detector.unload(release_shared=True)
+        except Exception:
+            pass
 
 def _run_inpainting_sync(self, image_path: str, regions: list) -> str:
     """Run inpainting synchronously (for Translate button) and return cleaned image path
