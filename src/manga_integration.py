@@ -10923,8 +10923,6 @@ class MangaTranslationTab(QObject):
                 import concurrent.futures
                 import threading as _threading
                 progress_lock = _threading.Lock()
-                # Memory barrier: ensures resources are fully released before next panel starts
-                completion_barrier = _threading.Semaphore(1)  # Only one panel can complete at a time
                 counters = {
                     'started': 0,
                     'done': 0,
@@ -11072,94 +11070,88 @@ class MangaTranslationTab(QObject):
                         except Exception as cleanup_err:
                             self._log(f"⚠️ Panel translator cleanup warning: {cleanup_err}", "debug")
                         
-                        # CRITICAL: Use completion barrier to prevent resource conflicts
-                        # This ensures only one panel completes/cleans up at a time
-                        with completion_barrier:
-                            # Update counters only if not stopped
-                            with progress_lock:
-                                if self.stop_flag.is_set():
-                                    # Don't update counters if translation was stopped
-                                    return False
+                        # Check if translation was stopped before processing results
+                        if self.stop_flag.is_set():
+                            return False
+                        
+                        # Check if translation actually produced valid output
+                        translation_successful = False
+                        if result.get('success', False) and not result.get('interrupted', False):
+                            # Verify there's an actual output file and translated regions
+                            output_exists = result.get('output_path') and os.path.exists(result.get('output_path', ''))
+                            regions = result.get('regions', [])
+                            has_translations = any(r.get('translated_text', '') for r in regions)
                             
-                            # Check if translation actually produced valid output
-                            translation_successful = False
-                            if result.get('success', False) and not result.get('interrupted', False):
-                                # Verify there's an actual output file and translated regions
-                                output_exists = result.get('output_path') and os.path.exists(result.get('output_path', ''))
-                                regions = result.get('regions', [])
-                                has_translations = any(r.get('translated_text', '') for r in regions)
+                            # CRITICAL: Verify all detected regions got translated
+                            # Partial failures indicate inpainting or rendering issues
+                            if has_translations and regions:
+                                translated_count = sum(1 for r in regions if (r.get('translated_text') or '').strip())
+                                detected_count = len(regions)
+                                completion_rate = translated_count / detected_count if detected_count > 0 else 0
                                 
-                                # CRITICAL: Verify all detected regions got translated
-                                # Partial failures indicate inpainting or rendering issues
-                                if has_translations and regions:
-                                    translated_count = sum(1 for r in regions if (r.get('translated_text') or '').strip())
-                                    detected_count = len(regions)
-                                    completion_rate = translated_count / detected_count if detected_count > 0 else 0
+                                # Log warning if completion rate is less than 100%
+                                if completion_rate < 1.0:
+                                    self._log(f"⚠️ Partial translation: {translated_count}/{detected_count} regions translated ({completion_rate*100:.1f}%)", "warning")
+                                    self._log(f"   API may have skipped some regions (sound effects, symbols, or cleaning removed content)", "warning")
+                                
+                                # Only consider successful if at least 50% of regions translated
+                                # This prevents marking completely failed images as successful
+                                translation_successful = output_exists and completion_rate >= 0.5
+                            else:
+                                translation_successful = output_exists and has_translations
+                        
+                        # Update counters and progress (thread-safe)
+                        with progress_lock:
+                            if translation_successful:
+                                self.completed_files += 1
+                                self._log(f"✅ Translation completed: {filename}", "success")
+                                
+                                # Save cleaned image path to state if available
+                                if result.get('cleaned_image_path'):
+                                    try:
+                                        if hasattr(self, 'image_state_manager') and self.image_state_manager:
+                                            self.image_state_manager.update_state(filepath, {
+                                                'cleaned_image_path': result.get('cleaned_image_path')
+                                            })
+                                            print(f"[CLEANED] Saved cleaned image path to state: {os.path.basename(result.get('cleaned_image_path'))}")
+                                    except Exception as e:
+                                        print(f"[CLEANED] Failed to save cleaned path to state: {e}")
+                                
+                                # Update image preview to show translated output if this is the current file
+                                # Use thread-safe queue to update preview from parallel worker
+                                if hasattr(self, 'image_preview_widget'):
+                                    current_path = self.image_preview_widget.current_image_path
+                                    print(f"[PREVIEW_UPDATE]   Translated output: {result.get('output_path')}")
                                     
-                                    # Log warning if completion rate is less than 100%
-                                    if completion_rate < 1.0:
-                                        self._log(f"⚠️ Partial translation: {translated_count}/{detected_count} regions translated ({completion_rate*100:.1f}%)", "warning")
-                                        self._log(f"   API may have skipped some regions (sound effects, symbols, or cleaning removed content)", "warning")
+                                    # Normalize paths for comparison (fix slash mixing on Windows)
+                                    norm_current = os.path.normpath(current_path) if current_path else None
+                                    norm_source = os.path.normpath(filepath)
                                     
-                                    # Only consider successful if at least 50% of regions translated
-                                    # This prevents marking completely failed images as successful
-                                    translation_successful = output_exists and completion_rate >= 0.5
+                                    # Match if showing original OR any translated version of this image
+                                    is_current = (norm_current == norm_source or 
+                                                 (norm_current and os.path.dirname(norm_current).endswith(f"{os.path.splitext(os.path.basename(filepath))[0]}_translated")))
+                                    
+                                    if is_current:
+                                        # Use queue for thread-safe GUI update with source path for persistence
+                                        self.update_queue.put(('preview_update', {
+                                            'translated_path': result.get('output_path'),
+                                            'source_path': filepath
+                                        }))
+                                        self._log(f"🖼️ Queued preview update to show translated image", "debug")
+                            else:
+                                self.failed_files += 1
+                                # Log the specific reason for failure
+                                if result.get('interrupted', False):
+                                    self._log(f"⚠️ Translation interrupted: {filename}", "warning")
+                                elif not result.get('success', False):
+                                    self._log(f"❌ Translation failed: {filename}", "error")
+                                elif not result.get('output_path') or not os.path.exists(result.get('output_path', '')):
+                                    self._log(f"❌ Output file not created: {filename}", "error")
                                 else:
-                                    translation_successful = output_exists and has_translations
-                            
-                                if translation_successful:
-                                    self.completed_files += 1
-                                    self._log(f"✅ Translation completed: {filename}", "success")
-                                    
-                                    # Save cleaned image path to state if available
-                                    if result.get('cleaned_image_path'):
-                                        try:
-                                            if hasattr(self, 'image_state_manager') and self.image_state_manager:
-                                                self.image_state_manager.update_state(filepath, {
-                                                    'cleaned_image_path': result.get('cleaned_image_path')
-                                                })
-                                                print(f"[CLEANED] Saved cleaned image path to state: {os.path.basename(result.get('cleaned_image_path'))}")
-                                        except Exception as e:
-                                            print(f"[CLEANED] Failed to save cleaned path to state: {e}")
-                                    
-                                    # Update image preview to show translated output if this is the current file
-                                    # Use thread-safe queue to update preview from parallel worker
-                                    if hasattr(self, 'image_preview_widget'):
-                                        current_path = self.image_preview_widget.current_image_path
-                                        print(f"[PREVIEW_UPDATE]   Translated output: {result.get('output_path')}")
-                                        
-                                        # Normalize paths for comparison (fix slash mixing on Windows)
-                                        norm_current = os.path.normpath(current_path) if current_path else None
-                                        norm_source = os.path.normpath(filepath)
-                                        
-                                        # Match if showing original OR any translated version of this image
-                                        is_current = (norm_current == norm_source or 
-                                                     (norm_current and os.path.dirname(norm_current).endswith(f"{os.path.splitext(os.path.basename(filepath))[0]}_translated")))
-                                        
-                                        if is_current:
-                                            # Use queue for thread-safe GUI update with source path for persistence
-                                            self.update_queue.put(('preview_update', {
-                                                'translated_path': result.get('output_path'),
-                                                'source_path': filepath
-                                            }))
-                                            self._log(f"🖼️ Queued preview update to show translated image", "debug")
-                                    
-                                    # Memory barrier removed - no artificial delays needed
-                                else:
-                                    self.failed_files += 1
-                                    # Log the specific reason for failure
-                                    if result.get('interrupted', False):
-                                        self._log(f"⚠️ Translation interrupted: {filename}", "warning")
-                                    elif not result.get('success', False):
-                                        self._log(f"❌ Translation failed: {filename}", "error")
-                                    elif not result.get('output_path') or not os.path.exists(result.get('output_path', '')):
-                                        self._log(f"❌ Output file not created: {filename}", "error")
-                                    else:
-                                        self._log(f"❌ No text was translated: {filename}", "error")
-                                    counters['failed'] += 1
-                                counters['done'] += 1
-                                self._update_progress(counters['done'], total, f"Completed {counters['done']}/{total}")
-                            # End of completion_barrier block - resources now released for next panel
+                                    self._log(f"❌ No text was translated: {filename}", "error")
+                                counters['failed'] += 1
+                            counters['done'] += 1
+                            self._update_progress(counters['done'], total, f"Completed {counters['done']}/{total}")
                         
                         return result.get('success', False)
                     except Exception as e:
