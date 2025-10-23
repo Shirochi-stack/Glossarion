@@ -752,6 +752,13 @@ class MangaTranslator:
             # Clear the references
             self._checked_out_inpainter = None
             self._inpainter_pool_key = None
+            
+            # Trigger immediate GUI pool tracker update
+            try:
+                if hasattr(self, 'update_queue'):
+                    self.update_queue.put(('update_pool_tracker',))
+            except Exception:
+                pass
         except Exception as e:
             # Non-critical - just log
             try:
@@ -809,6 +816,13 @@ class MangaTranslator:
             # Clear the references
             self._checked_out_bubble_detector = None
             self._bubble_detector_pool_key = None
+            
+            # Trigger immediate GUI pool tracker update
+            try:
+                if hasattr(self, 'update_queue'):
+                    self.update_queue.put(('update_pool_tracker',))
+            except Exception:
+                pass
         except Exception as e:
             # Non-critical - just log
             try:
@@ -13106,6 +13120,14 @@ class MangaTranslator:
             
             self._log(f"\n✅ Detection complete: {len(regions)} regions found")
             
+            # OPTIMIZATION: Return bubble detector to pool immediately after detection
+            # This frees the model for reuse by other images in batch mode
+            try:
+                self._return_bubble_detector_to_pool()
+                self._log("🔄 Returned detector to pool (available for next image)", "debug")
+            except Exception as e:
+                self._log(f"⚠️ Failed to return detector to pool: {e}", "debug")
+            
             # Save debug outputs only if 'Save intermediate images' is enabled
             if self.manga_settings.get('advanced', {}).get('save_intermediate', False):
                 self._save_debug_image(image_path, regions, debug_base_dir=output_dir)
@@ -13403,6 +13425,14 @@ class MangaTranslator:
                 self._log("↪️ Concurrent mode disabled — running sequentially", "info")
                 translate_ok = _task_translate()
                 inpainted = _task_inpaint()
+            
+            # OPTIMIZATION: Return inpainter to pool immediately after inpainting completes
+            # This frees the model for reuse by other images in batch mode
+            try:
+                self._return_inpainter_to_pool()
+                self._log("🔄 Returned inpainter to pool (available for next image)", "debug")
+            except Exception as e:
+                self._log(f"⚠️ Failed to return inpainter to pool: {e}", "debug")
             
             # After concurrent phase, validate translation
             # OPTIMIZATION: Skip slow to_dict() conversion unless actually interrupted
