@@ -1567,6 +1567,12 @@ class MangaTranslator:
                         # Only clear if we're truly shutting down the thread
                     except Exception:
                         pass
+            
+            # Return checked-out inpainter to pool if we have one
+            try:
+                self._return_inpainter_to_pool()
+            except Exception:
+                pass
         except Exception:
             # Best-effort cleanup only
             pass
