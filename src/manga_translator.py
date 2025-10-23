@@ -5555,9 +5555,42 @@ class MangaTranslator:
         
         return languages
 
-    def _start_early_inpainting_if_needed(self, rtdetr_detections, image, ocr_settings, image_path):
+    def _early_inpaint_with_instance(self, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        """Early inpainting worker that reuses an already-checked-out inpainter instance.
+        This avoids pool contention when early inpainting runs concurrently with OCR.
+        """
+        try:
+            # Get the pre-checked-out instance that was stored for us
+            inp = getattr(self, '_early_inpaint_instance', None)
+            
+            if inp and getattr(inp, 'model_loaded', False):
+                self._log("   🎨 Early inpainting using pre-checked-out instance", "debug")
+                iterations = getattr(self, '_current_inpainter_iterations', 1)
+                # Use lock if enabled (singleton mode)
+                lock = getattr(self, '_inpaint_lock', None)
+                if lock:
+                    with lock:
+                        return inp.inpaint(image, mask, iterations=iterations)
+                else:
+                    return inp.inpaint(image, mask, iterations=iterations)
+            else:
+                # Fallback to regular inpaint_regions if no instance was provided
+                self._log("   ⚠️ No pre-checked-out instance, falling back to pool checkout", "warning")
+                return self.inpaint_regions(image, mask)
+        except Exception as e:
+            self._log(f"   ⚠️ Early inpainting failed: {e}", "warning")
+            return image.copy()  # Return original if inpainting fails
+    
+    def _start_early_inpainting_if_needed(self, rtdetr_detections, image, ocr_settings, image_path, inpainter_instance=None):
         """Start inpainting in background immediately after RT-DETR detection.
         This runs concurrently with OCR for maximum speed.
+        
+        Args:
+            rtdetr_detections: RT-DETR detection results
+            image: Image to inpaint
+            ocr_settings: OCR settings
+            image_path: Path to image file
+            inpainter_instance: Optional already-checked-out inpainter to reuse (avoids pool contention)
         """
         if getattr(self, 'skip_inpainting', False) or not rtdetr_detections:
             return None
@@ -5608,11 +5641,14 @@ class MangaTranslator:
             self._log(f"   ✅ Mask created in {time.time() - mask_start:.1f}s")
             
             # Start inpainting in background thread IMMEDIATELY
+            # Store the inpainter instance for the background thread to use
+            self._early_inpaint_instance = inpainter_instance
+            
             import concurrent.futures
             self._inpainting_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             self._inpainting_start_time = time.time()  # Track when inpainting started
             self._inpainting_future = self._inpainting_executor.submit(
-                self.inpaint_regions, 
+                self._early_inpaint_with_instance, 
                 image.copy(), 
                 mask
             )
@@ -8740,55 +8776,19 @@ class MangaTranslator:
                         return _reconcile_worker(spare)
                 
                 # No available spares - all are checked out
+                # DO NOT create temporary instances that load models - they cause memory leaks
                 if spares:
-                    self._log(f"⏳ All {len(spares)} spare inpainters are in use - creating new instance", "warning")
+                    self._log(f"⚠️ All {len(spares)} spare inpainters are checked out!", "warning")
+                    self._log(f"🚨 MEMORY LEAK PREVENTION: Refusing to create temporary inpainter instance", "warning")
+                    self._log(f"💡 Solution: Increase preload count or reduce parallel translation threads", "info")
+                    return None
         
-        # No pool or no spares available - create a new instance on-demand
-        self._log(f"📦 Creating new inpainter instance for {local_method}", "info")
-        try:
-            # Get worker process setting from config
-            disable_worker = False
-            try:
-                disable_worker = bool(
-                    self.manga_settings.get('inpainting', {}).get('disable_worker_process', False)
-                )
-            except Exception:
-                pass
-            inp = LocalInpainter(enable_worker_process=not disable_worker)
-            # Apply tiling settings
-            tiling_settings = self.manga_settings.get('tiling', {})
-            inp.tiling_enabled = tiling_settings.get('enabled', False)
-            inp.tile_size = tiling_settings.get('tile_size', 512)
-            inp.tile_overlap = tiling_settings.get('tile_overlap', 64)
-            # Ensure model path
-            if not model_path or not os.path.exists(model_path):
-                try:
-                    model_path = inp.download_jit_model(local_method)
-                except Exception as e:
-                    self._log(f"⚠️ JIT download failed: {e}", "warning")
-                    return None
-            # Load model
-            if model_path and os.path.exists(model_path):
-                try:
-                    self._log(f"📦 Loading inpainter model: {local_method}", "debug")
-                    loaded_ok = inp.load_model_with_retry(local_method, model_path, force_reload=force_reload)
-                    if not loaded_ok:
-                        self._log(f"🔄 Load failed, retrying with force_reload=True", "warning")
-                        loaded_ok = inp.load_model_with_retry(local_method, model_path, force_reload=True)
-                    if loaded_ok:
-                        return _reconcile_worker(inp)
-                    else:
-                        self._log(f"❌ Failed to load inpainter model", "error")
-                        return None
-                except Exception as e:
-                    self._log(f"⚠️ Inpainter load exception: {e}", "warning")
-                    return None
-            else:
-                self._log(f"⚠️ Model path not found: {model_path}", "warning")
-                return None
-        except Exception as e:
-            self._log(f"⚠️ Failed to create inpainter: {e}", "warning")
-            return None
+        # No pool record exists - this should only happen on first use before preload
+        # DO NOT create temporary instances - they cause memory leaks
+        self._log(f"⚠️ No inpainter pool found for {local_method} - pool not initialized!", "warning")
+        self._log(f"🚨 MEMORY LEAK PREVENTION: Refusing to create temporary inpainter instance", "warning")
+        self._log(f"💡 Solution: Preload inpainters before translation or increase preload count", "info")
+        return None
 
     @classmethod
     def _count_preloaded_inpainters(cls) -> int:
@@ -9185,9 +9185,25 @@ class MangaTranslator:
                 
                 self._log(f"Using local method: {local_method} (loaded from config)", "info")
                 
-                # Check if we already have a loaded instance in the shared pool
-                # This avoids unnecessary tracking and reloading
-                inp_shared = self._get_or_init_shared_local_inpainter(local_method, model_path, force_reload=False)
+                # CRITICAL FIX: Don't checkout inpainter during initialization
+                # This causes pool exhaustion when early inpainting runs concurrently
+                # Just verify that an inpainter exists in the pool
+                key = (local_method, os.path.abspath(os.path.normpath(model_path)) if model_path else '')
+                with MangaTranslator._inpaint_pool_lock:
+                    rec = MangaTranslator._inpaint_pool.get(key)
+                    if rec and rec.get('spares'):
+                        spares = rec.get('spares', [])
+                        available_count = len([s for s in spares if s and getattr(s, 'model_loaded', False)])
+                        if available_count > 0:
+                            self._log(f"✅ Inpainter pool ready: {available_count} instance(s) available", "info")
+                            # Don't checkout - leave it in pool for actual inpainting calls
+                            inp_shared = spares[0]  # Just for reference, not checkout
+                        else:
+                            self._log(f"⚠️ Pool exists but no loaded instances available", "warning")
+                            inp_shared = None
+                    else:
+                        self._log(f"⚠️ No inpainter pool found - will need to create on demand", "warning")
+                        inp_shared = None
                 
                 # Initialize need_reload flag
                 need_reload = False
@@ -12464,28 +12480,14 @@ class MangaTranslator:
                                     break
             except Exception:
                 pass
-            # If still not set, create a fresh detector and store it for future use
+            # If still not set, NO pool instances available - this is a problem!
+            # DO NOT create temporary instances that load models - they cause memory leaks
             if not hasattr(self._thread_local, 'bubble_detector') or self._thread_local.bubble_detector is None:
-                self._thread_local.bubble_detector = BubbleDetector()
-                self._log("🤖 Created thread-local bubble detector (NOT added to pool spares to avoid leak)", "debug")
-                
-                # IMPORTANT: Do NOT add dynamically created detectors to the pool spares list
-                # This was causing the pool to grow beyond preloaded count (e.g. 9/5, 10/5)
-                # Only preloaded detectors should be in spares list for proper tracking
-                # Just mark it as checked out for return tracking if needed
-                try:
-                    with MangaTranslator._detector_pool_lock:
-                        if key in MangaTranslator._detector_pool:
-                            rec = MangaTranslator._detector_pool[key]
-                            if 'checked_out' not in rec:
-                                rec['checked_out'] = []
-                            # Only track in checked_out, NOT in spares
-                            rec['checked_out'].append(self._thread_local.bubble_detector)
-                            # Store references for later return
-                            self._checked_out_bubble_detector = self._thread_local.bubble_detector
-                            self._bubble_detector_pool_key = key
-                except Exception:
-                    pass
+                self._log("⚠️ No bubble detector available in pool - all instances checked out!", "warning")
+                self._log("🚨 MEMORY LEAK PREVENTION: Refusing to create temporary detector instance", "warning")
+                self._log("💡 Solution: Increase preload count or reduce parallel translation threads", "info")
+                # Return None to signal unavailability - caller must handle gracefully
+                return None
         return self._thread_local.bubble_detector
     
     def _get_thread_local_inpainter(self, local_method: str, model_path: str):
@@ -12530,65 +12532,13 @@ class MangaTranslator:
             except Exception:
                 pass
             
-            # No preloaded instance available: create and load thread-local instance
-            try:
-                from local_inpainter import LocalInpainter
-                # Use a per-thread config path to avoid concurrent JSON writes
-                try:
-                    import tempfile
-                    thread_cfg = os.path.join(tempfile.gettempdir(), f"gl_inpainter_{threading.get_ident()}.json")
-                except Exception:
-                    thread_cfg = "config_thread_local.json"
-                inp = LocalInpainter(config_path=thread_cfg)
-                # Apply tiling settings
-                tiling_settings = self.manga_settings.get('tiling', {}) if hasattr(self, 'manga_settings') else {}
-                inp.tiling_enabled = tiling_settings.get('enabled', False)
-                inp.tile_size = tiling_settings.get('tile_size', 512)
-                inp.tile_overlap = tiling_settings.get('tile_overlap', 64)
-                
-                # Ensure model is available
-                resolved_model_path = model_path
-                if not resolved_model_path or not os.path.exists(resolved_model_path):
-                    try:
-                        resolved_model_path = inp.download_jit_model(local_method)
-                    except Exception as e:
-                        self._log(f"⚠️ JIT model download failed for {local_method}: {e}", "warning")
-                        resolved_model_path = None
-                
-                # Load model for this thread's instance
-                if resolved_model_path and os.path.exists(resolved_model_path):
-                    try:
-                        self._log(f"📥 Loading {local_method} inpainting model (thread-local)", "info")
-                        inp.load_model_with_retry(local_method, resolved_model_path, force_reload=False)
-                    except Exception as e:
-                        self._log(f"⚠️ Thread-local inpainter load error: {e}", "warning")
-                else:
-                    self._log("⚠️ No model path available for thread-local inpainter", "warning")
-                
-                # Re-check thread-local and publish ONLY if model loaded successfully
-                tl2 = getattr(self, '_thread_local', None)
-                if tl2 is None:
-                    self._thread_local = threading.local()
-                    tl2 = self._thread_local
-                if not hasattr(tl2, 'local_inpainters') or getattr(tl2, 'local_inpainters', None) is None:
-                    tl2.local_inpainters = {}
-                if getattr(inp, 'model_loaded', False):
-                    tl2.local_inpainters[key] = inp
-                else:
-                    # Ensure future calls will attempt a fresh init instead of using a half-initialized instance
-                    tl2.local_inpainters[key] = None
-            except Exception as e:
-                self._log(f"❌ Failed to create thread-local inpainter: {e}", "error")
-                try:
-                    tl3 = getattr(self, '_thread_local', None)
-                    if tl3 is None:
-                        self._thread_local = threading.local()
-                        tl3 = self._thread_local
-                    if not hasattr(tl3, 'local_inpainters') or getattr(tl3, 'local_inpainters', None) is None:
-                        tl3.local_inpainters = {}
-                    tl3.local_inpainters[key] = None
-                except Exception:
-                    pass
+            # No preloaded instance available - this is a problem!
+            # DO NOT create temporary instances that load models - they cause memory leaks
+            self._log("⚠️ No inpainter available in pool - all instances checked out!", "warning")
+            self._log("🚨 MEMORY LEAK PREVENTION: Refusing to create temporary inpainter instance", "warning")
+            self._log("💡 Solution: Increase preload count or reduce parallel translation threads", "info")
+            # Return None to signal unavailability - caller must handle gracefully
+            return None
         return getattr(self._thread_local, 'local_inpainters', {}).get(key)
     
     def translate_regions(self, regions: List[TextRegion], image_path: str) -> List[TextRegion]:
