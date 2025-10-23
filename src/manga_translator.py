@@ -13487,6 +13487,16 @@ class MangaTranslator:
         finally:
             # Per-image memory cleanup to reduce RAM growth across pages
             try:
+                # Return checked-out instances to pool ASAP for reuse
+                try:
+                    self._return_inpainter_to_pool()
+                except Exception:
+                    pass
+                try:
+                    self._return_bubble_detector_to_pool()
+                except Exception:
+                    pass
+                
                 # Clear self-held large attributes
                 try:
                     self.current_image = None
