@@ -9725,79 +9725,48 @@ class MangaTranslator:
             except Exception:
                 pass
             
-            # RETRY LOGIC: Attempt to reload model with multiple strategies
-            self._log("   ⚠️ Local inpainting model not loaded; attempting retry...", "warning")
+            # POLLING RETRY LOGIC: Wait for an instance to become available instead of creating new ones
+            self._log("   ⚠️ Local inpainting model not loaded; polling pool for available instance...", "warning")
             
-            retry_attempts = [
-                {'force_reload': True, 'desc': 'force reload'},
-                {'force_reload': True, 'desc': 'force reload with delay', 'delay': 1.0},
-                {'force_reload': False, 'desc': 'standard reload'},
-            ]
+            import time
+            max_poll_time = 30  # Poll for up to 30 seconds
+            poll_interval = 0.5  # Check every 0.5 seconds
+            poll_start = time.time()
             
-            for attempt_num, retry_config in enumerate(retry_attempts, 1):
+            while time.time() - poll_start < max_poll_time:
                 try:
-                    self._log(f"   🔄 Retry attempt {attempt_num}/{len(retry_attempts)}: {retry_config['desc']}", "info")
+                    # Check stop flag
+                    if self._check_stop():
+                        self._log("   ⏹️ Translation stopped while polling for inpainter", "warning")
+                        break
                     
-                    # Apply delay if specified
-                    if retry_config.get('delay'):
-                        import time
-                        time.sleep(retry_config['delay'])
+                    # Try to get an instance from the pool (with internal polling)
+                    retry_inp = self._get_thread_local_inpainter(local_method, model_path)
                     
-                    # Try to get or create a fresh inpainter instance
-                    retry_inp = self._get_or_init_shared_local_inpainter(
-                        local_method, 
-                        model_path, 
-                        force_reload=retry_config['force_reload']
-                    )
-                    
-                    if retry_inp:
-                        # Check if model is loaded
-                        if getattr(retry_inp, 'model_loaded', False):
-                            self._log(f"   ✅ Model loaded successfully on retry attempt {attempt_num}", "info")
-                            # Use lock for retry path (likely using shared instance)
-                            lock = getattr(self, '_inpaint_lock', None)
-                            iterations = getattr(self, '_current_inpainter_iterations', 1)
-                            if lock:
-                                with lock:
-                                    return retry_inp.inpaint(image, mask, iterations=iterations)
-                            else:
+                    if retry_inp and getattr(retry_inp, 'model_loaded', False):
+                        elapsed = time.time() - poll_start
+                        self._log(f"   ✅ Inpainter became available after {elapsed:.1f}s polling", "info")
+                        lock = getattr(self, '_inpaint_lock', None)
+                        iterations = getattr(self, '_current_inpainter_iterations', 1)
+                        if lock:
+                            with lock:
                                 return retry_inp.inpaint(image, mask, iterations=iterations)
                         else:
-                            # Model exists but not loaded - try loading it directly
-                            self._log(f"   🔧 Model not loaded, attempting direct load...", "info")
-                            if model_path and os.path.exists(model_path):
-                                try:
-                                    loaded_ok = retry_inp.load_model_with_retry(
-                                        local_method, 
-                                        model_path, 
-                                        force_reload=True
-                                    )
-                                    if loaded_ok and getattr(retry_inp, 'model_loaded', False):
-                                        self._log(f"   ✅ Direct load successful on attempt {attempt_num}", "info")
-                                        # Use lock for retry path (likely using shared instance)
-                                        lock = getattr(self, '_inpaint_lock', None)
-                                        iterations = getattr(self, '_current_inpainter_iterations', 1)
-                                        if lock:
-                                            with lock:
-                                                return retry_inp.inpaint(image, mask, iterations=iterations)
-                                        else:
-                                            return retry_inp.inpaint(image, mask, iterations=iterations)
-                                    else:
-                                        self._log(f"   ⚠️ Direct load returned {loaded_ok}, model_loaded={getattr(retry_inp, 'model_loaded', False)}", "warning")
-                                except Exception as load_err:
-                                    self._log(f"   ⚠️ Direct load failed: {load_err}", "warning")
-                            else:
-                                if not model_path:
-                                    self._log(f"   ⚠️ No model path configured", "warning")
-                                elif not os.path.exists(model_path):
-                                    self._log(f"   ⚠️ Model file does not exist: {model_path}", "warning")
-                    else:
-                        self._log(f"   ⚠️ Failed to get inpainter instance on attempt {attempt_num}", "warning")
-                        
-                except Exception as retry_err:
-                    self._log(f"   ⚠️ Retry attempt {attempt_num} failed: {retry_err}", "warning")
+                            return retry_inp.inpaint(image, mask, iterations=iterations)
+                    
+                    # Log progress periodically
+                    elapsed = time.time() - poll_start
+                    if int(elapsed) % 5 == 0 and elapsed > 0:  # Log every 5 seconds
+                        self._log(f"   ⏳ Still polling for inpainter... ({int(elapsed)}s)", "info")
+                    
+                    # Wait before next poll
+                    time.sleep(poll_interval)
+                    
+                except Exception as poll_err:
+                    self._log(f"   ⚠️ Polling error: {poll_err}", "warning")
                     import traceback
                     self._log(traceback.format_exc(), "debug")
+                    time.sleep(poll_interval)
             
             # All retries exhausted - provide detailed diagnostic information
             self._log("   ❌ All retry attempts exhausted. Diagnostics:", "error")
