@@ -2597,18 +2597,41 @@ def _run_inpainting_sync(self, image_path: str, regions: list) -> str:
                 if inpainter and hasattr(inpainter, '_pool_key'):
                     from manga_translator import MangaTranslator
                     key = inpainter._pool_key
+                    
+                    # Log the return operation
+                    try:
+                        method, path = key
+                        path_basename = os.path.basename(path) if path else 'None'
+                        logging.info(f"🔑 Return inpainter model: {method}/{path_basename}")
+                    except Exception:
+                        pass
+                    
                     with MangaTranslator._inpaint_pool_lock:
                         rec = MangaTranslator._inpaint_pool.get(key)
                         if rec and 'checked_out' in rec:
                             checked_out = rec['checked_out']
                             if inpainter in checked_out:
                                 checked_out.remove(inpainter)
-                                print(f"[INPAINT_SYNC] Returned inpainter to pool after successful inpainting")
+                                
+                                # Log pool status after return
+                                spares_list = rec.get('spares', [])
+                                total_spares = len(spares_list)
+                                checked_out_count = len(checked_out)
+                                available_count = total_spares - checked_out_count
+                                valid_spares = sum(1 for s in spares_list if s and getattr(s, 'model_loaded', False))
+                                
+                                try:
+                                    method, path = key
+                                    path_basename = os.path.basename(path) if path else 'None'
+                                    logging.info(f"🔄 Returned inpainter to pool [key: {method}/{path_basename}] ({checked_out_count}/{total_spares} in use, {available_count} available, {valid_spares} valid)")
+                                except Exception:
+                                    logging.info(f"🔄 Returned inpainter to pool ({checked_out_count}/{total_spares} in use, {available_count} available, {valid_spares} valid)")
+                    
                     # Update GUI pool tracker after return
                     if hasattr(self, 'update_queue'):
                         self.update_queue.put(('update_pool_tracker', None))
             except Exception as e:
-                print(f"[INPAINT_SYNC] Failed to return inpainter to pool: {e}")
+                logging.warning(f"⚠️ Failed to return inpainter to pool: {e}")
             
         else:
             # For cloud/hybrid methods, would need more complex setup
