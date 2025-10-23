@@ -9028,22 +9028,35 @@ class MangaTranslator:
 
     @classmethod
     def get_preload_counters(cls) -> Dict[str, int]:
-        """Return current counters for preloaded instances (for diagnostics/logging)."""
+        """Return current counters for preloaded instances (for diagnostics/logging).
+        Returns both total spares and checked-out counts for accurate tracking.
+        """
         try:
             with cls._inpaint_pool_lock:
                 inpaint_spares = sum(len((rec or {}).get('spares') or []) for rec in cls._inpaint_pool.values())
+                inpaint_checked_out = sum(len((rec or {}).get('checked_out') or []) for rec in cls._inpaint_pool.values())
+                inpaint_available = inpaint_spares - inpaint_checked_out
                 inpaint_keys = len(cls._inpaint_pool)
             with cls._detector_pool_lock:
                 detector_spares = sum(len((rec or {}).get('spares') or []) for rec in cls._detector_pool.values())
+                detector_checked_out = sum(len((rec or {}).get('checked_out') or []) for rec in cls._detector_pool.values())
+                detector_available = detector_spares - detector_checked_out
                 detector_keys = len(cls._detector_pool)
             return {
                 'inpaint_spares': inpaint_spares,
+                'inpaint_checked_out': inpaint_checked_out,
+                'inpaint_available': inpaint_available,
                 'inpaint_keys': inpaint_keys,
                 'detector_spares': detector_spares,
+                'detector_checked_out': detector_checked_out,
+                'detector_available': detector_available,
                 'detector_keys': detector_keys,
             }
         except Exception:
-            return {'inpaint_spares': 0, 'inpaint_keys': 0, 'detector_spares': 0, 'detector_keys': 0}
+            return {
+                'inpaint_spares': 0, 'inpaint_checked_out': 0, 'inpaint_available': 0, 'inpaint_keys': 0,
+                'detector_spares': 0, 'detector_checked_out': 0, 'detector_available': 0, 'detector_keys': 0
+            }
 
     def preload_bubble_detectors(self, ocr_settings: Dict[str, Any], count: int) -> int:
         """Preload N bubble detector instances (non-singleton) for panel parallelism.

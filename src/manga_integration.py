@@ -10764,7 +10764,7 @@ class MangaTranslationTab(QObject):
             try:
                 st = self.translator.get_preload_counters() if hasattr(self.translator, 'get_preload_counters') else None
                 if st:
-                    self._log(f"   Preload counters before: inpaint_spares={st.get('inpaint_spares',0)}, detector_spares={st.get('detector_spares',0)}", "debug")
+                    self._log(f"   Preload status: Inpainter [{st.get('inpaint_checked_out',0)}/{st.get('inpaint_spares',0)} in use, {st.get('inpaint_available',0)} available] | Detector [{st.get('detector_checked_out',0)}/{st.get('detector_spares',0)} in use, {st.get('detector_available',0)} available]", "debug")
             except Exception:
                 pass
             # 1) Warm up bubble detector instances first (so detection can start immediately)
@@ -10825,7 +10825,7 @@ class MangaTranslationTab(QObject):
             try:
                 st2 = self.translator.get_preload_counters() if hasattr(self.translator, 'get_preload_counters') else None
                 if st2:
-                    self._log(f"   Preload counters after: inpaint_spares={st2.get('inpaint_spares',0)}, detector_spares={st2.get('detector_spares',0)}", "debug")
+                    self._log(f"   Preload status: Inpainter [{st2.get('inpaint_checked_out',0)}/{st2.get('inpaint_spares',0)} in use, {st2.get('inpaint_available',0)} available] | Detector [{st2.get('detector_checked_out',0)}/{st2.get('detector_spares',0)} in use, {st2.get('detector_available',0)} available]", "debug")
             except Exception:
                 pass
 
