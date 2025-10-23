@@ -12948,9 +12948,11 @@ class MangaTranslator:
             return regions
         
         # Check if parallel processing OR batch translation is enabled
-        parallel_enabled = self.manga_settings.get('advanced', {}).get('parallel_processing', False)
+        # Check instance attribute first, then fall back to manga_settings
+        parallel_enabled = getattr(self, 'parallel_processing', False) or self.manga_settings.get('advanced', {}).get('parallel_processing', False)
         batch_enabled = getattr(self, 'batch_mode', False)
-        max_workers = self.manga_settings.get('advanced', {}).get('max_workers', 4)
+        # Check instance attribute first for max_workers, then fall back to manga_settings
+        max_workers = getattr(self, 'max_workers', None) or self.manga_settings.get('advanced', {}).get('max_workers', 4)
         
         # Batch translation (parallel API calls) should work independently of parallel processing
         if batch_enabled:
