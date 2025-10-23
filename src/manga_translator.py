@@ -9025,7 +9025,16 @@ class MangaTranslator:
                             with MangaTranslator._inpaint_pool_lock:
                                 # CRITICAL: Verify this model still matches current GUI selection before adding to pool
                                 # This prevents race condition where user switches models while preload is running
-                                current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+                                # Read directly from UI instance if available (more reliable than manga_settings)
+                                current_method = local_method  # Use the method we're actually preloading
+                                if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'manga_translator'):
+                                    try:
+                                        current_method = self.main_gui.manga_translator.local_model_type_value
+                                    except Exception:
+                                        current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+                                else:
+                                    current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+                                
                                 current_model_path = self.main_gui.config.get(f'manga_{current_method}_model_path', '') if hasattr(self, 'main_gui') else ''
                                 if current_model_path:
                                     try:
@@ -9098,8 +9107,16 @@ class MangaTranslator:
         # CRITICAL: Clean up pool entries that don't match current GUI settings FIRST
         # This MUST happen BEFORE checking desired count to ensure stale models are removed
         with MangaTranslator._inpaint_pool_lock:
-            # Get currently selected settings from GUI
-            current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+            # Get currently selected settings from GUI - read directly from UI if available
+            current_method = local_method  # Use the method we're actually preloading
+            if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'manga_translator'):
+                try:
+                    current_method = self.main_gui.manga_translator.local_model_type_value
+                except Exception:
+                    current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+            else:
+                current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+            
             current_model_path = self.main_gui.config.get(f'manga_{current_method}_model_path', '') if hasattr(self, 'main_gui') else ''
             if current_model_path:
                 try:
@@ -9209,8 +9226,17 @@ class MangaTranslator:
                         with MangaTranslator._inpaint_pool_lock:
                             # CRITICAL: Verify this model still matches current GUI selection before adding to pool
                             # This prevents race condition where user switches models while preload is running
+                            # Read directly from UI instance if available (more reliable than manga_settings)
                             try:
-                                current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+                                current_method = local_method  # Use the method we're actually preloading
+                                if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'manga_translator'):
+                                    try:
+                                        current_method = self.main_gui.manga_translator.local_model_type_value
+                                    except Exception:
+                                        current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+                                else:
+                                    current_method = self.manga_settings.get('inpainting', {}).get('local_method', 'anime')
+                                
                                 current_model_path = self.main_gui.config.get(f'manga_{current_method}_model_path', '') if hasattr(self, 'main_gui') else ''
                                 if current_model_path:
                                     try:
