@@ -194,6 +194,7 @@ class BubbleDetector:
     _rtdetr_loaded = False
     _rtdetr_repo_id = 'ogkalu/comic-text-and-bubble-detector'
     _rtdetr_device = None  # Track active CUDA device
+    _pyo3_initialized = False  # Track if PyO3 has ever been loaded (can't be unloaded)
     
     # Shared RT-DETR (ONNX) across process to avoid device/context storms
     _rtdetr_onnx_init_lock = threading.Lock()
@@ -646,6 +647,15 @@ class BubbleDetector:
             logger.info("RT-DETR model already loaded")
             return True
         
+        # CRITICAL: Check if PyO3 was previously initialized
+        # If it was, we can't reload RT-DETR in this process
+        if BubbleDetector._pyo3_initialized and not BubbleDetector._rtdetr_loaded:
+            logger.error("❌ RT-DETR cannot be loaded - PyO3 was previously initialized but model was unloaded")
+            logger.warning("⚠️ PyO3 modules can only be initialized once per Python process")
+            logger.info("💡 To reload RT-DETR, restart the GUI application")
+            logger.info("💡 Alternatively, use rtdetr_onnx detector which doesn't have this limitation")
+            return False
+        
         # Fast path: if shared already loaded and not forcing reload, attach
         if BubbleDetector._rtdetr_loaded and not force_reload:
             self.rtdetr_model = BubbleDetector._rtdetr_shared_model
@@ -711,19 +721,40 @@ class BubbleDetector:
                         **from_kwargs,
                     )
                 except Exception as primary_err:
+                    # Check if this is a PyO3 re-initialization error
+                    error_str = str(primary_err)
+                    if 'PyO3' in error_str and 'may only be initialized once' in error_str:
+                        logger.error(f"❌ Failed to load RT-DETR: {primary_err}")
+                        logger.warning("⚠️ PyO3 re-initialization error detected - model already loaded in this process")
+                        logger.info("💡 To reload RT-DETR, restart the GUI application")
+                        self.rtdetr_loaded = False
+                        return False
+                    
                     # Fallback to a simple CPU load (no device move) if CUDA path fails
                     logger.warning(f"RT-DETR primary load failed ({primary_err}); retrying on CPU...")
-                    from_kwargs_fallback = {
-                        'cache_dir': self.cache_dir if not model_path else None,
-                        'low_cpu_mem_usage': False,
-                        'device_map': None,
-                    }
-                    if TORCH_AVAILABLE:
-                        from_kwargs_fallback['torch_dtype'] = torch.float32
-                    self.rtdetr_model = RTDetrForObjectDetection.from_pretrained(
-                        model_path if model_path else repo_id,
-                        **from_kwargs_fallback,
-                    )
+                    try:
+                        from_kwargs_fallback = {
+                            'cache_dir': self.cache_dir if not model_path else None,
+                            'low_cpu_mem_usage': False,
+                            'device_map': None,
+                        }
+                        if TORCH_AVAILABLE:
+                            from_kwargs_fallback['torch_dtype'] = torch.float32
+                        self.rtdetr_model = RTDetrForObjectDetection.from_pretrained(
+                            model_path if model_path else repo_id,
+                            **from_kwargs_fallback,
+                        )
+                    except Exception as fallback_err:
+                        # Check for PyO3 error again
+                        fallback_str = str(fallback_err)
+                        if 'PyO3' in fallback_str and 'may only be initialized once' in fallback_str:
+                            logger.error(f"❌ Failed to load RT-DETR: {fallback_err}")
+                            logger.warning("⚠️ PyO3 re-initialization error - cannot reload model in this process")
+                            logger.info("💡 To reload RT-DETR, restart the GUI application")
+                            self.rtdetr_loaded = False
+                            return False
+                        # Re-raise other errors
+                        raise
                 
                 # Optional dynamic quantization for linear layers (CPU only)
                 if self.quantize_enabled and TORCH_AVAILABLE and (not gpu_available):
@@ -758,6 +789,8 @@ class BubbleDetector:
                 BubbleDetector._rtdetr_shared_processor = self.rtdetr_processor
                 BubbleDetector._rtdetr_loaded = True
                 BubbleDetector._rtdetr_repo_id = repo_id
+                # Mark PyO3 as initialized (can't be unloaded)
+                BubbleDetector._pyo3_initialized = True
 
                 self.rtdetr_loaded = True
                 

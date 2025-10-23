@@ -9236,7 +9236,37 @@ class MangaTranslator:
         model_id = (ocr_settings or {}).get('rtdetr_model_url') or (ocr_settings or {}).get('bubble_model_path') or ''
         key = (det_type, model_id)
         created = 0
+        
+        # CRITICAL: Clean up pool entries that don't match current GUI settings
+        # This ensures models are unloaded when user changes the detector dropdown
         with MangaTranslator._detector_pool_lock:
+            # Current selection key
+            current_key = key
+            
+            # Find and clean up all pool entries that DON'T match current settings
+            keys_to_remove = []
+            for pool_key, pool_rec in list(MangaTranslator._detector_pool.items()):
+                if pool_key != current_key:  # Not the currently selected detector
+                    # Only clean up if nothing is checked out (safe to remove)
+                    checked_out_count = len(pool_rec.get('checked_out', []))
+                    spares_count = len(pool_rec.get('spares', []))
+                    
+                    if checked_out_count == 0 and spares_count > 0:
+                        self._log(f"🧹 Removing {spares_count} unused detector(s) that don't match current selection: {pool_key[0]}", "info")
+                        # Unload all spares
+                        for spare in pool_rec.get('spares', []):
+                            try:
+                                if hasattr(spare, 'unload'):
+                                    spare.unload(release_shared=True)  # Release shared RT-DETR models too
+                            except Exception:
+                                pass
+                        keys_to_remove.append(pool_key)
+            
+            # Remove cleaned up entries from pool
+            for old_key in keys_to_remove:
+                MangaTranslator._detector_pool.pop(old_key, None)
+            
+            # Now ensure the current pool record exists
             rec = MangaTranslator._detector_pool.get(key)
             if not rec:
                 rec = {'spares': []}
@@ -9248,21 +9278,78 @@ class MangaTranslator:
         desired = max(0, int(count) - len(spares))
         if desired <= 0:
             return 0
-        self._log(f"🧰 Preloading {desired} bubble detector instance(s) [{det_type}]", "info")
+        self._log(f"🪧 Preloading {desired} bubble detector instance(s) [{det_type}]", "info")
         for i in range(desired):
             try:
                 bd = BubbleDetector()
                 ok = False
-                if det_type == 'rtdetr_onnx':
+                
+                # CRITICAL: For RT-DETR (PyTorch), check if already loaded globally
+                # PyO3 modules can only be initialized once per process
+                if det_type == 'rtdetr':
+                    from bubble_detector import BubbleDetector as BD_Class
+                    
+                    # Check BOTH class flag AND actual model existence
+                    is_already_loaded = (
+                        BD_Class._rtdetr_loaded and 
+                        BD_Class._rtdetr_shared_model is not None and
+                        BD_Class._rtdetr_shared_processor is not None
+                    )
+                    
+                    if is_already_loaded:
+                        # Already loaded globally - just attach to existing instance
+                        bd.rtdetr_model = BD_Class._rtdetr_shared_model
+                        bd.rtdetr_processor = BD_Class._rtdetr_shared_processor
+                        bd.rtdetr_loaded = True
+                        ok = True
+                        self._log("✅ RT-DETR already loaded globally - reusing shared instance", "info")
+                    else:
+                        # First load - this will initialize globally
+                        # But wrap in try/catch for PyO3 errors
+                        try:
+                            ok = bool(bd.load_rtdetr_model(model_id=model_id))
+                        except Exception as load_err:
+                            error_str = str(load_err)
+                            if 'PyO3' in error_str and 'may only be initialized once' in error_str:
+                                self._log("⚠️ RT-DETR cannot be loaded - PyO3 already initialized. Using ONNX instead is recommended.", "warning")
+                                ok = False
+                            else:
+                                raise
+                elif det_type == 'rtdetr_onnx':
                     ok = bool(bd.load_rtdetr_onnx_model(model_id=model_id))
-                elif det_type == 'rtdetr':
-                    ok = bool(bd.load_rtdetr_model(model_id=model_id))
                 elif det_type == 'yolo':
                     if model_id:
                         ok = bool(bd.load_model(model_id))
                 else:
                     # auto: prefer RT-DETR
-                    ok = bool(bd.load_rtdetr_model(model_id=model_id))
+                    from bubble_detector import BubbleDetector as BD_Class
+                    
+                    # Check BOTH class flag AND actual model existence
+                    is_already_loaded = (
+                        BD_Class._rtdetr_loaded and 
+                        BD_Class._rtdetr_shared_model is not None and
+                        BD_Class._rtdetr_shared_processor is not None
+                    )
+                    
+                    if is_already_loaded:
+                        # Already loaded globally
+                        bd.rtdetr_model = BD_Class._rtdetr_shared_model
+                        bd.rtdetr_processor = BD_Class._rtdetr_shared_processor
+                        bd.rtdetr_loaded = True
+                        ok = True
+                        self._log("✅ RT-DETR already loaded globally - reusing shared instance", "info")
+                    else:
+                        # Try to load, but catch PyO3 errors gracefully
+                        try:
+                            ok = bool(bd.load_rtdetr_model(model_id=model_id))
+                        except Exception as load_err:
+                            error_str = str(load_err)
+                            if 'PyO3' in error_str and 'may only be initialized once' in error_str:
+                                self._log("⚠️ RT-DETR cannot be loaded - PyO3 already initialized. Using ONNX instead is recommended.", "warning")
+                                ok = False
+                            else:
+                                raise
+                
                 if ok:
                     with MangaTranslator._detector_pool_lock:
                         rec = MangaTranslator._detector_pool.get(key) or {'spares': []}
