@@ -548,8 +548,9 @@ class FFCInpaintModel(BaseModel):  # Use BaseModel instead of nn.Module
             logger.error("PyTorch not available for forward pass")
             raise RuntimeError("PyTorch not available for forward pass")
             
-        # Force sync before forward pass
-        if torch.cuda.is_available():
+        # Force sync before forward pass only if not in parallel panel translation mode
+        parallel_mode = os.environ.get('PARALLEL_PANEL_TRANSLATION_ENABLED', '0') == '1'
+        if not parallel_mode and torch.cuda.is_available():
             try:
                 torch.cuda.synchronize()
             except Exception:
@@ -634,13 +635,30 @@ class LocalInpainter:
     }
     
     def __init__(self, config_path="config.json", enable_worker_process=None):
-        # Enable CUDA debugging
-        os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
-        os.environ['TORCH_USE_CUDA_DSA'] = '1'  # Enable device-side assertions
+        # Load config first to check parallel_panel_translation setting
+        self.config_path = config_path
+        self.config = self._load_config()
+        
+        # Check if parallel panel translation is enabled (for inpainting pool parallelism)
+        # Priority: 1) Environment variable (set by manga_translator), 2) Config file
+        parallel_mode = os.environ.get('PARALLEL_PANEL_TRANSLATION_ENABLED', '0') == '1'
+        if not parallel_mode:
+            # Fallback: check config directly
+            try:
+                parallel_mode = self.config.get('manga_settings', {}).get('advanced', {}).get('parallel_panel_translation', False)
+            except Exception:
+                parallel_mode = False
+        
+        # Only enable CUDA debugging if NOT in parallel mode
+        # These settings force sequential execution, which is useful for debugging but kills performance
+        if not parallel_mode:
+            # Enable CUDA debugging in sequential mode
+            os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+            os.environ['TORCH_USE_CUDA_DSA'] = '1'  # Enable device-side assertions
 
-        # Set thread limits early if environment indicates single-threaded mode
+        # Set thread limits early if environment indicates single-threaded mode AND not in parallel mode
         try:
-            if os.environ.get('OMP_NUM_THREADS') == '1':
+            if os.environ.get('OMP_NUM_THREADS') == '1' and not parallel_mode:
                 # Already in single-threaded mode, ensure it's applied to this process
                 # Check if torch is available at module level before trying to use it
                 if TORCH_AVAILABLE and torch is not None:
@@ -655,9 +673,6 @@ class LocalInpainter:
                     pass
         except Exception:
             pass
-        
-        self.config_path = config_path
-        self.config = self._load_config()
         self.model = None
         self.model_loaded = False
         self.current_method = None

@@ -855,9 +855,34 @@ class MangaTranslator:
         # CRITICAL: Set thread limits FIRST before any heavy library operations
         # This must happen before cv2, torch, numpy operations
         try:
-            parallel_enabled = main_gui.config.get('manga_settings', {}).get('advanced', {}).get('parallel_processing', False)
-            if not parallel_enabled:
-                # Force single-threaded mode for all computational libraries
+            # Use parallel_panel_translation setting (NOT parallel_processing)
+            # parallel_panel_translation controls inpainting pool parallelism
+            parallel_panel_enabled = main_gui.config.get('manga_settings', {}).get('advanced', {}).get('parallel_panel_translation', False)
+            
+            # Set environment variable for LocalInpainter to detect parallel panel mode
+            os.environ['PARALLEL_PANEL_TRANSLATION_ENABLED'] = '1' if parallel_panel_enabled else '0'
+            
+            if parallel_panel_enabled:
+                # Parallel panel mode: use conservative threading to allow pool instances to run concurrently
+                # 4 threads per instance allows good parallelism without excessive spawning
+                os.environ['OMP_NUM_THREADS'] = '4'
+                os.environ['MKL_NUM_THREADS'] = '4'
+                os.environ['OPENBLAS_NUM_THREADS'] = '4'
+                os.environ['NUMEXPR_NUM_THREADS'] = '4'
+                os.environ['VECLIB_MAXIMUM_THREADS'] = '4'
+                os.environ['ONNXRUNTIME_NUM_THREADS'] = '4'
+                # Set torch and cv2 thread limits if already imported
+                try:
+                    import torch
+                    torch.set_num_threads(4)
+                except (ImportError, RuntimeError):
+                    pass
+                try:
+                    cv2.setNumThreads(4)
+                except (AttributeError, NameError):
+                    pass
+            else:
+                # Sequential mode: force single-threaded for all computational libraries
                 os.environ['OMP_NUM_THREADS'] = '1'
                 os.environ['MKL_NUM_THREADS'] = '1'
                 os.environ['OPENBLAS_NUM_THREADS'] = '1'
