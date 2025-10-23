@@ -817,6 +817,13 @@ class MangaTranslator:
             self._checked_out_bubble_detector = None
             self._bubble_detector_pool_key = None
             
+            # CRITICAL: Clear thread-local cache so next checkout gets from pool
+            try:
+                if hasattr(self, '_thread_local') and hasattr(self._thread_local, 'bubble_detector'):
+                    self._thread_local.bubble_detector = None
+            except Exception:
+                pass
+            
             # Trigger immediate GUI pool tracker update
             try:
                 if hasattr(self, 'update_queue'):
