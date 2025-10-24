@@ -436,6 +436,14 @@ class GlossaryManagerMixin:
                 if hasattr(self, 'append_glossary_checkbox'):
                     self.append_glossary_var = self.append_glossary_checkbox.isChecked()
                 
+                # Update the main GUI's enable_auto_glossary_var to match the checkbox
+                if hasattr(self, 'enable_auto_glossary_checkbox'):
+                    self.enable_auto_glossary_var = self.enable_auto_glossary_checkbox.isChecked()
+                
+                # Update the main GUI's compress_glossary_prompt_var to match the checkbox
+                if hasattr(self, 'compress_glossary_checkbox'):
+                    self.compress_glossary_prompt_var = self.compress_glossary_checkbox.isChecked()
+                
                 # Call main save_config - it will:
                 # 1. Update custom_entry_types from checkboxes
                 # 2. Read from all UI widgets and instance variables
