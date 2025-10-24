@@ -4238,8 +4238,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                             successful += 1
                         else:
                             failed += 1
-                    elif ext in {'.epub', '.txt', '.csv'}:
-                        # Process as EPUB/TXT/CSV
+                    elif ext in {'.epub', '.txt', '.csv', '.json'}:
+                        # Process as EPUB/TXT/CSV/JSON
                         if self._process_text_file(file_path):
                             successful += 1
                         else:
@@ -5110,7 +5110,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     self.append_log(f"📑 No manual glossary loaded")
                 
                 # IMPORTANT: Set IS_TEXT_FILE_TRANSLATION flag for text files
-                if file_path.lower().endswith('.txt'):
+                if file_path.lower().endswith(('.txt', '.csv', '.json')):
                     os.environ['IS_TEXT_FILE_TRANSLATION'] = '1'
                     self.append_log("📄 Processing as text file")
                 
