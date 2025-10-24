@@ -3618,7 +3618,6 @@ def _create_processing_options_section(self, parent):
     break_split_h.addWidget(QLabel("Break Split Count:"))
     break_split_edit = QLineEdit()
     break_split_edit.setFixedWidth(60)
-    break_split_edit.setPlaceholderText("200")
     try:
         break_split_edit.setText(str(self.break_split_count_var) if hasattr(self, 'break_split_count_var') and self.break_split_count_var else '')
     except Exception:
