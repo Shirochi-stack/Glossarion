@@ -4065,8 +4065,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # Post-translation scanning phase
                 # If scanning phase toggle is enabled, launch scanner after translation
                 # BUT only if translation completed successfully (not stopped by user)
+                # SKIP scanning for CSV/JSON files (they are plain text glossaries)
                 try:
-                    if (hasattr(self, 'scan_phase_enabled_var') and self.scan_phase_enabled_var and 
+                    # Check if any of the files are CSV/JSON/TXT
+                    csv_json_files = [f for f in self.selected_files if f.lower().endswith(('.csv', '.json', '.txt'))]
+                    
+                    if csv_json_files:
+                        self.append_log("📑 Skipping post-translation scanning for CSV/JSON files")
+                    elif (hasattr(self, 'scan_phase_enabled_var') and self.scan_phase_enabled_var and 
                         translation_completed and not self.stop_requested):
                         mode = self.scan_phase_mode_var if hasattr(self, 'scan_phase_mode_var') else 'quick-scan'
                         self.append_log(f"🧪 Scanning phase enabled — launching QA Scanner in {mode} mode...")
@@ -7661,7 +7667,7 @@ Important rules:
                 except Exception as e:
                     self.append_log(f"❌ Failed to read CBZ: {os.path.basename(path)} - {e}")
             else:
-                # Non-JSON/CBZ files pass through unchanged
+                # All other files (TXT, JSON, CSV, EPUB, etc.) pass through unchanged
                 processed_paths.append(path)
         
         # Store the list of selected files (using processed paths)

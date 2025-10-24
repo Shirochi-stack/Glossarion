@@ -4234,10 +4234,10 @@ def main(log_callback=None, stop_callback=None):
     if not input_path and len(sys.argv) > 1:
         input_path = sys.argv[1]
     
-    is_text_file = input_path.lower().endswith('.txt')
+    is_text_file = input_path.lower().endswith(('.txt', '.csv', '.json'))
     
     if is_text_file:
-        os.environ["IS_TEXT_FILE_TRANSLATION"] = "1"  
+        os.environ["IS_TEXT_FILE_TRANSLATION"] = "1"
         
     import json as _json
     _original_load = _json.load
@@ -4272,14 +4272,14 @@ def main(log_callback=None, stop_callback=None):
     else:
         print("✅ AI artifact removal is DISABLED - preserving all content as-is")
        
-    if '--epub' in sys.argv or (len(sys.argv) > 1 and sys.argv[1].endswith(('.epub', '.txt'))):
+    if '--epub' in sys.argv or (len(sys.argv) > 1 and sys.argv[1].endswith(('.epub', '.txt', '.csv', '.json'))):
         import argparse
         parser = argparse.ArgumentParser()
         parser.add_argument('epub', help='Input EPUB or text file')
         args = parser.parse_args()
         input_path = args.epub
     
-    is_text_file = input_path.lower().endswith('.txt')
+    is_text_file = input_path.lower().endswith(('.txt', '.csv', '.json'))
     
     if is_text_file:
         file_base = os.path.splitext(os.path.basename(input_path))[0]
@@ -4901,195 +4901,200 @@ def main(log_callback=None, stop_callback=None):
     print("📑 GLOSSARY GENERATION PHASE")
     print("="*50)
     
-    print(f"📑 DEBUG: ENABLE_AUTO_GLOSSARY = '{os.getenv('ENABLE_AUTO_GLOSSARY', 'NOT SET')}'")
-    print(f"📑 DEBUG: MANUAL_GLOSSARY = '{config.MANUAL_GLOSSARY}'")
-    print(f"📑 DEBUG: Manual glossary exists? {os.path.isfile(config.MANUAL_GLOSSARY) if config.MANUAL_GLOSSARY else False}")
-    print(f"📑 DEBUG: Duplicate algorithm = '{os.getenv('GLOSSARY_DUPLICATE_ALGORITHM', 'auto')}'")
-    print(f"📑 DEBUG: Fuzzy threshold = '{os.getenv('GLOSSARY_FUZZY_THRESHOLD', '0.90')}'")
-    
-    # Check if glossary.csv already exists in the source folder
-    existing_glossary_csv = os.path.join(out, "glossary.csv")
-    existing_glossary_json = os.path.join(out, "glossary.json")
-    print(f"📑 DEBUG: Existing glossary.csv? {os.path.exists(existing_glossary_csv)}")
-    print(f"📑 DEBUG: Existing glossary.json? {os.path.exists(existing_glossary_json)}")
+    # Skip glossary generation for CSV/JSON files (they are typically glossaries themselves)
+    if input_path.lower().endswith(('.csv', '.json')):
+        print("📑 Skipping glossary generation for CSV/JSON file")
+        print("   CSV/JSON files are treated as plain text and typically don't need glossaries")
+    else:
+        print(f"📑 DEBUG: ENABLE_AUTO_GLOSSARY = '{os.getenv('ENABLE_AUTO_GLOSSARY', 'NOT SET')}'")
+        print(f"📑 DEBUG: MANUAL_GLOSSARY = '{config.MANUAL_GLOSSARY}'")
+        print(f"📑 DEBUG: Manual glossary exists? {os.path.isfile(config.MANUAL_GLOSSARY) if config.MANUAL_GLOSSARY else False}")
+        print(f"📑 DEBUG: Duplicate algorithm = '{os.getenv('GLOSSARY_DUPLICATE_ALGORITHM', 'auto')}'")
+        print(f"📑 DEBUG: Fuzzy threshold = '{os.getenv('GLOSSARY_FUZZY_THRESHOLD', '0.90')}'")
+        
+        # Check if glossary.csv already exists in the source folder
+        existing_glossary_csv = os.path.join(out, "glossary.csv")
+        existing_glossary_json = os.path.join(out, "glossary.json")
+        print(f"📑 DEBUG: Existing glossary.csv? {os.path.exists(existing_glossary_csv)}")
+        print(f"📑 DEBUG: Existing glossary.json? {os.path.exists(existing_glossary_json)}")
 
-    if config.MANUAL_GLOSSARY and os.path.isfile(config.MANUAL_GLOSSARY):
-        ext = os.path.splitext(config.MANUAL_GLOSSARY)[1].lower()
-        target_name = "glossary.csv" if ext == ".csv" else "glossary.json"
-        target_path = os.path.join(out, target_name)
-        if os.path.abspath(config.MANUAL_GLOSSARY) != os.path.abspath(target_path):
-            shutil.copy(config.MANUAL_GLOSSARY, target_path)
-            print("📑 Using manual glossary from:", config.MANUAL_GLOSSARY)
-        else:
-            print("📑 Using existing glossary:", config.MANUAL_GLOSSARY)
-    elif os.path.exists(existing_glossary_csv) or os.path.exists(existing_glossary_json):
-        print("📑 Existing glossary file detected in source folder - skipping automatic generation")
-        if os.path.exists(existing_glossary_csv):
-            print(f"📑 Using existing glossary.csv: {existing_glossary_csv}")
-        elif os.path.exists(existing_glossary_json):
-            print(f"📑 Using existing glossary.json: {existing_glossary_json}")
-    elif os.getenv("ENABLE_AUTO_GLOSSARY", "0") == "1":
-        model = os.getenv("MODEL", "gpt-4")
-        if is_traditional_translation_api(model):
-            print("📑 Automatic glossary generation disabled")
-            print(f"   {model} does not support glossary extraction")
-            print("   Traditional translation APIs cannot identify character names/terms")
-        else:
-            print("📑 Starting automatic glossary generation...")
-            try:
-                # Use the new process-safe glossary worker
-                from glossary_process_worker import generate_glossary_in_process
-                import concurrent.futures
-                import multiprocessing
-                
-                instructions = ""
-                
-                # Get extraction workers setting
-                extraction_workers = int(os.getenv("EXTRACTION_WORKERS", "1"))
-                if extraction_workers == 1:
-                    # Auto-detect for better performance
-                    extraction_workers = min(os.cpu_count() or 4, 4)
-                    print(f"📑 Using {extraction_workers} CPU cores for glossary generation")
-                
-                # Collect environment variables to pass to subprocess
-                env_vars = {}
-                important_vars = [
-                    'EXTRACTION_WORKERS', 'GLOSSARY_MIN_FREQUENCY', 'GLOSSARY_MAX_NAMES',
-                    'GLOSSARY_MAX_TITLES', 'GLOSSARY_BATCH_SIZE', 'GLOSSARY_STRIP_HONORIFICS',
-                    'GLOSSARY_FUZZY_THRESHOLD', 'GLOSSARY_MAX_TEXT_SIZE', 'GLOSSARY_MAX_SENTENCES',
-                    'AUTO_GLOSSARY_PROMPT', 'GLOSSARY_USE_SMART_FILTER', 'GLOSSARY_USE_LEGACY_CSV',
-                    'GLOSSARY_PARALLEL_ENABLED', 'GLOSSARY_FILTER_MODE', 'GLOSSARY_SKIP_FREQUENCY_CHECK',
-                    'GLOSSARY_SKIP_ALL_VALIDATION', 'MODEL', 'API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY',
-                    'MAX_OUTPUT_TOKENS', 'GLOSSARY_TEMPERATURE', 'MANUAL_GLOSSARY', 'ENABLE_AUTO_GLOSSARY',
-                    'GLOSSARY_DUPLICATE_ALGORITHM'
-                ]
-                
-                for var in important_vars:
-                    if var in os.environ:
-                        env_vars[var] = os.environ[var]
-                
-                # Create a Queue for real-time log streaming
-                manager = multiprocessing.Manager()
-                log_queue = manager.Queue()
-                
-                # Use ProcessPoolExecutor for true parallelism (completely bypasses GIL)
-                print("📑 Starting glossary generation in separate process...")
-                with concurrent.futures.ProcessPoolExecutor(max_workers=1) as executor:
-                    # Submit to separate process WITH log queue
-                    future = executor.submit(
-                        generate_glossary_in_process,
-                        out,
-                        chapters,
-                        instructions,
-                        env_vars,
-                        log_queue  # Pass the queue for real-time logs
-                    )
+        if config.MANUAL_GLOSSARY and os.path.isfile(config.MANUAL_GLOSSARY):
+            ext = os.path.splitext(config.MANUAL_GLOSSARY)[1].lower()
+            target_name = "glossary.csv" if ext == ".csv" else "glossary.json"
+            target_path = os.path.join(out, target_name)
+            if os.path.abspath(config.MANUAL_GLOSSARY) != os.path.abspath(target_path):
+                shutil.copy(config.MANUAL_GLOSSARY, target_path)
+                print("📑 Using manual glossary from:", config.MANUAL_GLOSSARY)
+            else:
+                print("📑 Using existing glossary:", config.MANUAL_GLOSSARY)
+        elif os.path.exists(existing_glossary_csv) or os.path.exists(existing_glossary_json):
+            print("📑 Existing glossary file detected in source folder - skipping automatic generation")
+            if os.path.exists(existing_glossary_csv):
+                print(f"📑 Using existing glossary.csv: {existing_glossary_csv}")
+            elif os.path.exists(existing_glossary_json):
+                print(f"📑 Using existing glossary.json: {existing_glossary_json}")
+        elif os.getenv("ENABLE_AUTO_GLOSSARY", "0") == "1":
+            model = os.getenv("MODEL", "gpt-4")
+            if is_traditional_translation_api(model):
+                print("📑 Automatic glossary generation disabled")
+                print(f"   {model} does not support glossary extraction")
+                print("   Traditional translation APIs cannot identify character names/terms")
+            else:
+                print("📑 Starting automatic glossary generation...")
+                try:
+                    # Use the new process-safe glossary worker
+                    from glossary_process_worker import generate_glossary_in_process
+                    import concurrent.futures
+                    import multiprocessing
                     
-                    # Poll for completion and stream logs in real-time
-                    poll_count = 0
-                    while not future.done():
-                        poll_count += 1
+                    instructions = ""
+                    
+                    # Get extraction workers setting
+                    extraction_workers = int(os.getenv("EXTRACTION_WORKERS", "1"))
+                    if extraction_workers == 1:
+                        # Auto-detect for better performance
+                        extraction_workers = min(os.cpu_count() or 4, 4)
+                        print(f"📑 Using {extraction_workers} CPU cores for glossary generation")
+                    
+                    # Collect environment variables to pass to subprocess
+                    env_vars = {}
+                    important_vars = [
+                        'EXTRACTION_WORKERS', 'GLOSSARY_MIN_FREQUENCY', 'GLOSSARY_MAX_NAMES',
+                        'GLOSSARY_MAX_TITLES', 'GLOSSARY_BATCH_SIZE', 'GLOSSARY_STRIP_HONORIFICS',
+                        'GLOSSARY_FUZZY_THRESHOLD', 'GLOSSARY_MAX_TEXT_SIZE', 'GLOSSARY_MAX_SENTENCES',
+                        'AUTO_GLOSSARY_PROMPT', 'GLOSSARY_USE_SMART_FILTER', 'GLOSSARY_USE_LEGACY_CSV',
+                        'GLOSSARY_PARALLEL_ENABLED', 'GLOSSARY_FILTER_MODE', 'GLOSSARY_SKIP_FREQUENCY_CHECK',
+                        'GLOSSARY_SKIP_ALL_VALIDATION', 'MODEL', 'API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY',
+                        'MAX_OUTPUT_TOKENS', 'GLOSSARY_TEMPERATURE', 'MANUAL_GLOSSARY', 'ENABLE_AUTO_GLOSSARY',
+                        'GLOSSARY_DUPLICATE_ALGORITHM'
+                    ]
+                    
+                    for var in important_vars:
+                        if var in os.environ:
+                            env_vars[var] = os.environ[var]
+                    
+                    # Create a Queue for real-time log streaming
+                    manager = multiprocessing.Manager()
+                    log_queue = manager.Queue()
+                    
+                    # Use ProcessPoolExecutor for true parallelism (completely bypasses GIL)
+                    print("📑 Starting glossary generation in separate process...")
+                    with concurrent.futures.ProcessPoolExecutor(max_workers=1) as executor:
+                        # Submit to separate process WITH log queue
+                        future = executor.submit(
+                            generate_glossary_in_process,
+                            out,
+                            chapters,
+                            instructions,
+                            env_vars,
+                            log_queue  # Pass the queue for real-time logs
+                        )
                         
-                        # Check for logs from subprocess and print them immediately
+                        # Poll for completion and stream logs in real-time
+                        poll_count = 0
+                        while not future.done():
+                            poll_count += 1
+                            
+                            # Check for logs from subprocess and print them immediately
+                            try:
+                                while not log_queue.empty():
+                                    log_line = log_queue.get_nowait()
+                                    print(log_line)  # Print to GUI
+                            except:
+                                pass
+                            
+                            # Super short sleep to yield to GUI
+                            time.sleep(0.001)
+                            
+                            # Check for stop every 100 polls
+                            if poll_count % 100 == 0:
+                                if check_stop():
+                                    print("📑 ❌ Glossary generation cancelled")
+                                    executor.shutdown(wait=False, cancel_futures=True)
+                                    return
+                        
+                        # Get any remaining logs from queue
                         try:
                             while not log_queue.empty():
                                 log_line = log_queue.get_nowait()
-                                print(log_line)  # Print to GUI
+                                print(log_line)
                         except:
                             pass
                         
-                        # Super short sleep to yield to GUI
-                        time.sleep(0.001)
+                        # Get result
+                        if future.done():
+                            try:
+                                result = future.result(timeout=0.1)
+                                if isinstance(result, dict):
+                                    if result.get('success'):
+                                        print(f"📑 ✅ Glossary generation completed successfully")
+                                    else:
+                                        print(f"📑 ❌ Glossary generation failed: {result.get('error')}")
+                                        if result.get('traceback'):
+                                            print(f"📑 Error details:\n{result.get('traceback')}")
+                            except Exception as e:
+                                print(f"📑 ❌ Error retrieving glossary result: {e}")
+                    
+                    print("✅ Automatic glossary generation COMPLETED")
+                    
+                    # Handle deferred glossary appending
+                    if os.getenv('DEFER_GLOSSARY_APPEND') == '1':
+                        print("📑 Processing deferred glossary append to system prompt...")
                         
-                        # Check for stop every 100 polls
-                        if poll_count % 100 == 0:
-                            if check_stop():
-                                print("📑 ❌ Glossary generation cancelled")
-                                executor.shutdown(wait=False, cancel_futures=True)
-                                return
-                    
-                    # Get any remaining logs from queue
-                    try:
-                        while not log_queue.empty():
-                            log_line = log_queue.get_nowait()
-                            print(log_line)
-                    except:
-                        pass
-                    
-                    # Get result
-                    if future.done():
-                        try:
-                            result = future.result(timeout=0.1)
-                            if isinstance(result, dict):
-                                if result.get('success'):
-                                    print(f"📑 ✅ Glossary generation completed successfully")
+                        glossary_path = find_glossary_file(out)
+                        if glossary_path and os.path.exists(glossary_path):
+                            try:
+                                glossary_block = None
+                                if glossary_path.lower().endswith('.csv'):
+                                    with open(glossary_path, 'r', encoding='utf-8') as f:
+                                        glossary_block = f.read()
                                 else:
-                                    print(f"📑 ❌ Glossary generation failed: {result.get('error')}")
-                                    if result.get('traceback'):
-                                        print(f"📑 Error details:\n{result.get('traceback')}")
-                        except Exception as e:
-                            print(f"📑 ❌ Error retrieving glossary result: {e}")
-                
-                print("✅ Automatic glossary generation COMPLETED")
-                
-                # Handle deferred glossary appending
-                if os.getenv('DEFER_GLOSSARY_APPEND') == '1':
-                    print("📑 Processing deferred glossary append to system prompt...")
-                    
-                    glossary_path = find_glossary_file(out)
-                    if glossary_path and os.path.exists(glossary_path):
-                        try:
-                            glossary_block = None
-                            if glossary_path.lower().endswith('.csv'):
-                                with open(glossary_path, 'r', encoding='utf-8') as f:
-                                    glossary_block = f.read()
-                            else:
-                                with open(glossary_path, 'r', encoding='utf-8') as f:
-                                    glossary_data = json.load(f)
+                                    with open(glossary_path, 'r', encoding='utf-8') as f:
+                                        glossary_data = json.load(f)
+                                    
+                                    formatted_entries = {}
+                                    if isinstance(glossary_data, dict) and 'entries' in glossary_data:
+                                        formatted_entries = glossary_data['entries']
+                                    elif isinstance(glossary_data, dict):
+                                        formatted_entries = {k: v for k, v in glossary_data.items() if k != "metadata"}
+                                    
+                                    if formatted_entries:
+                                        glossary_block = json.dumps(formatted_entries, ensure_ascii=False, indent=2)
+                                    else:
+                                        glossary_block = None
                                 
-                                formatted_entries = {}
-                                if isinstance(glossary_data, dict) and 'entries' in glossary_data:
-                                    formatted_entries = glossary_data['entries']
-                                elif isinstance(glossary_data, dict):
-                                    formatted_entries = {k: v for k, v in glossary_data.items() if k != "metadata"}
-                                
-                                if formatted_entries:
-                                    glossary_block = json.dumps(formatted_entries, ensure_ascii=False, indent=2)
+                                if glossary_block:
+                                    glossary_prompt = os.getenv('GLOSSARY_APPEND_PROMPT', 
+                                        "Character/Term Glossary (use these translations consistently):")
+                                    
+                                    current_prompt = config.PROMPT
+                                    if current_prompt:
+                                        current_prompt += "\n\n"
+                                    current_prompt += f"{glossary_prompt}\n{glossary_block}"
+                                    
+                                    config.PROMPT = current_prompt
+                                    
+                                    print(f"✅ Added auto-generated glossary to system prompt ({os.path.basename(glossary_path)})")
+                                    
+                                    if 'DEFER_GLOSSARY_APPEND' in os.environ:
+                                        del os.environ['DEFER_GLOSSARY_APPEND']
+                                    if 'GLOSSARY_APPEND_PROMPT' in os.environ:
+                                        del os.environ['GLOSSARY_APPEND_PROMPT']
                                 else:
-                                    glossary_block = None
-                            
-                            if glossary_block:
-                                glossary_prompt = os.getenv('GLOSSARY_APPEND_PROMPT', 
-                                    "Character/Term Glossary (use these translations consistently):")
-                                
-                                current_prompt = config.PROMPT
-                                if current_prompt:
-                                    current_prompt += "\n\n"
-                                current_prompt += f"{glossary_prompt}\n{glossary_block}"
-                                
-                                config.PROMPT = current_prompt
-                                
-                                print(f"✅ Added auto-generated glossary to system prompt ({os.path.basename(glossary_path)})")
-                                
-                                if 'DEFER_GLOSSARY_APPEND' in os.environ:
-                                    del os.environ['DEFER_GLOSSARY_APPEND']
-                                if 'GLOSSARY_APPEND_PROMPT' in os.environ:
-                                    del os.environ['GLOSSARY_APPEND_PROMPT']
-                            else:
-                                print("⚠️ Auto-generated glossary has no entries - skipping append")
-                                if 'DEFER_GLOSSARY_APPEND' in os.environ:
-                                    del os.environ['DEFER_GLOSSARY_APPEND']
-                                if 'GLOSSARY_APPEND_PROMPT' in os.environ:
-                                    del os.environ['GLOSSARY_APPEND_PROMPT']
-                        except Exception as e:
-                            print(f"⚠️ Failed to append auto-generated glossary: {e}")
-                    else:
-                        print("⚠️ No glossary file found after automatic generation")
-                
-            except Exception as e:
-                print(f"❌ Glossary generation failed: {e}")
-    else:
-        print("📑 Automatic glossary generation disabled")
+                                    print("⚠️ Auto-generated glossary has no entries - skipping append")
+                                    if 'DEFER_GLOSSARY_APPEND' in os.environ:
+                                        del os.environ['DEFER_GLOSSARY_APPEND']
+                                    if 'GLOSSARY_APPEND_PROMPT' in os.environ:
+                                        del os.environ['GLOSSARY_APPEND_PROMPT']
+                            except Exception as e:
+                                print(f"⚠️ Failed to append auto-generated glossary: {e}")
+                        else:
+                            print("⚠️ No glossary file found after automatic generation")
+                    
+                except Exception as e:
+                    print(f"❌ Glossary generation failed: {e}")
+        else:
+            print("📑 Automatic glossary generation disabled")
         # Don't create an empty glossary - let any existing manual glossary remain
 
     glossary_file = find_glossary_file(out)
