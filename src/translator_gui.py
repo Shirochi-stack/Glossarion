@@ -4232,8 +4232,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                             successful += 1
                         else:
                             failed += 1
-                    elif ext in {'.epub', '.txt'}:
-                        # Process as EPUB/TXT
+                    elif ext in {'.epub', '.txt', '.csv'}:
+                        # Process as EPUB/TXT/CSV
                         if self._process_text_file(file_path):
                             successful += 1
                         else:
@@ -7540,11 +7540,12 @@ Important rules:
     def browse_files(self):
         """Select one or more files - automatically handles single/multiple selection"""
         file_filter = (
-            "Supported files (*.epub *.cbz *.txt *.json *.png *.jpg *.jpeg *.gif *.bmp *.webp);;"
+            "Supported files (*.epub *.cbz *.txt *.json *.csv *.png *.jpg *.jpeg *.gif *.bmp *.webp);;"
             "EPUB/CBZ (*.epub *.cbz);;"
             "EPUB files (*.epub);;"
             "Comic Book Zip (*.cbz);;"
-            "Text files (*.txt *.json);;"
+            "Text files (*.txt *.json *.csv);;"
+            "CSV files (*.csv);;"
             "Image files (*.png *.jpg *.jpeg *.gif *.bmp *.webp);;"
             "PNG files (*.png);;"
             "JPEG files (*.jpg *.jpeg);;"
@@ -7571,7 +7572,7 @@ Important rules:
         )
         if folder_path:
             # Find all supported files in the folder
-            supported_extensions = {'.epub', '.cbz', '.txt', '.json', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
+            supported_extensions = {'.epub', '.cbz', '.txt', '.json', '.csv', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
             files = []
             
             # Recursively find files if deep scan is enabled
