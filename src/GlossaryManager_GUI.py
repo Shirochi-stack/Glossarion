@@ -2754,9 +2754,9 @@ Provide translations in the same numbered format."""
        
         # Buttons
         browse_btn = QPushButton("Browse")
-        browse_btn.setFixedWidth(120)
+        browse_btn.setFixedWidth(135)
         browse_btn.clicked.connect(browse_glossary)
-        browse_btn.setStyleSheet("padding: 8px;")
+        browse_btn.setStyleSheet("background-color: #495057; color: white; padding: 8px; font-weight: bold;")
         file_layout.addWidget(browse_btn)
         
         # Editor control buttons
@@ -2768,18 +2768,18 @@ Provide translations in the same numbered format."""
         editor_layout.addSpacing(2)
        
         buttons_row1 = [
-           ("Reload", load_glossary_for_editing, "#0dcaf0"),
-           ("Delete Selected", delete_selected_entries, "#dc3545"),
-           ("Clean Empty Fields", clean_empty_fields, "#ffc107"),
-           ("Remove Duplicates", remove_duplicates, "#ffc107"),
-           ("Backup Settings", backup_settings_dialog, "#198754")
+           ("Reload", load_glossary_for_editing, "#0891b2"),
+           ("Delete Selected", delete_selected_entries, "#991b1b"),
+           ("Clean Empty Fields", clean_empty_fields, "#b45309"),
+           ("Remove Duplicates", remove_duplicates, "#b45309"),
+           ("Backup Settings", backup_settings_dialog, "#15803d")
         ]
        
         for text, cmd, color in buttons_row1:
             btn = QPushButton(text)
-            btn.setFixedWidth(120)
+            btn.setFixedWidth(135)
             btn.clicked.connect(cmd)
-            btn.setStyleSheet(f"background-color: {color}; color: white; padding: 8px;")
+            btn.setStyleSheet(f"background-color: {color}; color: white; padding: 8px; font-weight: bold;")
             row1_layout.addWidget(btn)
        
         # Row 2
@@ -2788,18 +2788,18 @@ Provide translations in the same numbered format."""
         editor_layout.addSpacing(2)
 
         buttons_row2 = [
-           ("Trim Entries", smart_trim_dialog, "#0d6efd"),
-           ("Filter Entries", filter_entries_dialog, "#0d6efd"),
-           ("Convert Format", lambda: self.convert_glossary_format(load_glossary_for_editing), "#0dcaf0"),
-           ("Export Selection", export_selection, "#6c757d"),
-           ("About Format", duplicate_detection_settings, "#0dcaf0")
+           ("Trim Entries", smart_trim_dialog, "#1e40af"),
+           ("Filter Entries", filter_entries_dialog, "#1e40af"),
+           ("Convert Format", lambda: self.convert_glossary_format(load_glossary_for_editing), "#0891b2"),
+           ("Export Selection", export_selection, "#4b5563"),
+           ("About Format", duplicate_detection_settings, "#0891b2")
         ]
 
         for text, cmd, color in buttons_row2:
             btn = QPushButton(text)
-            btn.setFixedWidth(120)
+            btn.setFixedWidth(135)
             btn.clicked.connect(cmd)
-            btn.setStyleSheet(f"background-color: {color}; color: white; padding: 8px;")
+            btn.setStyleSheet(f"background-color: {color}; color: white; padding: 8px; font-weight: bold;")
             row2_layout.addWidget(btn)
 
         # Row 3
@@ -2808,15 +2808,15 @@ Provide translations in the same numbered format."""
         editor_layout.addSpacing(2)
 
         save_btn = QPushButton("Save Changes")
-        save_btn.setFixedWidth(150)
+        save_btn.setFixedWidth(165)
         save_btn.clicked.connect(save_edited_glossary)
-        save_btn.setStyleSheet("background-color: #198754; color: white; padding: 8px;")
+        save_btn.setStyleSheet("background-color: #15803d; color: white; padding: 8px; font-weight: bold;")
         row3_layout.addWidget(save_btn)
         
         save_as_btn = QPushButton("Save As...")
-        save_as_btn.setFixedWidth(150)
+        save_as_btn.setFixedWidth(165)
         save_as_btn.clicked.connect(save_as_glossary)
-        save_as_btn.setStyleSheet("background-color: #198754; color: white; padding: 8px; border: 1px solid #198754;")
+        save_as_btn.setStyleSheet("background-color: #15803d; color: white; padding: 8px; font-weight: bold; border: 1px solid #15803d;")
         row3_layout.addWidget(save_as_btn)
 
     def _on_tree_double_click(self, item, column_idx):
