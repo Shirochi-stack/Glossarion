@@ -1671,6 +1671,8 @@ class BatchHeaderTranslator:
             
             # Collect results as they complete
             completed = 0
+            # Initialize progress bar
+            from TransateKRtoEN import ProgressBar
             for future in as_completed(future_to_batch):
                 if self.stop_flag:
                     print("\nTranslation interrupted by user")
@@ -1684,10 +1686,15 @@ class BatchHeaderTranslator:
                         with translations_lock:
                             all_translations.update(translations)
                     completed += 1
-                    print(f"\n[Progress] Completed {completed}/{total_batches} batches")
+                    # Update progress bar
+                    ProgressBar.update(completed, total_batches, prefix="Batch Progress", bar_length=30)
                 except Exception as e:
                     print(f"\n❌ Batch {batch_num + 1} generated exception: {e}")
                     completed += 1
+                    ProgressBar.update(completed, total_batches, prefix="Batch Progress", bar_length=30)
+            
+            # Finish progress bar
+            ProgressBar.finish()
         
         print(f"\n✅ Translated {len(all_translations)} headers total (using parallel execution)")
         return all_translations

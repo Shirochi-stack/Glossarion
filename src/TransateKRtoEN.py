@@ -4284,6 +4284,12 @@ def main(log_callback=None, stop_callback=None):
     
     is_text_file = input_path.lower().endswith(('.txt', '.csv', '.json'))
     
+    # Disable Break Split Count for EPUB files (only works with plain text files)
+    if input_path.lower().endswith('.epub'):
+        if os.getenv('BREAK_SPLIT_COUNT', ''):
+            print("⚠️ Break Split Count disabled for EPUB files (only works with .txt files)")
+        os.environ['BREAK_SPLIT_COUNT'] = ''
+    
     if is_text_file:
         file_base = os.path.splitext(os.path.basename(input_path))[0]
     else:
