@@ -3611,32 +3611,32 @@ def _create_processing_options_section(self, parent):
     reinforce_h.addStretch()
     right_v.addWidget(reinforce_w)
     
-    # Line Break Split Count option
-    linebreak_w = QWidget()
-    linebreak_h = QHBoxLayout(linebreak_w)
-    linebreak_h.setContentsMargins(0, 5, 0, 0)
-    linebreak_h.addWidget(QLabel("Line Break Split Count:"))
-    linebreak_edit = QLineEdit()
-    linebreak_edit.setFixedWidth(60)
-    linebreak_edit.setPlaceholderText("200")
+    # Break Split Count option
+    break_split_w = QWidget()
+    break_split_h = QHBoxLayout(break_split_w)
+    break_split_h.setContentsMargins(0, 5, 0, 0)
+    break_split_h.addWidget(QLabel("Break Split Count:"))
+    break_split_edit = QLineEdit()
+    break_split_edit.setFixedWidth(60)
+    break_split_edit.setPlaceholderText("200")
     try:
-        linebreak_edit.setText(str(self.line_break_split_count_var) if hasattr(self, 'line_break_split_count_var') and self.line_break_split_count_var else '')
+        break_split_edit.setText(str(self.break_split_count_var) if hasattr(self, 'break_split_count_var') and self.break_split_count_var else '')
     except Exception:
         pass
-    def _on_linebreak_changed(text):
+    def _on_break_split_changed(text):
         try:
-            self.line_break_split_count_var = text
+            self.break_split_count_var = text
         except Exception:
             pass
-    linebreak_edit.textChanged.connect(_on_linebreak_changed)
-    linebreak_h.addWidget(linebreak_edit)
-    linebreak_h.addStretch()
-    right_v.addWidget(linebreak_w)
+    break_split_edit.textChanged.connect(_on_break_split_changed)
+    break_split_h.addWidget(break_split_edit)
+    break_split_h.addStretch()
+    right_v.addWidget(break_split_w)
     
-    linebreak_desc = QLabel("Split chunks after N elements\n(Leave empty for token-only splitting)")
-    linebreak_desc.setStyleSheet("color: gray; font-size: 9pt;")
-    linebreak_desc.setContentsMargins(0, 0, 0, 5)
-    right_v.addWidget(linebreak_desc)
+    break_split_desc = QLabel("Split chunks after N elements\n(Leave empty for token-only splitting)")
+    break_split_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    break_split_desc.setContentsMargins(0, 0, 0, 5)
+    right_v.addWidget(break_split_desc)
     
     right_v.addStretch()
     columns_h.addWidget(right_column)

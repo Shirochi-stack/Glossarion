@@ -38,12 +38,12 @@ class ChapterSplitter:
         
         effective_max_tokens = max_tokens
         
-        # Check for line break split configuration
-        line_break_split = os.getenv('LINE_BREAK_SPLIT_COUNT', '')
+        # Check for break split configuration
+        break_split = os.getenv('BREAK_SPLIT_COUNT', '')
         max_elements = None
-        if line_break_split and line_break_split.isdigit():
-            max_elements = int(line_break_split)
-            print(f"✅ Line Break split: {max_elements} elements per chunk")
+        if break_split and break_split.isdigit():
+            max_elements = int(break_split)
+            print(f"✅ Break split: {max_elements} elements per chunk")
         
         # First check if splitting is needed
         total_tokens = self.count_tokens(chapter_html)

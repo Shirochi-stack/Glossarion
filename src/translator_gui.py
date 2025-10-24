@@ -5283,7 +5283,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt,
             'EMERGENCY_PARAGRAPH_RESTORE': "1" if self.emergency_restore_var else "0",
             'REINFORCEMENT_FREQUENCY': str(self.reinforcement_freq_var),
-            'LINE_BREAK_SPLIT_COUNT': str(self.line_break_split_count_var) if hasattr(self, 'line_break_split_count_var') and self.line_break_split_count_var else '',
+            'BREAK_SPLIT_COUNT': str(self.break_split_count_var) if hasattr(self, 'break_split_count_var') and self.break_split_count_var else '',
             'RETRY_TRUNCATED': "1" if self.retry_truncated_var else "0",
             'MAX_RETRY_TOKENS': str(self.max_retry_tokens_var),
             'RETRY_DUPLICATE_BODIES': "1" if self.retry_duplicate_var else "0",
