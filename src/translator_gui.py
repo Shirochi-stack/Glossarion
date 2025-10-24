@@ -736,7 +736,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.thread_delay_var = str(self.config.get('thread_submission_delay', 0.5))
         self.remove_ai_artifacts = os.getenv("REMOVE_AI_ARTIFACTS", "0") == "1"
         print(f"   🎨 Remove AI Artifacts: {'ENABLED' if self.remove_ai_artifacts else 'DISABLED'}")
-        self.disable_chapter_merging_var = self.config.get('disable_chapter_merging', False)
+        self.disable_chapter_merging_var = self.config.get('disable_chapter_merging', True)
         self.selected_files = []
         self.current_file_index = 0
         self.use_gemini_openai_endpoint_var = self.config.get('use_gemini_openai_endpoint', False)
@@ -968,8 +968,8 @@ Text to analyze:
             print("Metadata translation UI not available")
         
         # Default prompts
-        self.default_translation_chunk_prompt = "[This is part {chunk_idx}/{total_chunks}]. You must maintain the narrative flow with the previous chunks while translating it and following all system prompt guidelines previously mentioned.\n{chunk_html}"
-        self.default_image_chunk_prompt = "This is part {chunk_idx} of {total_chunks} of a longer image. You must maintain the narrative flow with the previous chunks while translating it and following all system prompt guidelines previously mentioned. {context}"
+        self.default_translation_chunk_prompt = "[This is part {chunk_idx}/{total_chunks}]. You must maintain the narrative flow with the previous chunks while following all system prompt guidelines previously mentioned.\n{chunk_html}"
+        self.default_image_chunk_prompt = "This is part {chunk_idx} of {total_chunks} of a longer image. You must maintain the narrative flow with the previous chunks while following all system prompt guidelines previously mentioned. {context}"
         self.default_prompts = {
 
             "korean": (
@@ -1738,7 +1738,7 @@ Recent translations to summarize:
             ('enable_watermark_removal_var', 'enable_watermark_removal', True),
             ('save_cleaned_images_var', 'save_cleaned_images', False),
             ('advanced_watermark_removal_var', 'advanced_watermark_removal', False),
-            ('enable_decimal_chapters_var', 'enable_decimal_chapters', False),
+            ('enable_decimal_chapters_var', 'enable_decimal_chapters', True),
             ('disable_gemini_safety_var', 'disable_gemini_safety', False),
             ('single_api_image_chunks_var', 'single_api_image_chunks', False),
 
