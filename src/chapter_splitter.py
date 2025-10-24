@@ -64,6 +64,46 @@ class ChapterSplitter:
         else:
             elements = list(soup.children)
         
+        # Check if we have actual HTML tags (not just text)
+        has_html_tags = any(hasattr(elem, 'name') for elem in elements if not (isinstance(elem, str) and elem.strip() == ''))
+        
+        # If no HTML tags, split by lines instead
+        if not has_html_tags:
+            # Plain text mode - split by line count OR token limit
+            lines = chapter_html.split('\n')
+            chunks = []
+            current_lines = []
+            current_tokens = 0
+            
+            for line in lines:
+                line_tokens = self.count_tokens(line)
+                
+                # Check if we should split
+                should_split = False
+                if current_lines:
+                    if current_tokens + line_tokens > effective_max_tokens:
+                        should_split = True
+                    elif max_elements and len(current_lines) >= max_elements:
+                        should_split = True
+                
+                if should_split:
+                    chunks.append('\n'.join(current_lines))
+                    current_lines = [line]
+                    current_tokens = line_tokens
+                else:
+                    current_lines.append(line)
+                    current_tokens += line_tokens
+            
+            if current_lines:
+                chunks.append('\n'.join(current_lines))
+            
+            if not chunks:
+                chunks = [chapter_html]
+            
+            total_chunks = len(chunks)
+            return [(chunk, i+1, total_chunks) for i, chunk in enumerate(chunks)]
+        
+        # HTML mode - split by element count
         chunks = []
         current_chunk_elements = []
         current_chunk_tokens = 0
