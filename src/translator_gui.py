@@ -8722,6 +8722,7 @@ Important rules:
                     ('GLOSSARY_MAX_TEXT_SIZE', str(self.config.get('glossary_max_text_size', 50000))),
                     ('GLOSSARY_CHAPTER_SPLIT_THRESHOLD', str(self.config.get('glossary_chapter_split_threshold', 8192))),
                     ('GLOSSARY_FILTER_MODE', self.config.get('glossary_filter_mode', 'strict')),
+                    ('GLOSSARY_DUPLICATE_ALGORITHM', self.config.get('glossary_duplicate_algorithm', 'auto')),
                 ]
                 for env_key, env_value in glossary_env_mappings:
                     if env_key:  # Skip None entries
