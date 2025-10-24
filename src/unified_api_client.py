@@ -5747,13 +5747,8 @@ class UnifiedClient:
                 # Extract chapter info for better tracking
                 chapter_info = self._extract_chapter_info(messages)
                 
-                # Extract safety/moderation config if present
-                safety_config = self._extract_safety_config()
-                if safety_config:
-                    # Always place safety config next to the payload file
-                    # Use thread_dir (which was set at the beginning based on has_images)
-                    logger.debug(f"[{thread_name}] Saving safety config: unique_filename={unique_filename}, thread_dir={thread_dir}, has_images={has_images}")
-                    self._save_safety_config(safety_config, unique_filename, thread_dir)
+                # NOTE: Safety config saving is now handled by provider-specific methods
+                # (_save_gemini_safety_config) to avoid duplicates and ensure consistency
                 
                 # Include debug info with retry reason
                 debug_info = {
@@ -5853,70 +5848,28 @@ class UnifiedClient:
     def _extract_safety_config(self) -> dict:
         """Extract current safety/moderation configuration
         
+        DEPRECATED: This method is no longer used. Safety configs are now handled by
+        provider-specific methods like _save_gemini_safety_config() to avoid duplicates.
+        
         Returns:
-            Dictionary of safety settings or None
+            None (deprecated)
         """
-        try:
-            safety_config = {}
-            
-            # Check Gemini safety settings
-            if hasattr(self, 'client_type') and self.client_type == 'gemini':
-                disable_safety = os.getenv('DISABLE_GEMINI_SAFETY', '0') == '1'
-                safety_config['gemini'] = {
-                    'safety_disabled': disable_safety,
-                    'harm_category_settings': 'BLOCK_NONE' if disable_safety else 'DEFAULT'
-                }
-            
-            # Check OpenRouter safe mode
-            if hasattr(self, 'base_url') and 'openrouter' in str(self.base_url).lower():
-                disable_safety = os.getenv('DISABLE_GEMINI_SAFETY', '0') == '1'
-                safety_config['openrouter'] = {
-                    'safe_mode': not disable_safety
-                }
-            
-            # Check Poe safe mode
-            if hasattr(self, 'model') and self.model and self.model.startswith('poe/'):
-                disable_safety = os.getenv('DISABLE_GEMINI_SAFETY', '0') == '1'
-                safety_config['poe'] = {
-                    'safe_mode': not disable_safety
-                }
-            
-            # Add timestamp and model info
-            if safety_config:
-                safety_config['timestamp'] = datetime.now().isoformat()
-                safety_config['model'] = getattr(self, 'model', 'unknown')
-                safety_config['provider'] = getattr(self, 'client_type', 'unknown')
-                return safety_config
-            
-            return None
-            
-        except Exception as e:
-            print(f"Failed to extract safety config: {e}")
-            return None
+        # This method is deprecated and no longer saves configs to avoid duplicates
+        return None
     
     def _save_safety_config(self, config: dict, payload_filename: str, target_dir: str):
         """Save safety/moderation config in same folder as payload
+        
+        DEPRECATED: This method is no longer used. Use provider-specific methods like
+        _save_gemini_safety_config() instead to avoid duplicate safety config files.
         
         Args:
             config: Safety configuration dictionary
             payload_filename: Parent payload filename (for reference)
             target_dir: Directory where the payload is saved
         """
-        try:
-            # Save in the same directory as the payload
-            # Generate config filename based on payload
-            base_name = os.path.splitext(payload_filename)[0]
-            config_filename = f"{base_name}_safety.json"
-            config_path = os.path.join(target_dir, config_filename)
-            
-            # Save config
-            with open(config_path, 'w', encoding='utf-8') as f:
-                json.dump(config, f, indent=2, ensure_ascii=False)
-            
-            logger.debug(f"Saved safety config to: {config_path}")
-            
-        except Exception as e:
-            print(f"Failed to save safety config: {e}")
+        # This method is deprecated - no longer saves to avoid duplicate configs
+        pass
     
     def _save_response(self, content: str, filename: str):
         """Save API response with enhanced thread safety and deduplication"""
@@ -6400,7 +6353,8 @@ class UnifiedClient:
                 formatted_prompt = self._format_prompt(messages, style='gemini')
                 
                 # Check if safety settings are disabled via config (from GUI)
-                disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
+                disable_safety_env = os.getenv("DISABLE_GEMINI_SAFETY", "0")
+                disable_safety = disable_safety_env in ("1", "true", "True", "TRUE")
                 
                 # Get thinking budget from environment (though Vertex AI may not support it)
                 thinking_budget = int(os.getenv("THINKING_BUDGET", "-1"))
@@ -6502,7 +6456,14 @@ class UnifiedClient:
                     }
                 else:
                     safety_status = "ENABLED - Using default Gemini safety settings"
-                    readable_safety = "DEFAULT"
+                    # Show actual default thresholds (BLOCK_MEDIUM_AND_ABOVE for most categories)
+                    readable_safety = {
+                        "HATE_SPEECH": "BLOCK_MEDIUM_AND_ABOVE (default)",
+                        "SEXUALLY_EXPLICIT": "BLOCK_MEDIUM_AND_ABOVE (default)",
+                        "HARASSMENT": "BLOCK_MEDIUM_AND_ABOVE (default)",
+                        "DANGEROUS_CONTENT": "BLOCK_MEDIUM_AND_ABOVE (default)",
+                        "CIVIC_INTEGRITY": "BLOCK_MEDIUM_AND_ABOVE (default)"
+                    }
                 
                 # Save configuration to file
                 config_data = {
@@ -8192,7 +8153,8 @@ class UnifiedClient:
                         break
         
         # Check if safety settings are disabled
-        disable_safety = os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true"
+        disable_safety_env = os.getenv("DISABLE_GEMINI_SAFETY", "0")
+        disable_safety = disable_safety_env in ("1", "true", "True", "TRUE")
         
         # Get thinking budget from environment
         thinking_budget = int(os.getenv("THINKING_BUDGET", "-1"))  
@@ -8239,8 +8201,6 @@ class UnifiedClient:
         error_details = {}
         
         # Prepare configuration data
-        readable_safety = "DEFAULT"
-        safety_status = "ENABLED - Using default Gemini safety settings"
         if disable_safety:
             safety_status = "DISABLED - All categories set to BLOCK_NONE"
             readable_safety = {
@@ -8249,6 +8209,16 @@ class UnifiedClient:
                 "HARASSMENT": "BLOCK_NONE",
                 "DANGEROUS_CONTENT": "BLOCK_NONE",
                 "CIVIC_INTEGRITY": "BLOCK_NONE"
+            }
+        else:
+            safety_status = "ENABLED - Using default Gemini safety settings"
+            # Show actual default thresholds (BLOCK_MEDIUM_AND_ABOVE for most categories)
+            readable_safety = {
+                "HATE_SPEECH": "BLOCK_MEDIUM_AND_ABOVE (default)",
+                "SEXUALLY_EXPLICIT": "BLOCK_MEDIUM_AND_ABOVE (default)",
+                "HARASSMENT": "BLOCK_MEDIUM_AND_ABOVE (default)",
+                "DANGEROUS_CONTENT": "BLOCK_MEDIUM_AND_ABOVE (default)",
+                "CIVIC_INTEGRITY": "BLOCK_MEDIUM_AND_ABOVE (default)"
             }
         
         # Log to console with thinking status - only if not stopping

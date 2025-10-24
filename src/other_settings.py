@@ -4092,7 +4092,7 @@ def _create_processing_options_section(self, parent):
     section_v.addWidget(safety_title)
     
     if not hasattr(self, 'disable_gemini_safety_var'):
-        self.disable_gemini_safety_var = self.config.get('disable_gemini_safety', False)
+        self.disable_gemini_safety_var = self.config.get('disable_gemini_safety', True)
     
     safety_cb = self._create_styled_checkbox("Disable API Safety Filters (Gemini, Groq, Fireworks, etc.)")
     try:
