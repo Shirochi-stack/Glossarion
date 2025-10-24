@@ -6147,10 +6147,10 @@ def main(log_callback=None, stop_callback=None):
                     chunk_context = []
 
                 # Build the current system prompt from the original each time, and append the last summary block if present
-                # Apply per-chapter glossary compression if enabled
+                # Apply per-chunk glossary compression if enabled
                 if os.getenv("COMPRESS_GLOSSARY_PROMPT", "0") == "1" and glossary_path and os.path.exists(glossary_path):
-                    # Rebuild system prompt with compressed glossary for this chapter
-                    current_system_content = build_system_prompt(config.SYSTEM_PROMPT, glossary_path, source_text=c.get("body", ""))
+                    # Rebuild system prompt with compressed glossary for THIS SPECIFIC CHUNK
+                    current_system_content = build_system_prompt(config.SYSTEM_PROMPT, glossary_path, source_text=chunk_html)
                 else:
                     current_system_content = original_system_prompt
                 
