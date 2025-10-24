@@ -8388,6 +8388,7 @@ Important rules:
                 ('translation_temperature', ['trans_temp'], 0.3, lambda v: safe_float(v, 0.3)),
                 ('translation_history_limit', ['trans_history'], 2, lambda v: safe_int(v, 2)),
                 ('reinforcement_frequency', ['reinforcement_freq_var'], 10, lambda v: safe_int(v, 10)),
+                ('break_split_count', ['break_split_count_var'], '', str),
                 ('duplicate_lookback_chapters', ['duplicate_lookback_var'], 5, lambda v: safe_int(v, 5)),
 
                 # Boolean toggles - prioritize checkboxes over vars

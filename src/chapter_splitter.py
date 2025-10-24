@@ -43,7 +43,7 @@ class ChapterSplitter:
         max_elements = None
         if break_split and break_split.isdigit():
             max_elements = int(break_split)
-            print(f"✅ Break split: {max_elements} elements per chunk")
+            print(f"✅ Break split enabled: {max_elements} per chunk")
         
         # First check if splitting is needed
         total_tokens = self.count_tokens(chapter_html)
@@ -65,12 +65,16 @@ class ChapterSplitter:
             elements = list(soup.children)
         
         # Check if we have actual HTML tags (not just text)
-        has_html_tags = any(hasattr(elem, 'name') for elem in elements if not (isinstance(elem, str) and elem.strip() == ''))
+        # Count non-empty elements
+        non_empty_elements = [elem for elem in elements if not (isinstance(elem, str) and elem.strip() == '')]
+        has_html_tags = any(hasattr(elem, 'name') for elem in non_empty_elements)
         
-        # If no HTML tags, split by lines instead
-        if not has_html_tags:
+        # If no HTML tags OR only 1 element (likely wrapped plain text), split by lines instead
+        if not has_html_tags or len(non_empty_elements) <= 1:
             # Plain text mode - split by line count OR token limit
             lines = chapter_html.split('\n')
+            if max_elements:
+                print(f"📝 Total lines in file: {len(lines):,}")
             chunks = []
             current_lines = []
             current_tokens = 0
@@ -104,6 +108,11 @@ class ChapterSplitter:
             return [(chunk, i+1, total_chunks) for i, chunk in enumerate(chunks)]
         
         # HTML mode - split by element count
+        # Count total elements first if Break Split is enabled
+        if max_elements:
+            total_elements = sum(1 for elem in elements if not (isinstance(elem, str) and elem.strip() == ''))
+            print(f"🏷️ Total HTML elements in file: {total_elements:,}")
+        
         chunks = []
         current_chunk_elements = []
         current_chunk_tokens = 0
