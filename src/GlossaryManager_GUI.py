@@ -448,6 +448,13 @@ class GlossaryManagerMixin:
                     if hasattr(self, checkbox_name):
                         setattr(self, var_name, getattr(self, checkbox_name).isChecked())
                 
+                # Update duplicate detection algorithm from combo box
+                if hasattr(self, 'duplicate_algo_combo'):
+                    algo_index = self.duplicate_algo_combo.currentIndex()
+                    algo_map = {0: 'auto', 1: 'strict', 2: 'balanced', 3: 'aggressive', 4: 'basic'}
+                    self.glossary_duplicate_algorithm_var = algo_map.get(algo_index, 'auto')
+                    self.config['glossary_duplicate_algorithm'] = self.glossary_duplicate_algorithm_var
+                
                 # Call main save_config - it will:
                 # 1. Update custom_entry_types from checkboxes
                 # 2. Read from all UI widgets and instance variables
