@@ -2447,46 +2447,116 @@ class BatchTranslationProcessor:
             else:
                 chapter_system_prompt = build_system_prompt(self.config.SYSTEM_PROMPT, glossary_path, source_text=chapter_body)
             
-            chapter_msgs = [{"role": "system", "content": chapter_system_prompt}, {"role": "user", "content": chapter_body}]
+            # Check if chapter needs chunking
+            from chapter_splitter import ChapterSplitter
+            chapter_splitter = ChapterSplitter(self.config)
             
-            # Log combined prompt token count
-            try:
-                import tiktoken
-                try:
-                    enc = tiktoken.encoding_for_model(self.config.MODEL)
-                except:
-                    enc = tiktoken.get_encoding('cl100k_base')
+            # Get token budget
+            token_env = os.getenv("MAX_INPUT_TOKENS", "1000000").strip()
+            if not token_env or token_env.lower() == "unlimited":
+                max_input_tokens = 1000000
+                budget_str = "unlimited"
+            elif token_env.isdigit():
+                max_input_tokens = int(token_env)
+                budget_str = f"{max_input_tokens:,}"
+            else:
+                max_input_tokens = 1000000
+                budget_str = "unlimited"
+            
+            # Calculate available tokens for content
+            system_tokens = chapter_splitter.count_tokens(chapter_system_prompt)
+            available_tokens = max_input_tokens - system_tokens - 100  # 100 token safety margin
+            
+            # Split into chunks if needed
+            chunks = chapter_splitter.split_chapter(chapter_body, available_tokens)
+            total_chunks = len(chunks)
+            
+            file_ref = chapter.get('original_basename', f'{terminology}_{chap_num}')
+            
+            if total_chunks > 1:
+                print(f"✂️ Chapter {actual_num} requires {total_chunks} chunks to fit within token limit")
+            
+            # Process each chunk sequentially
+            translated_chunks = []
+            
+            for chunk_html, chunk_idx, chunk_total in chunks:
+                if self.check_stop_fn():
+                    raise Exception("Translation stopped by user")
                 
-                total_tokens = sum(len(enc.encode(msg["content"])) for msg in chapter_msgs)
-                file_ref = chapter.get('original_basename', f'{terminology}_{chap_num}')
-                
-                # Get token budget string
-                token_env = os.getenv("MAX_INPUT_TOKENS", "1000000").strip()
-                if not token_env or token_env.lower() == "unlimited":
-                    budget_str = "unlimited"
-                elif token_env.isdigit():
-                    budget_str = f"{int(token_env):,}"
+                # Build messages for this chunk
+                if total_chunks > 1:
+                    chunk_prompt_template = os.getenv("TRANSLATION_CHUNK_PROMPT", "[PART {chunk_idx}/{total_chunks}]\n{chunk_html}")
+                    user_prompt = chunk_prompt_template.format(
+                        chunk_idx=chunk_idx,
+                        total_chunks=total_chunks,
+                        chunk_html=chunk_html
+                    )
                 else:
-                    budget_str = "unlimited"
+                    user_prompt = chunk_html
                 
-                print(f"💬 Chunk 1/1 combined prompt: {total_tokens:,} tokens (system + user) / {budget_str} [File: {file_ref}]")
-            except ImportError:
-                print(f"💬 Combined prompt prepared [File: {chapter.get('original_basename', f'{terminology}_{chap_num}')}]")
-            
-            # Generate filename before API call
-            fname = FileUtilities.create_chapter_filename(chapter, actual_num)
-            self.client.set_output_filename(fname)
+                chapter_msgs = [{"role": "system", "content": chapter_system_prompt}, {"role": "user", "content": user_prompt}]
+                
+                # Log combined prompt token count
+                try:
+                    import tiktoken
+                    try:
+                        enc = tiktoken.encoding_for_model(self.config.MODEL)
+                    except:
+                        enc = tiktoken.get_encoding('cl100k_base')
+                    
+                    total_tokens = sum(len(enc.encode(msg["content"])) for msg in chapter_msgs)
+                    print(f"💬 Chunk {chunk_idx}/{total_chunks} combined prompt: {total_tokens:,} tokens (system + user) / {budget_str} [File: {file_ref}]")
+                except ImportError:
+                    print(f"💬 Chunk {chunk_idx}/{total_chunks} prepared [File: {file_ref}]")
+                
+                # Generate filename before API call
+                if chunk_idx < total_chunks:
+                    # This is a chunk - use chunk naming format
+                    fname = f"response_{chap_num:03d}_chunk_{chunk_idx}.html"
+                else:
+                    # Last chunk or single chunk - use regular naming
+                    fname = FileUtilities.create_chapter_filename(chapter, actual_num)
+                
+                if hasattr(self.client, 'set_output_filename'):
+                    self.client.set_output_filename(fname)
 
-            if hasattr(self.client, '_current_output_file'):
-                self.client._current_output_file = fname
+                if hasattr(self.client, '_current_output_file'):
+                    self.client._current_output_file = fname
 
-            print(f"📤 Sending Chapter {actual_num} to API...")
-            result, finish_reason = send_with_interrupt(
-                chapter_msgs, self.client, self.config.TEMP, 
-                self.config.MAX_OUTPUT_TOKENS, self.check_stop_fn
-            )
+                print(f"📤 Sending Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks} to API...")
+                result, finish_reason = send_with_interrupt(
+                    chapter_msgs, self.client, self.config.TEMP, 
+                    self.config.MAX_OUTPUT_TOKENS, self.check_stop_fn
+                )
+                
+                print(f"📥 Received Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks} response, finish_reason: {finish_reason}")
+                
+                if finish_reason in ["length", "max_tokens"]:
+                    print(f"    ⚠️ Chunk {chunk_idx}/{total_chunks} response was TRUNCATED!")
+                
+                if result:
+                    # Remove chunk markers from result
+                    result = re.sub(r'\[PART \d+/\d+\]\s*', '', result, flags=re.IGNORECASE)
+                    translated_chunks.append(result)
+                else:
+                    raise Exception(f"Empty result for chunk {chunk_idx}/{total_chunks}")
+                
+                # Track chunk completion
+                self.chunks_completed += 1
+                
+                # Delay between chunks if needed
+                if chunk_idx < total_chunks and self.config.DELAY > 0:
+                    time.sleep(self.config.DELAY)
             
-            print(f"📥 Received Chapter {actual_num} response, finish_reason: {finish_reason}")
+            # Combine all chunks
+            if total_chunks > 1:
+                result = '\n'.join(translated_chunks)
+                print(f"🔗 Combined {total_chunks} chunks for Chapter {actual_num}")
+            else:
+                result = translated_chunks[0] if translated_chunks else None
+            
+            if not result:
+                raise Exception("No translation result produced")
 
             # Enhanced mode workflow (same as non-batch):
             # 1. Original HTML -> html2text -> Markdown/plain text (during extraction)
@@ -2495,9 +2565,6 @@ class BatchTranslationProcessor:
             if result and chapter.get("enhanced_extraction", False):
                 print(f"🔄 Converting translated markdown back to HTML...")
                 result = convert_enhanced_text_to_html(result, chapter)
-                
-            if finish_reason in ["length", "max_tokens"]:
-                print(f"⚠️ Chapter {actual_num} response was TRUNCATED!")
             
             if self.config.REMOVE_AI_ARTIFACTS:
                 result = ContentProcessor.clean_ai_artifacts(result, True)
@@ -2585,7 +2652,7 @@ class BatchTranslationProcessor:
                     self.save_progress_fn()
                     # Only increment chapters_completed for successful chapters
                     self.chapters_completed += 1
-                    self.chunks_completed += 1
+                    # Note: chunks_completed is already incremented in the loop above
             
             print(f"✅ Chapter {actual_num} completed successfully")
             return True, actual_num
