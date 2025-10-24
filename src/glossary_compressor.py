@@ -197,24 +197,15 @@ def _compress_json_glossary(json_data, source_text):
 
 def _text_contains_term(text, term):
     """
-    Check if term appears in text using regex for word boundary matching.
-    Case-insensitive search.
+    Check if term appears in text using simple substring matching.
+    Works well with Korean/CJK text where word boundaries are not clear.
     """
     if not term or not text:
         return False
     
-    # Escape special regex characters in the term
-    escaped_term = re.escape(term)
-    
-    # Use word boundaries for more accurate matching
-    # \b doesn't work well with non-ASCII characters, so we use a more flexible pattern
-    pattern = r'(?<![^\s\W])' + escaped_term + r'(?![^\s\W])'
-    
-    try:
-        return bool(re.search(pattern, text, re.IGNORECASE | re.UNICODE))
-    except re.error:
-        # If regex fails, fall back to simple substring search
-        return term.lower() in text.lower()
+    # For CJK languages (Korean, Chinese, Japanese), simple substring matching works best
+    # Word boundaries don't apply the same way as in English
+    return term in text
 
 
 def compress_glossary_file(glossary_path, source_text):
