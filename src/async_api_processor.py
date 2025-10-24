@@ -3183,6 +3183,35 @@ class AsyncProcessingDialog:
                 
                 # TRUE BRUTE FORCE: Just dump the entire JSON
                 glossary_text = json.dumps(glossary_data, ensure_ascii=False, indent=2)
+                original_glossary_text = glossary_text  # Store for compression stats
+                
+                # Apply glossary compression if enabled
+                compress_glossary_enabled = env_vars.get('COMPRESS_GLOSSARY_PROMPT') == '1'
+                if compress_glossary_enabled and content:
+                    try:
+                        from glossary_compressor import compress_glossary
+                        original_length = len(glossary_text)
+                        glossary_text = compress_glossary(glossary_text, content, glossary_format='auto')
+                        compressed_length = len(glossary_text)
+                        reduction_pct = ((original_length - compressed_length) / original_length * 100) if original_length > 0 else 0
+                        
+                        # Calculate token savings if tiktoken is available
+                        try:
+                            import tiktoken
+                            try:
+                                enc = tiktoken.encoding_for_model(env_vars.get('MODEL', 'gpt-4'))
+                            except:
+                                enc = tiktoken.get_encoding('cl100k_base')
+                            
+                            original_tokens = len(enc.encode(original_glossary_text))
+                            compressed_tokens = len(enc.encode(glossary_text))
+                            token_reduction_pct = ((original_tokens - compressed_tokens) / original_tokens * 100) if original_tokens > 0 else 0
+                            
+                            logger.info(f"🗜️ Glossary: {original_length}→{compressed_length} chars ({reduction_pct:.1f}%), {original_tokens}→{compressed_tokens} tokens ({token_reduction_pct:.1f}%)")
+                        except ImportError:
+                            logger.info(f"🗜️ Glossary compressed: {original_length} → {compressed_length} chars ({reduction_pct:.1f}% reduction)")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Glossary compression failed: {e}")
                 
                 # Use the append prompt format if provided
                 append_prompt = env_vars.get('APPEND_GLOSSARY_PROMPT', '')
@@ -3197,7 +3226,7 @@ class AsyncProcessingDialog:
                     # Default format
                     system_prompt = f"{system_prompt}\n\nGlossary:\n{glossary_text}"
                 
-                logger.info(f"Glossary appended to system prompt ({len(glossary_text)} chars)")
+                logger.info(f"✅ Glossary appended ({len(glossary_text)} characters)")
                 
                 # Log preview for debugging
                 if len(glossary_text) > 200:

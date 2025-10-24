@@ -2397,7 +2397,57 @@ class BatchTranslationProcessor:
                     image_translations = {}
                     print(f"✅ Processed {len(image_translations)} images for Chapter {actual_num}")
             
-            chapter_msgs = self.base_msg + [{"role": "user", "content": chapter_body}]
+            # Build chapter-specific system prompt with glossary compression
+            glossary_path = find_glossary_file(self.out_dir)
+            
+            # Capture compression stats if enabled
+            compress_glossary_enabled = os.getenv("COMPRESS_GLOSSARY_PROMPT", "0") == "1"
+            if compress_glossary_enabled and glossary_path and os.path.exists(glossary_path):
+                try:
+                    # Load glossary to get original size
+                    with open(glossary_path, 'r', encoding='utf-8') as f:
+                        if glossary_path.lower().endswith('.csv'):
+                            original_glossary = f.read()
+                        else:
+                            glossary_data = json.load(f)
+                            original_glossary = json.dumps(glossary_data, ensure_ascii=False, indent=2)
+                    
+                    original_length = len(original_glossary)
+                    
+                    # Build system prompt with compression
+                    chapter_system_prompt = build_system_prompt(self.config.SYSTEM_PROMPT, glossary_path, source_text=chapter_body)
+                    
+                    # Extract compressed glossary from system prompt to measure compression
+                    # The glossary is appended after the prompt, so we can estimate the size
+                    prompt_without_glossary = self.config.SYSTEM_PROMPT
+                    glossary_in_prompt = len(chapter_system_prompt) - len(prompt_without_glossary) if len(chapter_system_prompt) > len(prompt_without_glossary) else 0
+                    
+                    if glossary_in_prompt > 0 and original_length > glossary_in_prompt:
+                        reduction_pct = ((original_length - glossary_in_prompt) / original_length * 100)
+                        
+                        # Calculate token savings
+                        try:
+                            import tiktoken
+                            try:
+                                enc = tiktoken.encoding_for_model(self.config.MODEL)
+                            except:
+                                enc = tiktoken.get_encoding('cl100k_base')
+                            
+                            original_tokens = len(enc.encode(original_glossary))
+                            compressed_tokens = len(enc.encode(chapter_system_prompt)) - len(enc.encode(prompt_without_glossary))
+                            token_reduction_pct = ((original_tokens - compressed_tokens) / original_tokens * 100) if original_tokens > 0 else 0
+                            
+                            print(f"🗜️ Glossary: {original_length:,}→{glossary_in_prompt:,} chars ({reduction_pct:.1f}%), {original_tokens:,}→{compressed_tokens:,} tokens ({token_reduction_pct:.1f}%)")
+                        except ImportError:
+                            print(f"🗜️ Glossary compressed: {original_length:,} → {glossary_in_prompt:,} chars ({reduction_pct:.1f}% reduction)")
+                    
+                except Exception as e:
+                    print(f"⚠️ Failed to measure glossary compression: {e}")
+                    chapter_system_prompt = build_system_prompt(self.config.SYSTEM_PROMPT, glossary_path, source_text=chapter_body)
+            else:
+                chapter_system_prompt = build_system_prompt(self.config.SYSTEM_PROMPT, glossary_path, source_text=chapter_body)
+            
+            chapter_msgs = [{"role": "system", "content": chapter_system_prompt}, {"role": "user", "content": chapter_body}]
             
             # Generate filename before API call
             fname = FileUtilities.create_chapter_filename(chapter, actual_num)
