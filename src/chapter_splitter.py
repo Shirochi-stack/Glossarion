@@ -91,7 +91,7 @@ class ChapterSplitter:
             
             # If adding this element would exceed the limit AND we have content
             if current_chunk_tokens + element_tokens > effective_max_tokens and current_chunk_elements:
-                # Save current chunk
+                # Save current chunk at element boundary (elements are typically paragraphs/lines)
                 chunks.append(self._create_chunk_html(current_chunk_elements))
                 # Start new chunk with this element
                 current_chunk_elements = [element_html]

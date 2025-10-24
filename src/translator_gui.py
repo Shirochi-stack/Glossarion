@@ -7631,22 +7631,12 @@ Important rules:
         if not hasattr(self, 'json_conversions'):
             self.json_conversions = {}  # Maps converted .txt paths to original .json paths
         
-        # Process JSON files first - convert them to TXT
+        # Process CBZ files - extract images
         processed_paths = []
         
         for path in paths:
             lower = path.lower()
-            if lower.endswith('.json'):
-                # Convert JSON to TXT
-                txt_path = self._convert_json_to_txt(path)
-                if txt_path:
-                    processed_paths.append(txt_path)
-                    # Track the conversion for potential reverse conversion later
-                    self.json_conversions[txt_path] = path
-                    self.append_log(f"📄 Converted JSON to TXT: {os.path.basename(path)}")
-                else:
-                    self.append_log(f"❌ Failed to convert JSON: {os.path.basename(path)}")
-            elif lower.endswith('.cbz'):
+            if lower.endswith('.cbz'):
                 # Extract images from CBZ (ZIP) to a temp folder and add them
                 try:
                     import zipfile, tempfile, shutil
