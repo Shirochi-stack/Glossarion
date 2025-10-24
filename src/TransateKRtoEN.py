@@ -2060,7 +2060,7 @@ class TranslationProcessor:
                     terminology = "Section" if is_text_source else "Chapter"
                     file_ref = c.get('original_basename', f'{terminology}_{c["num"]}')
 
-                print(f"[DEBUG] Chunk {chunk_idx}/{total_chunks} tokens = {total_tokens:,} / {self.get_token_budget_str()} [File: {file_ref}]")            
+                print(f"💬 Chunk {chunk_idx}/{total_chunks} combined prompt: {total_tokens:,} tokens (system + user) / {self.get_token_budget_str()} [File: {file_ref}]")
                 
                 self.client.context = 'translation'
 
@@ -3591,7 +3591,17 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None):
         elif not os.path.exists(actual_glossary_path):
             print(f"[DEBUG] ❌ Glossary file does not exist: {actual_glossary_path}")
     
-    print(f"🎯 Final system prompt length: {len(system)} characters")
+    # Calculate token count for system prompt
+    try:
+        import tiktoken
+        try:
+            enc = tiktoken.encoding_for_model(os.getenv("MODEL", "gpt-4"))
+        except:
+            enc = tiktoken.get_encoding("cl100k_base")
+        system_tokens = len(enc.encode(system))
+        print(f"🎯 Final system prompt: {len(system):,} chars, {system_tokens:,} tokens")
+    except ImportError:
+        print(f"🎯 Final system prompt length: {len(system)} characters")
     
     return system
 
@@ -6083,8 +6093,8 @@ def main(log_callback=None, stop_callback=None):
                     else:
                         file_ref = c.get('original_basename', f'{terminology}_{actual_num}')
                     
-                    print(f"  📄 Translating {terminology.lower()} content (Overall: {current_chunk_number}/{total_chunks_needed} - {progress_percent:.1f}% - ETA: {eta_str}) [File: {file_ref}]")
-                    print(f"  📊 {terminology} {actual_num} size: {len(chunk_html):,} characters (~{chapter_splitter.count_tokens(chunk_html):,} tokens)")
+                    chunk_tokens = chapter_splitter.count_tokens(chunk_html)
+                    print(f"  📄 {terminology} {actual_num} [{len(chunk_html):,} chars, {chunk_tokens:,} tokens]")
                 
                 print(f"  ℹ️ This may take 30-60 seconds. Stop will take effect after completion.")
                 
