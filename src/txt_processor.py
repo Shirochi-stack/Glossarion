@@ -54,18 +54,18 @@ class TextFileProcessor:
         print(f"📊 Text file chunk size: {available_tokens:,} tokens (based on {max_output_tokens:,} output limit, compression: {compression_factor})")
         
         for chapter_data in raw_chapters:
-            # Convert chapter content to HTML format
-            chapter_html = self._text_to_html(chapter_data['content'])
-            chapter_tokens = self.chapter_splitter.count_tokens(chapter_html)
+            # Keep content as plain text
+            chapter_content = chapter_data['content']
+            chapter_tokens = self.chapter_splitter.count_tokens(chapter_content)
             
             if chapter_tokens > available_tokens:
                 # Chapter needs splitting
                 print(f"Chapter {chapter_data['num']} ({chapter_data['title']}) has {chapter_tokens} tokens, splitting...")
                 
-                chunks = self.chapter_splitter.split_chapter(chapter_html, available_tokens)
+                chunks = self.chapter_splitter.split_chapter(chapter_content, available_tokens)
                 
                 # Add each chunk as a separate chapter
-                for chunk_html, chunk_idx, total_chunks in chunks:
+                for chunk_content, chunk_idx, total_chunks in chunks:
                     chunk_title = chapter_data['title']
                     if total_chunks > 1:
                         chunk_title = f"{chapter_data['title']} (Part {chunk_idx}/{total_chunks})"
@@ -76,10 +76,10 @@ class TextFileProcessor:
                     final_chapters.append({
                         'num': chunk_num,
                         'title': chunk_title,
-                        'body': chunk_html,
+                        'body': chunk_content,
                         'filename': f"section_{int(chapter_data['num'])}_part{chunk_idx}.txt",  # Changed to avoid using file_base
-                        'content_hash': self._generate_hash(chunk_html),
-                        'file_size': len(chunk_html),
+                        'content_hash': self._generate_hash(chunk_content),
+                        'file_size': len(chunk_content),
                         'has_images': False,
                         'is_chunk': True,
                         'chunk_info': {
@@ -93,10 +93,10 @@ class TextFileProcessor:
                 final_chapters.append({
                     'num': chapter_data['num'],  # Keep as integer for non-split chapters
                     'title': chapter_data['title'],
-                    'body': chapter_html,
+                    'body': chapter_content,
                     'filename': f"section_{chapter_data['num']}.txt",  # Changed to avoid using file_base
-                    'content_hash': self._generate_hash(chapter_html),
-                    'file_size': len(chapter_html),
+                    'content_hash': self._generate_hash(chapter_content),
+                    'file_size': len(chapter_content),
                     'has_images': False,
                     'is_chunk': False
                 })
@@ -111,7 +111,7 @@ class TextFileProcessor:
             final_chapters.append({
                 'num': 1,
                 'title': 'Section 1',  # Changed from self.file_base
-                'body': self._text_to_html(all_content or 'Empty file'),
+                'body': all_content or 'Empty file',
                 'filename': 'section_1.txt',  # Changed to avoid using file_base
                 'content_hash': self._generate_hash(all_content or ''),
                 'file_size': len(all_content or ''),
@@ -121,41 +121,6 @@ class TextFileProcessor:
         
         return final_chapters
     
-    def _text_to_html(self, text: str) -> str:
-        """Convert plain text to HTML format"""
-        # Escape HTML characters
-        text = text.replace('&', '&amp;')
-        text = text.replace('<', '&lt;')
-        text = text.replace('>', '&gt;')
-        
-        # Split into paragraphs
-        paragraphs = text.split('\n\n')
-        
-        # Wrap each paragraph in <p> tags
-        html_parts = []
-        for para in paragraphs:
-            para = para.strip()
-            if para:
-                # Check if it's a chapter heading
-                if re.match(r'^(Chapter|CHAPTER|Ch\.|Part)\s+\d+', para):
-                    html_parts.append(f'<h1>{para}</h1>')
-                else:
-                    # Replace single newlines with <br> within paragraphs
-                    para = para.replace('\n', '<br>\n')
-                    html_parts.append(f'<p>{para}</p>')
-        
-        # Create a simple HTML structure
-        html = f"""<html>
-<head>
-    <title>{self.file_base}</title>
-    <meta charset="utf-8"/>
-</head>
-<body>
-    {''.join(html_parts)}
-</body>
-</html>"""
-        
-        return html
     
     def _generate_hash(self, content: str) -> str:
         """Generate hash for content"""
@@ -181,9 +146,8 @@ class TextFileProcessor:
         # Combine all content
         all_content = []
         for filename, content in sorted_chapters:
-            # Extract text from HTML
-            soup = BeautifulSoup(content, 'html.parser')
-            text_content = soup.get_text()
+            # Content is already plain text, no need to parse HTML
+            text_content = content
             
             # Add chapter separator if needed
             if len(all_content) > 0:

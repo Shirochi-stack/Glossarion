@@ -1,4 +1,5 @@
 import re
+import os
 from bs4 import BeautifulSoup
 import tiktoken
 
@@ -28,37 +29,36 @@ class ChapterSplitter:
     
     def split_chapter(self, chapter_html, max_tokens=None):
         """
-        Split a chapter into smaller chunks if it exceeds token limit.
-        Splits by token count, not HTML structure, for even distribution.
+        Split a chapter into smaller chunks.
+        Splits based on EITHER token limit OR line break count (whichever comes first).
         Returns: List of (chunk_html, chunk_index, total_chunks)
         """
         if max_tokens is None:
             max_tokens = self.target_tokens
         
-        # The max_tokens passed in has already been adjusted for compression in TransateKRtoEN.py
-        # (via available_tokens = (max_output_tokens - safety_margin) / compression_factor)
-        # So we use it directly without any further compression adjustment
         effective_max_tokens = max_tokens
-            
+        
+        # Check for line break split configuration
+        line_break_split = os.getenv('LINE_BREAK_SPLIT_COUNT', '')
+        max_elements = None
+        if line_break_split and line_break_split.isdigit():
+            max_elements = int(line_break_split)
+            print(f"✅ Line Break split: {max_elements} elements per chunk")
+        
         # First check if splitting is needed
         total_tokens = self.count_tokens(chapter_html)
         
-        # Debug output to diagnose chunking issues
-        import os
         if os.getenv('DEBUG_CHUNK_SPLITTING', '0') == '1':
             print(f"[CHUNK DEBUG] Total tokens: {total_tokens:,}")
             print(f"[CHUNK DEBUG] Effective max tokens: {effective_max_tokens:,}")
+            print(f"[CHUNK DEBUG] Max elements per chunk: {max_elements if max_elements else 'None (token-only)'}")
             print(f"[CHUNK DEBUG] Needs split: {total_tokens > effective_max_tokens}")
         
-        if total_tokens <= effective_max_tokens:
+        if total_tokens <= effective_max_tokens and max_elements is None:
             return [(chapter_html, 1, 1)]  # No split needed
         
-        # NEW APPROACH: Split by token count, treating content as a stream
-        # This ensures even chunk sizes regardless of HTML structure
         soup = BeautifulSoup(chapter_html, 'html.parser')
         
-        # Get all text-containing elements (paragraphs, divs, spans, etc.)
-        # We'll process them as a stream and split when we hit the token limit
         if soup.body:
             elements = list(soup.body.children)
         else:
@@ -67,6 +67,7 @@ class ChapterSplitter:
         chunks = []
         current_chunk_elements = []
         current_chunk_tokens = 0
+        element_count = 0
         
         for element in elements:
             # Skip empty text nodes
@@ -75,6 +76,7 @@ class ChapterSplitter:
             
             element_html = str(element)
             element_tokens = self.count_tokens(element_html)
+            element_count += 1
             
             # Special case: if a single element exceeds the limit
             if element_tokens > effective_max_tokens:
@@ -83,15 +85,22 @@ class ChapterSplitter:
                     chunks.append(self._create_chunk_html(current_chunk_elements))
                     current_chunk_elements = []
                     current_chunk_tokens = 0
+                    element_count = 0
                 
-                # Add the oversized element as its own chunk (unavoidable)
-                # We could split it further, but for now, just include it
+                # Add the oversized element as its own chunk
                 chunks.append(element_html)
                 continue
             
-            # If adding this element would exceed the limit AND we have content
-            if current_chunk_tokens + element_tokens > effective_max_tokens and current_chunk_elements:
-                # Save current chunk at element boundary (elements are typically paragraphs/lines)
+            # Check if we should split: EITHER token limit OR element count reached
+            should_split = False
+            if current_chunk_elements:
+                if current_chunk_tokens + element_tokens > effective_max_tokens:
+                    should_split = True
+                elif max_elements and len(current_chunk_elements) >= max_elements:
+                    should_split = True
+            
+            if should_split:
+                # Save current chunk at element boundary
                 chunks.append(self._create_chunk_html(current_chunk_elements))
                 # Start new chunk with this element
                 current_chunk_elements = [element_html]

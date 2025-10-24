@@ -3611,6 +3611,33 @@ def _create_processing_options_section(self, parent):
     reinforce_h.addStretch()
     right_v.addWidget(reinforce_w)
     
+    # Line Break Split Count option
+    linebreak_w = QWidget()
+    linebreak_h = QHBoxLayout(linebreak_w)
+    linebreak_h.setContentsMargins(0, 5, 0, 0)
+    linebreak_h.addWidget(QLabel("Line Break Split Count:"))
+    linebreak_edit = QLineEdit()
+    linebreak_edit.setFixedWidth(60)
+    linebreak_edit.setPlaceholderText("200")
+    try:
+        linebreak_edit.setText(str(self.line_break_split_count_var) if hasattr(self, 'line_break_split_count_var') and self.line_break_split_count_var else '')
+    except Exception:
+        pass
+    def _on_linebreak_changed(text):
+        try:
+            self.line_break_split_count_var = text
+        except Exception:
+            pass
+    linebreak_edit.textChanged.connect(_on_linebreak_changed)
+    linebreak_h.addWidget(linebreak_edit)
+    linebreak_h.addStretch()
+    right_v.addWidget(linebreak_w)
+    
+    linebreak_desc = QLabel("Split chunks after N elements\n(Leave empty for token-only splitting)")
+    linebreak_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    linebreak_desc.setContentsMargins(0, 0, 0, 5)
+    right_v.addWidget(linebreak_desc)
+    
     right_v.addStretch()
     columns_h.addWidget(right_column)
     
