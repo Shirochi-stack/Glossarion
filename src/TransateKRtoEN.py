@@ -2449,6 +2449,30 @@ class BatchTranslationProcessor:
             
             chapter_msgs = [{"role": "system", "content": chapter_system_prompt}, {"role": "user", "content": chapter_body}]
             
+            # Log combined prompt token count
+            try:
+                import tiktoken
+                try:
+                    enc = tiktoken.encoding_for_model(self.config.MODEL)
+                except:
+                    enc = tiktoken.get_encoding('cl100k_base')
+                
+                total_tokens = sum(len(enc.encode(msg["content"])) for msg in chapter_msgs)
+                file_ref = chapter.get('original_basename', f'{terminology}_{chap_num}')
+                
+                # Get token budget string
+                token_env = os.getenv("MAX_INPUT_TOKENS", "1000000").strip()
+                if not token_env or token_env.lower() == "unlimited":
+                    budget_str = "unlimited"
+                elif token_env.isdigit():
+                    budget_str = f"{int(token_env):,}"
+                else:
+                    budget_str = "unlimited"
+                
+                print(f"💬 Chunk 1/1 combined prompt: {total_tokens:,} tokens (system + user) / {budget_str} [File: {file_ref}]")
+            except ImportError:
+                print(f"💬 Combined prompt prepared [File: {chapter.get('original_basename', f'{terminology}_{chap_num}')}]")
+            
             # Generate filename before API call
             fname = FileUtilities.create_chapter_filename(chapter, actual_num)
             self.client.set_output_filename(fname)
