@@ -8704,6 +8704,7 @@ Important rules:
                     ('AUTO_GLOSSARY_PROMPT', self.config.get('auto_glossary_prompt', '')),
                     ('APPEND_GLOSSARY_PROMPT', self.config.get('append_glossary_prompt', '')),
                     ('APPEND_GLOSSARY', '1' if self.config.get('append_glossary') else '0'),
+                    ('ENABLE_AUTO_GLOSSARY', '1' if self.config.get('enable_auto_glossary') else '0'),
                     ('GLOSSARY_TRANSLATION_PROMPT', self.config.get('glossary_translation_prompt', '')),
                     ('GLOSSARY_FORMAT_INSTRUCTIONS', self.config.get('glossary_format_instructions', '')),
                     ('GLOSSARY_DISABLE_HONORIFICS_FILTER', '1' if self.config.get('glossary_disable_honorifics_filter') else '0'),
