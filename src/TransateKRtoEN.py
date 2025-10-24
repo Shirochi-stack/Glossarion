@@ -3661,7 +3661,10 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None):
             #print(f"[DEBUG] ❌ Glossary append disabled")
             pass
         elif not actual_glossary_path:
-            print(f"[DEBUG] ❌ No glossary path provided")
+            # Check if we're translating CSV/JSON files (they typically don't need glossaries)
+            input_path = os.getenv('EPUB_PATH', '')
+            if not input_path.lower().endswith(('.csv', '.json')):
+                print(f"[DEBUG] ❌ No glossary path provided")
         elif not os.path.exists(actual_glossary_path):
             print(f"[DEBUG] ❌ Glossary file does not exist: {actual_glossary_path}")
     
