@@ -3507,7 +3507,7 @@ def parse_token_limit(env_value):
     
     return 1000000, "1000000 (default)"
 
-def build_system_prompt(user_prompt, glossary_path=None):
+def build_system_prompt(user_prompt, glossary_path=None, source_text=None):
     """Build the system prompt with glossary - TRUE BRUTE FORCE VERSION"""
     append_glossary = os.getenv("APPEND_GLOSSARY", "1") == "1"
     actual_glossary_path = glossary_path
@@ -3531,6 +3531,20 @@ def build_system_prompt(user_prompt, glossary_path=None):
                 with open(actual_glossary_path, "r", encoding="utf-8") as gf:
                     glossary_text = gf.read()
             
+            # Apply glossary compression if enabled and source text is provided
+            compress_glossary_enabled = os.getenv("COMPRESS_GLOSSARY_PROMPT", "0") == "1"
+            if compress_glossary_enabled and source_text:
+                try:
+                    from glossary_compressor import compress_glossary
+                    original_length = len(glossary_text)
+                    glossary_text = compress_glossary(glossary_text, source_text, glossary_format='auto')
+                    compressed_length = len(glossary_text)
+                    reduction_pct = ((original_length - compressed_length) / original_length * 100) if original_length > 0 else 0
+                    print(f"🗜️ Glossary compressed: {original_length} → {compressed_length} chars ({reduction_pct:.1f}% reduction)")
+                except Exception as e:
+                    print(f"⚠️ Glossary compression failed: {e}")
+                    # Continue with uncompressed glossary
+            
             if system:
                 system += "\n\n"
             
@@ -3545,7 +3559,7 @@ def build_system_prompt(user_prompt, glossary_path=None):
             system += f"{custom_prompt}\n{glossary_text}"
             
             print(f"[DEBUG] ✅ Entire glossary appended!")
-            print(f"[DEBUG] Glossary text length: {len(glossary_text)} characters")           
+            print(f"[DEBUG] Glossary text length: {len(glossary_text)} characters")
                 
         except Exception as e:
             print(f"[ERROR] Could not load glossary: {e}")
@@ -5035,7 +5049,13 @@ def main(log_callback=None, stop_callback=None):
         except Exception as e:
             print(f"[DEBUG] Error checking glossary: {e}")
     glossary_path = find_glossary_file(out)
-    system = build_system_prompt(config.SYSTEM_PROMPT, glossary_path)
+    # Combine all chapter texts for glossary compression
+    combined_source_text = None
+    if os.getenv("COMPRESS_GLOSSARY_PROMPT", "0") == "1":
+        print("🗜️ Glossary compression enabled - preparing source text...")
+        combined_source_text = "\n".join(c.get("body", "") for c in chapters if c.get("body"))
+        print(f"🗜️ Combined source text: {len(combined_source_text):,} characters from {len(chapters)} chapters")
+    system = build_system_prompt(config.SYSTEM_PROMPT, glossary_path, source_text=combined_source_text)
     base_msg = [{"role": "system", "content": system}]
     # Preserve the original system prompt to avoid in-place mutations
     original_system_prompt = system

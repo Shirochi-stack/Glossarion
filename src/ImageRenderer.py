@@ -470,6 +470,22 @@ def _run_detect_background(self, image_path: str, detection_config: dict):
         for i, box in enumerate(boxes[:3]):
             print(f"[DETECT]   Box {i}: {box}")
         
+        # Build RT-DETR class membership sets (if available) for bubble-aware metadata
+        def _norm_box_local(b):
+            try:
+                return (int(b[0]), int(b[1]), int(b[2]), int(b[3]))
+            except Exception:
+                return tuple(b)
+        text_bubble_set, free_text_set, empty_bubble_set = set(), set(), set()
+        try:
+            if isinstance(detection_results, dict):
+                text_bubble_set = set(_norm_box_local(b) for b in (detection_results.get('text_bubbles') or []))
+                free_text_set = set(_norm_box_local(b) for b in (detection_results.get('text_free') or []))
+                empty_bubble_set = set(_norm_box_local(b) for b in (detection_results.get('bubbles') or []))
+        except Exception:
+            # No RT-DETR class info available
+            pass
+        
         # Process detection boxes and store regions
         regions = []
         seen_boxes = set()  # Track boxes to detect duplicates
@@ -515,15 +531,31 @@ def _run_detect_background(self, image_path: str, detection_config: dict):
                         ny2 = max(ny1 + 1, min(ny2, image.shape[0]))
                         x1, y1, x2, y2 = nx1, ny1, nx2, ny2
                     
+                    # Classify bubble type using RT-DETR sets if available
+                    norm_box = (x1, y1, x2 - x1, y2 - y1)
+                    if norm_box in free_text_set:
+                        bubble_type = 'free_text'
+                    elif norm_box in text_bubble_set:
+                        bubble_type = 'text_bubble'
+                    elif norm_box in empty_bubble_set:
+                        bubble_type = 'empty_bubble'
+                    else:
+                        # Heuristic fallback
+                        bubble_type = 'text_bubble'
+                    region_type = 'free_text' if bubble_type == 'free_text' else 'text_bubble'
+                    
                     # Store region for workflow continuity
                     region_dict = {
                         'bbox': [x1, y1, x2 - x1, y2 - y1],  # (x, y, width, height)
                         'coords': [[x1, y1], [x2, y1], [x2, y2], [x1, y2]],  # Corner coordinates (use clamped values)
                         'confidence': getattr(box, 'confidence', confidence) if hasattr(box, 'confidence') else confidence,
-                        'shape': 'ellipse' if getattr(self, '_use_circle_shapes', False) else 'rect'
+                        'shape': 'ellipse' if getattr(self, '_use_circle_shapes', False) else 'rect',
+                        'bubble_type': bubble_type,
+                        'region_type': region_type,
+                        'bubble_bounds': [x1, y1, x2 - x1, y2 - y1]
                     }
                     regions.append(region_dict)
-                    print(f"[DETECT] Added region {len(regions)-1}: bbox={region_dict['bbox']}")
+                    print(f"[DETECT] Added region {len(regions)-1}: bbox={region_dict['bbox']}, type={bubble_type}")
                     
                 except (ValueError, IndexError) as e:
                     self._log(f"⚠️ Skipping invalid box {i}: {e}", "warning")
@@ -2328,6 +2360,21 @@ def _run_detection_sync(self, image_path: str, detection_config: dict) -> list:
         except Exception as me:
             print(f"[DETECT_SYNC] Merge step failed or unavailable: {me}")
         
+        # Build RT-DETR class membership sets (if available) for bubble-aware metadata
+        def _norm_box_local(b):
+            try:
+                return (int(b[0]), int(b[1]), int(b[2]), int(b[3]))
+            except Exception:
+                return tuple(b)
+        text_bubble_set, free_text_set, empty_bubble_set = set(), set(), set()
+        try:
+            if isinstance(detection_results, dict):
+                text_bubble_set = set(_norm_box_local(b) for b in (detection_results.get('text_bubbles') or []))
+                free_text_set = set(_norm_box_local(b) for b in (detection_results.get('text_free') or []))
+                empty_bubble_set = set(_norm_box_local(b) for b in (detection_results.get('bubbles') or []))
+        except Exception:
+            pass
+        
         # Process detection boxes and store regions
         regions = []
         for i, box in enumerate(boxes):
@@ -2368,11 +2415,26 @@ def _run_detection_sync(self, image_path: str, detection_config: dict) -> list:
                         ny2 = max(ny + 1, min(ny2, image.shape[0]))
                         x, y, width, height = nx, ny, (nx2 - nx), (ny2 - ny)
                     
+                    # Classify bubble type using RT-DETR sets if available
+                    norm_box = (x, y, width, height)
+                    if norm_box in free_text_set:
+                        bubble_type = 'free_text'
+                    elif norm_box in text_bubble_set:
+                        bubble_type = 'text_bubble'
+                    elif norm_box in empty_bubble_set:
+                        bubble_type = 'empty_bubble'
+                    else:
+                        bubble_type = 'text_bubble'
+                    region_type = 'free_text' if bubble_type == 'free_text' else 'text_bubble'
+                    
                     region_dict = {
                         'bbox': [x, y, width, height],  # (x, y, width, height)
                         'coords': [[x, y], [x2, y], [x2, y2], [x, y2]],  # Corner coordinates
                         'confidence': getattr(box, 'confidence', confidence) if hasattr(box, 'confidence') else confidence,
-                        'shape': 'ellipse' if getattr(self, '_use_circle_shapes', False) else 'rect'
+                        'shape': 'ellipse' if getattr(self, '_use_circle_shapes', False) else 'rect',
+                        'bubble_type': bubble_type,
+                        'region_type': region_type,
+                        'bubble_bounds': [x, y, width, height]
                     }
                     regions.append(region_dict)
                     
@@ -2863,7 +2925,10 @@ def _run_ocr_on_regions(self, image_path: str, regions: list, ocr_config: dict) 
                                     'region_index': i,
                                     'bbox': bbox,
                                     'text': region_text.strip(),
-                                    'confidence': region.get('confidence', 1.0)
+                                    'confidence': region.get('confidence', 1.0),
+                                    'bubble_type': region.get('bubble_type'),
+                                    'region_type': region.get('region_type'),
+                                    'bubble_bounds': region.get('bubble_bounds', bbox)
                                 })
                                 print(f"[OCR_REGIONS] Region {i+1}: '{region_text.strip()}'")
                 
@@ -3069,7 +3134,10 @@ def _run_ocr_on_regions(self, image_path: str, regions: list, ocr_config: dict) 
                                     'region_index': i,
                                     'bbox': bbox,
                                     'text': region_text.strip(),
-                                    'confidence': region.get('confidence', 1.0)
+                                    'confidence': region.get('confidence', 1.0),
+                                    'bubble_type': region.get('bubble_type'),
+                                    'region_type': region.get('region_type'),
+                                    'bubble_bounds': region.get('bubble_bounds', bbox)
                                 })
                                 print(f"[OCR_REGIONS] Region {i+1}: '{region_text.strip()}'")
                 
@@ -3149,7 +3217,10 @@ def _run_ocr_on_regions(self, image_path: str, regions: list, ocr_config: dict) 
                         'region_index': i,
                         'bbox': bbox,
                         'text': region_text.strip(),
-                        'confidence': region.get('confidence', 1.0)
+                        'confidence': region.get('confidence', 1.0),
+                        'bubble_type': region.get('bubble_type'),
+                        'region_type': region.get('region_type'),
+                        'bubble_bounds': region.get('bubble_bounds', bbox)
                     })
                     print(f"[OCR_REGIONS] Region {i+1}: '{region_text.strip()}'")
         
@@ -4175,7 +4246,9 @@ def _update_rectangles_with_recognition(self, recognized_texts: list):
                 # Store recognition data for context menu
                 self._recognition_data[region_index] = {
                     'text': recognized_text,
-                    'bbox': text_data['bbox']
+                    'bbox': text_data['bbox'],
+                    'bubble_type': text_data.get('bubble_type'),
+                    'bubble_bounds': text_data.get('bubble_bounds', text_data['bbox'])
                 }
                 
                 # Change rectangle color to BLUE when text is recognized
@@ -8291,43 +8364,92 @@ def _render_with_manga_translator(self, image_path: str, regions, output_path: s
         
         print(f"[RENDER] Image exists: {os.path.exists(image_path)}")
         
-        # Get or create MangaTranslator instance
-        if not hasattr(self, '_manga_translator') or self._manga_translator is None:
-            print(f"[RENDER] Creating new MangaTranslator instance...")
-            ocr_config = _get_ocr_config(self, )
-            api_key = self.main_gui.api_key_entry.text().strip() if hasattr(self.main_gui, 'api_key_entry') else ''
-            model = self.main_gui.model_var if hasattr(self.main_gui, 'model_var') else 'gpt-4o-mini'
+        # Decide which translator to use: prefer existing main translator for consistent settings
+        translator_inst = None
+        try:
+            if hasattr(self, 'translator') and self.translator:
+                translator_inst = self.translator
+                # Ensure latest GUI settings are applied to the main translator
+                try:
+                    if hasattr(self, '_apply_rendering_settings'):
+                        self._apply_rendering_settings()
+                except Exception:
+                    pass
+        except Exception:
+            translator_inst = None
+        
+        if translator_inst is None:
+            # Fallback: create or reuse a lightweight translator dedicated to rendering
+            if not hasattr(self, '_manga_translator') or self._manga_translator is None:
+                print(f"[RENDER] Creating new MangaTranslator instance (render-only)...")
+                ocr_config = _get_ocr_config(self, )
+                api_key = self.main_gui.config.get('api_key', '') if hasattr(self, 'main_gui') else ''
+                model = self.main_gui.config.get('model', 'gpt-4o-mini') if hasattr(self, 'main_gui') else 'gpt-4o-mini'
+                if not api_key:
+                    print(f"[RENDER] ERROR: No API key found!")
+                    raise ValueError("No API key found")
+                unified_client = UnifiedClient(model=model, api_key=api_key)
+                self._manga_translator = MangaTranslator(
+                    ocr_config=ocr_config,
+                    unified_client=unified_client,
+                    main_gui=self.main_gui,
+                    log_callback=self._log,
+                    skip_inpainter_init=True
+                )
+                print(f"[RENDER] MangaTranslator instance created")
+            else:
+                print(f"[RENDER] Using existing MangaTranslator instance (render-only)")
+            translator_inst = self._manga_translator
             
-            if not api_key:
-                print(f"[RENDER] ERROR: No API key found!")
-                raise ValueError("No API key found")
-            
-            unified_client = UnifiedClient(model=model, api_key=api_key)
-            
-            # MangaTranslator will access manga_settings via main_gui.config (property)
-            # Check the render_parallel setting for debugging
-            manga_settings = self.main_gui.config.get('manga_settings', {})
-            render_parallel = manga_settings.get('advanced', {}).get('render_parallel', True)
-            print(f"[RENDER] MangaTranslator will use render_parallel={render_parallel} from main_gui.config")
-            
-            self._manga_translator = MangaTranslator(
-                ocr_config=ocr_config,
-                unified_client=unified_client,
-                main_gui=self.main_gui,
-                log_callback=self._log,
-                skip_inpainter_init=True  # Rendering only, no inpainting needed
-            )
-            print(f"[RENDER] MangaTranslator instance created")
-        else:
-            print(f"[RENDER] Using existing MangaTranslator instance")
-            # Refresh settings from config to ensure consistency with current GUI settings
-            config = self.main_gui.config if hasattr(self.main_gui, 'config') else {}
-            self._manga_translator.strict_text_wrapping = config.get('manga_strict_text_wrapping', True)
-            self._manga_translator.constrain_to_bubble = config.get('manga_constrain_to_bubble', True)
-            self._manga_translator.custom_font_size = config.get('manga_font_size', None) if config.get('manga_font_size', 0) > 0 else None
-            self._manga_translator.font_size_mode = config.get('manga_font_size_mode', 'fixed')
-            self._manga_translator.font_size_multiplier = config.get('manga_font_size_multiplier', 1.0)
-            print(f"[RENDER] Refreshed settings: strict_wrap={self._manga_translator.strict_text_wrapping}, constrain={self._manga_translator.constrain_to_bubble}")
+            # Apply current GUI rendering settings to the render-only translator
+            try:
+                # Safe area controls
+                try:
+                    translator_inst.safe_area_enabled = bool(getattr(self, 'safe_area_enabled_value', True))
+                    translator_inst.safe_area_scale = float(getattr(self, 'safe_area_scale_value', 1.0))
+                except Exception:
+                    pass
+                # Text color & shadow
+                text_color = (
+                    getattr(self, 'text_color_r_value', 102),
+                    getattr(self, 'text_color_g_value', 0),
+                    getattr(self, 'text_color_b_value', 0),
+                )
+                shadow_color = (
+                    getattr(self, 'shadow_color_r_value', 255),
+                    getattr(self, 'shadow_color_g_value', 255),
+                    getattr(self, 'shadow_color_b_value', 255),
+                )
+                translator_inst.update_text_rendering_settings(
+                    bg_opacity=getattr(self, 'bg_opacity_value', 0),
+                    bg_style=getattr(self, 'bg_style_value', 'circle'),
+                    bg_reduction=getattr(self, 'bg_reduction_value', 1.0),
+                    font_style=getattr(self, 'selected_font_path', None),
+                    font_size=(-getattr(self, 'font_size_multiplier_value', 1.0)) if getattr(self, 'font_size_mode_value', 'fixed') == 'multiplier' else getattr(self, 'font_size_value', 0),
+                    text_color=text_color,
+                    shadow_enabled=getattr(self, 'shadow_enabled_value', True),
+                    shadow_color=shadow_color,
+                    shadow_offset_x=getattr(self, 'shadow_offset_x_value', 2),
+                    shadow_offset_y=getattr(self, 'shadow_offset_y_value', 2),
+                    shadow_blur=getattr(self, 'shadow_blur_value', 0),
+                    force_caps_lock=getattr(self, 'force_caps_lock_value', True)
+                )
+                # Mode and bounds
+                translator_inst.font_size_mode = getattr(self, 'font_size_mode_value', 'fixed')
+                translator_inst.font_size_multiplier = getattr(self, 'font_size_multiplier_value', 1.0)
+                translator_inst.min_readable_size = int(getattr(self, 'auto_min_size_value', 10))
+                translator_inst.max_font_size_limit = int(getattr(self, 'max_font_size_value', 48))
+                translator_inst.strict_text_wrapping = getattr(self, 'strict_text_wrapping_value', True)
+                translator_inst.force_caps_lock = getattr(self, 'force_caps_lock_value', True)
+                translator_inst.constrain_to_bubble = getattr(self, 'constrain_to_bubble_value', True)
+                # Free-text-only BG opacity toggle
+                try:
+                    translator_inst.free_text_only_bg_opacity = bool(getattr(self, 'free_text_only_bg_opacity_value', False))
+                except Exception:
+                    pass
+            except Exception as _rs:
+                print(f"[RENDER] Failed to apply rendering settings to render-only translator: {_rs}")
+        
         
         # Prepare image as numpy BGR array
         if image_bgr is None:
@@ -8416,7 +8538,7 @@ def _render_with_manga_translator(self, image_path: str, regions, output_path: s
         
         # Call MangaTranslator's render_translated_text method with filtered regions
         print(f"[RENDER] Calling render_translated_text with {len(filtered_regions)} regions...")
-        rendered_bgr = self._manga_translator.render_translated_text(image_bgr, filtered_regions)
+        rendered_bgr = translator_inst.render_translated_text(image_bgr, filtered_regions)
         print(f"[RENDER] Rendering complete, output shape: {rendered_bgr.shape}")
         
         # Convert back to PIL and save
@@ -9625,8 +9747,16 @@ def _process_translate_results(self, results: dict):
                     vertices=vertices,
                     bounding_box=(x, y, w, h),
                     confidence=1.0,
-                    region_type='text_block'
+                    region_type=result.get('original', {}).get('region_type', 'text_block')
                 )
+                try:
+                    ob = result.get('original', {})
+                    bb = ob.get('bubble_bounds') or [x, y, w, h]
+                    region.bubble_bounds = tuple(bb) if isinstance(bb, (list, tuple)) else None
+                    if ob.get('bubble_type'):
+                        region.bubble_type = ob.get('bubble_type')
+                except Exception:
+                    pass
                 region.translated_text = result['translation']
                 regions.append(region)
             

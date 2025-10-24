@@ -8462,6 +8462,7 @@ Important rules:
 
                 # Glossary Settings
                 ('append_glossary', ['append_glossary_checkbox', 'append_glossary_var'], False, bool),
+                ('compress_glossary_prompt', ['compress_glossary_checkbox', 'compress_glossary_prompt_var'], False, bool),
                 ('glossary_min_frequency', ['glossary_min_frequency_entry', 'glossary_min_frequency_var'], 2, lambda v: safe_int(v, 2)),
                 ('glossary_max_names', ['glossary_max_names_entry', 'glossary_max_names_var'], 50, lambda v: safe_int(v, 50)),
                 ('glossary_max_titles', ['glossary_max_titles_entry', 'glossary_max_titles_var'], 30, lambda v: safe_int(v, 30)),
@@ -8712,6 +8713,7 @@ Important rules:
                     ('GLOSSARY_FUZZY_THRESHOLD', str(self.config.get('glossary_fuzzy_threshold', 0.90))),
                     ('GLOSSARY_USE_LEGACY_CSV', '1' if self.config.get('glossary_use_legacy_csv') else '0'),
                     ('GLOSSARY_MAX_SENTENCES', str(self.config.get('glossary_max_sentences', 200))),
+                    ('COMPRESS_GLOSSARY_PROMPT', '1' if self.config.get('compress_glossary_prompt') else '0'),
                     # Add missing environment variables that GlossaryManager.py reads
                     ('GLOSSARY_MIN_FREQUENCY', str(self.config.get('glossary_min_frequency', 2))),
                     ('GLOSSARY_MAX_NAMES', str(self.config.get('glossary_max_names', 50))),

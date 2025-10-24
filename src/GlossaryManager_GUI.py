@@ -1167,6 +1167,22 @@ Rules:
         append_layout.addWidget(label2)
         append_layout.addStretch()
         
+        # Compress glossary toggle
+        compress_widget = QWidget()
+        compress_layout = QHBoxLayout(compress_widget)
+        compress_layout.setContentsMargins(0, 0, 0, 15)
+        auto_layout.addWidget(compress_widget)
+        
+        if not hasattr(self, 'compress_glossary_checkbox'):
+            self.compress_glossary_checkbox = self._create_styled_checkbox("Compress Glossary Prompt")
+            self.compress_glossary_checkbox.setChecked(self.config.get('compress_glossary_prompt', False))
+        compress_layout.addWidget(self.compress_glossary_checkbox)
+        
+        label3 = QLabel("(Excludes glossary entries that don't appear in source text before sending to API)")
+        # label3.setStyleSheet("color: white; font-size: 10pt; font-style: italic;")
+        compress_layout.addWidget(label3)
+        compress_layout.addStretch()
+        
         # Custom append prompt section
         append_prompt_frame = QGroupBox("Glossary Append Format")
         append_prompt_layout = QVBoxLayout(append_prompt_frame)
