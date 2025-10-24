@@ -7198,9 +7198,8 @@ Important rules:
                     not getattr(self, '_user_scrolled_up', False)):
                     scrollbar = self.log_text.verticalScrollBar()
                     scrollbar.setValue(scrollbar.maximum())
-                    # Force scroll repeatedly with aggressive timing to fight fast log updates
-                    for delay in [10, 25, 50, 75, 100, 150, 200, 300]:
-                        QTimer.singleShot(delay, lambda sb=scrollbar: sb.setValue(sb.maximum()) if _time.time() >= getattr(self, '_autoscroll_delay_until', 0) and not getattr(self, '_user_scrolled_up', False) else None)
+                    # Use single delayed timer instead of 8 timers to prevent handle exhaustion
+                    QTimer.singleShot(100, lambda sb=scrollbar: sb.setValue(sb.maximum()) if _time.time() >= getattr(self, '_autoscroll_delay_until', 0) and not getattr(self, '_user_scrolled_up', False) else None)
             except Exception:
                 pass
         except Exception as e:
@@ -7283,9 +7282,8 @@ Important rules:
                        scrollbar = self.log_text.verticalScrollBar()
                        if at_bottom or True:
                            scrollbar.setValue(scrollbar.maximum())
-                           # Force scroll repeatedly with aggressive timing to fight fast log updates
-                           for delay in [10, 25, 50, 75, 100, 150, 200, 300]:
-                               QTimer.singleShot(delay, lambda sb=scrollbar: sb.setValue(sb.maximum()) if _time.time() >= getattr(self, '_autoscroll_delay_until', 0) and not getattr(self, '_user_scrolled_up', False) else None)
+                           # Use single delayed timer instead of 8 timers to prevent handle exhaustion
+                           QTimer.singleShot(100, lambda sb=scrollbar: sb.setValue(sb.maximum()) if _time.time() >= getattr(self, '_autoscroll_delay_until', 0) and not getattr(self, '_user_scrolled_up', False) else None)
                    # Force immediate update of the widget
                    self.log_text.update()
                    self.log_text.repaint()

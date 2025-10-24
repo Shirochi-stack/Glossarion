@@ -5027,6 +5027,8 @@ def main(log_callback=None, stop_callback=None):
         print(f"📑 DEBUG: ENABLE_AUTO_GLOSSARY = '{os.getenv('ENABLE_AUTO_GLOSSARY', 'NOT SET')}'")
         print(f"📑 DEBUG: MANUAL_GLOSSARY = '{config.MANUAL_GLOSSARY}'")
         print(f"📑 DEBUG: Manual glossary exists? {os.path.isfile(config.MANUAL_GLOSSARY) if config.MANUAL_GLOSSARY else False}")
+        print(f"📑 DEBUG: APPEND_GLOSSARY = '{os.getenv('APPEND_GLOSSARY', '1')}'")
+        print(f"📑 DEBUG: APPEND_GLOSSARY_PROMPT = '{os.getenv('APPEND_GLOSSARY_PROMPT', 'NOT SET')}'")
         print(f"📑 DEBUG: Duplicate algorithm = '{os.getenv('GLOSSARY_DUPLICATE_ALGORITHM', 'auto')}'")
         print(f"📑 DEBUG: Fuzzy threshold = '{os.getenv('GLOSSARY_FUZZY_THRESHOLD', '0.90')}'")
         
@@ -5038,7 +5040,16 @@ def main(log_callback=None, stop_callback=None):
 
         if config.MANUAL_GLOSSARY and os.path.isfile(config.MANUAL_GLOSSARY):
             ext = os.path.splitext(config.MANUAL_GLOSSARY)[1].lower()
-            target_name = "glossary.csv" if ext == ".csv" else "glossary.json"
+            # Treat .txt files as CSV format
+            if ext in [".csv", ".txt"]:
+                target_name = "glossary.csv"
+            elif ext == ".json":
+                target_name = "glossary.json"
+            else:
+                # Default to CSV for unknown extensions
+                target_name = "glossary.csv"
+                print(f"⚠️ Unknown glossary extension '{ext}', treating as CSV")
+            
             target_path = os.path.join(out, target_name)
             if os.path.abspath(config.MANUAL_GLOSSARY) != os.path.abspath(target_path):
                 shutil.copy(config.MANUAL_GLOSSARY, target_path)
@@ -5218,16 +5229,17 @@ def main(log_callback=None, stop_callback=None):
     glossary_file = find_glossary_file(out)
     if glossary_file and os.path.exists(glossary_file):
         try:
-            if glossary_file.lower().endswith('.csv'):
-                # Quick CSV stats
+            if glossary_file.lower().endswith(('.csv', '.txt')):
+                # Quick CSV/TXT stats
                 with open(glossary_file, 'r', encoding='utf-8') as f:
                     lines = [ln.strip() for ln in f.readlines() if ln.strip()]
                 entry_count = max(0, len(lines) - 1) if lines and ',' in lines[0] else len(lines)
-                print(f"📑 Glossary ready (CSV) with {entry_count} entries")
+                file_type = "TXT" if glossary_file.lower().endswith('.txt') else "CSV"
+                print(f"📑 Glossary ready ({file_type}) with {entry_count} entries")
                 print("📑 Sample glossary lines:")
                 for ln in lines[1:4]:
                     print(f"   • {ln}")
-            else:
+            elif glossary_file.lower().endswith('.json'):
                 with open(glossary_file, 'r', encoding='utf-8') as f:
                     glossary_data = json.load(f)
                 
