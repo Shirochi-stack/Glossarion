@@ -432,17 +432,21 @@ class GlossaryManagerMixin:
                 if hasattr(self, 'custom_entry_types') and not enabled_types:
                     QMessageBox.warning(dialog, "Warning", "No entry types selected! The glossary extraction will not find any entries.")
                 
-                # Update the main GUI's append_glossary_var to match the checkbox
-                if hasattr(self, 'append_glossary_checkbox'):
-                    self.append_glossary_var = self.append_glossary_checkbox.isChecked()
-                
-                # Update the main GUI's enable_auto_glossary_var to match the checkbox
-                if hasattr(self, 'enable_auto_glossary_checkbox'):
-                    self.enable_auto_glossary_var = self.enable_auto_glossary_checkbox.isChecked()
-                
-                # Update the main GUI's compress_glossary_prompt_var to match the checkbox
-                if hasattr(self, 'compress_glossary_checkbox'):
-                    self.compress_glossary_prompt_var = self.compress_glossary_checkbox.isChecked()
+                # CRITICAL: Update the main GUI's instance variables to match checkbox states
+                # These vars are checked at runtime in _get_environment_variables() and translate_image()
+                # Without updating them here, changes won't take effect until GUI restart
+                checkbox_to_var_mapping = [
+                    ('append_glossary_checkbox', 'append_glossary_var'),
+                    ('enable_auto_glossary_checkbox', 'enable_auto_glossary_var'),
+                    ('compress_glossary_checkbox', 'compress_glossary_prompt_var'),
+                    ('glossary_history_rolling_checkbox', 'glossary_history_rolling_var'),
+                    ('strip_honorifics_checkbox', 'strip_honorifics_var'),
+                    ('disable_honorifics_checkbox', 'disable_honorifics_var'),
+                    ('use_legacy_csv_checkbox', 'use_legacy_csv_var'),
+                ]
+                for checkbox_name, var_name in checkbox_to_var_mapping:
+                    if hasattr(self, checkbox_name):
+                        setattr(self, var_name, getattr(self, checkbox_name).isChecked())
                 
                 # Call main save_config - it will:
                 # 1. Update custom_entry_types from checkboxes
