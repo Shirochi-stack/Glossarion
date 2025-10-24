@@ -8462,7 +8462,7 @@ Important rules:
 
                 # Glossary Settings
                 ('append_glossary', ['append_glossary_checkbox', 'append_glossary_var'], False, bool),
-                ('compress_glossary_prompt', ['compress_glossary_checkbox', 'compress_glossary_prompt_var'], False, bool),
+                ('compress_glossary_prompt', ['compress_glossary_checkbox', 'compress_glossary_prompt_var'], True, bool),
                 ('glossary_min_frequency', ['glossary_min_frequency_entry', 'glossary_min_frequency_var'], 2, lambda v: safe_int(v, 2)),
                 ('glossary_max_names', ['glossary_max_names_entry', 'glossary_max_names_var'], 50, lambda v: safe_int(v, 50)),
                 ('glossary_max_titles', ['glossary_max_titles_entry', 'glossary_max_titles_var'], 30, lambda v: safe_int(v, 30)),

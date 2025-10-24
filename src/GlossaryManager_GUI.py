@@ -1175,7 +1175,7 @@ Rules:
         
         if not hasattr(self, 'compress_glossary_checkbox'):
             self.compress_glossary_checkbox = self._create_styled_checkbox("Compress Glossary Prompt")
-            self.compress_glossary_checkbox.setChecked(self.config.get('compress_glossary_prompt', False))
+            self.compress_glossary_checkbox.setChecked(self.config.get('compress_glossary_prompt', True))
         compress_layout.addWidget(self.compress_glossary_checkbox)
         
         label3 = QLabel("(Excludes glossary entries that don't appear in source text before sending to API)")
