@@ -2709,7 +2709,7 @@ Provide translations in the same numbered format."""
         def save_edited_glossary():
            if save_current_glossary():
                QMessageBox.information(self.dialog, "Success", "Glossary saved successfully")
-               self.append_log(f"✅ Saved glossary to: {self.editor_file_var.get()}")
+               self.append_log(f"✅ Saved glossary to: {self.editor_file_entry.text()}")
        
         def save_as_glossary():
            if not self.current_glossary_data:
@@ -2745,7 +2745,7 @@ Provide translations in the same numbered format."""
                    with open(path, 'w', encoding='utf-8') as f:
                        json.dump(self.current_glossary_data, f, ensure_ascii=False, indent=2)
                
-               self.editor_file_var.set(path)
+               self.editor_file_entry.setText(path)
                QMessageBox.information(self.dialog, "Success", f"Glossary saved to {os.path.basename(path)}")
                self.append_log(f"✅ Saved glossary as: {path}")
                
@@ -2908,7 +2908,7 @@ Provide translations in the same numbered format."""
             return
         
         # Get current file path
-        current_path = self.editor_file_var.get()
+        current_path = self.editor_file_entry.text()
         default_csv_path = current_path.replace('.json', '.csv')
         
         # Ask user for CSV save location

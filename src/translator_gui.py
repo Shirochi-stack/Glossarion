@@ -1395,12 +1395,12 @@ Text to analyze:
         if operation_name != "manual" and not self.config.get('glossary_auto_backup', True):
             return True
         
-        if not self.current_glossary_data or not self.editor_file_var:
+        if not self.current_glossary_data or not hasattr(self, 'editor_file_entry') or not self.editor_file_entry.text():
             return True
         
         try:
             # Get the original glossary file path
-            original_path = self.editor_file_var
+            original_path = self.editor_file_entry.text()
             original_dir = os.path.dirname(original_path)
             original_name = os.path.basename(original_path)
             
