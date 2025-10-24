@@ -2296,6 +2296,9 @@ class BatchTranslationProcessor:
     
     def process_single_chapter(self, chapter_data):
         """Process a single chapter (runs in thread)"""
+        import threading
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
         # APPLY INTERRUPTIBLE THREADING DELAY FIRST
         thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
         if thread_delay > 0:
@@ -2357,9 +2360,12 @@ class BatchTranslationProcessor:
             
             print(f"    📖 Extracted actual chapter number: {actual_num} (from raw: {raw_num})")
         
+        # Initialize variables that might be needed in except block
+        content_hash = None
+        ai_features = None
+        
         try:
             # Check if this is from a text file
-            ai_features = None
             is_text_source = self.is_text_file or chapter.get('filename', '').endswith('.txt') or chapter.get('is_chunk', False)
             terminology = "Section" if is_text_source else "Chapter"
             print(f"🔄 Starting #{idx+1} (Internal: {terminology} {chap_num}, Actual: {terminology} {actual_num})  (thread: {threading.current_thread().name}) [File: {chapter.get('original_basename', f'{terminology}_{chap_num}')}]")
@@ -2474,14 +2480,20 @@ class BatchTranslationProcessor:
             file_ref = chapter.get('original_basename', f'{terminology}_{chap_num}')
             
             if total_chunks > 1:
-                print(f"✂️ Chapter {actual_num} requires {total_chunks} chunks to fit within token limit")
+                print(f"✂️ Chapter {actual_num} requires {total_chunks} chunks - processing in parallel")
             
-            # Process each chunk sequentially
-            translated_chunks = []
+            # Process chunks in parallel (batch mode doesn't use context between chunks)
+            # threading and ThreadPoolExecutor already imported at top of function
             
-            for chunk_html, chunk_idx, chunk_total in chunks:
+            translated_chunks = [None] * total_chunks  # Pre-allocate to maintain order
+            chunks_lock = threading.Lock()
+            
+            def process_chunk(chunk_data):
+                """Process a single chunk in parallel"""
+                chunk_html, chunk_idx, chunk_total = chunk_data
+                
                 if self.check_stop_fn():
-                    raise Exception("Translation stopped by user")
+                    return None, chunk_idx
                 
                 # Build messages for this chunk
                 if total_chunks > 1:
@@ -2537,16 +2549,46 @@ class BatchTranslationProcessor:
                 if result:
                     # Remove chunk markers from result
                     result = re.sub(r'\[PART \d+/\d+\]\s*', '', result, flags=re.IGNORECASE)
-                    translated_chunks.append(result)
+                    return result, chunk_idx
                 else:
                     raise Exception(f"Empty result for chunk {chunk_idx}/{total_chunks}")
+            
+            # Use ThreadPoolExecutor to process chunks in parallel
+            # Use same batch size as chapter-level parallelism
+            max_chunk_workers = min(total_chunks, self.config.BATCH_SIZE)
+            
+            with ThreadPoolExecutor(max_workers=max_chunk_workers, thread_name_prefix=f"Ch{actual_num}Chunk") as chunk_executor:
+                # Submit all chunks
+                future_to_chunk = {chunk_executor.submit(process_chunk, chunk_data): chunk_data[1] 
+                                  for chunk_data in chunks}
                 
-                # Track chunk completion
-                self.chunks_completed += 1
-                
-                # Delay between chunks if needed
-                if chunk_idx < total_chunks and self.config.DELAY > 0:
-                    time.sleep(self.config.DELAY)
+                # Collect results as they complete
+                completed_chunks = 0
+                for future in as_completed(future_to_chunk):
+                    if self.check_stop_fn():
+                        print("❌ Translation stopped during chunk processing")
+                        chunk_executor.shutdown(wait=False, cancel_futures=True)
+                        raise Exception("Translation stopped by user")
+                    
+                    try:
+                        result, chunk_idx = future.result()
+                        if result:
+                            # Store result at correct index to maintain order
+                            with chunks_lock:
+                                translated_chunks[chunk_idx - 1] = result  # chunk_idx is 1-based
+                                self.chunks_completed += 1
+                                completed_chunks += 1
+                            
+                            print(f"✅ Chunk {chunk_idx}/{total_chunks} completed ({completed_chunks}/{total_chunks})")
+                    except Exception as e:
+                        chunk_idx = future_to_chunk[future]
+                        print(f"❌ Chunk {chunk_idx}/{total_chunks} failed: {e}")
+                        raise
+            
+            # Verify all chunks completed
+            if None in translated_chunks:
+                missing = [i+1 for i, chunk in enumerate(translated_chunks) if chunk is None]
+                raise Exception(f"Failed to translate chunks: {missing}")
             
             # Combine all chunks
             if total_chunks > 1:
