@@ -25,119 +25,18 @@ class TextFileProcessor:
         with open(self.file_path, 'r', encoding='utf-8') as f:
             content = f.read()
         
-        # First, detect chapters in the content
-        raw_chapters = self._detect_chapters(content)
+        # Treat entire file as single document - no chapter detection
+        raw_chapters = [{
+            'num': 1,
+            'title': self.file_base,
+            'content': content
+        }]
         
-        # Then, process each chapter for splitting if needed
+        # Process for splitting if needed
         final_chapters = self._process_chapters_for_splitting(raw_chapters)
         
-        print(f"📚 Extracted {len(final_chapters)} total chunks from {len(raw_chapters)} detected chapters")
+        print(f"📚 Extracted {len(final_chapters)} total chunks")
         return final_chapters
-    
-    def _detect_chapters(self, content: str) -> List[Dict]:
-        """Detect chapter boundaries in the text"""
-        chapters = []
-        
-        # Chapter detection patterns
-        chapter_patterns = [
-            # English patterns
-            (r'^Chapter\s+(\d+).*$', 'chapter'),
-            (r'^CHAPTER\s+(\d+).*$', 'chapter'),
-            (r'^Ch\.\s*(\d+).*$', 'chapter'),
-            # Numbered sections
-            (r'^(\d+)\.\s+(.*)$', 'numbered'),
-            (r'^Part\s+(\d+).*$', 'part'),
-            # Scene breaks (these don't have numbers)
-            (r'^\*\s*\*\s*\*.*$', 'break'),
-            (r'^---+.*$', 'break'),
-            (r'^===+.*$', 'break'),
-        ]
-        
-        # Find all chapter markers and their positions
-        chapter_breaks = []
-        lines = content.split('\n')
-        
-        for line_num, line in enumerate(lines):
-            for pattern, pattern_type in chapter_patterns:
-                match = re.match(pattern, line.strip())
-                if match:
-                    chapter_breaks.append({
-                        'line_num': line_num,
-                        'line': line,
-                        'type': pattern_type,
-                        'match': match
-                    })
-                    break
-        
-        if not chapter_breaks:
-            # No chapter markers found, treat as single chapter
-            print(f"No chapter markers found in {self.file_base}, treating as single document")
-            # FIX: Use "Section 1" instead of filename to avoid number extraction issues
-            chapters = [{
-                'num': 1,
-                'title': 'Section 1',  # Changed from self.file_base
-                'content': content
-            }]
-        else:
-            # Split content by chapter markers
-            print(f"Found {len(chapter_breaks)} chapter markers in {self.file_base}")
-            
-            for i, chapter_break in enumerate(chapter_breaks):
-                # Determine chapter number and title
-                chapter_num, chapter_title = self._extract_chapter_info(chapter_break, i)
-                
-                # Get content for this chapter
-                start_line = chapter_break['line_num'] + 1  # Start after the chapter marker
-                
-                # Find where this chapter ends
-                if i < len(chapter_breaks) - 1:
-                    end_line = chapter_breaks[i + 1]['line_num']
-                else:
-                    end_line = len(lines)
-                
-                # Extract chapter content
-                chapter_lines = lines[start_line:end_line]
-                chapter_content = '\n'.join(chapter_lines).strip()
-                
-                if chapter_content:  # Only add if there's actual content
-                    chapters.append({
-                        'num': chapter_num,
-                        'title': chapter_title,
-                        'content': chapter_content
-                    })
-        
-        return chapters
-    
-    def _extract_chapter_info(self, chapter_break: Dict, index: int) -> Tuple[int, str]:
-        """Extract chapter number and title from a chapter break"""
-        if chapter_break['type'] == 'break':
-            # Scene breaks don't have numbers
-            chapter_num = index + 1
-            chapter_title = f"Section {chapter_num}"
-        else:
-            # Try to extract number from match
-            match_groups = chapter_break['match'].groups()
-            if match_groups and match_groups[0]:  # Check if group exists AND is not empty
-                try:
-                    # Strip whitespace and check if it's a valid number
-                    num_str = match_groups[0].strip()
-                    if num_str:  # Only try to convert if not empty
-                        chapter_num = int(num_str)
-                        chapter_title = chapter_break['line'].strip()
-                    else:
-                        # Empty match group, use index
-                        chapter_num = index + 1
-                        chapter_title = chapter_break['line'].strip()
-                except (ValueError, IndexError):
-                    # Failed to convert to int, use index
-                    chapter_num = index + 1
-                    chapter_title = chapter_break['line'].strip()
-            else:
-                # No match groups or empty match
-                chapter_num = index + 1
-                chapter_title = chapter_break['line'].strip()
-        
-        return chapter_num, chapter_title
     
     def _process_chapters_for_splitting(self, raw_chapters: List[Dict]) -> List[Dict]:
         """Process chapters and split them if they exceed token limits"""
