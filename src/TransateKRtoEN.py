@@ -3536,11 +3536,31 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None):
             if compress_glossary_enabled and source_text:
                 try:
                     from glossary_compressor import compress_glossary
+                    original_glossary_text = glossary_text  # Store original for token counting
                     original_length = len(glossary_text)
                     glossary_text = compress_glossary(glossary_text, source_text, glossary_format='auto')
                     compressed_length = len(glossary_text)
                     reduction_pct = ((original_length - compressed_length) / original_length * 100) if original_length > 0 else 0
-                    print(f"🗜️ Glossary compressed: {original_length} → {compressed_length} chars ({reduction_pct:.1f}% reduction)")
+                    
+                    # Also calculate token savings if tiktoken is available
+                    try:
+                        import tiktoken
+                        try:
+                            enc = tiktoken.encoding_for_model(os.getenv("MODEL", "gpt-4"))
+                        except:
+                            enc = tiktoken.get_encoding("cl100k_base")
+                        
+                        # Count tokens for original and compressed glossary
+                        original_tokens = len(enc.encode(original_glossary_text))
+                        compressed_tokens = len(enc.encode(glossary_text))
+                        token_reduction = original_tokens - compressed_tokens
+                        token_reduction_pct = (token_reduction / original_tokens * 100) if original_tokens > 0 else 0
+                        
+                        print(f"🗜️ Glossary compressed: {original_length:,} → {compressed_length:,} chars ({reduction_pct:.1f}% reduction)")
+                        print(f"🗜️ Token savings: {original_tokens:,} → {compressed_tokens:,} tokens ({token_reduction:,} saved, {token_reduction_pct:.1f}% reduction)")
+                    except ImportError:
+                        # If tiktoken is not available, just show character reduction
+                        print(f"🗜️ Glossary compressed: {original_length:,} → {compressed_length:,} chars ({reduction_pct:.1f}% reduction)")
                 except Exception as e:
                     print(f"⚠️ Glossary compression failed: {e}")
                     # Continue with uncompressed glossary
@@ -5049,13 +5069,9 @@ def main(log_callback=None, stop_callback=None):
         except Exception as e:
             print(f"[DEBUG] Error checking glossary: {e}")
     glossary_path = find_glossary_file(out)
-    # Combine all chapter texts for glossary compression
-    combined_source_text = None
-    if os.getenv("COMPRESS_GLOSSARY_PROMPT", "0") == "1":
-        print("🗜️ Glossary compression enabled - preparing source text...")
-        combined_source_text = "\n".join(c.get("body", "") for c in chapters if c.get("body"))
-        print(f"🗜️ Combined source text: {len(combined_source_text):,} characters from {len(chapters)} chapters")
-    system = build_system_prompt(config.SYSTEM_PROMPT, glossary_path, source_text=combined_source_text)
+    # Build system prompt without glossary compression initially
+    # Compression will happen per-chapter when enabled
+    system = build_system_prompt(config.SYSTEM_PROMPT, glossary_path, source_text=None)
     base_msg = [{"role": "system", "content": system}]
     # Preserve the original system prompt to avoid in-place mutations
     original_system_prompt = system
@@ -6131,7 +6147,13 @@ def main(log_callback=None, stop_callback=None):
                     chunk_context = []
 
                 # Build the current system prompt from the original each time, and append the last summary block if present
-                current_system_content = original_system_prompt
+                # Apply per-chapter glossary compression if enabled
+                if os.getenv("COMPRESS_GLOSSARY_PROMPT", "0") == "1" and glossary_path and os.path.exists(glossary_path):
+                    # Rebuild system prompt with compressed glossary for this chapter
+                    current_system_content = build_system_prompt(config.SYSTEM_PROMPT, glossary_path, source_text=c.get("body", ""))
+                else:
+                    current_system_content = original_system_prompt
+                
                 if config.USE_ROLLING_SUMMARY and last_summary_block_text:
                     current_system_content = (
                         current_system_content
