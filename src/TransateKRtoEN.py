@@ -6596,14 +6596,6 @@ def main(log_callback=None, stop_callback=None):
                             # Add separator if not first chapter
                             if i > 0:
                                 combined.write(f"\n\n{'='*50}\n\n")
-                            
-                            # Write the original chapter title (without Part X/Y suffix)
-                            original_title = chapter_data['title']
-                            # Remove the (Part X/Y) suffix if present
-                            if ' (Part ' in original_title:
-                                original_title = original_title.split(' (Part ')[0]
-                            
-                            combined.write(f"{original_title}\n\n")
                         
                         # Add the chunk content
                         combined.write(content)
@@ -6618,9 +6610,6 @@ def main(log_callback=None, stop_callback=None):
                         # Add separator if not first chapter
                         if i > 0:
                             combined.write(f"\n\n{'='*50}\n\n")
-                        
-                        # Write the chapter title
-                        combined.write(f"{chapter_data['title']}\n\n")
                         
                         # Add the content
                         combined.write(content)

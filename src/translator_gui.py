@@ -1775,7 +1775,8 @@ Recent translations to summarize:
             ('chapter_number_offset_var', 'chapter_number_offset', '0'),
             ('compression_factor_var', 'compression_factor', '1.0'),
             # NEW: scanning phase mode (quick-scan/aggressive/ai-hunter/custom)
-            ('scan_phase_mode_var', 'scan_phase_mode', 'quick-scan') 
+            ('scan_phase_mode_var', 'scan_phase_mode', 'quick-scan'),
+            ('break_split_count_var', 'break_split_count', '')
         ]
         
         for var_name, key, default in str_vars:
