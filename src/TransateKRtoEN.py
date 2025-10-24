@@ -3517,17 +3517,16 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None):
     
     if append_glossary and actual_glossary_path and os.path.exists(actual_glossary_path):
         try:
-            print(f"[DEBUG] ✅ Loading glossary from: {os.path.abspath(actual_glossary_path)}")
+            print(f"✅ Loading glossary from: {os.path.abspath(actual_glossary_path)}")
             
             # Try to load as JSON first
             try:
                 with open(actual_glossary_path, "r", encoding="utf-8") as gf:
                     glossary_data = json.load(gf)
                 glossary_text = json.dumps(glossary_data, ensure_ascii=False, indent=2)
-                print(f"[DEBUG] Loaded as JSON")
+                print(f"Loaded as JSON")
             except json.JSONDecodeError:
                 # If JSON fails, just read as raw text
-                #print(f"[DEBUG] JSON parse failed, reading as raw text")
                 with open(actual_glossary_path, "r", encoding="utf-8") as gf:
                     glossary_text = gf.read()
             
@@ -3556,8 +3555,7 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None):
                         token_reduction = original_tokens - compressed_tokens
                         token_reduction_pct = (token_reduction / original_tokens * 100) if original_tokens > 0 else 0
                         
-                        print(f"🗜️ Glossary compressed: {original_length:,} → {compressed_length:,} chars ({reduction_pct:.1f}% reduction)")
-                        print(f"🗜️ Token savings: {original_tokens:,} → {compressed_tokens:,} tokens ({token_reduction:,} saved, {token_reduction_pct:.1f}% reduction)")
+                        print(f"🗜️ Glossary: {original_length:,}→{compressed_length:,} chars ({reduction_pct:.1f}%), {original_tokens:,}→{compressed_tokens:,} tokens ({token_reduction_pct:.1f}%)")
                     except ImportError:
                         # If tiktoken is not available, just show character reduction
                         print(f"🗜️ Glossary compressed: {original_length:,} → {compressed_length:,} chars ({reduction_pct:.1f}% reduction)")
@@ -3578,8 +3576,7 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None):
             
             system += f"{custom_prompt}\n{glossary_text}"
             
-            print(f"[DEBUG] ✅ Entire glossary appended!")
-            print(f"[DEBUG] Glossary text length: {len(glossary_text)} characters")
+            print(f"✅ Glossary appended ({len(glossary_text):,} characters)")
                 
         except Exception as e:
             print(f"[ERROR] Could not load glossary: {e}")
