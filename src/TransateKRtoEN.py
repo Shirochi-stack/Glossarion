@@ -6610,7 +6610,7 @@ def main(log_callback=None, stop_callback=None):
                         
                         # Add spacing between chunks of the same chapter
                         if chunk_idx < total_chunks:
-                            combined.write("\n\n")
+                            combined.write("\n")
                     else:
                         # This is a standalone chapter
                         current_main_chapter = chapter_data['num']
