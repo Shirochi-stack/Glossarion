@@ -1948,11 +1948,14 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         print(f"🔍 [DEBUG] max_sentences parameter was provided: {max_sentences}")
     
     print(f"🔍 [DEBUG] Final GLOSSARY_MAX_SENTENCES value being used: {max_sentences}")
-    if len(filtered_sentences) > max_sentences:
+    # Handle max_sentences = 0 as "include all sentences"
+    if max_sentences > 0 and len(filtered_sentences) > max_sentences:
         print(f"📁 Limiting to {max_sentences} representative sentences (from {len(filtered_sentences):,})")
         # Take a representative sample
         step = len(filtered_sentences) // max_sentences
         filtered_sentences = filtered_sentences[::step][:max_sentences]
+    elif max_sentences == 0:
+        print(f"📁 Including ALL {len(filtered_sentences):,} sentences (max_sentences=0)")
     
     # Check if gender context expansion is enabled
     include_gender_context = os.getenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
