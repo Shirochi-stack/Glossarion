@@ -6196,6 +6196,9 @@ def on_profile_select(self, event=None):
         # Update profile_var to match only when profile exists
         self.profile_var = name
         self.config['active_profile'] = name
+        
+        # Set this as the active profile for autosave
+        self._active_profile_for_autosave = name
 
 def save_profile(self):
     """Save current prompt under selected profile and persist."""

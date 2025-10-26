@@ -62,23 +62,31 @@ class ChapterSplitter:
             return [(chapter_html, 1, 1)]  # No split needed
         
         # Determine if content is plain text based on filename extension
+        # Check this FIRST before any HTML parsing
         is_plain_text_file = False
         if filename:
-            ext = os.path.splitext(filename)[0].lower() if isinstance(filename, str) else ''
             # Check if it's a known plain text extension
             is_plain_text_file = any(filename.lower().endswith(suffix) for suffix in ['.csv', '.json', '.txt'])
+            if is_plain_text_file and max_elements:
+                print(f"📄 Detected plain text file format (forcing line-based splitting)")
         
-        soup = BeautifulSoup(chapter_html, 'html.parser')
-        
-        if soup.body:
-            elements = list(soup.body.children)
+        # If it's a plain text file, skip HTML parsing and go directly to line-based splitting
+        if not is_plain_text_file:
+            soup = BeautifulSoup(chapter_html, 'html.parser')
+            
+            if soup.body:
+                elements = list(soup.body.children)
+            else:
+                elements = list(soup.children)
+            
+            # Check if we have actual HTML tags (not just text)
+            # Count non-empty elements
+            non_empty_elements = [elem for elem in elements if not (isinstance(elem, str) and elem.strip() == '')]
+            has_html_tags = any(hasattr(elem, 'name') for elem in non_empty_elements)
         else:
-            elements = list(soup.children)
-        
-        # Check if we have actual HTML tags (not just text)
-        # Count non-empty elements
-        non_empty_elements = [elem for elem in elements if not (isinstance(elem, str) and elem.strip() == '')]
-        has_html_tags = any(hasattr(elem, 'name') for elem in non_empty_elements)
+            # For plain text files, set these to trigger line-based mode
+            has_html_tags = False
+            non_empty_elements = []
         
         # Force plain text mode for .csv, .json, .txt files OR if no HTML tags OR only 1 element
         if is_plain_text_file or not has_html_tags or len(non_empty_elements) <= 1:

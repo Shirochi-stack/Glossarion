@@ -785,6 +785,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
 
         # Track original profile content for reverting unsaved changes
         self._original_profile_content = {}
+        # Track the currently active profile to prevent cross-profile saves
+        self._active_profile_for_autosave = None
         
         # Initialize compression-related variables
         self.enable_image_compression_var = self.config.get('enable_image_compression', False)
@@ -1861,6 +1863,8 @@ Recent translations to summarize:
         if hasattr(self, 'profile_var') and self.profile_var in self.prompt_profiles:
             initial_prompt = self.prompt_profiles[self.profile_var]
             self.prompt_text.setPlainText(initial_prompt)
+            # Set the initial active profile for autosave
+            self._active_profile_for_autosave = self.profile_var
         
         self.append_log("🚀 Glossarion v6.2.6 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
@@ -2513,6 +2517,16 @@ Recent translations to summarize:
             # Don't auto-save if user is currently editing the profile name
             # Only save to profiles that already exist
             if name not in self.prompt_profiles:
+                return
+            
+            # CRITICAL: Only auto-save if this profile is the one we're actively editing
+            # This prevents accidentally saving to a previously selected profile
+            if not hasattr(self, '_active_profile_for_autosave'):
+                self._active_profile_for_autosave = None
+            
+            if self._active_profile_for_autosave != name:
+                # Profile has changed but we haven't confirmed it yet
+                # Don't auto-save until on_profile_select confirms the switch
                 return
             
             # Get current text from prompt_text
