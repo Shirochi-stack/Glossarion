@@ -125,8 +125,13 @@ def _atomic_write_file(filepath, content, encoding='utf-8'):
 
 def save_glossary(output_dir, chapters, instructions, language="korean", log_callback=None):
     """Targeted glossary generator with true CSV format output and parallel processing"""
-    # Redirect stdout to GUI log if callback provided
-    if log_callback:
+    # Note: Don't redirect stdout here if log_callback is provided by subprocess worker
+    # The worker already captures stdout and sends to queue
+    # Only redirect if we're NOT in a subprocess (i.e., log_callback is a real GUI callback)
+    import sys
+    in_subprocess = hasattr(sys.stdout, 'queue')  # Worker's LogCapture has a queue attribute
+    
+    if log_callback and not in_subprocess:
         set_output_redirect(log_callback)
     
     print("📱 Targeted Glossary Generator v6.0 (CSV Format + Parallel)")
@@ -2013,14 +2018,33 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         all_sentences_list = re.split(r'[.!?。！？]+', clean_text)
         all_sentences_list = [s.strip() for s in all_sentences_list if s.strip()]
         
-        # Create index map for fast lookup
+        # Create index map for fast lookup - OPTIMIZED to O(n) instead of O(n²)
+        # Build a lookup dict: sentence -> index for fast matching
         sentence_to_index = {}
-        for idx, sentence in enumerate(all_sentences_list):
-            for filtered_sent in filtered_sentences:
-                # Check if filtered sentence matches or contains this sentence
-                if filtered_sent.strip() in sentence or sentence in filtered_sent.strip():
-                    sentence_to_index[filtered_sent] = idx
-                    break
+        all_sentences_normalized = {s.strip(): idx for idx, s in enumerate(all_sentences_list)}
+        
+        print(f"📑 Mapping {len(filtered_sentences):,} filtered sentences to context positions...")
+        for filtered_sent in filtered_sentences:
+            filtered_normalized = filtered_sent.strip()
+            
+            # Try exact match first (fastest)
+            if filtered_normalized in all_sentences_normalized:
+                sentence_to_index[filtered_sent] = all_sentences_normalized[filtered_normalized]
+            else:
+                # Try substring match (slower fallback)
+                found = False
+                for sentence, idx in all_sentences_normalized.items():
+                    if filtered_normalized in sentence or sentence in filtered_normalized:
+                        sentence_to_index[filtered_sent] = idx
+                        found = True
+                        break
+                
+                if not found:
+                    # Last resort: try finding in original list
+                    for idx, sentence in enumerate(all_sentences_list):
+                        if filtered_normalized in sentence or sentence in filtered_normalized:
+                            sentence_to_index[filtered_sent] = idx
+                            break
         
         # Build context windows
         context_groups = []
@@ -2080,8 +2104,10 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                               existing_glossary, output_dir, 
                               strip_honorifics=True, fuzzy_threshold=0.90, filter_mode='all', max_sentences=200, log_callback=None):
     """Extract glossary using custom AI prompt with proper filtering"""
-    # Redirect stdout to GUI log if callback provided
-    if log_callback:
+    # Redirect stdout to GUI log if callback provided (but not in subprocess - worker handles it)
+    import sys
+    in_subprocess = hasattr(sys.stdout, 'queue')
+    if log_callback and not in_subprocess:
         set_output_redirect(log_callback)
     
     print("📑 Using custom automatic glossary prompt")

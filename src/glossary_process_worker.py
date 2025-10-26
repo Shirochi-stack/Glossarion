@@ -68,6 +68,41 @@ def generate_glossary_in_process(output_dir, chapters_data, instructions, env_va
         sys.stdout = log_capture
         sys.stderr = log_capture
         
+        # ALSO capture logging module output
+        import logging
+        
+        # Create a custom logging handler that writes to our log_capture
+        class QueueLogHandler(logging.Handler):
+            def __init__(self, log_capture):
+                super().__init__()
+                self.log_capture = log_capture
+                
+            def emit(self, record):
+                try:
+                    msg = self.format(record)
+                    self.log_capture.write(msg + '\n')
+                except Exception:
+                    pass
+        
+        # Add our handler to the root logger and all existing loggers
+        queue_handler = QueueLogHandler(log_capture)
+        queue_handler.setLevel(logging.DEBUG)
+        
+        # Store original handlers so we can restore them later
+        original_handlers = {}
+        
+        # Redirect root logger
+        root_logger = logging.getLogger()
+        original_handlers['root'] = root_logger.handlers[:]
+        root_logger.handlers = [queue_handler]
+        
+        # Redirect unified_api_client logger specifically
+        api_logger = logging.getLogger('unified_api_client')
+        original_handlers['unified_api_client'] = api_logger.handlers[:]
+        api_logger.handlers = [queue_handler]
+        api_logger.setLevel(logging.DEBUG)
+        api_logger.propagate = False  # Prevent propagation to root logger (avoid duplicates)
+        
         # Set environment variables from parent process
         for key, value in env_vars.items():
             os.environ[key] = str(value)
@@ -99,6 +134,13 @@ def generate_glossary_in_process(output_dir, chapters_data, instructions, env_va
         # Restore stdout and stderr
         sys.stdout = old_stdout
         sys.stderr = old_stderr
+        
+        # Restore logging handlers
+        if 'original_handlers' in locals():
+            root_logger = logging.getLogger()
+            root_logger.handlers = original_handlers.get('root', [])
+            api_logger = logging.getLogger('unified_api_client')
+            api_logger.handlers = original_handlers.get('unified_api_client', [])
         
         return {
             'success': True,
