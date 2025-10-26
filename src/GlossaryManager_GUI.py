@@ -484,6 +484,7 @@ class GlossaryManagerMixin:
                     ('enable_auto_glossary_checkbox', 'enable_auto_glossary_var'),
                     ('compress_glossary_checkbox', 'compress_glossary_prompt_var'),
                     ('include_gender_context_checkbox', 'include_gender_context_var'),
+                    ('include_description_checkbox', 'include_description_var'),
                     ('glossary_history_rolling_checkbox', 'glossary_history_rolling_var'),
                     ('strip_honorifics_checkbox', 'strip_honorifics_var'),
                     ('disable_honorifics_checkbox', 'disable_honorifics_var'),
@@ -1275,6 +1276,21 @@ Rules:
         label4 = QLabel("(Expands text snippets to include surrounding sentences for better gender detection)")
         gender_context_layout.addWidget(label4)
         gender_context_layout.addStretch()
+        
+        # Include description column toggle (below gender context)
+        description_widget = QWidget()
+        description_layout = QHBoxLayout(description_widget)
+        description_layout.setContentsMargins(0, 0, 0, 15)
+        auto_layout.addWidget(description_widget)
+        
+        if not hasattr(self, 'include_description_checkbox'):
+            self.include_description_checkbox = self._create_styled_checkbox("Include Description Column")
+            self.include_description_checkbox.setChecked(self.config.get('include_description', False))
+        description_layout.addWidget(self.include_description_checkbox)
+        
+        label5 = QLabel("(Adds a description/context field for each glossary entry)")
+        description_layout.addWidget(label5)
+        description_layout.addStretch()
         
         # Custom append prompt section
         append_prompt_frame = QGroupBox("Glossary Append Format")

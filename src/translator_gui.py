@@ -1730,6 +1730,7 @@ Recent translations to summarize:
             ('enable_auto_glossary_var', 'enable_auto_glossary', False),
             ('append_glossary_var', 'append_glossary', False),
             ('include_gender_context_var', 'include_gender_context', False),
+            ('include_description_var', 'include_description', False),
             ('retry_truncated_var', 'retry_truncated', False),
             ('retry_duplicate_var', 'retry_duplicate_bodies', False),
             ('preserve_original_text_var', 'preserve_original_text_on_failure', False),
@@ -8512,6 +8513,7 @@ Important rules:
                 ('append_glossary', ['append_glossary_checkbox', 'append_glossary_var'], False, bool),
                 ('compress_glossary_prompt', ['compress_glossary_checkbox', 'compress_glossary_prompt_var'], True, bool),
                 ('include_gender_context', ['include_gender_context_checkbox', 'include_gender_context_var'], False, bool),
+                ('include_description', ['include_description_checkbox', 'include_description_var'], False, bool),
                 ('glossary_min_frequency', ['glossary_min_frequency_entry', 'glossary_min_frequency_var'], 2, lambda v: safe_int(v, 2)),
                 ('glossary_max_names', ['glossary_max_names_entry', 'glossary_max_names_var'], 50, lambda v: safe_int(v, 50)),
                 ('glossary_max_titles', ['glossary_max_titles_entry', 'glossary_max_titles_var'], 30, lambda v: safe_int(v, 30)),
@@ -8769,6 +8771,7 @@ Important rules:
                     ('GLOSSARY_MAX_SENTENCES', str(self.config.get('glossary_max_sentences', 200))),
                     ('COMPRESS_GLOSSARY_PROMPT', '1' if self.config.get('compress_glossary_prompt') else '0'),
                     ('GLOSSARY_INCLUDE_GENDER_CONTEXT', '1' if self.config.get('include_gender_context') else '0'),
+                    ('GLOSSARY_INCLUDE_DESCRIPTION', '1' if self.config.get('include_description') else '0'),
                     # Add missing environment variables that GlossaryManager.py reads
                     ('GLOSSARY_MIN_FREQUENCY', str(self.config.get('glossary_min_frequency', 2))),
                     ('GLOSSARY_MAX_NAMES', str(self.config.get('glossary_max_names', 50))),
