@@ -2103,7 +2103,9 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                     detected_terms = {}
             
             # Replace placeholders in prompt
-            prompt = custom_prompt.replace('{language}', language)
+            # Get target language from environment (used in the prompt for translation output)
+            target_language = os.getenv('GLOSSARY_TARGET_LANGUAGE', 'English')
+            prompt = custom_prompt.replace('{language}', target_language)
             prompt = prompt.replace('{min_frequency}', str(min_frequency))
             prompt = prompt.replace('{max_names}', str(max_names))
             prompt = prompt.replace('{max_titles}', str(max_titles))

@@ -38,6 +38,50 @@ class GlossaryManagerMixin:
         """Disable mousewheel scrolling on a tab widget to prevent accidental tab switching"""
         tabwidget.wheelEvent = lambda event: None
     
+    @staticmethod
+    def _disable_combobox_mousewheel(combobox):
+        """Disable mousewheel scrolling on a combobox"""
+        combobox.wheelEvent = lambda event: None
+    
+    @staticmethod
+    def _add_combobox_arrow(combobox):
+        """Add a unicode arrow overlay to a combobox"""
+        from PySide6.QtCore import QTimer
+        from PySide6.QtWidgets import QLabel
+        from PySide6.QtCore import Qt
+        
+        arrow_label = QLabel("▼", combobox)
+        arrow_label.setStyleSheet("""
+            QLabel {
+                color: white;
+                background: transparent;
+                font-size: 10pt;
+                border: none;
+            }
+        """)
+        arrow_label.setAlignment(Qt.AlignCenter)
+        arrow_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        
+        def position_arrow():
+            try:
+                if arrow_label and combobox:
+                    width = combobox.width()
+                    height = combobox.height()
+                    arrow_label.setGeometry(width - 20, (height - 16) // 2, 20, 16)
+            except RuntimeError:
+                pass
+        
+        # Position arrow when combobox is resized
+        original_resize = combobox.resizeEvent
+        def new_resize(event):
+            original_resize(event)
+            position_arrow()
+        
+        combobox.resizeEvent = new_resize
+        
+        # Initial position
+        QTimer.singleShot(0, position_arrow)
+    
     def _create_styled_checkbox(self, text):
         """Create a checkbox; styling is handled by the dialog's global stylesheet."""
         from PySide6.QtWidgets import QCheckBox
@@ -52,7 +96,7 @@ class GlossaryManagerMixin:
         
         # Use screen ratios instead of fixed pixels
         self._screen = QApplication.primaryScreen().geometry()
-        min_width = int(self._screen.width() * 0.38)   # 30% of screen width
+        min_width = int(self._screen.width() * 0.42)   # 50% of screen width
         min_height = int(self._screen.height() * 0.9)  # 90% of screen height (leaves room for taskbar)
         dialog.setMinimumSize(min_width, min_height)
         
@@ -1282,6 +1326,11 @@ Rules:
         extraction_grid.setContentsMargins(2, 4, 6, 6)
         extraction_grid.setHorizontalSpacing(8)
         extraction_grid.setVerticalSpacing(6)
+        # Set column stretch factors to minimize gap between left and right columns
+        extraction_grid.setColumnStretch(0, 0)
+        extraction_grid.setColumnStretch(1, 1)
+        extraction_grid.setColumnStretch(2, 0)
+        extraction_grid.setColumnStretch(3, 1)
         settings_label_layout.addLayout(extraction_grid)
         
         # Initialize entry widgets with config values
@@ -1342,14 +1391,59 @@ Rules:
         extraction_grid.addWidget(_pair("Max titles:", self.glossary_max_titles_entry), 1, 0, 1, 2)
         extraction_grid.addWidget(_pair("Translation batch:", self.glossary_batch_size_entry), 1, 2, 1, 2)
         
-        # Row 3 - Max text size and chapter split
-        extraction_grid.addWidget(_pair("Max text size:", self.glossary_max_text_size_entry), 3, 0, 1, 2)
-        extraction_grid.addWidget(_pair("Chapter split threshold:", self.glossary_chapter_split_threshold_entry), 3, 2, 1, 2)
+        # Row 3 - Max text size and target language
+        extraction_grid.addWidget(_pair("Max text size:", self.glossary_max_text_size_entry), 2, 0, 1, 2)
         
-        # Row 4 - Max sentences for glossary (with inline hint)
+        # Target language dropdown
+        if not hasattr(self, 'glossary_target_language_combo'):
+            self.glossary_target_language_combo = QComboBox()
+            self.glossary_target_language_combo.setMaximumWidth(100)
+            languages = [
+                "English", "Spanish", "French", "German", "Italian", "Portuguese",
+                "Russian", "Arabic", "Hindi", "Chinese (Simplified)",
+                "Chinese (Traditional)", "Japanese", "Korean"
+            ]
+            self.glossary_target_language_combo.addItems(languages)
+            
+            # Use icon in dropdown arrow like duplicate algorithm dropdown
+            try:
+                icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+                if os.path.exists(icon_path):
+                    combo_style = """
+                        QComboBox {
+                            padding-right: 28px;
+                        }
+                        QComboBox::drop-down {
+                            subcontrol-origin: padding;
+                            subcontrol-position: top right;
+                            width: 24px;
+                            border-left: 1px solid #4a5568;
+                        }
+                        QComboBox::down-arrow {
+                            width: 16px;
+                            height: 16px;
+                            image: url(""" + icon_path.replace('\\', '/') + """);
+                        }
+                        QComboBox::down-arrow:on {
+                            top: 1px;
+                        }
+                    """
+                    self.glossary_target_language_combo.setStyleSheet(combo_style)
+            except Exception:
+                pass
+        
+        saved_language = self.config.get('glossary_target_language', 'English')
+        index = self.glossary_target_language_combo.findText(saved_language)
+        if index >= 0:
+            self.glossary_target_language_combo.setCurrentIndex(index)
+        
+        extraction_grid.addWidget(_pair("Target language:", self.glossary_target_language_combo), 2, 2, 1, 2)
+        
+        # Row 4 - Max sentences and chapter split threshold
+        # Max sentences for glossary (with inline hint)
         ms_cont = QWidget()
         ms_layout = QHBoxLayout(ms_cont)
-        ms_layout.setContentsMargins(0, 0, 0, 10)  # extra bottom padding
+        ms_layout.setContentsMargins(0, 0, 0, 0)
         ms_layout.setSpacing(6)
         ms_label = QLabel("Max sentences:")
         ms_label.setFixedWidth(180)
@@ -1360,15 +1454,17 @@ Rules:
         hint.setStyleSheet("color: gray;")
         ms_layout.addWidget(hint)
         ms_layout.addStretch()
-        extraction_grid.addWidget(ms_cont, 4, 0, 1, 4)
+        extraction_grid.addWidget(ms_cont, 3, 0, 1, 2)
+        
+        extraction_grid.addWidget(_pair("Chapter split threshold:", self.glossary_chapter_split_threshold_entry), 3, 2, 1, 2)
         
         # Row 5 - Filter mode
-        extraction_grid.addWidget(QLabel("Filter mode:"), 5, 0)
+        extraction_grid.addWidget(QLabel("Filter mode:"), 4, 0)
         filter_widget = QWidget()
         filter_layout = QHBoxLayout(filter_widget)
         filter_layout.setContentsMargins(0, 0, 0, 0)
         filter_layout.setSpacing(8)
-        extraction_grid.addWidget(filter_widget, 5, 1, 1, 3)
+        extraction_grid.addWidget(filter_widget, 4, 1, 1, 3)
         
         if not hasattr(self, 'glossary_filter_mode_buttons'):
             self.glossary_filter_mode_buttons = {}
@@ -1391,21 +1487,21 @@ Rules:
         filter_layout.addStretch()
 
         # Row 6 - Strip honorifics
-        extraction_grid.addWidget(QLabel("Strip honorifics:"), 6, 0)
+        extraction_grid.addWidget(QLabel("Strip honorifics:"), 5, 0)
         if not hasattr(self, 'strip_honorifics_checkbox'):
             self.strip_honorifics_checkbox = self._create_styled_checkbox("Remove honorifics from extracted names")
         # Always reload from config
         self.strip_honorifics_checkbox.setChecked(self.config.get('strip_honorifics', True))
-        extraction_grid.addWidget(self.strip_honorifics_checkbox, 6, 1, 1, 3)
+        extraction_grid.addWidget(self.strip_honorifics_checkbox, 5, 1, 1, 3)
         
         # Row 7 - Fuzzy matching threshold (reuse existing value)
-        extraction_grid.addWidget(QLabel("Fuzzy threshold:"), 7, 0)
+        extraction_grid.addWidget(QLabel("Fuzzy threshold:"), 6, 0)
         
         auto_fuzzy_widget = QWidget()
         auto_fuzzy_layout = QHBoxLayout(auto_fuzzy_widget)
         auto_fuzzy_layout.setContentsMargins(0, 0, 0, 0)
         auto_fuzzy_layout.setSpacing(8)
-        extraction_grid.addWidget(auto_fuzzy_widget, 7, 1, 1, 3)
+        extraction_grid.addWidget(auto_fuzzy_widget, 6, 1, 1, 3)
         
         # Always reload fuzzy threshold value from config
         try:
@@ -1418,7 +1514,7 @@ Rules:
         self.fuzzy_threshold_slider.setMinimum(50)
         self.fuzzy_threshold_slider.setMaximum(100)
         self.fuzzy_threshold_slider.setValue(int(self.fuzzy_threshold_value * 100))
-        self.fuzzy_threshold_slider.setMinimumWidth(200)
+        self.fuzzy_threshold_slider.setMinimumWidth(250)
         self._disable_slider_mousewheel(self.fuzzy_threshold_slider)  # Disable mouse wheel
         auto_fuzzy_layout.addWidget(self.fuzzy_threshold_slider)
         

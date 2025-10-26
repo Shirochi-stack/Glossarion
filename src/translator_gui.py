@@ -8645,6 +8645,10 @@ Important rules:
                 self.config['glossary_duplicate_algorithm'] = algo_reverse_map.get(self.duplicate_algo_combo.currentIndex(), 'auto')
             elif hasattr(self, 'glossary_duplicate_algorithm_var'):
                 self.config['glossary_duplicate_algorithm'] = self.glossary_duplicate_algorithm_var
+            
+            # Target language from combo box
+            if hasattr(self, 'glossary_target_language_combo'):
+                self.config['glossary_target_language'] = self.glossary_target_language_combo.currentText()
 
             # Custom glossary data structures
             if hasattr(self, 'custom_glossary_fields'):
@@ -8774,6 +8778,7 @@ Important rules:
                     ('GLOSSARY_CHAPTER_SPLIT_THRESHOLD', str(self.config.get('glossary_chapter_split_threshold', 8192))),
                     ('GLOSSARY_FILTER_MODE', self.config.get('glossary_filter_mode', 'strict')),
                     ('GLOSSARY_DUPLICATE_ALGORITHM', self.config.get('glossary_duplicate_algorithm', 'auto')),
+                    ('GLOSSARY_TARGET_LANGUAGE', self.config.get('glossary_target_language', 'English')),
                 ]
                 for env_key, env_value in glossary_env_mappings:
                     if env_key:  # Skip None entries
