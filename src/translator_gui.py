@@ -1656,9 +1656,10 @@ Rules:
         
         self.default_auto_glossary_prompt = """You are a glossary extraction assistant for Korean / Japanese / Chinese novels.
 
-Return ONLY CSV format with exactly 4 columns: type,raw_name,translated_name,gender.
+Return ONLY CSV format with 4-5 columns: type,raw_name,translated_name,gender,description(optional).
 For character entries, determine gender from context, leave empty if context is insufficient.
 For non-character entries, leave gender empty.
+The description column is optional and can contain brief context (role, location, significance).
 Only include terms that actually appear in the text.
 Do not use quotes around values unless they contain commas.
 

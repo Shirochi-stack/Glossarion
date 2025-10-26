@@ -380,7 +380,14 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
             
             # Process all collected entries at once (even if empty)
             # Add header so downstream steps can work uniformly
-            all_csv_lines.insert(0, "type,raw_name,translated_name")
+            include_gender_context = os.getenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
+            include_description = os.getenv("GLOSSARY_INCLUDE_DESCRIPTION", "0") == "1"
+            if include_description:
+                all_csv_lines.insert(0, "type,raw_name,translated_name,gender,description")
+            elif include_gender_context:
+                all_csv_lines.insert(0, "type,raw_name,translated_name,gender")
+            else:
+                all_csv_lines.insert(0, "type,raw_name,translated_name")
             
             # Merge with any on-disk glossary first (to avoid overwriting user edits)
             on_disk_path = os.path.join(output_dir, "glossary.csv")
@@ -518,7 +525,14 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
                     os.environ["GLOSSARY_FORCE_DISABLE_SMART_FILTER"] = _prev_force_disable
         
         # Build CSV from aggregated entries
-        csv_lines = ["type,raw_name,translated_name"] + all_glossary_entries
+        include_gender_context = os.getenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
+        include_description = os.getenv("GLOSSARY_INCLUDE_DESCRIPTION", "0") == "1"
+        if include_description:
+            csv_lines = ["type,raw_name,translated_name,gender,description"] + all_glossary_entries
+        elif include_gender_context:
+            csv_lines = ["type,raw_name,translated_name,gender"] + all_glossary_entries
+        else:
+            csv_lines = ["type,raw_name,translated_name"] + all_glossary_entries
         
         # Merge with any provided existing glossary AND on-disk glossary to avoid overwriting
         on_disk_path = os.path.join(output_dir, "glossary.csv")
@@ -915,7 +929,14 @@ def _incremental_update_glossary(output_dir, chunk_lines, strip_honorifics, lang
     # Ensure output dir
     os.makedirs(output_dir, exist_ok=True)
     # Compose CSV with header for merging
-    new_csv_lines = ["type,raw_name,translated_name"] + chunk_lines
+    include_gender_context = os.getenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
+    include_description = os.getenv("GLOSSARY_INCLUDE_DESCRIPTION", "0") == "1"
+    if include_description:
+        new_csv_lines = ["type,raw_name,translated_name,gender,description"] + chunk_lines
+    elif include_gender_context:
+        new_csv_lines = ["type,raw_name,translated_name,gender"] + chunk_lines
+    else:
+        new_csv_lines = ["type,raw_name,translated_name"] + chunk_lines
     # Load existing aggregator content, if any
     existing_csv = None
     if os.path.exists(agg_path):
@@ -2387,8 +2408,9 @@ def _process_ai_response(response_text, all_text, min_frequency,
                        strip_honorifics, fuzzy_threshold, language, filter_mode):
     """Process AI response and return CSV lines"""
 
-    # Check if gender context is enabled (used throughout the function)
+    # Check if gender context and description are enabled (used throughout the function)
     include_gender_context = os.getenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
+    include_description = os.getenv("GLOSSARY_INCLUDE_DESCRIPTION", "0") == "1"
     
     # option to completely skip frequency validation for speed
     skip_all_validation = os.getenv("GLOSSARY_SKIP_ALL_VALIDATION", "0") == "1"
@@ -2442,8 +2464,10 @@ def _process_ai_response(response_text, all_text, min_frequency,
     if skip_all_validation:
         # print("📑 ⚡ FAST MODE: Skipping all frequency validation (accepting all AI results)")
         
-        # Use appropriate header based on gender context setting
-        if include_gender_context:
+        # Use appropriate header based on gender and description settings
+        if include_description:
+            csv_lines.append("type,raw_name,translated_name,gender,description")
+        elif include_gender_context:
             csv_lines.append("type,raw_name,translated_name,gender")
             # print("📑 Fast mode: Using 4-column format with gender")
         else:
@@ -2458,7 +2482,19 @@ def _process_ai_response(response_text, all_text, min_frequency,
             # Parse CSV line
             parts = [p.strip() for p in line.split(',')]
             
-            if include_gender_context and len(parts) >= 4:
+            if include_description and len(parts) >= 5:
+                # Has all 5 columns (with gender and description)
+                entry_type = parts[0]
+                raw_name = parts[1]
+                translated_name = parts[2]
+                gender = parts[3] if len(parts) > 3 else ''
+                description = parts[4] if len(parts) > 4 else ''
+                
+                # Validate - reject malformed entries that look like tuples/lists
+                if (raw_name and translated_name and 
+                    not (raw_name.startswith(('[', '(')) or translated_name.startswith(('[', '(')))):
+                    csv_lines.append(f"{entry_type},{raw_name},{translated_name},{gender},{description}")
+            elif include_gender_context and len(parts) >= 4:
                 # Has all 4 columns (with gender)
                 entry_type = parts[0]
                 raw_name = parts[1]
@@ -2477,7 +2513,12 @@ def _process_ai_response(response_text, all_text, min_frequency,
                 # Validate - reject malformed entries
                 if (raw_name and translated_name and
                     not (raw_name.startswith(('[', '(')) or translated_name.startswith(('[', '(')))):
-                    if include_gender_context:
+                    if include_description:
+                        # Add empty gender and description columns when 5 columns expected
+                        gender = parts[3] if len(parts) > 3 else ''
+                        description = parts[4] if len(parts) > 4 else ''
+                        csv_lines.append(f"{entry_type},{raw_name},{translated_name},{gender},{description}")
+                    elif include_gender_context:
                         # Add empty gender column for 3-column entries when 4 columns expected
                         gender = parts[3] if len(parts) > 3 else ''
                         csv_lines.append(f"{entry_type},{raw_name},{translated_name},{gender}")
@@ -2490,7 +2531,9 @@ def _process_ai_response(response_text, all_text, min_frequency,
                 # Validate - reject malformed entries
                 if (raw_name and translated_name and
                     not (raw_name.startswith(('[', '(')) or translated_name.startswith(('[', '(')))):
-                    if include_gender_context:
+                    if include_description:
+                        csv_lines.append(f"term,{raw_name},{translated_name},,")
+                    elif include_gender_context:
                         csv_lines.append(f"term,{raw_name},{translated_name},")
                     else:
                         csv_lines.append(f"term,{raw_name},{translated_name}")
@@ -2525,11 +2568,13 @@ def _process_ai_response(response_text, all_text, min_frequency,
                 raw_name = parts[1]
                 translated_name = parts[2]
                 gender = parts[3] if len(parts) > 3 else ''
+                description = parts[4] if len(parts) > 4 else ''
             elif len(parts) == 2:
                 entry_type = 'term'
                 raw_name = parts[0]
                 translated_name = parts[1]
                 gender = ''
+                description = ''
             else:
                 continue
             
@@ -2551,6 +2596,7 @@ def _process_ai_response(response_text, all_text, min_frequency,
                     'original_raw': original_raw,
                     'translated_name': translated_name,
                     'gender': gender,
+                    'description': description,
                     'line': line
                 }
         
@@ -2569,7 +2615,9 @@ def _process_ai_response(response_text, all_text, min_frequency,
     # Process based on mode
     if filter_mode == "only_with_honorifics" or skip_frequency_check:
         # For these modes, accept all entries
-        if include_gender_context:
+        if include_description:
+            csv_lines.append("type,raw_name,translated_name,gender,description")  # Header with description
+        elif include_gender_context:
             csv_lines.append("type,raw_name,translated_name,gender")  # Header with gender
         else:
             csv_lines.append("type,raw_name,translated_name")  # Header
@@ -2585,11 +2633,13 @@ def _process_ai_response(response_text, all_text, min_frequency,
                 raw_name = parts[1]
                 translated_name = parts[2]
                 gender = parts[3] if len(parts) > 3 else ''
+                description = parts[4] if len(parts) > 4 else ''
             elif len(parts) == 2:
                 entry_type = 'term'
                 raw_name = parts[0]
                 translated_name = parts[1]
                 gender = ''
+                description = ''
             else:
                 continue
             
@@ -2600,7 +2650,9 @@ def _process_ai_response(response_text, all_text, min_frequency,
                 continue
             
             if raw_name and translated_name:
-                if include_gender_context:
+                if include_description:
+                    csv_line = f"{entry_type},{raw_name},{translated_name},{gender},{description}"
+                elif include_gender_context:
                     csv_line = f"{entry_type},{raw_name},{translated_name},{gender}"
                 else:
                     csv_line = f"{entry_type},{raw_name},{translated_name}"
@@ -2611,7 +2663,9 @@ def _process_ai_response(response_text, all_text, min_frequency,
     
     else:
         # Use pre-computed frequencies
-        if include_gender_context:
+        if include_description:
+            csv_lines.append("type,raw_name,translated_name,gender,description")  # Header with description
+        elif include_gender_context:
             csv_lines.append("type,raw_name,translated_name,gender")  # Header with gender
         else:
             csv_lines.append("type,raw_name,translated_name")  # Header
@@ -2624,7 +2678,9 @@ def _process_ai_response(response_text, all_text, min_frequency,
                 count += term_frequencies.get(info['original_raw'], 0)
             
             if count >= min_frequency:
-                if include_gender_context:
+                if include_description:
+                    csv_line = f"{info['entry_type']},{term},{info['translated_name']},{info['gender']},{info['description']}"
+                elif include_gender_context:
                     csv_line = f"{info['entry_type']},{term},{info['translated_name']},{info['gender']}"
                 else:
                     csv_line = f"{info['entry_type']},{term},{info['translated_name']}"
@@ -2639,7 +2695,9 @@ def _process_ai_response(response_text, all_text, min_frequency,
     
     # Ensure we have at least the header
     if len(csv_lines) == 0:
-        if include_gender_context:
+        if include_description:
+            csv_lines.append("type,raw_name,translated_name,gender,description")
+        elif include_gender_context:
             csv_lines.append("type,raw_name,translated_name,gender")
         else:
             csv_lines.append("type,raw_name,translated_name")
