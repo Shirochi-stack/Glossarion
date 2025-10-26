@@ -2482,6 +2482,9 @@ def _process_ai_response(response_text, all_text, min_frequency,
             # Parse CSV line
             parts = [p.strip() for p in line.split(',')]
             
+            # Replace invalid 'stop' values with empty string
+            parts = ['' if p == "'stop'" or p == "stop" else p for p in parts]
+            
             if include_description and len(parts) >= 5:
                 # Has all 5 columns (with gender and description)
                 entry_type = parts[0]
@@ -2567,6 +2570,9 @@ def _process_ai_response(response_text, all_text, min_frequency,
             
             parts = [p.strip() for p in line.split(',')]
             
+            # Replace invalid 'stop' values with empty string
+            parts = ['' if p == "'stop'" or p == "stop" else p for p in parts]
+            
             if len(parts) >= 3:
                 entry_type = parts[0].lower()
                 raw_name = parts[1]
@@ -2632,6 +2638,9 @@ def _process_ai_response(response_text, all_text, min_frequency,
                 continue  # Skip header
             
             parts = [p.strip() for p in line.split(',')]
+            
+            # Replace invalid 'stop' values with empty string
+            parts = ['' if p == "'stop'" or p == "stop" else p for p in parts]
             
             if len(parts) >= 3:
                 entry_type = parts[0].lower()
