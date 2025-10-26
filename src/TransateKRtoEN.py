@@ -5041,6 +5041,7 @@ def main(log_callback=None, stop_callback=None):
         print(f"📑 DEBUG: Translation batch = '{os.getenv('GLOSSARY_BATCH_SIZE', '50')}'")
         print(f"📑 DEBUG: Max text size = '{os.getenv('GLOSSARY_MAX_TEXT_SIZE', '50000')}'")
         print(f"📑 DEBUG: Max sentences = '{os.getenv('GLOSSARY_MAX_SENTENCES', '200')}'")
+        print(f"📑 DEBUG: Use smart filter = '{os.getenv('GLOSSARY_USE_SMART_FILTER', '1')}'")
         print(f"📑 DEBUG: Chapter split threshold = '{os.getenv('GLOSSARY_CHAPTER_SPLIT_THRESHOLD', '50000')}'")
         print(f"📑 DEBUG: Target language = '{os.getenv('GLOSSARY_TARGET_LANGUAGE', 'English')}'")
         

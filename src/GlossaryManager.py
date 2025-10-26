@@ -454,7 +454,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
             print(f"📑 ✅ AI GLOSSARY SAVED!")
             c_count, t_count, total = _count_glossary_entries(all_csv_lines, use_legacy_format)
             print(f"📑 Character entries: {c_count}")
-            print(f"📑 Term entries: {t_count}")
+            # print(f"📑 Term entries: {t_count}")
             print(f"📑 Total entries: {total}")
             
             return _parse_csv_to_dict(csv_content)
@@ -598,7 +598,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
             print(f"📑 File: {glossary_path}")
             c_count, t_count, total = _count_glossary_entries(csv_lines, use_legacy_format)
             print(f"📑 Character entries: {c_count}")
-            print(f"📑 Term entries: {t_count}")
+            # print(f"📑 Term entries: {t_count}")
             print(f"📑 Total entries: {total}")
         
         return _parse_csv_to_dict(csv_content)
@@ -2201,7 +2201,7 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                                os.getenv("_TEXT_ALREADY_FILTERED", "0") == "1")
             
             if already_filtered:
-                print("📑 Text already filtered, skipping re-filtering")
+                # print("📑 Text already filtered, skipping re-filtering")
                 text_sample = all_text  # Use as-is since it's already filtered
                 detected_terms = {}
             else:
@@ -2292,7 +2292,7 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                 print(f"📑 AI extracted {len(csv_lines) - 1} valid terms (header excluded)")
 
                 process_time = time.time() - process_start
-                print(f"📑 Response processing took {process_time:.1f}s")
+                # print(f"📑 Response processing took {process_time:.1f}s")
                 
                 # If we're running per-chunk, defer all heavy work and saving
                 if os.getenv("GLOSSARY_DEFER_SAVE", "0") == "1":
@@ -2354,7 +2354,7 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                 print(f"📑 File: {glossary_path}")
                 c_count, t_count, total = _count_glossary_entries(csv_lines, use_legacy_format)
                 print(f"📑 Character entries: {c_count}")
-                print(f"📑 Term entries: {t_count}")
+                # print(f"📑 Term entries: {t_count}")
                 print(f"📑 Total entries: {total}")
                 total_time = time.time() - extraction_start
                 print(f"📑 Total extraction time: {total_time:.1f}s")
