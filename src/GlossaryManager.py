@@ -2406,8 +2406,15 @@ def _process_ai_response(response_text, all_text, min_frequency,
     if skip_all_validation:
         print("📑 ⚡ FAST MODE: Skipping all frequency validation (accepting all AI results)")
         
-        # Always use the enforced 3-column header
-        csv_lines.append("type,raw_name,translated_name")
+        # Check if gender context is enabled
+        include_gender_context = os.getenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
+        
+        # Use appropriate header based on gender context setting
+        if include_gender_context:
+            csv_lines.append("type,raw_name,translated_name,gender")
+            print("📑 Fast mode: Using 4-column format with gender")
+        else:
+            csv_lines.append("type,raw_name,translated_name")
         
         # Process the AI response
         for line in lines:
@@ -2416,21 +2423,37 @@ def _process_ai_response(response_text, all_text, min_frequency,
                 continue
                 
             # Parse CSV line
-            parts = [p.strip().strip('"\"') for p in line.split(',')]
+            parts = [p.strip().strip('"\"“”') for p in line.split(',')]
             
-            if len(parts) >= 3:
-                # Has all 3 columns
+            if include_gender_context and len(parts) >= 4:
+                # Has all 4 columns (with gender)
+                entry_type = parts[0]
+                raw_name = parts[1]
+                translated_name = parts[2]
+                gender = parts[3] if len(parts) > 3 else ''
+                if raw_name and translated_name:
+                    csv_lines.append(f"{entry_type},{raw_name},{translated_name},{gender}")
+            elif len(parts) >= 3:
+                # Has at least 3 columns
                 entry_type = parts[0]
                 raw_name = parts[1]
                 translated_name = parts[2]
                 if raw_name and translated_name:
-                    csv_lines.append(f"{entry_type},{raw_name},{translated_name}")
+                    if include_gender_context:
+                        # Add empty gender column for 3-column entries when 4 columns expected
+                        gender = parts[3] if len(parts) > 3 else ''
+                        csv_lines.append(f"{entry_type},{raw_name},{translated_name},{gender}")
+                    else:
+                        csv_lines.append(f"{entry_type},{raw_name},{translated_name}")
             elif len(parts) == 2:
                 # Missing type, default to 'term'
                 raw_name = parts[0]
                 translated_name = parts[1]
                 if raw_name and translated_name:
-                    csv_lines.append(f"term,{raw_name},{translated_name}")
+                    if include_gender_context:
+                        csv_lines.append(f"term,{raw_name},{translated_name},")
+                    else:
+                        csv_lines.append(f"term,{raw_name},{translated_name}")
         
         print(f"📑 Fast mode: Accepted {len(csv_lines) - 1} entries without validation")
         return csv_lines
