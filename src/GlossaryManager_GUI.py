@@ -1353,6 +1353,7 @@ Rules:
                 padding: 5px;
                 border: 1px solid #8a6a08;
                 border-radius: 4px;
+                font-weight: bold;
             }
             QPushButton:hover { background-color: #9a6d07; }
             QPushButton:pressed { background-color: #8a6106; }
@@ -1625,6 +1626,52 @@ Rules:
         self.fuzzy_threshold_slider.valueChanged.connect(update_auto_fuzzy_label)
         update_auto_fuzzy_label(self.fuzzy_threshold_slider.value())
         
+        # Row 8 - Reset to Defaults button
+        reset_extraction_btn = QPushButton("Reset to Defaults")
+        reset_extraction_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #b8860b;
+                color: black;
+                padding: 5px 10px;
+                border: 1px solid #8a6a08;
+                border-radius: 4px;
+                font-size: 9pt;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #9a6d07; }
+            QPushButton:pressed { background-color: #8a6106; }
+        """)
+        
+        def reset_extraction_settings():
+            reply = QMessageBox.question(parent, "Reset Settings", 
+                                         "Reset all extraction settings to defaults?",
+                                         QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                # Reset all fields to defaults
+                self.glossary_min_frequency_entry.setText("2")
+                self.glossary_max_names_entry.setText("100")
+                self.glossary_max_titles_entry.setText("50")
+                self.glossary_context_window_entry.setText("2")
+                self.glossary_max_text_size_entry.setText("0")
+                self.glossary_chapter_split_threshold_entry.setText("0")
+                self.glossary_max_sentences_entry.setText("200")
+                self.glossary_target_language_combo.setCurrentText("English")
+                
+                # Reset filter mode to 'all'
+                if 'all' in self.glossary_filter_mode_buttons:
+                    self.glossary_filter_mode_buttons['all'].setChecked(True)
+                
+                # Reset strip honorifics to True
+                if hasattr(self, 'strip_honorifics_checkbox'):
+                    self.strip_honorifics_checkbox.setChecked(True)
+                
+                # Reset fuzzy threshold to 0.90
+                if hasattr(self, 'fuzzy_threshold_slider'):
+                    self.fuzzy_threshold_slider.setValue(90)
+        
+        reset_extraction_btn.clicked.connect(reset_extraction_settings)
+        extraction_grid.addWidget(reset_extraction_btn, 7, 0, 1, 2)
+        
         # Help text
         help_widget = QWidget()
         help_layout = QVBoxLayout(help_widget)
@@ -1735,6 +1782,7 @@ Prioritize names that appear with honorifics or in important contexts."""
                 padding: 5px;
                 border: 1px solid #8a6a08;
                 border-radius: 4px;
+                font-weight: bold;
             }
             QPushButton:hover { background-color: #9a6d07; }
             QPushButton:pressed { background-color: #8a6106; }
