@@ -283,55 +283,79 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         print(f"⚠️ Text too large for single API call!")
         print(f"   Estimated tokens: {estimated_tokens:,}")
         print(f"   Safe input limit: {safe_input_limit:,} (80% of {max_output_tokens:,} max tokens)")
-        print(f"   Forcing automatic chunking to prevent API errors...")
-        # Override threshold to force chunking
         if chapter_split_threshold == 0:
+            print(f"   Will use ChapterSplitter for token-based chunking...")
+        else:
+            print(f"   Forcing automatic chunking to prevent API errors...")
             # Calculate chunk size in characters that will be ~80% of safe limit in tokens
             chapter_split_threshold = safe_input_limit * 3  # Convert tokens back to chars
             print(f"   Auto-set chunk threshold: {chapter_split_threshold:,} characters")
     
     # Check if we need to split into chunks based on EFFECTIVE size after filtering
-    if chapter_split_threshold > 0 and effective_text_size > chapter_split_threshold:
-        print(f"📑 Effective text exceeds {chapter_split_threshold:,} chars, will process in chunks...")
-        
-        # If using smart filter, we need to split the FILTERED text, not raw text
-        if use_smart_filter and custom_prompt:
-            # Split the filtered text into chunks (reuse cached filtered text)
-            filtered_text = filtered_text_cache if filtered_text_cache is not None else _filter_text_for_glossary(all_text, min_frequency, max_sentences)[0]
-            chunks_to_process = []
+    needs_chunking = (chapter_split_threshold == 0 and estimated_tokens > safe_input_limit) or \
+                     (chapter_split_threshold > 0 and effective_text_size > chapter_split_threshold)
+    
+    if needs_chunking:
+        if chapter_split_threshold == 0:
+            # Use ChapterSplitter for token-based intelligent chunking
+            print(f"📑 Text exceeds safe token limit, using ChapterSplitter for token-based chunking...")
+            from chapter_splitter import ChapterSplitter
             
-            # Split filtered text into chunks of appropriate size
-            chunk_size = chapter_split_threshold
-            for i in range(0, len(filtered_text), chunk_size):
-                chunk_text = filtered_text[i:i + chunk_size]
-                chunks_to_process.append((len(chunks_to_process) + 1, chunk_text))
+            # Get the model name for the tokenizer
+            model = os.getenv("MODEL", "gemini-2.0-flash")
+            splitter = ChapterSplitter(model_name=model, target_tokens=safe_input_limit)
             
-            print(f"📑 Split filtered text into {len(chunks_to_process)} chunks")
+            # Get the text to split (filtered or raw)
+            text_to_split = filtered_text_cache if (use_smart_filter and custom_prompt and filtered_text_cache) else all_text
+            
+            # Use ChapterSplitter to intelligently split based on tokens
+            split_results = splitter.split_chapter(text_to_split, max_tokens=safe_input_limit)
+            chunks_to_process = [(i, chunk) for i, (chunk, _, _) in enumerate(split_results, 1)]
+            
+            print(f"📑 ChapterSplitter created {len(chunks_to_process)} token-balanced chunks")
             all_glossary_entries = []
         else:
-            # Original logic for unfiltered text
-            all_glossary_entries = []
-            chunk_size = 0
-            chunk_chapters = []
-            chunks_to_process = []
+            # Use character-based splitting with fixed threshold
+            print(f"📑 Effective text exceeds {chapter_split_threshold:,} chars, will process in chunks...")
             
-            for idx, chapter in enumerate(chapters):
-                if is_stop_requested():
-                    print("📑 ❌ Glossary generation stopped by user")
-                    return all_glossary_entries
+            # If using smart filter, we need to split the FILTERED text, not raw text
+            if use_smart_filter and custom_prompt:
+                # Split the filtered text into chunks (reuse cached filtered text)
+                filtered_text = filtered_text_cache if filtered_text_cache is not None else _filter_text_for_glossary(all_text, min_frequency, max_sentences)[0]
+                chunks_to_process = []
                 
-                chapter_text = clean_html(chapter["body"])
-                chunk_size += len(chapter_text)
-                chunk_chapters.append(chapter)
-                
-                # Process chunk when it reaches threshold or last chapter
-                if chunk_size >= chapter_split_threshold or idx == len(chapters) - 1:
-                    chunk_text = ' '.join(clean_html(ch["body"]) for ch in chunk_chapters)
+                # Split filtered text into chunks of appropriate size
+                chunk_size = chapter_split_threshold
+                for i in range(0, len(filtered_text), chunk_size):
+                    chunk_text = filtered_text[i:i + chunk_size]
                     chunks_to_process.append((len(chunks_to_process) + 1, chunk_text))
+                
+                print(f"📑 Split filtered text into {len(chunks_to_process)} chunks")
+                all_glossary_entries = []
+            else:
+                # Original logic for unfiltered text
+                all_glossary_entries = []
+                chunk_size = 0
+                chunk_chapters = []
+                chunks_to_process = []
+                
+                for idx, chapter in enumerate(chapters):
+                    if is_stop_requested():
+                        print("📑 ❌ Glossary generation stopped by user")
+                        return all_glossary_entries
                     
-                    # Reset for next chunk
-                    chunk_size = 0
-                    chunk_chapters = []
+                    chapter_text = clean_html(chapter["body"])
+                    chunk_size += len(chapter_text)
+                    chunk_chapters.append(chapter)
+                    
+                    # Process chunk when it reaches threshold or last chapter
+                    if chunk_size >= chapter_split_threshold or idx == len(chapters) - 1:
+                        chunk_text = ' '.join(clean_html(ch["body"]) for ch in chunk_chapters)
+                        chunks_to_process.append((len(chunks_to_process) + 1, chunk_text))
+                        
+                        # Reset for next chunk
+                        chunk_size = 0
+                        chunk_chapters = []
         
         print(f"📑 Split into {len(chunks_to_process)} chunks for processing")
         
