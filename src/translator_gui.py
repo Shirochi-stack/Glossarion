@@ -838,13 +838,38 @@ Format each entry as: type,raw_name,translated_name,gender
 For terms use: term,raw_name,translated_name,""")
         
         self.auto_glossary_prompt = self.config.get('auto_glossary_prompt', 
-            """Extract all character names and important terms from the text.
-Focus on:
-1. Character names (maximum {max_names})
-2. Important titles and positions (maximum {max_titles})
-3. Terms that appear at least {min_frequency} times
+            """You are a glossary extraction assistant for Korean / Japanese / Chinese novels.
 
-Return as JSON: {"term": "translation", ...}""")
+You must strictly return ONLY CSV format with 3-5 columns in this exact order: type,raw_name,translated_name,gender,description.
+For character entries, determine gender from context, leave empty if context is insufficient.
+For non-character entries, leave gender empty.
+The description column is optional and can contain brief context (role, location, significance).
+Only include terms that actually appear in the text.
+Do not use quotes around values unless they contain commas.
+
+CRITICAL EXTRACTION RULES:
+- Extract ONLY: Character names, Location names, Ability/Skill names, Item names, Organization names, Titles/Ranks
+- Do NOT extract sentences, dialogue, actions, questions, or statements as glossary entries
+- The raw_name and translated_name must be SHORT NOUNS ONLY (1-4 words max)
+- REJECT entries that contain verbs or end with punctuation (?, !, .)
+- REJECT entries starting with: "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But"
+- If unsure whether something is a proper noun/name, skip it
+- Note: The description column must contain context/explanations
+
+Critical Requirement: The translated name column should be in {language}.
+
+For example:
+character,김상현,Kim Sang-hyu,male
+character,갈편제,Gale Hardest  
+character,디히릿 아데,Dihirit Ade,female
+
+Focus on identifying:
+1. Character names with their honorifics
+2. Important titles and ranks
+3. Frequently mentioned terms (min frequency: {min_frequency})
+
+Extract up to {max_names} character names and {max_titles} titles.
+Prioritize names that appear with honorifics or in important contexts.""")
         
         self.append_glossary_prompt = self.config.get('append_glossary_prompt', 
            '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n')

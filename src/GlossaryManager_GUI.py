@@ -1680,7 +1680,7 @@ Rules:
         # Default unified prompt (combines system + extraction instructions)
         default_unified_prompt = """You are a glossary extraction assistant for Korean / Japanese / Chinese novels.
 
-Return ONLY CSV format with 4-5 columns: type,raw_name,translated_name,gender,description(optional).
+You must strictly return ONLY CSV format with 3-5 columns in this exact order: type,raw_name,translated_name,gender,description.
 For character entries, determine gender from context, leave empty if context is insufficient.
 For non-character entries, leave gender empty.
 The description column is optional and can contain brief context (role, location, significance).
@@ -1694,14 +1694,14 @@ CRITICAL EXTRACTION RULES:
 - REJECT entries that contain verbs or end with punctuation (?, !, .)
 - REJECT entries starting with: "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But"
 - If unsure whether something is a proper noun/name, skip it
-- Note: The optional description column can contain context/explanations
+- Note: The description column must contain context/explanations
 
 Critical Requirement: The translated name column should be in {language}.
 
 For example:
-character,김상현,Kim Sang-hyu,male
-character,갈편제,Gale Hardest  
-character,디히릿 아데,Dihirit Ade,female
+character,ᫀ뢔사난,Kim Sang-hyu,male
+character,ᫀ간편헤,Gale Hardest  
+character,ᫀ이히리ᄐ 나애,Dihirit Ade,female
 
 Focus on identifying:
 1. Character names with their honorifics
