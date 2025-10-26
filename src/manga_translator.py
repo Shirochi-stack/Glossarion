@@ -1267,6 +1267,9 @@ class MangaTranslator:
         # Store context for contextual translation (backwards compatibility)
         self.translation_context = []
         
+        # Thread safety lock for contextual translation (microsecond lock)
+        self._contextual_lock = threading.Lock()
+        
         # Font settings for text rendering
         self.font_path = self._find_font()
         self.min_font_size = 10
@@ -6768,38 +6771,40 @@ class MangaTranslator:
         if not self.history_manager or not self.contextual_enabled:
             return []
         
-        try:
-            # Load full history
-            full_history = self.history_manager.load_history()
-            
-            if not full_history:
-                return []
-            
-            # Extract only the contextual messages up to the limit
-            context = []
-            exchange_count = 0
-            
-            # Process history in pairs (user + assistant messages)
-            for i in range(0, len(full_history), 2):
-                if i + 1 < len(full_history):
-                    user_msg = full_history[i]
-                    assistant_msg = full_history[i + 1]
-                    
-                    if user_msg.get("role") == "user" and assistant_msg.get("role") == "assistant":
-                        context.extend([user_msg, assistant_msg])
-                        exchange_count += 1
+        # Thread-safe history access (prevents race conditions if used in batch mode)
+        with self._contextual_lock:
+            try:
+                # Load full history
+                full_history = self.history_manager.load_history()
+                
+                if not full_history:
+                    return []
+                
+                # Extract only the contextual messages up to the limit
+                context = []
+                exchange_count = 0
+                
+                # Process history in pairs (user + assistant messages)
+                for i in range(0, len(full_history), 2):
+                    if i + 1 < len(full_history):
+                        user_msg = full_history[i]
+                        assistant_msg = full_history[i + 1]
                         
-                        # Only keep up to the history limit
-                        if exchange_count >= self.translation_history_limit:
-                            # Get only the most recent exchanges
-                            context = context[-(self.translation_history_limit * 2):]
-                            break
-            
-            return context
-            
-        except Exception as e:
-            self._log(f"⚠️ Error loading history context: {str(e)}", "warning")
-            return []
+                        if user_msg.get("role") == "user" and assistant_msg.get("role") == "assistant":
+                            context.extend([user_msg, assistant_msg])
+                            exchange_count += 1
+                            
+                            # Only keep up to the history limit
+                            if exchange_count >= self.translation_history_limit:
+                                # Get only the most recent exchanges
+                                context = context[-(self.translation_history_limit * 2):]
+                                break
+                
+                return context
+                
+            except Exception as e:
+                self._log(f"⚠️ Error loading history context: {str(e)}", "warning")
+                return []
     
     def translate_text(self, text: str, context: Optional[List[Dict]] = None, image_path: str = None, region: TextRegion = None) -> str:
         """Translate text using API with GUI system prompt and full image context"""
@@ -7237,26 +7242,28 @@ class MangaTranslator:
             
             # Store in history if HistoryManager is available
             if self.history_manager and self.contextual_enabled:
-                try:
-                    # Append to history with proper limit handling
-                    self.history_manager.append_to_history(
-                        user_content=text,
-                        assistant_content=translated,
-                        hist_limit=self.translation_history_limit,
-                        reset_on_limit=not self.rolling_history_enabled,
-                        rolling_window=self.rolling_history_enabled
-                    )
-                    
-                    # Check if we're about to hit the limit
-                    if self.history_manager.will_reset_on_next_append(
-                        self.translation_history_limit, 
-                        self.rolling_history_enabled
-                    ):
-                        mode = "roll over" if self.rolling_history_enabled else "reset"
-                        self._log(f"📚 History will {mode} on next translation (at limit: {self.translation_history_limit})")
-                    
-                except Exception as e:
-                    self._log(f"⚠️ Failed to save to history: {str(e)}", "warning")
+                # Thread-safe history update (prevents race conditions if used in batch mode)
+                with self._contextual_lock:
+                    try:
+                        # Append to history with proper limit handling
+                        self.history_manager.append_to_history(
+                            user_content=text,
+                            assistant_content=translated,
+                            hist_limit=self.translation_history_limit,
+                            reset_on_limit=not self.rolling_history_enabled,
+                            rolling_window=self.rolling_history_enabled
+                        )
+                        
+                        # Check if we're about to hit the limit
+                        if self.history_manager.will_reset_on_next_append(
+                            self.translation_history_limit, 
+                            self.rolling_history_enabled
+                        ):
+                            mode = "roll over" if self.rolling_history_enabled else "reset"
+                            self._log(f"📚 History will {mode} on next translation (at limit: {self.translation_history_limit})")
+                        
+                    except Exception as e:
+                        self._log(f"⚠️ Failed to save to history: {str(e)}", "warning")
             
             # Also store in legacy context for compatibility
             self.translation_context.append({
