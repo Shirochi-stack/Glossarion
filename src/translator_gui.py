@@ -783,6 +783,9 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
             pass
 
 
+        # Track original profile content for reverting unsaved changes
+        self._original_profile_content = {}
+        
         # Initialize compression-related variables
         self.enable_image_compression_var = self.config.get('enable_image_compression', False)
         self.auto_compress_enabled_var = self.config.get('auto_compress_enabled', True)
@@ -2497,7 +2500,7 @@ Recent translations to summarize:
             self.REMOVE_AI_ARTIFACTS_var = (state == Qt.Checked)
     
     def _auto_save_system_prompt(self):
-        """Auto-save system prompt to current profile as user types"""
+        """Auto-save system prompt to current profile as user types (in-memory only)"""
         try:
             # Get current profile name
             if not hasattr(self, 'profile_menu'):
@@ -2507,18 +2510,23 @@ Recent translations to summarize:
             if not name:
                 return
             
+            # Don't auto-save if user is currently editing the profile name
+            # Only save to profiles that already exist
+            if name not in self.prompt_profiles:
+                return
+            
             # Get current text from prompt_text
             content = self.prompt_text.toPlainText().strip()
             
-            # Update the profile in memory
+            # Update the profile in memory (staging area)
             self.prompt_profiles[name] = content
             
-            # Update config
+            # Update config in memory
             self.config['prompt_profiles'] = self.prompt_profiles
             self.config['active_profile'] = name
             
             # Note: We don't call save_profiles() here to avoid constant disk I/O
-            # The profile will be saved when the config is saved (on exit or manual save)
+            # The profile will only be persisted when Save Profile is clicked
         except Exception as e:
             # Silently fail to avoid disrupting user's typing
             pass

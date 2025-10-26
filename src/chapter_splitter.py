@@ -27,10 +27,14 @@ class ChapterSplitter:
             # Fallback estimation
             return len(text) // 4
     
-    def split_chapter(self, chapter_html, max_tokens=None):
+    def split_chapter(self, chapter_html, max_tokens=None, filename=None):
         """
         Split a chapter into smaller chunks.
         Splits based on EITHER token limit OR line break count (whichever comes first).
+        Args:
+            chapter_html: The chapter content (HTML or plain text)
+            max_tokens: Maximum tokens per chunk
+            filename: Optional filename to help determine content type
         Returns: List of (chunk_html, chunk_index, total_chunks)
         """
         if max_tokens is None:
@@ -57,6 +61,13 @@ class ChapterSplitter:
         if total_tokens <= effective_max_tokens and max_elements is None:
             return [(chapter_html, 1, 1)]  # No split needed
         
+        # Determine if content is plain text based on filename extension
+        is_plain_text_file = False
+        if filename:
+            ext = os.path.splitext(filename)[0].lower() if isinstance(filename, str) else ''
+            # Check if it's a known plain text extension
+            is_plain_text_file = any(filename.lower().endswith(suffix) for suffix in ['.csv', '.json', '.txt'])
+        
         soup = BeautifulSoup(chapter_html, 'html.parser')
         
         if soup.body:
@@ -69,8 +80,8 @@ class ChapterSplitter:
         non_empty_elements = [elem for elem in elements if not (isinstance(elem, str) and elem.strip() == '')]
         has_html_tags = any(hasattr(elem, 'name') for elem in non_empty_elements)
         
-        # If no HTML tags OR only 1 element (likely wrapped plain text), split by lines instead
-        if not has_html_tags or len(non_empty_elements) <= 1:
+        # Force plain text mode for .csv, .json, .txt files OR if no HTML tags OR only 1 element
+        if is_plain_text_file or not has_html_tags or len(non_empty_elements) <= 1:
             # Plain text mode - split by line count OR token limit
             lines = chapter_html.split('\n')
             if max_elements:

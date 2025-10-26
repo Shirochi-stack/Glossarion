@@ -39,7 +39,8 @@ def extract_chapters_from_txt(txt_path: str) -> List[str]:
             print(f"Chapter {idx+1} has {chapter_tokens} tokens, splitting into smaller chunks...")
             
             # Use ChapterSplitter to split the HTML content
-            chunks = chapter_splitter.split_chapter(chapter['body'], available_tokens)
+            # Pass filename for content type detection
+            chunks = chapter_splitter.split_chapter(chapter['body'], available_tokens, filename=txt_path)
             
             # Extract text from each chunk
             for chunk_html, chunk_idx, total_chunks in chunks:

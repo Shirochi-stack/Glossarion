@@ -5460,12 +5460,15 @@ def main(log_callback=None, stop_callback=None):
         
         # For mixed content chapters, calculate on clean text
         # For mixed content chapters, calculate on clean text
+        # Get filename for content type detection
+        chapter_filename = c.get('filename') or c.get('original_basename', '')
+        
         if c.get('has_images', False) and ContentProcessor.is_meaningful_text_content(c["body"]):
             # Don't modify c["body"] at all during chunk calculation
             # Just pass the body as-is, the chunking will be slightly off but that's OK
-            chunks = chapter_splitter.split_chapter(c["body"], available_tokens)
+            chunks = chapter_splitter.split_chapter(c["body"], available_tokens, filename=chapter_filename)
         else:
-            chunks = chapter_splitter.split_chapter(c["body"], available_tokens)
+            chunks = chapter_splitter.split_chapter(c["body"], available_tokens, filename=chapter_filename)
         
         chapter_key_str = content_hash
         old_key_str = str(idx)
@@ -6189,9 +6192,12 @@ def main(log_callback=None, stop_callback=None):
                     
                     chapter_tokens = chapter_splitter.count_tokens(c["body"])
                     
+                    # Get filename for content type detection
+                    chapter_filename = c.get('filename') or c.get('original_basename', '')
+                    
                     if chapter_tokens > available_tokens:
                         # Even pre-split chunks might need further splitting
-                        chunks = chapter_splitter.split_chapter(c["body"], available_tokens)
+                        chunks = chapter_splitter.split_chapter(c["body"], available_tokens, filename=chapter_filename)
                         print(f"📄 Section {c['num']} (pre-split from text file) needs further splitting into {len(chunks)} chunks")
                     else:
                         chunks = [(c["body"], 1, 1)]
@@ -6211,7 +6217,9 @@ def main(log_callback=None, stop_callback=None):
                     
                     print(f"📊 Chunk size: {available_tokens:,} tokens (based on {max_output_tokens:,} output limit, compression: {compression_factor})")
                     
-                    chunks = chapter_splitter.split_chapter(c["body"], available_tokens)
+                    # Get filename for content type detection
+                    chapter_filename = c.get('filename') or c.get('original_basename', '')
+                    chunks = chapter_splitter.split_chapter(c["body"], available_tokens, filename=chapter_filename)
                     
                     # Use consistent terminology
                     is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)

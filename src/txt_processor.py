@@ -62,7 +62,8 @@ class TextFileProcessor:
                 # Chapter needs splitting
                 print(f"Chapter {chapter_data['num']} ({chapter_data['title']}) has {chapter_tokens} tokens, splitting...")
                 
-                chunks = self.chapter_splitter.split_chapter(chapter_content, available_tokens)
+                # Pass filename for content type detection
+                chunks = self.chapter_splitter.split_chapter(chapter_content, available_tokens, filename=self.file_path)
                 
                 # Add each chunk as a separate chapter
                 for chunk_content, chunk_idx, total_chunks in chunks:

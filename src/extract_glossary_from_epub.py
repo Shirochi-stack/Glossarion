@@ -1929,6 +1929,7 @@ def main(log_callback=None, stop_callback=None):
                     chapter_html = f"<html><body><p>{chap.replace(chr(10)+chr(10), '</p><p>')}</p></body></html>"
                     
                     # Use ChapterSplitter to split the chapter
+                    # No filename passed as this is EPUB content (not plain text files)
                     chunks = chapter_splitter.split_chapter(chapter_html, available_tokens)
                     print(f"📄 Chapter split into {len(chunks)} chunks")
                     

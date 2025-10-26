@@ -6174,12 +6174,24 @@ def on_profile_select(self, event=None):
     # Only update if the profile actually exists in prompt_profiles
     # This prevents switching to non-existent profiles while typing
     if name in self.prompt_profiles:
-        prompt = self.prompt_profiles.get(name, "")
+        # When switching profiles, revert any unsaved changes by loading from original content
+        if not hasattr(self, '_original_profile_content'):
+            self._original_profile_content = {}
+        
+        # If this profile hasn't been saved yet, store its original content
+        if name not in self._original_profile_content:
+            self._original_profile_content[name] = self.prompt_profiles.get(name, "")
+        
+        # Load the original (last saved) content, not the in-memory staged edits
+        prompt = self._original_profile_content.get(name, "")
         current_text = self.prompt_text.toPlainText().strip()
         if current_text != prompt.strip():
             # PySide6: Clear and set QTextEdit content
             self.prompt_text.clear()
             self.prompt_text.setPlainText(prompt)
+        
+        # Also revert the in-memory profile to original content
+        self.prompt_profiles[name] = prompt
         
         # Update profile_var to match only when profile exists
         self.profile_var = name
@@ -6202,6 +6214,11 @@ def save_profile(self):
     self.prompt_profiles[name] = content
     self.config['prompt_profiles'] = self.prompt_profiles
     self.config['active_profile'] = name
+    
+    # Update the original content to match the saved content
+    if not hasattr(self, '_original_profile_content'):
+        self._original_profile_content = {}
+    self._original_profile_content[name] = content
     
     # Update combobox items only if the profile is new
     current_items = [self.profile_menu.itemText(i) for i in range(self.profile_menu.count())]
