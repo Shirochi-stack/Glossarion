@@ -79,6 +79,7 @@ class TextFileProcessor:
                         'title': chunk_title,
                         'body': chunk_content,
                         'filename': f"section_{int(chapter_data['num'])}_part{chunk_idx}.txt",  # Changed to avoid using file_base
+                        'original_basename': os.path.basename(self.file_path),  # Add original filename for .csv/.json/.txt detection
                         'content_hash': self._generate_hash(chunk_content),
                         'file_size': len(chunk_content),
                         'has_images': False,
@@ -96,6 +97,7 @@ class TextFileProcessor:
                     'title': chapter_data['title'],
                     'body': chapter_content,
                     'filename': f"section_{chapter_data['num']}.txt",  # Changed to avoid using file_base
+                    'original_basename': os.path.basename(self.file_path),  # Add original filename for .csv/.json/.txt detection
                     'content_hash': self._generate_hash(chapter_content),
                     'file_size': len(chapter_content),
                     'has_images': False,
@@ -114,6 +116,7 @@ class TextFileProcessor:
                 'title': 'Section 1',  # Changed from self.file_base
                 'body': all_content or 'Empty file',
                 'filename': 'section_1.txt',  # Changed to avoid using file_base
+                'original_basename': os.path.basename(self.file_path),  # Add original filename for .csv/.json/.txt detection
                 'content_hash': self._generate_hash(all_content or ''),
                 'file_size': len(all_content or ''),
                 'has_images': False,

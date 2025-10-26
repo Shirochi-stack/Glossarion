@@ -2474,7 +2474,9 @@ class BatchTranslationProcessor:
             available_tokens = max_input_tokens - system_tokens - 100  # 100 token safety margin
             
             # Split into chunks if needed
-            chunks = chapter_splitter.split_chapter(chapter_body, available_tokens)
+            # Get filename for content type detection
+            chapter_filename = chapter.get('filename') or chapter.get('original_basename', '')
+            chunks = chapter_splitter.split_chapter(chapter_body, available_tokens, filename=chapter_filename)
             total_chunks = len(chunks)
             
             file_ref = chapter.get('original_basename', f'{terminology}_{chap_num}')
