@@ -3413,6 +3413,7 @@ Terms to translate:
 Provide translations in the same numbered format."""
         
         all_translations = {}
+        all_responses = []  # Collect raw responses
         chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "300"))  # 5 minute default
         
         for i in range(0, len(term_list), batch_size):
@@ -3467,10 +3468,10 @@ Provide translations in the same numbered format."""
                 else:
                     response_text = str(response)
                 
-                batch_translations = _parse_translation_response(response_text, batch)
-                all_translations.update(batch_translations)
+                # Store raw response with batch info
+                all_responses.append((batch, response_text))
                 
-                print(f"📑 Batch {batch_num} completed: {len(batch_translations)} translations")
+                print(f"📑 Batch {batch_num} completed - response received")
                 
                 # Small delay between batches to avoid rate limiting (configurable)
                 if i + batch_size < len(term_list):
@@ -3503,6 +3504,12 @@ Provide translations in the same numbered format."""
                 print(f"⚠️ Translation failed for batch {batch_num}: {e}")
                 for term in batch:
                     all_translations[term] = term
+        
+        # Parse all responses at the end
+        print(f"📑 Parsing {len(all_responses)} batch responses...")
+        for batch, response_text in all_responses:
+            batch_translations = _parse_translation_response(response_text, batch)
+            all_translations.update(batch_translations)
         
         # Ensure all terms have translations
         for term in term_list:
@@ -3677,7 +3684,7 @@ def _extract_names_for_honorific(honorific, all_text, language_hint,
                     standalone_names[potential_name] = count
 
 def _parse_translation_response(response, original_terms):
-    """Parse translation response - handles numbered format and fallback formats"""
+    """Just return the AI's response as-is mapped to original terms by index"""
     translations = {}
     
     # Handle UnifiedResponse object
@@ -3686,71 +3693,35 @@ def _parse_translation_response(response, original_terms):
     else:
         response_text = str(response)
     
+    # Split into lines and extract translations by numbered order
     lines = response_text.strip().split('\n')
     
-    # First pass: Try numbered format
+    term_index = 0
     for line in lines:
         line = line.strip()
         if not line:
             continue
-            
-        try:
-            # Try numbered format: "1. term" or "1) term" or "1: term" or "1 - term"
-            number_match = re.match(r'^(\d+)[\.):\-]\s*(.+)', line)
-            if number_match:
-                num = int(number_match.group(1)) - 1
-                content = number_match.group(2).strip()
-                
-                if 0 <= num < len(original_terms):
-                    original_term = original_terms[num]
-                    
-                    # Try to find separator and extract translation
-                    for separator in ['->', '→', ':', '-', '—', '=']:
-                        if separator in content:
-                            parts = content.split(separator, 1)
-                            if len(parts) == 2:
-                                translation = parts[1].strip()
-                                translation = translation.strip('"\'()[]')
-                                if translation and translation != original_term:
-                                    translations[original_term] = translation
-                                    break
-                    else:
-                        # No separator found, use entire content as translation
-                        if content != original_term:
-                            translations[original_term] = content
-                            
-        except (ValueError, IndexError):
-            continue
-    
-    # If we got translations, return them
-    if translations:
-        return translations
-    
-    # Fallback: Try to parse CSV format or any "original,translation" pairs
-    print(f"📑 WARNING: Numbered format not found, trying fallback parsing...")
-    for line in lines:
-        line = line.strip()
-        if not line or 'raw_name' in line.lower():
-            continue
         
-        # Try CSV format: raw,translated
-        if ',' in line:
-            parts = [p.strip() for p in line.split(',')]
-            if len(parts) >= 2:
-                raw_term = parts[0].strip('"\'*')
-                translated = parts[1].strip('"\'()')
-                
-                # Check if this raw term matches any original term
-                for orig_term in original_terms:
-                    if raw_term == orig_term and translated != raw_term:
-                        translations[orig_term] = translated
-                        break
+        # Check if line starts with a number (numbered list format)
+        number_match = re.match(r'^(\d+)[\.):\-\s]+(.+)', line)
+        if number_match:
+            idx = int(number_match.group(1)) - 1  # Convert to 0-based index
+            translation = number_match.group(2).strip()
+            
+            # Remove any trailing explanation in parentheses
+            translation = re.sub(r'\s*\([^)]+\)\s*$', '', translation)
+            translation = translation.strip()
+            
+            if 0 <= idx < len(original_terms):
+                translations[original_terms[idx]] = translation
+        elif term_index < len(original_terms):
+            # No number found, just use line as-is for current term
+            translation = line.strip('"\'*()[]「」『』【】〈〉《》')
+            if translation and not any(skip in translation.lower() for skip in ['here are', 'translation', 'korean', 'english']):
+                translations[original_terms[term_index]] = translation
+                term_index += 1
     
-    # Log if still no translations
-    if not translations:
-        print(f"📑 ERROR: Could not parse any translations from response")
-        print(f"📑 Response preview: {response_text[:200]}...")
-    
+    print(f"📑 Extracted {len(translations)}/{len(original_terms)} translations from AI response")
     return translations
     
     
