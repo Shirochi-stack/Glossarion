@@ -499,7 +499,7 @@ class GlossaryManagerMixin:
                     ('glossary_min_frequency_entry', 'glossary_min_frequency', 'glossary_min_frequency_var'),
                     ('glossary_max_names_entry', 'glossary_max_names', 'glossary_max_names_var'),
                     ('glossary_max_titles_entry', 'glossary_max_titles', 'glossary_max_titles_var'),
-                    ('glossary_batch_size_entry', 'glossary_batch_size', 'glossary_batch_size_var'),
+                    ('glossary_context_window_entry', 'glossary_context_window', 'glossary_context_window_var'),
                     ('glossary_max_text_size_entry', 'glossary_max_text_size', 'glossary_max_text_size_var'),
                     ('glossary_max_sentences_entry', 'glossary_max_sentences', 'glossary_max_sentences_var'),
                     ('glossary_chapter_split_threshold_entry', 'glossary_chapter_split_threshold', 'glossary_chapter_split_threshold_var'),
@@ -1389,10 +1389,10 @@ Rules:
             self.glossary_max_titles_entry.setFixedWidth(80)
         self.glossary_max_titles_entry.setText(str(self.config.get('glossary_max_titles', 50)))
         
-        if not hasattr(self, 'glossary_batch_size_entry'):
-            self.glossary_batch_size_entry = QLineEdit()
-            self.glossary_batch_size_entry.setFixedWidth(80)
-        self.glossary_batch_size_entry.setText(str(self.config.get('glossary_batch_size', 10)))
+        if not hasattr(self, 'glossary_context_window_entry'):
+            self.glossary_context_window_entry = QLineEdit()
+            self.glossary_context_window_entry.setFixedWidth(80)
+        self.glossary_context_window_entry.setText(str(self.config.get('glossary_context_window', 2)))
         
         if not hasattr(self, 'glossary_max_text_size_entry'):
             self.glossary_max_text_size_entry = QLineEdit()
@@ -1429,7 +1429,7 @@ Rules:
         
         # Row 2
         extraction_grid.addWidget(_pair("Max titles:", self.glossary_max_titles_entry), 1, 0, 1, 2)
-        extraction_grid.addWidget(_pair("Translation batch:", self.glossary_batch_size_entry), 1, 2, 1, 2)
+        extraction_grid.addWidget(_pair("Context window size:", self.glossary_context_window_entry), 1, 2, 1, 2)
         
         # Row 3 - Max text size and target language
         extraction_grid.addWidget(_pair("Max text size:", self.glossary_max_text_size_entry), 2, 0, 1, 2)
@@ -1615,7 +1615,7 @@ Rules:
         help_texts = [
             "• Min frequency: How many times a name must appear (lower = more terms)",
             "• Max names/titles: Limits to prevent huge glossaries",
-            "• Translation batch: Terms per API call (larger = faster but may reduce quality)",
+            "• Context window size: Number of sentences before/after for gender detection (default: 2)",
             "• Max text size: Characters to analyze (0 = entire text, 50000 = first 50k chars)",
             "• Chapter split: Split large texts into chunks (0 = no splitting, 100000 = split at 100k chars)",
             "• Max sentences: Maximum sentences to send to AI (default 200, increase for more context)",

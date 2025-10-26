@@ -810,7 +810,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.glossary_min_frequency_var = str(self.config.get('glossary_min_frequency', 2))
         self.glossary_max_names_var = str(self.config.get('glossary_max_names', 50))
         self.glossary_max_titles_var = str(self.config.get('glossary_max_titles', 30))
-        self.glossary_batch_size_var = str(self.config.get('glossary_batch_size', 50))
+        self.context_window_size_var = str(self.config.get('context_window_size', 5))
         self.glossary_max_text_size_var = str(self.config.get('glossary_max_text_size', 50000))
         self.glossary_chapter_split_threshold_var = self.config.get('glossary_chapter_split_threshold', '8192')
         self.glossary_max_sentences_var = str(self.config.get('glossary_max_sentences', 200))
@@ -1795,7 +1795,7 @@ Recent translations to summarize:
             ('glossary_min_frequency_var', 'glossary_min_frequency', '2'),
             ('glossary_max_names_var', 'glossary_max_names', '50'),
             ('glossary_max_titles_var', 'glossary_max_titles', '30'),
-            ('glossary_batch_size_var', 'glossary_batch_size', '50'),
+            ('context_window_size_var', 'context_window_size', '5'),
             ('webnovel_min_height_var', 'webnovel_min_height', '1000'),
             ('max_images_per_chapter_var', 'max_images_per_chapter', '1'),
             ('image_chunk_height_var', 'image_chunk_height', '1500'),
@@ -5339,7 +5339,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GLOSSARY_MIN_FREQUENCY': str(self.glossary_min_frequency_var),
             'GLOSSARY_MAX_NAMES': str(self.glossary_max_names_var),
             'GLOSSARY_MAX_TITLES': str(self.glossary_max_titles_var),
-            'GLOSSARY_BATCH_SIZE': str(self.glossary_batch_size_var),
+            'CONTEXT_WINDOW_SIZE': str(self.context_window_size_var),
             'GLOSSARY_STRIP_HONORIFICS': "1" if self.strip_honorifics_var else "0",
             'GLOSSARY_CHAPTER_SPLIT_THRESHOLD': str(self.glossary_chapter_split_threshold_var),
             'GLOSSARY_FILTER_MODE': self.glossary_filter_mode_var,
@@ -6405,7 +6405,7 @@ Important rules:
                     'GLOSSARY_MIN_FREQUENCY': str(self.glossary_min_frequency_var),
                     'GLOSSARY_MAX_NAMES': str(self.glossary_max_names_var),
                     'GLOSSARY_MAX_TITLES': str(self.glossary_max_titles_var),
-                    'GLOSSARY_BATCH_SIZE': str(self.glossary_batch_size_var),
+                    'CONTEXT_WINDOW_SIZE': str(self.context_window_size_var),
                     'ENABLE_AUTO_GLOSSARY': "1" if self.enable_auto_glossary_var else "0",
                     'APPEND_GLOSSARY': "1" if self.append_glossary_var else "0",
                     'GLOSSARY_STRIP_HONORIFICS': '1' if hasattr(self, 'strip_honorifics_var') and self.strip_honorifics_var else '1',
@@ -8527,7 +8527,7 @@ Important rules:
                 ('glossary_min_frequency', ['glossary_min_frequency_entry', 'glossary_min_frequency_var'], 2, lambda v: safe_int(v, 2)),
                 ('glossary_max_names', ['glossary_max_names_entry', 'glossary_max_names_var'], 50, lambda v: safe_int(v, 50)),
                 ('glossary_max_titles', ['glossary_max_titles_entry', 'glossary_max_titles_var'], 30, lambda v: safe_int(v, 30)),
-                ('glossary_batch_size', ['glossary_batch_size_entry', 'glossary_batch_size_var'], 50, lambda v: safe_int(v, 50)),
+                ('context_window_size', ['context_window_size_entry', 'context_window_size_var'], 5, lambda v: safe_int(v, 5)),
                 ('glossary_max_text_size', ['glossary_max_text_size_entry', 'glossary_max_text_size_var'], 50000, lambda v: safe_int(v, 50000)),
                 ('glossary_chapter_split_threshold', ['glossary_chapter_split_threshold_entry', 'glossary_chapter_split_threshold_var'], 8192, lambda v: safe_int(v, 8192)),
                 ('glossary_max_sentences', ['glossary_max_sentences_entry', 'glossary_max_sentences_var'], 200, lambda v: safe_int(v, 200)),
@@ -8786,7 +8786,7 @@ Important rules:
                     ('GLOSSARY_MIN_FREQUENCY', str(self.config.get('glossary_min_frequency', 2))),
                     ('GLOSSARY_MAX_NAMES', str(self.config.get('glossary_max_names', 50))),
                     ('GLOSSARY_MAX_TITLES', str(self.config.get('glossary_max_titles', 30))),
-                    ('GLOSSARY_BATCH_SIZE', str(self.config.get('glossary_batch_size', 50))),
+                    ('CONTEXT_WINDOW_SIZE', str(self.config.get('context_window_size', 5))),
                     ('GLOSSARY_MAX_TEXT_SIZE', str(self.config.get('glossary_max_text_size', 50000))),
                     ('GLOSSARY_CHAPTER_SPLIT_THRESHOLD', str(self.config.get('glossary_chapter_split_threshold', 8192))),
                     ('GLOSSARY_FILTER_MODE', self.config.get('glossary_filter_mode', 'strict')),
