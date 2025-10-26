@@ -1663,6 +1663,13 @@ The description column is optional and can contain brief context (role, location
 Only include terms that actually appear in the text.
 Do not use quotes around values unless they contain commas.
 
+IMPORTANT RULES:
+- Extract ONLY proper nouns, names, titles, and specific terminology
+- Do NOT extract complete sentences, sentence fragments, or common phrases
+- Do NOT extract verbs, conjunctions, or generic expressions
+- Terms should be 1-5 words maximum (names, titles, locations, abilities, items)
+- Skip generic terms like "then", "so", "if that's", "but", etc.
+
 Critical Requirement: The translated name column should be in {language}.
 
 For example:
