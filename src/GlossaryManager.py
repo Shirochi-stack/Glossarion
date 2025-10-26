@@ -679,9 +679,12 @@ def _convert_to_token_efficient_format(csv_lines):
                 # Format: * TranslatedName (RawName)
                 entry_line = f"* {translated_name} ({raw_name})"
                 
-                # Add gender if present and not Unknown
-                if len(parts) > 3 and parts[3] and parts[3] != 'Unknown':
-                    entry_line += f" [{parts[3]}]"
+                # Add gender if present and not Unknown - ONLY for character entries
+                if entry_type == 'character' and len(parts) > 3 and parts[3] and parts[3] != 'Unknown':
+                    # Validate gender field - reject if malformed
+                    gender_val = parts[3].strip()
+                    if not gender_val.startswith(('[', '(')):
+                        entry_line += f" [{gender_val}]"
                 
                 # Add any additional fields as description
                 if len(parts) > 4:
@@ -2453,7 +2456,7 @@ def _process_ai_response(response_text, all_text, min_frequency,
                 continue
                 
             # Parse CSV line
-            parts = [p.strip().strip('"\"“”') for p in line.split(',')]
+            parts = [p.strip() for p in line.split(',')]
             
             if include_gender_context and len(parts) >= 4:
                 # Has all 4 columns (with gender)
@@ -2461,14 +2464,19 @@ def _process_ai_response(response_text, all_text, min_frequency,
                 raw_name = parts[1]
                 translated_name = parts[2]
                 gender = parts[3] if len(parts) > 3 else ''
-                if raw_name and translated_name:
+                
+                # Validate - reject malformed entries that look like tuples/lists
+                if (raw_name and translated_name and 
+                    not (raw_name.startswith(('[', '(')) or translated_name.startswith(('[', '(')))):
                     csv_lines.append(f"{entry_type},{raw_name},{translated_name},{gender}")
             elif len(parts) >= 3:
                 # Has at least 3 columns
                 entry_type = parts[0]
                 raw_name = parts[1]
                 translated_name = parts[2]
-                if raw_name and translated_name:
+                # Validate - reject malformed entries
+                if (raw_name and translated_name and
+                    not (raw_name.startswith(('[', '(')) or translated_name.startswith(('[', '(')))):
                     if include_gender_context:
                         # Add empty gender column for 3-column entries when 4 columns expected
                         gender = parts[3] if len(parts) > 3 else ''
@@ -2479,7 +2487,9 @@ def _process_ai_response(response_text, all_text, min_frequency,
                 # Missing type, default to 'term'
                 raw_name = parts[0]
                 translated_name = parts[1]
-                if raw_name and translated_name:
+                # Validate - reject malformed entries
+                if (raw_name and translated_name and
+                    not (raw_name.startswith(('[', '(')) or translated_name.startswith(('[', '(')))):
                     if include_gender_context:
                         csv_lines.append(f"term,{raw_name},{translated_name},")
                     else:
@@ -2508,7 +2518,8 @@ def _process_ai_response(response_text, all_text, min_frequency,
             if 'type' in line.lower() and 'raw_name' in line.lower():
                 continue  # Skip header
             
-            parts = [p.strip().strip('"\"') for p in line.split(',')]
+            parts = [p.strip() for p in line.split(',')]
+            
             if len(parts) >= 3:
                 entry_type = parts[0].lower()
                 raw_name = parts[1]
@@ -2520,6 +2531,12 @@ def _process_ai_response(response_text, all_text, min_frequency,
                 translated_name = parts[1]
                 gender = ''
             else:
+                continue
+            
+            # Validate - reject malformed entries that look like tuples/lists
+            if not raw_name or not translated_name:
+                continue
+            if raw_name.startswith(('[', '(')) or translated_name.startswith(('[', '(')):
                 continue
             
             if raw_name and translated_name:
@@ -2561,7 +2578,8 @@ def _process_ai_response(response_text, all_text, min_frequency,
             if 'type' in line.lower() and 'raw_name' in line.lower():
                 continue  # Skip header
             
-            parts = [p.strip().strip('"\"') for p in line.split(',')]
+            parts = [p.strip() for p in line.split(',')]
+            
             if len(parts) >= 3:
                 entry_type = parts[0].lower()
                 raw_name = parts[1]
@@ -2573,6 +2591,12 @@ def _process_ai_response(response_text, all_text, min_frequency,
                 translated_name = parts[1]
                 gender = ''
             else:
+                continue
+            
+            # Validate - reject malformed entries
+            if not raw_name or not translated_name:
+                continue
+            if raw_name.startswith(('[', '(')) or translated_name.startswith(('[', '(')):
                 continue
             
             if raw_name and translated_name:
