@@ -2573,6 +2573,10 @@ def _process_ai_response(response_text, all_text, min_frequency,
             # Replace invalid 'stop' values with empty string
             parts = ['' if p == "'stop'" or p == "stop" else p for p in parts]
             
+            # Strip orphaned quotes and filter empty columns
+            parts = [p.strip('"').strip("'").strip() for p in parts]
+            parts = [p for p in parts if p]  # Remove empty strings
+            
             if len(parts) >= 3:
                 entry_type = parts[0].lower()
                 raw_name = parts[1]
@@ -2641,6 +2645,10 @@ def _process_ai_response(response_text, all_text, min_frequency,
             
             # Replace invalid 'stop' values with empty string
             parts = ['' if p == "'stop'" or p == "stop" else p for p in parts]
+            
+            # Strip orphaned quotes and filter empty columns
+            parts = [p.strip('"').strip("'").strip() for p in parts]
+            parts = [p for p in parts if p]  # Remove empty strings
             
             if len(parts) >= 3:
                 entry_type = parts[0].lower()
