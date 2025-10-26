@@ -776,92 +776,82 @@ def _process_chunks_batch_api(chunks_to_process, custom_prompt, language,
     os.environ["_CHUNK_ALREADY_FILTERED"] = "1"
     os.environ["GLOSSARY_FORCE_DISABLE_SMART_FILTER"] = "1"
 
-    # Process in API batches
-    for batch_start in range(0, len(chunks_to_process), api_batch_size):
-        if is_stop_requested():
-            break
+    # Process all chunks in parallel (no batching)
+    # Use extraction_workers setting (already passed as parameter)
+    max_workers = min(extraction_workers, len(chunks_to_process))
+    print(f"📑 Processing all {len(chunks_to_process)} chunks with {max_workers} parallel workers...")
+    
+    # Use ThreadPoolExecutor for all chunks at once
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {}
+        last_submission_time = 0
         
-        batch_end = min(batch_start + api_batch_size, len(chunks_to_process))
-        batch_chunks = chunks_to_process[batch_start:batch_end]
-        
-        print(f"📑 Processing API batch {batch_start//api_batch_size + 1}: chunks {batch_start+1}-{batch_end}")
-        
-        # Use ThreadPoolExecutor for parallel API calls within batch
-        # Batch mode: issue multiple API calls in parallel within each batch (one worker per chunk)
-        with ThreadPoolExecutor(max_workers=len(batch_chunks)) as executor:
-            futures = {}
-            last_submission_time = 0
+        for chunk_idx, chunk_text in chunks_to_process:
+            if is_stop_requested():
+                break
             
-            for chunk_idx, chunk_text in batch_chunks:
-                if is_stop_requested():
-                    break
-                
-                # Apply thread submission delay
-                if thread_delay > 0 and last_submission_time > 0:
-                    time_since_last = time.time() - last_submission_time
-                    if time_since_last < thread_delay:
-                        sleep_time = thread_delay - time_since_last
-                        print(f"🧵 Thread delay: {sleep_time:.1f}s for chunk {chunk_idx}")
-                        time.sleep(sleep_time)
-                
-                future = executor.submit(
-                    _extract_with_custom_prompt,
-                    custom_prompt, chunk_text, language,
-                    min_frequency, max_names, max_titles,
-                    None, output_dir, strip_honorifics,
-                    fuzzy_threshold, filter_mode, max_sentences
-                )
-                futures[future] = chunk_idx
-                last_submission_time = time.time()
+            # Apply thread submission delay
+            if thread_delay > 0 and last_submission_time > 0:
+                time_since_last = time.time() - last_submission_time
+                if time_since_last < thread_delay:
+                    sleep_time = thread_delay - time_since_last
+                    print(f"🧵 Thread delay: {sleep_time:.1f}s for chunk {chunk_idx}")
+                    time.sleep(sleep_time)
             
-            # Collect results
-            for future in as_completed(futures):
-                if is_stop_requested():
-                    break
-                
-                try:
-                    chunk_glossary = future.result()
-                    print(f"📑 DEBUG: Chunk {futures[future]} returned type={type(chunk_glossary)}, len={len(chunk_glossary)}")
+            future = executor.submit(
+                _extract_with_custom_prompt,
+                custom_prompt, chunk_text, language,
+                min_frequency, max_names, max_titles,
+                None, output_dir, strip_honorifics,
+                fuzzy_threshold, filter_mode, max_sentences
+            )
+            futures[future] = chunk_idx
+            last_submission_time = time.time()
+        
+        # Collect results
+        for future in as_completed(futures):
+            if is_stop_requested():
+                break
+            
+            try:
+                chunk_glossary = future.result()
+                print(f"📑 DEBUG: Chunk {futures[future]} returned type={type(chunk_glossary)}, len={len(chunk_glossary)}")
 
-                    # Normalize to CSV lines (without header)
-                    chunk_lines = []
-                    if isinstance(chunk_glossary, dict):
-                        for raw_name, translated_name in chunk_glossary.items():
-                            entry_type = "character" if _has_honorific(raw_name) else "term"
-                            chunk_lines.append(f"{entry_type},{raw_name},{translated_name}")
-                    elif isinstance(chunk_glossary, list):
-                        for line in chunk_glossary:
-                            if line and not line.startswith('type,'):
-                                chunk_lines.append(line)
-                    
-                    # Aggregate for end-of-run
-                    all_csv_lines.extend(chunk_lines)
-                    
-                    # Incremental update of glossary.csv in token-efficient format
-                    try:
-                        _incremental_update_glossary(output_dir, chunk_lines, strip_honorifics, language, filter_mode)
-                        print(f"📑 Incremental write: +{len(chunk_lines)} entries")
-                    except Exception as e2:
-                        print(f"⚠️ Incremental write failed: {e2}")
-                    
-                    completed_chunks += 1
-                    
-                    # Print progress for GUI
-                    progress_percent = (completed_chunks / total_chunks) * 100
-                    print(f"📑 Progress: {completed_chunks}/{total_chunks} chunks ({progress_percent:.0f}%)")
-                    print(f"📑 Chunk {futures[future]} completed and aggregated")
-                    
-                except Exception as e:
-                    print(f"⚠️ API call for chunk {futures[future]} failed: {e}")
-                    completed_chunks += 1
-                    progress_percent = (completed_chunks / total_chunks) * 100
-                    print(f"📑 Progress: {completed_chunks}/{total_chunks} chunks ({progress_percent:.0f}%)")
-        
-        # Add delay between API batches
-        if batch_end < len(chunks_to_process):
-            api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
-            print(f"⏱️ Waiting {api_delay}s before next API batch...")
-            time.sleep(api_delay)
+                # Normalize to CSV lines (without header)
+                chunk_lines = []
+                if isinstance(chunk_glossary, dict):
+                    for raw_name, translated_name in chunk_glossary.items():
+                        entry_type = "character" if _has_honorific(raw_name) else "term"
+                        chunk_lines.append(f"{entry_type},{raw_name},{translated_name}")
+                elif isinstance(chunk_glossary, list):
+                    for line in chunk_glossary:
+                        if line and not line.startswith('type,'):
+                            chunk_lines.append(line)
+                
+                # Aggregate for end-of-run
+                all_csv_lines.extend(chunk_lines)
+                
+                # DISABLED: Don't do incremental writes in batch mode
+                # This prevents chunks from merging with each other's results
+                # All merging will happen at the end in save_glossary()
+                # try:
+                #     _incremental_update_glossary(output_dir, chunk_lines, strip_honorifics, language, filter_mode)
+                #     print(f"📑 Incremental write: +{len(chunk_lines)} entries")
+                # except Exception as e2:
+                #     print(f"⚠️ Incremental write failed: {e2}")
+                
+                completed_chunks += 1
+                
+                # Print progress for GUI
+                progress_percent = (completed_chunks / total_chunks) * 100
+                print(f"📑 Progress: {completed_chunks}/{total_chunks} chunks ({progress_percent:.0f}%)")
+                print(f"📑 Chunk {futures[future]} completed and aggregated")
+                
+            except Exception as e:
+                print(f"⚠️ API call for chunk {futures[future]} failed: {e}")
+                completed_chunks += 1
+                progress_percent = (completed_chunks / total_chunks) * 100
+                print(f"📑 Progress: {completed_chunks}/{total_chunks} chunks ({progress_percent:.0f}%)")
     
     # CHANGE: Return CSV lines instead of dictionary
     
