@@ -3684,7 +3684,7 @@ def _extract_names_for_honorific(honorific, all_text, language_hint,
                     standalone_names[potential_name] = count
 
 def _parse_translation_response(response, original_terms):
-    """Just return the AI's response as-is mapped to original terms by index"""
+    """Extract translations from AI response by matching numbered lines to original terms"""
     translations = {}
     
     # Handle UnifiedResponse object
@@ -3693,35 +3693,27 @@ def _parse_translation_response(response, original_terms):
     else:
         response_text = str(response)
     
-    # Split into lines and extract translations by numbered order
+    # Split into lines
     lines = response_text.strip().split('\n')
     
-    term_index = 0
     for line in lines:
         line = line.strip()
         if not line:
             continue
         
-        # Check if line starts with a number (numbered list format)
+        # Match numbered format: "1. Translation" or "1) Translation" etc
         number_match = re.match(r'^(\d+)[\.):\-\s]+(.+)', line)
         if number_match:
-            idx = int(number_match.group(1)) - 1  # Convert to 0-based index
+            idx = int(number_match.group(1)) - 1  # Convert to 0-based
             translation = number_match.group(2).strip()
             
-            # Remove any trailing explanation in parentheses
+            # Remove trailing explanations in parentheses
             translation = re.sub(r'\s*\([^)]+\)\s*$', '', translation)
-            translation = translation.strip()
             
             if 0 <= idx < len(original_terms):
                 translations[original_terms[idx]] = translation
-        elif term_index < len(original_terms):
-            # No number found, just use line as-is for current term
-            translation = line.strip('"\'*()[]「」『』【】〈〉《》')
-            if translation and not any(skip in translation.lower() for skip in ['here are', 'translation', 'korean', 'english']):
-                translations[original_terms[term_index]] = translation
-                term_index += 1
     
-    print(f"📑 Extracted {len(translations)}/{len(original_terms)} translations from AI response")
+    print(f"📑 Extracted {len(translations)}/{len(original_terms)} translations")
     return translations
     
     
