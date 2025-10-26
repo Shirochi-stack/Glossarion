@@ -606,7 +606,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "6.2.7"
+        __version__ = "6.3.0"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -854,7 +854,7 @@ CRITICAL EXTRACTION RULES:
 - REJECT entries that contain verbs or end with punctuation (?, !, .)
 - REJECT entries starting with: "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But"
 - If unsure whether something is a proper noun/name, skip it
-- Note: The description column must contain context/explanations
+- Note: The description column must contain detailed context/explanations
 
 Critical Requirement: The translated name column should be in {language}.
 
@@ -1682,7 +1682,7 @@ Rules:
         
         self.default_auto_glossary_prompt = """You are a glossary extraction assistant for Korean / Japanese / Chinese novels.
 
-Return ONLY CSV format with 4-5 columns: type,raw_name,translated_name,gender,description(optional).
+You must strictly return ONLY CSV format with 3-5 columns in this exact order: type,raw_name,translated_name,gender,description.
 For character entries, determine gender from context, leave empty if context is insufficient.
 For non-character entries, leave gender empty.
 The description column is optional and can contain brief context (role, location, significance).
@@ -1696,7 +1696,7 @@ CRITICAL EXTRACTION RULES:
 - REJECT entries that contain verbs or end with punctuation (?, !, .)
 - REJECT entries starting with: "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But"
 - If unsure whether something is a proper noun/name, skip it
-- Note: The optional description column can contain context/explanations
+- Note: The description column must contain detailed context/explanations
 
 Critical Requirement: The translated name column should be in {language}.
 
@@ -1916,7 +1916,7 @@ Recent translations to summarize:
             # Set the initial active profile for autosave
             self._active_profile_for_autosave = self.profile_var
         
-        self.append_log("🚀 Glossarion v6.2.7 - Ready to use!")
+        self.append_log("🚀 Glossarion v6.3.0 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Restore last selected input files if available
@@ -9613,7 +9613,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v6.2.7...")
+    print("🚀 Starting Glossarion v6.3.0...")
     
     # Initialize splash screen
     splash_manager = None

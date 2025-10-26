@@ -1755,7 +1755,7 @@ CRITICAL EXTRACTION RULES:
 - REJECT entries that contain verbs or end with punctuation (?, !, .)
 - REJECT entries starting with: "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But"
 - If unsure whether something is a proper noun/name, skip it
-- Note: The description column must contain context/explanations
+- Note: The description column must contain detailed context/explanations
 
 Critical Requirement: The translated name column should be in {language}.
 
