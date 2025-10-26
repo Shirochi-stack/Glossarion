@@ -4,6 +4,7 @@
 import os
 import re
 import os
+import sys
 import threading
 import tempfile
 import queue
@@ -32,6 +33,27 @@ _io_time = 0
 def is_stop_requested():
     """Check if stop has been requested - default implementation"""
     return False
+
+def set_output_redirect(log_callback=None):
+    """Redirect print statements to a callback function for GUI integration"""
+    if log_callback:
+        import threading
+        
+        class CallbackWriter:
+            def __init__(self, callback):
+                self.callback = callback
+                self.main_thread = threading.main_thread()
+                
+            def write(self, text):
+                if text.strip():
+                    # The callback (append_log) is already thread-safe - it handles QTimer internally
+                    # So we can call it directly from any thread
+                    self.callback(text.strip())
+                    
+            def flush(self):
+                pass
+                
+        sys.stdout = CallbackWriter(log_callback)
 
 def is_traditional_translation_api(model: str) -> bool:
     """Check if the model is a traditional translation API"""
@@ -101,9 +123,13 @@ def _atomic_write_file(filepath, content, encoding='utf-8'):
                 print(f"⚠️ Fallback write also failed: {e2}")
                 return False
 
-def save_glossary(output_dir, chapters, instructions, language="korean"):
+def save_glossary(output_dir, chapters, instructions, language="korean", log_callback=None):
     """Targeted glossary generator with true CSV format output and parallel processing"""
-    print("📁 Targeted Glossary Generator v6.0 (CSV Format + Parallel)")
+    # Redirect stdout to GUI log if callback provided
+    if log_callback:
+        set_output_redirect(log_callback)
+    
+    print("📱 Targeted Glossary Generator v6.0 (CSV Format + Parallel)")
     
     # CRITICAL: Reload ALL glossary settings from environment variables at the START
     # This ensures child processes spawned by ProcessPoolExecutor get the latest values
@@ -239,6 +265,25 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
         filtered_text_cache = filtered_sample
         effective_text_size = len(filtered_sample)
         print(f"📁 Effective text size after filtering: {effective_text_size:,} chars (from {len(all_text):,})")
+    
+    # Safety check: Estimate token count and force chunking if it would exceed API limits
+    # Rough estimate: 1 token ≈ 3-4 characters for Asian languages
+    estimated_tokens = effective_text_size // 3
+    max_output_tokens = int(os.getenv("MAX_OUTPUT_TOKENS", "65536"))
+    
+    # Conservative safety margin: use 80% of max tokens for input to leave room for output
+    safe_input_limit = int(max_output_tokens * 0.8)
+    
+    if estimated_tokens > safe_input_limit:
+        print(f"⚠️ Text too large for single API call!")
+        print(f"   Estimated tokens: {estimated_tokens:,}")
+        print(f"   Safe input limit: {safe_input_limit:,} (80% of {max_output_tokens:,} max tokens)")
+        print(f"   Forcing automatic chunking to prevent API errors...")
+        # Override threshold to force chunking
+        if chapter_split_threshold == 0:
+            # Calculate chunk size in characters that will be ~80% of safe limit in tokens
+            chapter_split_threshold = safe_input_limit * 3  # Convert tokens back to chars
+            print(f"   Auto-set chunk threshold: {chapter_split_threshold:,} characters")
     
     # Check if we need to split into chunks based on EFFECTIVE size after filtering
     if chapter_split_threshold > 0 and effective_text_size > chapter_split_threshold:
@@ -398,7 +443,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
                             custom_prompt, chunk_text, language, 
                             min_frequency, max_names, max_titles, 
                             None, output_dir,  # Don't pass existing glossary to chunks
-                            strip_honorifics, fuzzy_threshold, filter_mode, max_sentences
+                            strip_honorifics, fuzzy_threshold, filter_mode, max_sentences, log_callback
                         )
                     else:
                         chunk_glossary = _extract_with_patterns(
@@ -530,7 +575,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean"):
             return _extract_with_custom_prompt(custom_prompt, text_to_process, language, 
                                                    min_frequency, max_names, max_titles, 
                                                    existing_glossary, output_dir, 
-                                                   strip_honorifics, fuzzy_threshold, filter_mode, max_sentences)
+                                                   strip_honorifics, fuzzy_threshold, filter_mode, max_sentences, log_callback)
         finally:
             if already_filtered:
                 os.environ.pop("_TEXT_ALREADY_FILTERED", None)
@@ -888,7 +933,7 @@ def _process_single_chunk(chunk_idx, chunk_text, custom_prompt, language,
                 custom_prompt, chunk_text, language, 
                 min_frequency, max_names, max_titles, 
                 None, output_dir,
-                strip_honorifics, fuzzy_threshold, filter_mode, max_sentences
+                strip_honorifics, fuzzy_threshold, filter_mode, max_sentences, log_callback=None
             )
         finally:
             os.environ["_CHUNK_ALREADY_FILTERED"] = "0"  # Reset
@@ -2031,10 +2076,14 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     return filtered_text, frequent_terms
 
 def _extract_with_custom_prompt(custom_prompt, all_text, language, 
-                               min_frequency, max_names, max_titles, 
-                               existing_glossary, output_dir, 
-                               strip_honorifics=True, fuzzy_threshold=0.90, filter_mode='all', max_sentences=200):
+                              min_frequency, max_names, max_titles, 
+                              existing_glossary, output_dir, 
+                              strip_honorifics=True, fuzzy_threshold=0.90, filter_mode='all', max_sentences=200, log_callback=None):
     """Extract glossary using custom AI prompt with proper filtering"""
+    # Redirect stdout to GUI log if callback provided
+    if log_callback:
+        set_output_redirect(log_callback)
+    
     print("📑 Using custom automatic glossary prompt")
     extraction_start = time.time()
     
@@ -3298,8 +3347,12 @@ def _extract_with_patterns(all_text, language, min_frequency,
     
     return _parse_csv_to_dict(csv_content)
 
-def _translate_terms_batch(term_list, profile_name, batch_size=50, output_dir=None):
+def _translate_terms_batch(term_list, profile_name, batch_size=50, output_dir=None, log_callback=None):
     """Use fully configurable prompts for translation with interrupt support"""
+    # Redirect stdout to GUI log if callback provided
+    if log_callback:
+        set_output_redirect(log_callback)
+    
     if not term_list or os.getenv("DISABLE_GLOSSARY_TRANSLATION", "0") == "1":
         print(f"📑 Glossary translation disabled or no terms to translate")
         return {term: term for term in term_list}

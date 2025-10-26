@@ -77,9 +77,19 @@ def generate_glossary_in_process(output_dir, chapters_data, instructions, env_va
         # Import here to avoid circular imports
         import GlossaryManager
         
+        # Create a log callback that uses the queue
+        def queue_log_callback(msg):
+            if log_queue:
+                try:
+                    log_queue.put(str(msg))
+                except:
+                    pass
+            # Also capture locally
+            captured_logs.append(str(msg))
+        
         # Generate glossary using module function (not a class)
         print(f"📑 Starting glossary generation in subprocess...")
-        result = GlossaryManager.save_glossary(output_dir, chapters_data, instructions)
+        result = GlossaryManager.save_glossary(output_dir, chapters_data, instructions, log_callback=queue_log_callback)
         
         print(f"📑 Glossary generation completed")
         
