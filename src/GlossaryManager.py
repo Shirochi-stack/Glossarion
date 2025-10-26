@@ -2207,11 +2207,13 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
             else:
                 # Apply smart filtering to reduce noise and focus on meaningful content
                 force_disable = os.getenv("GLOSSARY_FORCE_DISABLE_SMART_FILTER", "0") == "1"
-                user_disabled = os.getenv("GLOSSARY_DISABLE_SMART_FILTERING", "0") == "1"
-                use_smart_filter = (os.getenv("GLOSSARY_USE_SMART_FILTER", "1") == "1") and not force_disable and not user_disabled
+                use_smart_filter = (os.getenv("GLOSSARY_USE_SMART_FILTER", "1") == "1") and not force_disable
                 
-                if user_disabled:
+                if not use_smart_filter and not force_disable:
                     print("📑 Smart filtering DISABLED by user - sending full text to API (this will be expensive!)")
+                    # Use the full text with NO filtering
+                    text_sample = all_text
+                    detected_terms = {}
                 elif use_smart_filter:
                     print("📁 Applying smart text filtering to reduce noise...")
                     # Use max_sentences parameter (passed from parent, already read from environment)

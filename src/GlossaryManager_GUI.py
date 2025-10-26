@@ -485,12 +485,18 @@ class GlossaryManagerMixin:
                     ('compress_glossary_checkbox', 'compress_glossary_prompt_var'),
                     ('include_gender_context_checkbox', 'include_gender_context_var'),
                     ('include_description_checkbox', 'include_description_var'),
-                    ('disable_smart_filtering_checkbox', 'glossary_disable_smart_filtering_var'),
                     ('glossary_history_rolling_checkbox', 'glossary_history_rolling_var'),
                     ('strip_honorifics_checkbox', 'strip_honorifics_var'),
                     ('disable_honorifics_checkbox', 'disable_honorifics_var'),
                     ('use_legacy_csv_checkbox', 'use_legacy_csv_var'),
                 ]
+                
+                # Handle inverted logic for disable_smart_filtering_checkbox
+                if hasattr(self, 'disable_smart_filtering_checkbox'):
+                    # Checkbox is "disable" so checked=True means use_smart_filter=False
+                    use_smart_filter = not self.disable_smart_filtering_checkbox.isChecked()
+                    self.config['glossary_use_smart_filter'] = use_smart_filter
+                    setattr(self, 'glossary_use_smart_filter_var', use_smart_filter)
                 for checkbox_name, var_name in checkbox_to_var_mapping:
                     if hasattr(self, checkbox_name):
                         setattr(self, var_name, getattr(self, checkbox_name).isChecked())
@@ -1301,7 +1307,8 @@ Rules:
         
         if not hasattr(self, 'disable_smart_filtering_checkbox'):
             self.disable_smart_filtering_checkbox = self._create_styled_checkbox("Disable Smart Filtering (Send Full Text)")
-            self.disable_smart_filtering_checkbox.setChecked(self.config.get('glossary_disable_smart_filtering', False))
+            # Invert the logic: checkbox is "disable" so checked=True means use_smart_filter=False
+            self.disable_smart_filtering_checkbox.setChecked(not self.config.get('glossary_use_smart_filter', True))
         disable_filtering_layout.addWidget(self.disable_smart_filtering_checkbox)
         
         label6 = QLabel("(Disables all text filtering and sends the entire novel to the API - very expensive!)")
