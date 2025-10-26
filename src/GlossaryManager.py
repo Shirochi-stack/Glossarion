@@ -2221,11 +2221,11 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
 
                 # Before processing response
                 process_start = time.time()
-                print(f"📑 Processing AI response...")
-              
+                # print(f"📑 Processing AI response...")              
                 # Process response and build CSV
                 csv_lines = _process_ai_response(response_text, all_text, min_frequency, 
                                                      strip_honorifics, fuzzy_threshold, 
+                                                     language, filter_mode)
                                                      language, filter_mode)
                 
                 print(f"📑 AI extracted {len(csv_lines) - 1} valid terms (header excluded)")
@@ -2369,8 +2369,8 @@ def _process_ai_response(response_text, all_text, min_frequency,
     # option to completely skip frequency validation for speed
     skip_all_validation = os.getenv("GLOSSARY_SKIP_ALL_VALIDATION", "0") == "1"
 
-    if skip_all_validation:
-        print("📑 ⚡ FAST MODE: Skipping all frequency validation (accepting all AI results)")
+    # if skip_all_validation:
+    #     print("📑 ⚡ FAST MODE: Skipping all frequency validation (accepting all AI results)")
 
     # Clean response text
     response_text = response_text.strip()
@@ -2416,12 +2416,12 @@ def _process_ai_response(response_text, all_text, min_frequency,
     skip_all_validation = os.getenv("GLOSSARY_SKIP_ALL_VALIDATION", "0") == "1"
     
     if skip_all_validation:
-        print("📑 ⚡ FAST MODE: Skipping all frequency validation (accepting all AI results)")
+        # print("📑 ⚡ FAST MODE: Skipping all frequency validation (accepting all AI results)")
         
         # Use appropriate header based on gender context setting
         if include_gender_context:
             csv_lines.append("type,raw_name,translated_name,gender")
-            print("📑 Fast mode: Using 4-column format with gender")
+            # print("📑 Fast mode: Using 4-column format with gender")
         else:
             csv_lines.append("type,raw_name,translated_name")
         
@@ -2464,7 +2464,7 @@ def _process_ai_response(response_text, all_text, min_frequency,
                     else:
                         csv_lines.append(f"term,{raw_name},{translated_name}")
         
-        print(f"📑 Fast mode: Accepted {len(csv_lines) - 1} entries without validation")
+        # print(f"📑 Fast mode: Accepted {len(csv_lines) - 1} entries without validation")
         return csv_lines
     
     # For "only_with_honorifics" mode, ALWAYS skip frequency check
