@@ -2354,6 +2354,9 @@ def _process_ai_response(response_text, all_text, min_frequency,
                        strip_honorifics, fuzzy_threshold, language, filter_mode):
     """Process AI response and return CSV lines"""
 
+    # Check if gender context is enabled (used throughout the function)
+    include_gender_context = os.getenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
+    
     # option to completely skip frequency validation for speed
     skip_all_validation = os.getenv("GLOSSARY_SKIP_ALL_VALIDATION", "0") == "1"
 
@@ -2405,9 +2408,6 @@ def _process_ai_response(response_text, all_text, min_frequency,
     
     if skip_all_validation:
         print("📑 ⚡ FAST MODE: Skipping all frequency validation (accepting all AI results)")
-        
-        # Check if gender context is enabled
-        include_gender_context = os.getenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
         
         # Use appropriate header based on gender context setting
         if include_gender_context:
@@ -2483,10 +2483,12 @@ def _process_ai_response(response_text, all_text, min_frequency,
                 entry_type = parts[0].lower()
                 raw_name = parts[1]
                 translated_name = parts[2]
+                gender = parts[3] if len(parts) > 3 else ''
             elif len(parts) == 2:
                 entry_type = 'term'
                 raw_name = parts[0]
                 translated_name = parts[1]
+                gender = ''
             else:
                 continue
             
@@ -2501,6 +2503,7 @@ def _process_ai_response(response_text, all_text, min_frequency,
                     'entry_type': entry_type,
                     'original_raw': original_raw,
                     'translated_name': translated_name,
+                    'gender': gender,
                     'line': line
                 }
         
@@ -2519,7 +2522,11 @@ def _process_ai_response(response_text, all_text, min_frequency,
     # Process based on mode
     if filter_mode == "only_with_honorifics" or skip_frequency_check:
         # For these modes, accept all entries
-        csv_lines.append("type,raw_name,translated_name")  # Header
+        if include_gender_context:
+            csv_lines.append("type,raw_name,translated_name,gender")  # Header with gender
+        else:
+            csv_lines.append("type,raw_name,translated_name")  # Header
+        
         for line in lines:
             if 'type' in line.lower() and 'raw_name' in line.lower():
                 continue  # Skip header
@@ -2529,15 +2536,20 @@ def _process_ai_response(response_text, all_text, min_frequency,
                 entry_type = parts[0].lower()
                 raw_name = parts[1]
                 translated_name = parts[2]
+                gender = parts[3] if len(parts) > 3 else ''
             elif len(parts) == 2:
                 entry_type = 'term'
                 raw_name = parts[0]
                 translated_name = parts[1]
+                gender = ''
             else:
                 continue
             
             if raw_name and translated_name:
-                csv_line = f"{entry_type},{raw_name},{translated_name}"
+                if include_gender_context:
+                    csv_line = f"{entry_type},{raw_name},{translated_name},{gender}"
+                else:
+                    csv_line = f"{entry_type},{raw_name},{translated_name}"
                 csv_lines.append(csv_line)
                 entries_accepted += 1
         
@@ -2545,7 +2557,10 @@ def _process_ai_response(response_text, all_text, min_frequency,
     
     else:
         # Use pre-computed frequencies
-        csv_lines.append("type,raw_name,translated_name")  # Header
+        if include_gender_context:
+            csv_lines.append("type,raw_name,translated_name,gender")  # Header with gender
+        else:
+            csv_lines.append("type,raw_name,translated_name")  # Header
         
         for term, info in term_info_map.items():
             count = term_frequencies.get(term, 0)
@@ -2555,7 +2570,10 @@ def _process_ai_response(response_text, all_text, min_frequency,
                 count += term_frequencies.get(info['original_raw'], 0)
             
             if count >= min_frequency:
-                csv_line = f"{info['entry_type']},{term},{info['translated_name']}"
+                if include_gender_context:
+                    csv_line = f"{info['entry_type']},{term},{info['translated_name']},{info['gender']}"
+                else:
+                    csv_line = f"{info['entry_type']},{term},{info['translated_name']}"
                 csv_lines.append(csv_line)
                 entries_accepted += 1
                 
@@ -2567,7 +2585,10 @@ def _process_ai_response(response_text, all_text, min_frequency,
     
     # Ensure we have at least the header
     if len(csv_lines) == 0:
-        csv_lines.append("type,raw_name,translated_name")
+        if include_gender_context:
+            csv_lines.append("type,raw_name,translated_name,gender")
+        else:
+            csv_lines.append("type,raw_name,translated_name")
     
     # Print final summary
     print(f"📑 Processing complete: {entries_accepted} terms accepted")
