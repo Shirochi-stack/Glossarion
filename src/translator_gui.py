@@ -850,11 +850,11 @@ Do not use quotes around values unless they contain commas.
 CRITICAL EXTRACTION RULES:
 - Extract ONLY: Character names, Location names, Ability/Skill names, Item names, Organization names, Titles/Ranks
 - Do NOT extract sentences, dialogue, actions, questions, or statements as glossary entries
-- The raw_name and translated_name must be SHORT NOUNS ONLY (1-4 words max)
+- The raw_name and translated_name must be SHORT NOUNS ONLY (1-5 words max)
 - REJECT entries that contain verbs or end with punctuation (?, !, .)
-- REJECT entries starting with: "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But"
+- REJECT entries starting with: "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But". (The description column is excluded from this restriction)
 - If unsure whether something is a proper noun/name, skip it
-- Note: The description column must contain detailed context/explanations
+- The description column must contain detailed context/explanation
 
 Critical Requirement: The translated name column should be in {language}.
 
@@ -1692,11 +1692,11 @@ Do not use quotes around values unless they contain commas.
 CRITICAL EXTRACTION RULES:
 - Extract ONLY: Character names, Location names, Ability/Skill names, Item names, Organization names, Titles/Ranks
 - Do NOT extract sentences, dialogue, actions, questions, or statements as glossary entries
-- The raw_name and translated_name must be SHORT NOUNS ONLY (1-4 words max)
+- The raw_name and translated_name must be SHORT NOUNS ONLY (1-5 words max)
 - REJECT entries that contain verbs or end with punctuation (?, !, .)
-- REJECT entries starting with: "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But"
+- REJECT entries starting with: "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But". (The description column is excluded from this restriction)
 - If unsure whether something is a proper noun/name, skip it
-- Note: The description column must contain detailed context/explanations
+- The description column must contain detailed context/explanation
 
 Critical Requirement: The translated name column should be in {language}.
 
