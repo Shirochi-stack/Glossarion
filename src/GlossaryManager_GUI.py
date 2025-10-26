@@ -1299,6 +1299,20 @@ Rules:
         description_layout.addWidget(label5)
         description_layout.addStretch()
         
+        # Function to update description checkbox state based on gender context
+        def update_description_state():
+            gender_enabled = self.include_gender_context_checkbox.isChecked()
+            self.include_description_checkbox.setEnabled(gender_enabled)
+            label5.setEnabled(gender_enabled)
+            if not gender_enabled:
+                # Uncheck if disabled
+                self.include_description_checkbox.setChecked(False)
+        
+        # Connect gender context checkbox to update description state
+        self.include_gender_context_checkbox.stateChanged.connect(update_description_state)
+        # Initialize state
+        update_description_state()
+        
         # Disable smart filtering toggle (below description)
         disable_filtering_widget = QWidget()
         disable_filtering_layout = QHBoxLayout(disable_filtering_widget)
