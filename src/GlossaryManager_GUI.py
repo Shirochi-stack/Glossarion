@@ -495,19 +495,21 @@ class GlossaryManagerMixin:
                 
                 # Update text field variables from Targeted Extraction Settings
                 text_field_to_var_mapping = [
-                    ('glossary_min_frequency_entry', 'glossary_min_frequency'),
-                    ('glossary_max_names_entry', 'glossary_max_names'),
-                    ('glossary_max_titles_entry', 'glossary_max_titles'),
-                    ('glossary_batch_size_entry', 'glossary_batch_size'),
-                    ('glossary_max_text_size_entry', 'glossary_max_text_size'),
-                    ('glossary_max_sentences_entry', 'glossary_max_sentences'),
-                    ('glossary_chapter_split_threshold_entry', 'glossary_chapter_split_threshold'),
+                    ('glossary_min_frequency_entry', 'glossary_min_frequency', 'glossary_min_frequency_var'),
+                    ('glossary_max_names_entry', 'glossary_max_names', 'glossary_max_names_var'),
+                    ('glossary_max_titles_entry', 'glossary_max_titles', 'glossary_max_titles_var'),
+                    ('glossary_batch_size_entry', 'glossary_batch_size', 'glossary_batch_size_var'),
+                    ('glossary_max_text_size_entry', 'glossary_max_text_size', 'glossary_max_text_size_var'),
+                    ('glossary_max_sentences_entry', 'glossary_max_sentences', 'glossary_max_sentences_var'),
+                    ('glossary_chapter_split_threshold_entry', 'glossary_chapter_split_threshold', 'glossary_chapter_split_threshold_var'),
                 ]
-                for field_name, var_name in text_field_to_var_mapping:
+                for field_name, config_key, var_name in text_field_to_var_mapping:
                     if hasattr(self, field_name):
                         try:
                             value = int(getattr(self, field_name).text())
-                            self.config[var_name] = value
+                            self.config[config_key] = value
+                            # Also update the instance variable (used by _get_environment_variables)
+                            setattr(self, var_name, str(value))
                         except ValueError:
                             pass  # Keep existing value if invalid
                 
