@@ -2304,29 +2304,21 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                     return {}
                 else:
                     print(f"⚠️ AI extraction failed: {e}")
-                    print("📑 Falling back to pattern-based extraction")
-                    return _extract_with_patterns(all_text, language, min_frequency, 
-                                                     max_names, max_titles, 50,
-                                                     existing_glossary, output_dir, 
-                                                     strip_honorifics, fuzzy_threshold, filter_mode)
+                    print("📑 ❌ Glossary generation failed - returning empty glossary")
+                    return {}
             except Exception as e:
                 print(f"⚠️ AI extraction failed: {e}")
                 import traceback
                 traceback.print_exc()
-                print("📑 Falling back to pattern-based extraction")
-                return _extract_with_patterns(all_text, language, min_frequency, 
-                                                 max_names, max_titles, 50,
-                                                 existing_glossary, output_dir, 
-                                                 strip_honorifics, fuzzy_threshold, filter_mode)
+                print("📑 ❌ Glossary generation failed - returning empty glossary")
+                return {}
                 
     except Exception as e:
         print(f"⚠️ Custom prompt processing failed: {e}")
         import traceback
         traceback.print_exc()
-        return _extract_with_patterns(all_text, language, min_frequency, 
-                                         max_names, max_titles, 50, 
-                                         existing_glossary, output_dir, 
-                                         strip_honorifics, fuzzy_threshold, filter_mode)
+        print("📑 ❌ Glossary generation failed - returning empty glossary")
+        return {}
 
 def _filter_csv_by_mode(csv_lines, filter_mode):
     """Filter CSV lines based on the filter mode"""
