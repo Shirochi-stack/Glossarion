@@ -2105,17 +2105,15 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
             # Replace placeholders in prompt
             # Get target language from environment (used in the prompt for translation output)
             target_language = os.getenv('GLOSSARY_TARGET_LANGUAGE', 'English')
-            prompt = custom_prompt.replace('{language}', target_language)
-            prompt = prompt.replace('{min_frequency}', str(min_frequency))
-            prompt = prompt.replace('{max_names}', str(max_names))
-            prompt = prompt.replace('{max_titles}', str(max_titles))
+            system_prompt = custom_prompt.replace('{language}', target_language)
+            system_prompt = system_prompt.replace('{min_frequency}', str(min_frequency))
+            system_prompt = system_prompt.replace('{max_names}', str(max_names))
+            system_prompt = system_prompt.replace('{max_titles}', str(max_titles))
             
-            # Hardcode text_sample append (format instructions removed from GUI)
-            full_prompt = f"{prompt}\n\nText to analyze:\n{text_sample}"
-            
-            # Send as a single user message (the prompt already contains role instructions)
+            # Send system prompt and text as separate messages
             messages = [
-                {"role": "user", "content": full_prompt}
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"{text_sample}"}
             ]
             
             # Check stop before API call

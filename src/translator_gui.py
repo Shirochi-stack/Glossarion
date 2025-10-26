@@ -1657,7 +1657,7 @@ Rules:
         self.default_auto_glossary_prompt = """You are a glossary extraction assistant for Korean / Japanese / Chinese novels.
 
 Return ONLY CSV format with exactly 4 columns: type,raw_name,translated_name,gender.
-For character entries, determine gender from context.
+For character entries, determine gender from context, leave empty if context is insufficient.
 For non-character entries, leave gender empty.
 Only include terms that actually appear in the text.
 Do not use quotes around values unless they contain commas.
@@ -1665,9 +1665,9 @@ Do not use quotes around values unless they contain commas.
 Critical Requirement: The translated name column should be in {language}.
 
 For example:
-character,김상현,Kim Sang-hyu
+character,김상현,Kim Sang-hyu,male
 character,갈편제,Gale Hardest  
-character,디히릿 아데,Dihirit Ade
+character,디히릿 아데,Dihirit Ade,female
 
 Focus on identifying:
 1. Character names with their honorifics
