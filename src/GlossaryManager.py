@@ -2226,7 +2226,6 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                 csv_lines = _process_ai_response(response_text, all_text, min_frequency, 
                                                      strip_honorifics, fuzzy_threshold, 
                                                      language, filter_mode)
-                                                     language, filter_mode)
                 
                 print(f"📑 AI extracted {len(csv_lines) - 1} valid terms (header excluded)")
 
