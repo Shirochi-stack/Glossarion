@@ -2125,11 +2125,14 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     
     original_length = len(clean_text)
     filtered_length = len(filtered_text)
-    reduction_percent = ((original_length - filtered_length) / original_length * 100) if original_length > 0 else 0
+    size_change_percent = ((original_length - filtered_length) / original_length * 100) if original_length > 0 else 0
     
     print(f"\n📑 === FILTERING COMPLETE ===")
     print(f"📑 Duration: {filter_duration:.1f} seconds")
-    print(f"📑 Text reduction: {original_length:,} → {filtered_length:,} chars ({reduction_percent:.1f}% reduction)")
+    if size_change_percent >= 0:
+        print(f"📑 Text reduction: {original_length:,} → {filtered_length:,} chars ({size_change_percent:.1f}% reduction)")
+    else:
+        print(f"📑 Text expansion: {original_length:,} → {filtered_length:,} chars ({abs(size_change_percent):.1f}% expansion)")
     print(f"📑 Terms found: {len(frequent_terms):,} unique terms (min frequency: {min_frequency})")
     print(f"📑 Final output: {len(filtered_sentences)} sentences, {filtered_length:,} characters")
     print(f"📑 Performance: {(original_length / filter_duration / 1000):.1f}K chars/second")
