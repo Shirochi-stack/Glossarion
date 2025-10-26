@@ -2490,9 +2490,10 @@ def _process_ai_response(response_text, all_text, min_frequency,
                 gender = parts[3] if len(parts) > 3 else ''
                 description = parts[4] if len(parts) > 4 else ''
                 
-                # Validate - reject malformed entries that look like tuples/lists
+                # Validate - reject malformed entries that look like tuples/lists or quoted strings
                 if (raw_name and translated_name and 
-                    not (raw_name.startswith(('[', '(')) or translated_name.startswith(('[', '(')))):
+                    not (raw_name.startswith(('[', '(', "'", '"')) or translated_name.startswith(('[', '(', "'", '"'))) and
+                    not (raw_name.endswith(("'", '"')) or translated_name.endswith(("'", '"')))):
                     csv_lines.append(f"{entry_type},{raw_name},{translated_name},{gender},{description}")
             elif include_gender_context and len(parts) >= 4:
                 # Has all 4 columns (with gender)
@@ -2501,18 +2502,20 @@ def _process_ai_response(response_text, all_text, min_frequency,
                 translated_name = parts[2]
                 gender = parts[3] if len(parts) > 3 else ''
                 
-                # Validate - reject malformed entries that look like tuples/lists
+                # Validate - reject malformed entries that look like tuples/lists or quoted strings
                 if (raw_name and translated_name and 
-                    not (raw_name.startswith(('[', '(')) or translated_name.startswith(('[', '(')))):
+                    not (raw_name.startswith(('[', '(', "'", '"')) or translated_name.startswith(('[', '(', "'", '"'))) and
+                    not (raw_name.endswith(("'", '"')) or translated_name.endswith(("'", '"')))):
                     csv_lines.append(f"{entry_type},{raw_name},{translated_name},{gender}")
             elif len(parts) >= 3:
                 # Has at least 3 columns
                 entry_type = parts[0]
                 raw_name = parts[1]
                 translated_name = parts[2]
-                # Validate - reject malformed entries
+                # Validate - reject malformed entries that look like tuples/lists or quoted strings
                 if (raw_name and translated_name and
-                    not (raw_name.startswith(('[', '(')) or translated_name.startswith(('[', '(')))):
+                    not (raw_name.startswith(('[', '(', "'", '"')) or translated_name.startswith(('[', '(', "'", '"'))) and
+                    not (raw_name.endswith(("'", '"')) or translated_name.endswith(("'", '"')))):
                     if include_description:
                         # Add empty gender and description columns when 5 columns expected
                         gender = parts[3] if len(parts) > 3 else ''
@@ -2528,9 +2531,10 @@ def _process_ai_response(response_text, all_text, min_frequency,
                 # Missing type, default to 'term'
                 raw_name = parts[0]
                 translated_name = parts[1]
-                # Validate - reject malformed entries
+                # Validate - reject malformed entries that look like tuples/lists or quoted strings
                 if (raw_name and translated_name and
-                    not (raw_name.startswith(('[', '(')) or translated_name.startswith(('[', '(')))):
+                    not (raw_name.startswith(('[', '(', "'", '"')) or translated_name.startswith(('[', '(', "'", '"'))) and
+                    not (raw_name.endswith(("'", '"')) or translated_name.endswith(("'", '"')))):
                     if include_description:
                         csv_lines.append(f"term,{raw_name},{translated_name},,")
                     elif include_gender_context:
@@ -2578,10 +2582,11 @@ def _process_ai_response(response_text, all_text, min_frequency,
             else:
                 continue
             
-            # Validate - reject malformed entries that look like tuples/lists
+            # Validate - reject malformed entries that look like tuples/lists or quoted strings
             if not raw_name or not translated_name:
                 continue
-            if raw_name.startswith(('[', '(')) or translated_name.startswith(('[', '(')):
+            if (raw_name.startswith(('[', '(', "'", '"')) or translated_name.startswith(('[', '(', "'", '"')) or
+                raw_name.endswith(("'", '"')) or translated_name.endswith(("'", '"'))):
                 continue
             
             if raw_name and translated_name:
@@ -2643,10 +2648,11 @@ def _process_ai_response(response_text, all_text, min_frequency,
             else:
                 continue
             
-            # Validate - reject malformed entries
+            # Validate - reject malformed entries that look like tuples/lists or quoted strings
             if not raw_name or not translated_name:
                 continue
-            if raw_name.startswith(('[', '(')) or translated_name.startswith(('[', '(')):
+            if (raw_name.startswith(('[', '(', "'", '"')) or translated_name.startswith(('[', '(', "'", '"')) or
+                raw_name.endswith(("'", '"')) or translated_name.endswith(("'", '"'))):
                 continue
             
             if raw_name and translated_name:
