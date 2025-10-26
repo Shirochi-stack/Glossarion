@@ -1654,16 +1654,28 @@ Rules:
 - Leave gender empty for terms (just end with comma)
 """
         
-        self.default_auto_glossary_prompt = """You are extracting a targeted glossary from a {language} novel.
+        self.default_auto_glossary_prompt = """You are a glossary extraction assistant for Korean / Japanese / Chinese novels.
+
+Return ONLY CSV format with exactly 4 columns: type,raw_name,translated_name,gender.
+For character entries, determine gender from context.
+For non-character entries, leave gender empty.
+Only include terms that actually appear in the text.
+Do not use quotes around values unless they contain commas.
+
+Critical Requirement: The translated name column should be in {language}.
+
+For example:
+character,김상현,Kim Sang-hyu
+character,갈편제,Gale Hardest  
+character,디히릿 아데,Dihirit Ade
+
 Focus on identifying:
 1. Character names with their honorifics
 2. Important titles and ranks
 3. Frequently mentioned terms (min frequency: {min_frequency})
 
 Extract up to {max_names} character names and {max_titles} titles.
-Prioritize names that appear with honorifics or in important contexts.
-Return the glossary in a simple key-value format.
-        """
+Prioritize names that appear with honorifics or in important contexts."""
         
         self.default_rolling_summary_system_prompt = """You are a context summarization assistant. Create concise, informative summaries that preserve key story elements for translation continuity."""
         

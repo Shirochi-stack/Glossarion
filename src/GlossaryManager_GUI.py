@@ -1134,16 +1134,6 @@ Rules:
                     #print(f"Updated append_glossary_prompt from UI: '{self.append_glossary_prompt[:80]}...' ({len(self.append_glossary_prompt)} chars)")
                     pass
             
-            if hasattr(self, 'translation_prompt_text'):
-                self.glossary_translation_prompt = self.translation_prompt_text.toPlainText().strip()
-                if debug_enabled:
-                    print(f"🔍 [UPDATE] glossary_translation_prompt: {len(self.glossary_translation_prompt)} chars")
-
-            if hasattr(self, 'format_instructions_text'):
-                self.glossary_format_instructions = self.format_instructions_text.toPlainText().strip()
-                if debug_enabled:
-                    print(f"🔍 [UPDATE] glossary_format_instructions: {len(self.glossary_format_instructions)} chars")
-                
         except Exception as e:
             print(f"❌ Error updating glossary prompts: {e}")
             import traceback
@@ -1505,46 +1495,71 @@ Rules:
             label.setStyleSheet("color: gray; font-size: 10pt; margin-left: 20px;")
             help_layout.addWidget(label)
         
-        # Tab 2: Extraction Prompt
-        extraction_prompt_tab = QWidget()
-        extraction_prompt_tab_layout = QVBoxLayout(extraction_prompt_tab)
-        extraction_prompt_tab_layout.setContentsMargins(10, 10, 10, 10)
-        notebook.addTab(extraction_prompt_tab, "Extraction Prompt")
+        # Tab 2: Glossary Prompt (unified system + extraction)
+        glossary_prompt_tab = QWidget()
+        glossary_prompt_tab_layout = QVBoxLayout(glossary_prompt_tab)
+        glossary_prompt_tab_layout.setContentsMargins(10, 10, 10, 10)
+        notebook.addTab(glossary_prompt_tab, "Glossary Prompt")
         
-        # Auto prompt section
-        auto_prompt_frame = QGroupBox("Extraction Template (System Prompt)")
-        auto_prompt_frame_layout = QVBoxLayout(auto_prompt_frame)
-        extraction_prompt_tab_layout.addWidget(auto_prompt_frame)
+        # Unified glossary prompt section
+        glossary_prompt_frame = QGroupBox("Glossary Extraction Prompt")
+        glossary_prompt_frame_layout = QVBoxLayout(glossary_prompt_frame)
+        glossary_prompt_tab_layout.addWidget(glossary_prompt_frame)
+        
+        desc_label = QLabel("This prompt guides the AI to extract character names, terms, and titles from the text:")
+        glossary_prompt_frame_layout.addWidget(desc_label)
         
         placeholder_label = QLabel("Available placeholders: {language}, {min_frequency}, {max_names}, {max_titles}")
         placeholder_label.setStyleSheet("color: #5a9fd4; font-size: 9pt; font-style: italic;")
-        auto_prompt_frame_layout.addWidget(placeholder_label)
+        glossary_prompt_frame_layout.addWidget(placeholder_label)
         
         self.auto_prompt_text = QTextEdit()
         self.auto_prompt_text.setMinimumHeight(250)
         self.auto_prompt_text.setLineWrapMode(QTextEdit.WidgetWidth)
-        auto_prompt_frame_layout.addWidget(self.auto_prompt_text)
+        glossary_prompt_frame_layout.addWidget(self.auto_prompt_text)
         
-        # Always reload extraction prompt from config to ensure fresh state
-        default_auto_prompt = getattr(self, 'default_auto_glossary_prompt', '')
-        self.auto_glossary_prompt = self.config.get('auto_glossary_prompt', default_auto_prompt)
+        # Default unified prompt (combines system + extraction instructions)
+        default_unified_prompt = """You are a glossary extraction assistant for Korean / Japanese / Chinese novels.
+
+Return ONLY CSV format with exactly 4 columns: type,raw_name,translated_name,gender.
+For character entries, determine gender from context.
+For non-character entries, leave gender empty.
+Only include terms that actually appear in the text.
+Do not use quotes around values unless they contain commas.
+
+Critical Requirement: The translated name column should be in {language}.
+
+For example:
+character,김상현,Kim Sang-hyu
+character,갈편제,Gale Hardest  
+character,디히릿 아데,Dihirit Ade
+
+Focus on identifying:
+1. Character names with their honorifics
+2. Important titles and ranks
+3. Frequently mentioned terms (min frequency: {min_frequency})
+
+Extract up to {max_names} character names and {max_titles} titles.
+Prioritize names that appear with honorifics or in important contexts."""
         
+        # Load from config or use default
+        self.auto_glossary_prompt = self.config.get('auto_glossary_prompt', default_unified_prompt)
         self.auto_prompt_text.setPlainText(self.auto_glossary_prompt)
         
-        auto_prompt_controls_widget = QWidget()
-        auto_prompt_controls_layout = QHBoxLayout(auto_prompt_controls_widget)
-        auto_prompt_controls_layout.setContentsMargins(0, 0, 0, 0)
-        extraction_prompt_tab_layout.addWidget(auto_prompt_controls_widget)
+        glossary_prompt_controls_widget = QWidget()
+        glossary_prompt_controls_layout = QHBoxLayout(glossary_prompt_controls_widget)
+        glossary_prompt_controls_layout.setContentsMargins(0, 0, 0, 0)
+        glossary_prompt_tab_layout.addWidget(glossary_prompt_controls_widget)
         
-        def reset_auto_prompt():
-            reply = QMessageBox.question(parent, "Reset Prompt", "Reset automatic glossary prompt to default?",
+        def reset_glossary_prompt():
+            reply = QMessageBox.question(parent, "Reset Prompt", "Reset glossary prompt to default?",
                                          QMessageBox.Yes | QMessageBox.No)
             if reply == QMessageBox.Yes:
-                self.auto_prompt_text.setPlainText(getattr(self, 'default_auto_glossary_prompt', ''))
+                self.auto_prompt_text.setPlainText(default_unified_prompt)
         
-        reset_auto_btn = QPushButton("Reset to Default")
-        reset_auto_btn.clicked.connect(reset_auto_prompt)
-        reset_auto_btn.setStyleSheet("""
+        reset_glossary_btn = QPushButton("Reset to Default")
+        reset_glossary_btn.clicked.connect(reset_glossary_prompt)
+        reset_glossary_btn.setStyleSheet("""
             QPushButton {
                 background-color: #b8860b;
                 color: black;
@@ -1555,164 +1570,10 @@ Rules:
             QPushButton:hover { background-color: #9a6d07; }
             QPushButton:pressed { background-color: #8a6106; }
         """)
-        auto_prompt_controls_layout.addWidget(reset_auto_btn)
-        auto_prompt_controls_layout.addStretch()
+        glossary_prompt_controls_layout.addWidget(reset_glossary_btn)
+        glossary_prompt_controls_layout.addStretch()
         
-        # Tab 3: Format Instructions
-        format_tab = QWidget()
-        format_tab_layout = QVBoxLayout(format_tab)
-        format_tab_layout.setContentsMargins(10, 10, 10, 10)
-        notebook.addTab(format_tab, "Format Instructions")
-        
-        # Format instructions section
-        format_prompt_frame = QGroupBox("Output Format Instructions (User Prompt)")
-        format_prompt_frame_layout = QVBoxLayout(format_prompt_frame)
-        format_tab_layout.addWidget(format_prompt_frame)
-        
-        format_desc_label = QLabel("These instructions are added to your extraction prompt to specify the output format:")
-        format_prompt_frame_layout.addWidget(format_desc_label)
-        
-        format_placeholder_label = QLabel("Available placeholders: {text_sample}")
-        format_placeholder_label.setStyleSheet("color: #5a9fd4; font-size: 9pt; font-style: italic;")
-        format_prompt_frame_layout.addWidget(format_placeholder_label)
-        
-        # Always reload format instructions from config to ensure fresh state
-        default_format_instructions = """
-Return the results in EXACT CSV format with this header:
-type,raw_name,translated_name
-
-For example:
-character,김상현,Kim Sang-hyu
-character,갈편제,Gale Hardest  
-character,디히릿 아데,Dihirit Ade
-
-Only include terms that actually appear in the text.
-Do not use quotes around values unless they contain commas.
-
-Text to analyze:
-{text_sample}"""
-        self.glossary_format_instructions = self.config.get('glossary_format_instructions', default_format_instructions)
-        
-        self.format_instructions_text = QTextEdit()
-        self.format_instructions_text.setMinimumHeight(250)
-        self.format_instructions_text.setLineWrapMode(QTextEdit.WidgetWidth)
-        format_prompt_frame_layout.addWidget(self.format_instructions_text)
-        self.format_instructions_text.setPlainText(self.glossary_format_instructions)
-        
-        format_prompt_controls_widget = QWidget()
-        format_prompt_controls_layout = QHBoxLayout(format_prompt_controls_widget)
-        format_prompt_controls_layout.setContentsMargins(0, 0, 0, 0)
-        format_tab_layout.addWidget(format_prompt_controls_widget)
-        
-        def reset_format_instructions():
-            reply = QMessageBox.question(parent, "Reset Prompt", "Reset format instructions to default?",
-                                         QMessageBox.Yes | QMessageBox.No)
-            if reply == QMessageBox.Yes:
-                default_format_instructions = """
-Return the results in EXACT CSV format with this header:
-type,raw_name,translated_name
-
-For example:
-character,김상현,Kim Sang-hyu
-character,갈편제,Gale Hardest  
-character,디히릿 아데,Dihirit Ade
-
-Only include terms that actually appear in the text.
-Do not use quotes around values unless they contain commas.
-
-Text to analyze:
-{text_sample}"""
-                self.format_instructions_text.setPlainText(default_format_instructions)
-        
-        reset_format_btn = QPushButton("Reset to Default")
-        reset_format_btn.clicked.connect(reset_format_instructions)
-        reset_format_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #b8860b;
-                color: black;
-                padding: 5px;
-                border: 1px solid #8a6a08;
-                border-radius: 4px;
-            }
-            QPushButton:hover { background-color: #9a6d07; }
-            QPushButton:pressed { background-color: #8a6106; }
-        """)
-        format_prompt_controls_layout.addWidget(reset_format_btn)
-        format_prompt_controls_layout.addStretch()
-        
-        # Tab 4: Translation Prompt
-        translation_prompt_tab = QWidget()
-        translation_prompt_tab_layout = QVBoxLayout(translation_prompt_tab)
-        translation_prompt_tab_layout.setContentsMargins(10, 10, 10, 10)
-        notebook.addTab(translation_prompt_tab, "Translation Prompt")
-        
-        # Translation prompt section
-        trans_prompt_frame = QGroupBox("Glossary Translation Template (User Prompt)")
-        trans_prompt_frame_layout = QVBoxLayout(trans_prompt_frame)
-        translation_prompt_tab_layout.addWidget(trans_prompt_frame)
-        
-        trans_desc_label = QLabel("This prompt is used to translate extracted terms to English:")
-        trans_prompt_frame_layout.addWidget(trans_desc_label)
-        
-        trans_placeholder_label = QLabel("Available placeholders: {language}, {terms_list}, {batch_size}")
-        trans_placeholder_label.setStyleSheet("color: #5a9fd4; font-size: 9pt; font-style: italic;")
-        trans_prompt_frame_layout.addWidget(trans_placeholder_label)
-        
-        # Always reload translation prompt from config to ensure fresh state
-        default_translation_prompt = """
-You are translating {language} character names and important terms to English.
-For character names, provide English transliterations or keep as romanized.
-Keep honorifics/suffixes only if they are integral to the name.
-Respond with the same numbered format.
-
-Terms to translate:
-{terms_list}
-
-Provide translations in the same numbered format."""
-        self.glossary_translation_prompt = self.config.get('glossary_translation_prompt', default_translation_prompt)
-        
-        self.translation_prompt_text = QTextEdit()
-        self.translation_prompt_text.setMinimumHeight(250)
-        self.translation_prompt_text.setLineWrapMode(QTextEdit.WidgetWidth)
-        trans_prompt_frame_layout.addWidget(self.translation_prompt_text)
-        self.translation_prompt_text.setPlainText(self.glossary_translation_prompt)
-        
-        trans_prompt_controls_widget = QWidget()
-        trans_prompt_controls_layout = QHBoxLayout(trans_prompt_controls_widget)
-        trans_prompt_controls_layout.setContentsMargins(0, 0, 0, 0)
-        translation_prompt_tab_layout.addWidget(trans_prompt_controls_widget)
-        
-        def reset_trans_prompt():
-            reply = QMessageBox.question(parent, "Reset Prompt", "Reset translation prompt to default?",
-                                         QMessageBox.Yes | QMessageBox.No)
-            if reply == QMessageBox.Yes:
-                default_trans_prompt = """
-You are translating {language} character names and important terms to English.
-For character names, provide English transliterations or keep as romanized.
-Keep honorifics/suffixes only if they are integral to the name.
-Respond with the same numbered format.
-
-Terms to translate:
-{terms_list}
-
-Provide translations in the same numbered format."""
-                self.translation_prompt_text.setPlainText(default_trans_prompt)
-        
-        reset_trans_btn = QPushButton("Reset to Default")
-        reset_trans_btn.clicked.connect(reset_trans_prompt)
-        reset_trans_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #b8860b;
-                color: black;
-                padding: 5px;
-                border: 1px solid #8a6a08;
-                border-radius: 4px;
-            }
-            QPushButton:hover { background-color: #9a6d07; }
-            QPushButton:pressed { background-color: #8a6106; }
-        """)
-        trans_prompt_controls_layout.addWidget(reset_trans_btn)
-        trans_prompt_controls_layout.addStretch()
+        # Format Instructions removed - now hardcoded to just append {text_sample}
         
         # Update states function with proper error handling - converted to use signals
         def update_auto_glossary_state(checked=None):
@@ -1734,10 +1595,6 @@ Provide translations in the same numbered format."""
             
             # Enable/disable text widgets
             self.auto_prompt_text.setEnabled(enabled)
-            if hasattr(self, 'format_instructions_text'):
-                self.format_instructions_text.setEnabled(enabled)
-            if hasattr(self, 'translation_prompt_text'):
-                self.translation_prompt_text.setEnabled(enabled)
         
         def update_append_prompt_state(checked=None):
             enabled = self.append_glossary_checkbox.isChecked()

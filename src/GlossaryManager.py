@@ -2108,71 +2108,12 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
             prompt = prompt.replace('{max_names}', str(max_names))
             prompt = prompt.replace('{max_titles}', str(max_titles))
             
-            # Get the format instructions from environment variable
-            format_instructions = os.getenv("GLOSSARY_FORMAT_INSTRUCTIONS", "")
+            # Hardcode text_sample append (format instructions removed from GUI)
+            full_prompt = f"{prompt}\n\nText to analyze:\n{text_sample}"
             
-            # If no format instructions are provided, use a default
-            if not format_instructions:
-                # Check if gender context is enabled to include gender column
-                include_gender_context = os.getenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
-                
-                if include_gender_context:
-                    format_instructions = """
-Return the results in EXACT CSV format with this header:
-type,raw_name,translated_name,gender
-
-For CHARACTERS:
-- Analyze the provided context to determine gender
-- Look for pronouns (그는/그녀는, he/she, 彼/彼女, 他/她) near the character
-- Look for gendered descriptions or relationships
-- Use "Male", "Female", or "Unknown" if uncertain
-
-For OTHER TYPES (terms, locations, etc.):
-- Leave the gender column empty
-
-Examples:
-character,김상현,Kim Sang-hyun,Male
-character,이민아,Lee Mina,Female
-character,박준호,Park Junho,Unknown
-term,무협,martial arts,
-
-Only include entries that actually appear in the text.
-Do not use quotes around values unless they contain commas.
-
-Text to analyze (with context windows around character mentions):
-{text_sample}"""
-                else:
-                    format_instructions = """
-Return the results in EXACT CSV format with this header:
-type,raw_name,translated_name
-
-For example:
-character,김상현,Kim Sang-hyu
-character,갈편제,Gale Hardest  
-character,디히릿 아데,Dihirit Ade
-
-Only include entries that actually appear in the text.
-Do not use quotes around values unless they contain commas.
-
-Text to analyze:
-{text_sample}"""
-            
-            # Replace placeholders in format instructions
-            format_instructions = format_instructions.replace('{text_sample}', text_sample)
-            
-            # Combine the user's prompt with format instructions
-            enhanced_prompt = f"{prompt}\n\n{format_instructions}"
-            
-            # Update system message based on whether gender is included
-            include_gender_context = os.getenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
-            if include_gender_context:
-                system_content = "You are a glossary extraction assistant. Return ONLY CSV format with exactly 4 columns: type,raw_name,translated_name,gender. For character entries, determine gender from context. For non-character entries, leave gender empty."
-            else:
-                system_content = "You are a glossary extraction assistant. Return ONLY CSV format with exactly 3 columns: type,raw_name,translated_name. The 'type' column should classify entries (e.g., character, term, location, etc.)."
-            
+            # Send as a single user message (the prompt already contains role instructions)
             messages = [
-                {"role": "system", "content": system_content},
-                {"role": "user", "content": enhanced_prompt}
+                {"role": "user", "content": full_prompt}
             ]
             
             # Check stop before API call
