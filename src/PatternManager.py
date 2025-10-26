@@ -350,6 +350,27 @@ CHINESE_NUMS = {
     '首': 1, '次': 2, '初': 1, '末': -1,
 }
 
+# Gender indicator patterns for pronoun-based gender detection
+# Note: These are PRONOUNS, not titles or honorifics
+GENDER_PRONOUNS = {
+    'korean': {
+        'male': ['그는', '그가', '그를', '그의', '그에게', '그도', '그만', '그조차', '그한테'],
+        'female': ['그녀는', '그녀가', '그녀를', '그녀의', '그녀에게', '그녀도', '그녀만', '그녀조차', '그녀한테'],
+    },
+    'japanese': {
+        'male': ['彼は', '彼が', '彼を', '彼の', '彼に', '彼も', '彼だけ', '彼こそ'],
+        'female': ['彼女は', '彼女が', '彼女を', '彼女の', '彼女に', '彼女も', '彼女だけ', '彼女こそ'],
+    },
+    'chinese': {
+        'male': ['他', '他的', '他们', '他说', '他是', '他在', '他会', '他想'],
+        'female': ['她', '她的', '她们', '她说', '她是', '她在', '她会', '她想'],
+    },
+    'english': {
+        'male': [' he ', ' his ', ' him ', ' himself ', 'He ', 'His ', 'Him '],
+        'female': [' she ', ' her ', ' hers ', ' herself ', 'She ', 'Her ', 'Hers '],
+    }
+}
+
     # Common words - keeping the same for filtering
 COMMON_WORDS = {
     '이', '그', '저', '우리', '너희', '자기', '당신', '여기', '거기', '저기',

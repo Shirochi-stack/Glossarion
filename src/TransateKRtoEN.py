@@ -5033,6 +5033,8 @@ def main(log_callback=None, stop_callback=None):
         print(f"📑 DEBUG: APPEND_GLOSSARY_PROMPT = '{os.getenv('APPEND_GLOSSARY_PROMPT', 'NOT SET')}'")
         print(f"📑 DEBUG: Duplicate algorithm = '{os.getenv('GLOSSARY_DUPLICATE_ALGORITHM', 'auto')}'")
         print(f"📑 DEBUG: Fuzzy threshold = '{os.getenv('GLOSSARY_FUZZY_THRESHOLD', '0.90')}'")
+        print(f"📑 DEBUG: Include gender context = '{os.getenv('GLOSSARY_INCLUDE_GENDER_CONTEXT', '0')}'")
+        print(f"📑 DEBUG: Context window size = '{os.getenv('GLOSSARY_CONTEXT_WINDOW', '2')}'")
         
         # Check if glossary.csv already exists in the source folder
         existing_glossary_csv = os.path.join(out, "glossary.csv")
@@ -5097,7 +5099,7 @@ def main(log_callback=None, stop_callback=None):
                         'GLOSSARY_PARALLEL_ENABLED', 'GLOSSARY_FILTER_MODE', 'GLOSSARY_SKIP_FREQUENCY_CHECK',
                         'GLOSSARY_SKIP_ALL_VALIDATION', 'MODEL', 'API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY',
                         'MAX_OUTPUT_TOKENS', 'GLOSSARY_TEMPERATURE', 'MANUAL_GLOSSARY', 'ENABLE_AUTO_GLOSSARY',
-                        'GLOSSARY_DUPLICATE_ALGORITHM'
+                        'GLOSSARY_DUPLICATE_ALGORITHM', 'GLOSSARY_INCLUDE_GENDER_CONTEXT', 'GLOSSARY_CONTEXT_WINDOW'
                     ]
                     
                     for var in important_vars:

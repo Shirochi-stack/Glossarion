@@ -1954,7 +1954,60 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         step = len(filtered_sentences) // max_sentences
         filtered_sentences = filtered_sentences[::step][:max_sentences]
     
-    filtered_text = ' '.join(filtered_sentences)
+    # Check if gender context expansion is enabled
+    include_gender_context = os.getenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
+    
+    if include_gender_context:
+        context_window = int(os.getenv("GLOSSARY_CONTEXT_WINDOW", "2"))
+        print(f"📑 Gender context enabled: Expanding snippets with {context_window}-sentence windows...")
+        
+        # Split full text into sentences for context extraction
+        all_sentences_list = re.split(r'[.!?。！？]+', clean_text)
+        all_sentences_list = [s.strip() for s in all_sentences_list if s.strip()]
+        
+        # Create index map for fast lookup
+        sentence_to_index = {}
+        for idx, sentence in enumerate(all_sentences_list):
+            for filtered_sent in filtered_sentences:
+                # Check if filtered sentence matches or contains this sentence
+                if filtered_sent.strip() in sentence or sentence in filtered_sent.strip():
+                    sentence_to_index[filtered_sent] = idx
+                    break
+        
+        # Build context windows
+        context_groups = []
+        included_indices = set()
+        
+        for filtered_sent in filtered_sentences:
+            if filtered_sent not in sentence_to_index:
+                # If we can't find it, just use the sentence as-is
+                context_groups.append(filtered_sent)
+                continue
+            
+            idx = sentence_to_index[filtered_sent]
+            
+            # Skip if already included in a previous window
+            if idx in included_indices:
+                continue
+            
+            # Get context window: [idx-context_window ... idx ... idx+context_window]
+            start_idx = max(0, idx - context_window)
+            end_idx = min(len(all_sentences_list), idx + context_window + 1)
+            
+            # Mark all sentences in this window as included
+            for i in range(start_idx, end_idx):
+                included_indices.add(i)
+            
+            # Extract the window
+            window_sentences = all_sentences_list[start_idx:end_idx]
+            context_group = ' '.join(window_sentences)
+            context_groups.append(context_group)
+        
+        print(f"📑 Created {len(context_groups):,} context windows (up to {context_window*2+1} sentences each)")
+        filtered_text = '\n\n'.join(context_groups)  # Separate windows with double newline
+        print(f"📑 Context-expanded text: {len(filtered_text):,} characters")
+    else:
+        filtered_text = ' '.join(filtered_sentences)
     
     # Calculate and display filtering statistics
     filter_end_time = time.time()
@@ -2060,7 +2113,36 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
             
             # If no format instructions are provided, use a default
             if not format_instructions:
-                format_instructions = """
+                # Check if gender context is enabled to include gender column
+                include_gender_context = os.getenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
+                
+                if include_gender_context:
+                    format_instructions = """
+Return the results in EXACT CSV format with this header:
+type,raw_name,translated_name,gender
+
+For CHARACTERS:
+- Analyze the provided context to determine gender
+- Look for pronouns (그는/그녀는, he/she, 彼/彼女, 他/她) near the character
+- Look for gendered descriptions or relationships
+- Use "Male", "Female", or "Unknown" if uncertain
+
+For OTHER TYPES (terms, locations, etc.):
+- Leave the gender column empty
+
+Examples:
+character,김상현,Kim Sang-hyun,Male
+character,이민아,Lee Mina,Female
+character,박준호,Park Junho,Unknown
+term,무협,martial arts,
+
+Only include entries that actually appear in the text.
+Do not use quotes around values unless they contain commas.
+
+Text to analyze (with context windows around character mentions):
+{text_sample}"""
+                else:
+                    format_instructions = """
 Return the results in EXACT CSV format with this header:
 type,raw_name,translated_name
 
@@ -2081,8 +2163,15 @@ Text to analyze:
             # Combine the user's prompt with format instructions
             enhanced_prompt = f"{prompt}\n\n{format_instructions}"
             
+            # Update system message based on whether gender is included
+            include_gender_context = os.getenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
+            if include_gender_context:
+                system_content = "You are a glossary extraction assistant. Return ONLY CSV format with exactly 4 columns: type,raw_name,translated_name,gender. For character entries, determine gender from context. For non-character entries, leave gender empty."
+            else:
+                system_content = "You are a glossary extraction assistant. Return ONLY CSV format with exactly 3 columns: type,raw_name,translated_name. The 'type' column should classify entries (e.g., character, term, location, etc.)."
+            
             messages = [
-                {"role": "system", "content": "You are a glossary extraction assistant. Return ONLY CSV format with exactly 3 columns: type,raw_name,translated_name. The 'type' column should classify entries (e.g., character, term, location, etc.)."},
+                {"role": "system", "content": system_content},
                 {"role": "user", "content": enhanced_prompt}
             ]
             

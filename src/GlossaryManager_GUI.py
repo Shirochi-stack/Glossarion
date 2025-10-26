@@ -439,6 +439,7 @@ class GlossaryManagerMixin:
                     ('append_glossary_checkbox', 'append_glossary_var'),
                     ('enable_auto_glossary_checkbox', 'enable_auto_glossary_var'),
                     ('compress_glossary_checkbox', 'compress_glossary_prompt_var'),
+                    ('include_gender_context_checkbox', 'include_gender_context_var'),
                     ('glossary_history_rolling_checkbox', 'glossary_history_rolling_var'),
                     ('strip_honorifics_checkbox', 'strip_honorifics_var'),
                     ('disable_honorifics_checkbox', 'disable_honorifics_var'),
@@ -1201,6 +1202,21 @@ Rules:
         # label3.setStyleSheet("color: white; font-size: 10pt; font-style: italic;")
         compress_layout.addWidget(label3)
         compress_layout.addStretch()
+        
+        # Include gender context toggle (below compress glossary)
+        gender_context_widget = QWidget()
+        gender_context_layout = QHBoxLayout(gender_context_widget)
+        gender_context_layout.setContentsMargins(0, 0, 0, 15)
+        auto_layout.addWidget(gender_context_widget)
+        
+        if not hasattr(self, 'include_gender_context_checkbox'):
+            self.include_gender_context_checkbox = self._create_styled_checkbox("Include Gender Context (More Expensive)")
+            self.include_gender_context_checkbox.setChecked(self.config.get('include_gender_context', False))
+        gender_context_layout.addWidget(self.include_gender_context_checkbox)
+        
+        label4 = QLabel("(Expands text snippets to include surrounding sentences for better gender detection)")
+        gender_context_layout.addWidget(label4)
+        gender_context_layout.addStretch()
         
         # Custom append prompt section
         append_prompt_frame = QGroupBox("Glossary Append Format")
