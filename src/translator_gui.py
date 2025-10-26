@@ -606,7 +606,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 8192
         self.proc = self.glossary_proc = None
-        __version__ = "6.2.6"
+        __version__ = "6.2.7"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -1866,7 +1866,7 @@ Recent translations to summarize:
             # Set the initial active profile for autosave
             self._active_profile_for_autosave = self.profile_var
         
-        self.append_log("🚀 Glossarion v6.2.6 - Ready to use!")
+        self.append_log("🚀 Glossarion v6.2.7 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Restore last selected input files if available
@@ -7519,10 +7519,25 @@ Important rules:
             self.auto_loaded_glossary_path = None
             self.auto_loaded_glossary_for_file = None
         
-        # Don't override manually loaded glossaries
+        # Check if manually loaded glossary matches the new file
         if getattr(self, 'manual_glossary_manually_loaded', False) and self.manual_glossary_path:
-            self.append_log(f"📑 Keeping manually loaded glossary: {os.path.basename(self.manual_glossary_path)}")
-            return
+            # Extract the base name from the current EPUB file (without extension)
+            current_file_base = os.path.splitext(os.path.basename(file_path))[0]
+            
+            # Get the glossary filename
+            glossary_name = os.path.basename(self.manual_glossary_path)
+            
+            # Check if the current EPUB's base name appears anywhere in the glossary filename
+            if current_file_base in glossary_name:
+                # Glossary matches the current file, keep it
+                self.append_log(f"📑 Keeping manually loaded glossary: {glossary_name}")
+                return
+            else:
+                # Glossary doesn't match, clear it
+                self.append_log(f"📑 Cleared manually loaded glossary from different novel: {glossary_name}")
+                self.manual_glossary_path = None
+                self.manual_glossary_manually_loaded = False
+                # Continue to auto-load logic below
         
         file_base = os.path.splitext(os.path.basename(file_path))[0]
         output_dir = file_base
@@ -9537,7 +9552,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v6.2.6...")
+    print("🚀 Starting Glossarion v6.2.7...")
     
     # Initialize splash screen
     splash_manager = None
