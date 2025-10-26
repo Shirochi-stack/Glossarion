@@ -493,6 +493,28 @@ class GlossaryManagerMixin:
                     if hasattr(self, checkbox_name):
                         setattr(self, var_name, getattr(self, checkbox_name).isChecked())
                 
+                # Update text field variables from Targeted Extraction Settings
+                text_field_to_var_mapping = [
+                    ('glossary_min_frequency_entry', 'glossary_min_frequency'),
+                    ('glossary_max_names_entry', 'glossary_max_names'),
+                    ('glossary_max_titles_entry', 'glossary_max_titles'),
+                    ('glossary_batch_size_entry', 'glossary_batch_size'),
+                    ('glossary_max_text_size_entry', 'glossary_max_text_size'),
+                    ('glossary_max_sentences_entry', 'glossary_max_sentences'),
+                    ('glossary_chapter_split_threshold_entry', 'glossary_chapter_split_threshold'),
+                ]
+                for field_name, var_name in text_field_to_var_mapping:
+                    if hasattr(self, field_name):
+                        try:
+                            value = int(getattr(self, field_name).text())
+                            self.config[var_name] = value
+                        except ValueError:
+                            pass  # Keep existing value if invalid
+                
+                # Update target language from combo box
+                if hasattr(self, 'glossary_target_language_combo'):
+                    self.config['glossary_target_language'] = self.glossary_target_language_combo.currentText()
+                
                 # Update duplicate detection algorithm from combo box
                 if hasattr(self, 'duplicate_algo_combo'):
                     algo_index = self.duplicate_algo_combo.currentIndex()

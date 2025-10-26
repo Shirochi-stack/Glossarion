@@ -5035,6 +5035,14 @@ def main(log_callback=None, stop_callback=None):
         print(f"📑 DEBUG: Fuzzy threshold = '{os.getenv('GLOSSARY_FUZZY_THRESHOLD', '0.90')}'")
         print(f"📑 DEBUG: Include gender context = '{os.getenv('GLOSSARY_INCLUDE_GENDER_CONTEXT', '0')}'")
         print(f"📑 DEBUG: Context window size = '{os.getenv('GLOSSARY_CONTEXT_WINDOW', '2')}'")
+        print(f"📑 DEBUG: Min frequency = '{os.getenv('GLOSSARY_MIN_FREQUENCY', '1')}'")
+        print(f"📑 DEBUG: Max names = '{os.getenv('GLOSSARY_MAX_NAMES', '50')}'")
+        print(f"📑 DEBUG: Max titles = '{os.getenv('GLOSSARY_MAX_TITLES', '50')}'")
+        print(f"📑 DEBUG: Translation batch = '{os.getenv('GLOSSARY_BATCH_SIZE', '50')}'")
+        print(f"📑 DEBUG: Max text size = '{os.getenv('GLOSSARY_MAX_TEXT_SIZE', '50000')}'")
+        print(f"📑 DEBUG: Max sentences = '{os.getenv('GLOSSARY_MAX_SENTENCES', '200')}'")
+        print(f"📑 DEBUG: Chapter split threshold = '{os.getenv('GLOSSARY_CHAPTER_SPLIT_THRESHOLD', '50000')}'")
+        print(f"📑 DEBUG: Target language = '{os.getenv('GLOSSARY_TARGET_LANGUAGE', 'English')}'")
         
         # Check if glossary.csv already exists in the source folder
         existing_glossary_csv = os.path.join(out, "glossary.csv")
