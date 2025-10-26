@@ -485,6 +485,7 @@ class GlossaryManagerMixin:
                     ('compress_glossary_checkbox', 'compress_glossary_prompt_var'),
                     ('include_gender_context_checkbox', 'include_gender_context_var'),
                     ('include_description_checkbox', 'include_description_var'),
+                    ('disable_smart_filtering_checkbox', 'glossary_disable_smart_filtering_var'),
                     ('glossary_history_rolling_checkbox', 'glossary_history_rolling_var'),
                     ('strip_honorifics_checkbox', 'strip_honorifics_var'),
                     ('disable_honorifics_checkbox', 'disable_honorifics_var'),
@@ -1291,6 +1292,21 @@ Rules:
         label5 = QLabel("(Adds a description/context field for each glossary entry)")
         description_layout.addWidget(label5)
         description_layout.addStretch()
+        
+        # Disable smart filtering toggle (below description)
+        disable_filtering_widget = QWidget()
+        disable_filtering_layout = QHBoxLayout(disable_filtering_widget)
+        disable_filtering_layout.setContentsMargins(0, 0, 0, 15)
+        auto_layout.addWidget(disable_filtering_widget)
+        
+        if not hasattr(self, 'disable_smart_filtering_checkbox'):
+            self.disable_smart_filtering_checkbox = self._create_styled_checkbox("Disable Smart Filtering (Send Full Text)")
+            self.disable_smart_filtering_checkbox.setChecked(self.config.get('glossary_disable_smart_filtering', False))
+        disable_filtering_layout.addWidget(self.disable_smart_filtering_checkbox)
+        
+        label6 = QLabel("(Disables all text filtering and sends the entire novel to the API - very expensive!)")
+        disable_filtering_layout.addWidget(label6)
+        disable_filtering_layout.addStretch()
         
         # Custom append prompt section
         append_prompt_frame = QGroupBox("Glossary Append Format")
