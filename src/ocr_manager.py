@@ -22,27 +22,48 @@ import base64
 import io
 import requests
 
-try:
-    import gptqmodel
-    HAS_GPTQ = True
-except ImportError:
-    try:
-        import auto_gptq
-        HAS_GPTQ = True
-    except ImportError:
-        HAS_GPTQ = False
+# Lazy import flags - don't import torch dependencies at module level
+# This prevents PyInstaller from loading torch DLLs before proper initialization
+HAS_GPTQ = None
+HAS_OPTIMUM = None
+HAS_ACCELERATE = None
 
-try:
-    import optimum
-    HAS_OPTIMUM = True
-except ImportError:
-    HAS_OPTIMUM = False
+def _check_accelerate():
+    """Lazy check for accelerate availability"""
+    global HAS_ACCELERATE
+    if HAS_ACCELERATE is None:
+        try:
+            import accelerate
+            HAS_ACCELERATE = True
+        except ImportError:
+            HAS_ACCELERATE = False
+    return HAS_ACCELERATE
 
-try:
-    import accelerate
-    HAS_ACCELERATE = True
-except ImportError:
-    HAS_ACCELERATE = False
+def _check_gptq():
+    """Lazy check for GPTQ availability"""
+    global HAS_GPTQ
+    if HAS_GPTQ is None:
+        try:
+            import gptqmodel
+            HAS_GPTQ = True
+        except ImportError:
+            try:
+                import auto_gptq
+                HAS_GPTQ = True
+            except ImportError:
+                HAS_GPTQ = False
+    return HAS_GPTQ
+
+def _check_optimum():
+    """Lazy check for optimum availability"""
+    global HAS_OPTIMUM
+    if HAS_OPTIMUM is None:
+        try:
+            import optimum
+            HAS_OPTIMUM = True
+        except ImportError:
+            HAS_OPTIMUM = False
+    return HAS_OPTIMUM
 
 logger = logging.getLogger(__name__)
 

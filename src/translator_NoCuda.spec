@@ -278,22 +278,26 @@ if platform.system() == 'Windows':
             if found:
                 break
     
-    # CRITICAL FIX: Add dependencies for shm.dll
-    # These are often in the torch/lib directory itself
+    # CRITICAL FIX: Collect ALL DLLs from torch/lib directory
+    # This ensures shm.dll, c10.dll, and all their dependencies are included
     try:
         import torch
         torch_lib = os.path.join(os.path.dirname(torch.__file__), 'lib')
         
-        # Check for dependencies that shm.dll needs
-        shm_deps = ['fbgemm.dll', 'asmjit.dll', 'cpuinfo.dll', 'c10.dll']
-        for dep_dll in shm_deps:
-            dep_path = os.path.join(torch_lib, dep_dll)
-            if os.path.exists(dep_path):
-                if not any(dep_path == b[0] for b in binaries):
-                    binaries.append((dep_path, 'torch/lib'))
-                    print(f"  Added shm.dll dependency: {dep_dll}")
-    except:
-        pass
+        if os.path.exists(torch_lib):
+            print(f"\n  Collecting ALL torch DLLs from: {torch_lib}")
+            dll_count = 0
+            for filename in os.listdir(torch_lib):
+                if filename.lower().endswith('.dll'):
+                    full_path = os.path.join(torch_lib, filename)
+                    # Check if not already added
+                    if not any(b[0] == full_path for b in binaries):
+                        binaries.append((full_path, 'torch/lib'))
+                        dll_count += 1
+                        print(f"    ✓ {filename}")
+            print(f"  Total torch DLLs added: {dll_count}\n")
+    except Exception as e:
+        print(f"  Warning: Could not collect torch DLLs: {e}")
 # ============================================================================
 # HIDDEN IMPORTS (Organized by category)
 # ============================================================================
@@ -1078,7 +1082,7 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=['./hooks'],  # Add custom hooks directory
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=['hooks/rthook_torch.py'],  # Critical: Initialize torch environment before imports
     excludes=excludes,
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

@@ -1081,6 +1081,31 @@ excludes = [
 ]
 
 # ============================================================================
+# COLLECT TORCH DLLS
+# ============================================================================
+
+if platform.system() == 'Windows':
+    # CRITICAL: Collect ALL DLLs from torch/lib directory
+    try:
+        import torch
+        torch_lib = os.path.join(os.path.dirname(torch.__file__), 'lib')
+        
+        if os.path.exists(torch_lib):
+            print(f"\n  Collecting ALL torch DLLs from: {torch_lib}")
+            dll_count = 0
+            for filename in os.listdir(torch_lib):
+                if filename.lower().endswith('.dll'):
+                    full_path = os.path.join(torch_lib, filename)
+                    # Check if not already added
+                    if not any(b[0] == full_path for b in binaries):
+                        binaries.append((full_path, 'torch/lib'))
+                        dll_count += 1
+                        print(f"    ✓ {filename}")
+            print(f"  Total torch DLLs added: {dll_count}\n")
+    except Exception as e:
+        print(f"  Warning: Could not collect torch DLLs: {e}")
+
+# ============================================================================
 # ANALYSIS
 # ============================================================================
 
@@ -1090,9 +1115,9 @@ a = Analysis(
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
-    hookspath=[],
+    hookspath=['./hooks'],  # Add custom hooks directory
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=['hooks/rthook_torch.py'],  # Critical: Initialize torch environment before imports
     excludes=excludes,
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
