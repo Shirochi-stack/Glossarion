@@ -1774,7 +1774,10 @@ Prioritize names that appear with honorifics or in important contexts."""
         
         # Load from config or use default
         # Note: Ignoring old 'auto_glossary_prompt' key to force update to new prompt
+        # Also treat empty strings as missing to ensure users get the new default
         self.unified_auto_glossary_prompt = self.config.get('unified_auto_glossary_prompt', default_unified_prompt)
+        if not self.unified_auto_glossary_prompt or not self.unified_auto_glossary_prompt.strip():
+            self.unified_auto_glossary_prompt = default_unified_prompt
         self.auto_prompt_text.setPlainText(self.unified_auto_glossary_prompt)
         
         glossary_prompt_controls_widget = QWidget()
