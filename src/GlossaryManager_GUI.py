@@ -1196,9 +1196,9 @@ Rules:
                     print(f"🔍 [UPDATE] manual_glossary_prompt: {len(self.manual_glossary_prompt)} chars")
             
             if hasattr(self, 'auto_prompt_text'):
-                self.auto_glossary_prompt = self.auto_prompt_text.toPlainText().strip()
+                self.unified_auto_glossary_prompt = self.auto_prompt_text.toPlainText().strip()
                 if debug_enabled:
-                    print(f"🔍 [UPDATE] auto_glossary_prompt: {len(self.auto_glossary_prompt)} chars")
+                    print(f"🔍 [UPDATE] unified_auto_glossary_prompt: {len(self.unified_auto_glossary_prompt)} chars")
             
             if hasattr(self, 'append_prompt_text'):
                 old_value = getattr(self, 'append_glossary_prompt', '<NOT SET>')
@@ -1773,8 +1773,9 @@ Extract up to {max_names} character names and {max_titles} titles.
 Prioritize names that appear with honorifics or in important contexts."""
         
         # Load from config or use default
-        self.auto_glossary_prompt = self.config.get('auto_glossary_prompt', default_unified_prompt)
-        self.auto_prompt_text.setPlainText(self.auto_glossary_prompt)
+        # Note: Ignoring old 'auto_glossary_prompt' key to force update to new prompt
+        self.unified_auto_glossary_prompt = self.config.get('unified_auto_glossary_prompt', default_unified_prompt)
+        self.auto_prompt_text.setPlainText(self.unified_auto_glossary_prompt)
         
         glossary_prompt_controls_widget = QWidget()
         glossary_prompt_controls_layout = QHBoxLayout(glossary_prompt_controls_widget)
