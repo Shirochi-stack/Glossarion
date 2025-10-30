@@ -3485,6 +3485,21 @@ def _create_prompt_management_section(self, parent):
     css_cb.setContentsMargins(0, 5, 0, 5)
     section_v.addWidget(css_cb)
     
+    # HTML serialization method toggle
+    html_method_cb = self._create_styled_checkbox("Use HTML Method for EPUB (Fixes spacing issues in Freda Reader)")
+    try:
+        html_method_cb.setChecked(bool(self.epub_use_html_method_var))
+    except Exception:
+        pass
+    def _on_html_method_toggle(checked):
+        try:
+            self.epub_use_html_method_var = bool(checked)
+        except Exception:
+            pass
+    html_method_cb.toggled.connect(_on_html_method_toggle)
+    html_method_cb.setContentsMargins(0, 5, 0, 5)
+    section_v.addWidget(html_method_cb)
+    
     # Output file naming
     retain_cb = self._create_styled_checkbox("Retain source extension (no 'response_' prefix)")
     try:

@@ -972,6 +972,7 @@ Text to analyze:
         self.ignore_title_var = self.config.get('ignore_title', False)
         self.use_sorted_fallback_var = self.config.get('use_sorted_fallback', False)  # Disabled by default
         self.attach_css_to_chapters_var = self.config.get('attach_css_to_chapters', False)
+        self.epub_use_html_method_var = self.config.get('epub_use_html_method', False)
         
         # Retain exact source extension and disable 'response_' prefix
         self.retain_source_extension_var = self.config.get('retain_source_extension', False)
@@ -5460,6 +5461,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'USE_GEMINI_OPENAI_ENDPOINT': '1' if self.use_gemini_openai_endpoint_var else '0',
             'GEMINI_OPENAI_ENDPOINT': self.gemini_openai_endpoint_var if self.gemini_openai_endpoint_var else '',
             "ATTACH_CSS_TO_CHAPTERS": "1" if self.attach_css_to_chapters_var else "0",
+            "EPUB_USE_HTML_METHOD": "1" if self.epub_use_html_method_var else "0",
             'GLOSSARY_FUZZY_THRESHOLD': str(self.config.get('glossary_fuzzy_threshold', 0.90)),
             'GLOSSARY_MAX_TEXT_SIZE': str(self.config.get('glossary_max_text_size', 50000)),
             'GLOSSARY_MAX_SENTENCES': str(self.config.get('glossary_max_sentences', 200)),
@@ -8534,6 +8536,7 @@ Important rules:
                 # Boolean toggles - prioritize checkboxes over vars
                 ('REMOVE_AI_ARTIFACTS', ['remove_artifacts_checkbox', 'REMOVE_AI_ARTIFACTS_var'], False, bool),
                 ('attach_css_to_chapters', ['attach_css_to_chapters_var'], False, bool),
+                ('epub_use_html_method', ['epub_use_html_method_var'], False, bool),
                 ('use_rolling_summary', ['rolling_summary_var'], False, bool),
                 ('translate_book_title', ['translate_book_title_var'], False, bool),
                 ('emergency_paragraph_restore', ['emergency_restore_var'], False, bool),

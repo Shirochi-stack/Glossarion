@@ -638,7 +638,10 @@ class XHTMLConverter:
             doc = lxml_html.document_fromstring(f"<div>{html_content}</div>", parser=parser)
             
             # Get the content back
-            body_xhtml = etree.tostring(doc, method='xml', encoding='unicode')
+            # Use HTML method if enabled (better whitespace preservation for buggy readers like Freda)
+            # but may reduce XHTML compliance. Default: xml (strict XHTML)
+            serialize_method = 'html' if os.getenv('EPUB_USE_HTML_METHOD', '0') == '1' else 'xml'
+            body_xhtml = etree.tostring(doc, method=serialize_method, encoding='unicode')
             # Remove the wrapper div we added
             body_xhtml = re.sub(r'^<div[^>]*>|</div>$', '', body_xhtml)
             
@@ -2870,6 +2873,12 @@ h1 {
 p {
     margin: 1em 0;
     text-indent: 0;
+    white-space: normal;
+}
+
+/* Ensure proper word spacing for readers like Freda */
+body, p, div, span {
+    word-spacing: normal;
 }
 
 img {
