@@ -11,13 +11,22 @@ import faulthandler
 import platform
 
 # PySide6 imports (replacing Tkinter)
-from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QLineEdit, QPushButton,
-                                QTextEdit, QVBoxLayout, QHBoxLayout, QGridLayout, QFrame,
-                                QMenuBar, QMenu, QMessageBox, QFileDialog, QDialog,
-                                QScrollArea, QTabWidget, QCheckBox, QComboBox, QSpinBox,
-                                QSizePolicy, QSplitter, QProgressBar, QStyle, QToolButton, QGraphicsOpacityEffect)
-from PySide6.QtCore import Qt, Signal, Slot, QTimer, QThread, QSize, QEvent, QPropertyAnimation, QEasingCurve, Property
-from PySide6.QtGui import QFont, QColor, QIcon, QTextCursor, QKeySequence, QAction, QTextCharFormat, QTransform
+try:
+    from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QLineEdit, QPushButton,
+                                    QTextEdit, QVBoxLayout, QHBoxLayout, QGridLayout, QFrame,
+                                    QMenuBar, QMenu, QMessageBox, QFileDialog, QDialog,
+                                    QScrollArea, QTabWidget, QCheckBox, QComboBox, QSpinBox,
+                                    QSizePolicy, QSplitter, QProgressBar, QStyle, QToolButton, QGraphicsOpacityEffect)
+    from PySide6.QtCore import Qt, Signal, Slot, QTimer, QThread, QSize, QEvent, QPropertyAnimation, QEasingCurve, Property
+    from PySide6.QtGui import QFont, QColor, QIcon, QTextCursor, QKeySequence, QAction, QTextCharFormat, QTransform
+except ImportError as e:
+    print(f"\n{'='*60}")
+    print("ERROR: PySide6 is not installed or could not be imported.")
+    print(f"\nDetails: {e}")
+    print(f"\nPlease install PySide6 using:")
+    print("  pip install PySide6")
+    print(f"{'='*60}\n")
+    sys.exit(1)
 
 from ai_hunter_enhanced import AIHunterConfigGUI, ImprovedAIHunterDetection
 import traceback

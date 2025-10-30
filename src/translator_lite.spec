@@ -1012,9 +1012,9 @@ a = Analysis(
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
-    hookspath=[],
+    hookspath=['.'],  # Use custom hooks in current directory (bypasses PySide6.QtNetwork SSL check)
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=['pyi_rth_win32_runtime.py'],  # Fix R6034 runtime conflicts
     excludes=excludes,
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
@@ -1022,7 +1022,7 @@ a = Analysis(
     noarchive=False,
 )
 
-# Simple cleanup after Analysis
+# Simple cleanup after Analysis + Fix R6034 runtime conflicts
 a.binaries = [b for b in a.binaries if not any([
     b[0].endswith('opencv_videoio_ffmpeg490_64.dll'),
     'scipy.libs' in b[0],
@@ -1032,6 +1032,9 @@ a.binaries = [b for b in a.binaries if not any([
     'hdf5.dll' in b[0],
     'libsndfile' in b[0],
     'geos-' in b[0],
+    # Remove conflicting MSVC runtime DLLs (keep only system ones)
+    b[0].lower() in ['msvcr90.dll', 'msvcp90.dll', 'msvcr100.dll', 'msvcp100.dll',
+                     'msvcr110.dll', 'msvcp110.dll', 'msvcr120.dll', 'msvcp120.dll'],
 ])]
 
 # Remove torch only
