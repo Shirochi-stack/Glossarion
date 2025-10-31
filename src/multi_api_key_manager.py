@@ -2054,6 +2054,31 @@ class MultiAPIKeyDialog(QDialog):
                     output_dir=None
                 )
                 
+                # Set Google credentials and other key-specific settings
+                google_credentials = key_data.get('google_credentials')
+                if google_credentials:
+                    client.current_key_google_creds = google_credentials
+                    client.google_creds_path = google_credentials
+                    print(f"[DEBUG] Set Google credentials for fallback test: {os.path.basename(google_credentials)}")
+                
+                google_region = key_data.get('google_region')
+                if google_region:
+                    client.current_key_google_region = google_region
+                    print(f"[DEBUG] Set Google region for fallback test: {google_region}")
+                
+                # Set Azure endpoint settings if configured
+                use_individual_endpoint = key_data.get('use_individual_endpoint', False)
+                if use_individual_endpoint:
+                    azure_endpoint = key_data.get('azure_endpoint')
+                    if azure_endpoint:
+                        client.current_key_azure_endpoint = azure_endpoint
+                        client.current_key_use_individual_endpoint = True
+                        print(f"[DEBUG] Set Azure endpoint for fallback test: {azure_endpoint[:50]}...")
+                    
+                    azure_api_version = key_data.get('azure_api_version')
+                    if azure_api_version:
+                        client.current_key_azure_api_version = azure_api_version
+                
                 messages = [
                     {"role": "system", "content": "You are a helpful assistant."},
                     {"role": "user", "content": "Say 'API test successful' and nothing else."}
@@ -2062,7 +2087,7 @@ class MultiAPIKeyDialog(QDialog):
                 response = client.send(
                     messages,
                     temperature=0.7,
-                    max_tokens=100
+                    max_tokens=1000
                 )
                 
                 if response and isinstance(response, tuple):
@@ -3689,6 +3714,26 @@ class MultiAPIKeyDialog(QDialog):
                     output_dir=None
                 )
                 
+                # Set Google credentials and other key-specific settings
+                if hasattr(key, 'google_credentials') and key.google_credentials:
+                    client.current_key_google_creds = key.google_credentials
+                    client.google_creds_path = key.google_credentials
+                    print(f"[DEBUG] Set Google credentials for test: {os.path.basename(key.google_credentials)}")
+                
+                if hasattr(key, 'google_region') and key.google_region:
+                    client.current_key_google_region = key.google_region
+                    print(f"[DEBUG] Set Google region for test: {key.google_region}")
+                
+                # Set Azure endpoint settings if configured
+                if hasattr(key, 'use_individual_endpoint') and key.use_individual_endpoint:
+                    if hasattr(key, 'azure_endpoint') and key.azure_endpoint:
+                        client.current_key_azure_endpoint = key.azure_endpoint
+                        client.current_key_use_individual_endpoint = True
+                        print(f"[DEBUG] Set Azure endpoint for test: {key.azure_endpoint[:50]}...")
+                    
+                    if hasattr(key, 'azure_api_version') and key.azure_api_version:
+                        client.current_key_azure_api_version = key.azure_api_version
+                
                 messages = [
                     {"role": "system", "content": "You are a helpful assistant."},
                     {"role": "user", "content": "Say 'API test successful' and nothing else."}
@@ -3697,7 +3742,7 @@ class MultiAPIKeyDialog(QDialog):
                 response = client.send(
                     messages,
                     temperature=0.7,
-                    max_tokens=100
+                    max_tokens=1000
                 )
                 
                 if response and isinstance(response, tuple):
@@ -4007,7 +4052,7 @@ class MultiAPIKeyDialog(QDialog):
                             {"role": "system", "content": "You are a helpful assistant."},
                             {"role": "user", "content": "Say 'API test successful' and nothing else."}
                         ],
-                        max_tokens=100,
+                        max_tokens=1000,
                         temperature=0.7
                     )
                     
@@ -4030,6 +4075,23 @@ class MultiAPIKeyDialog(QDialog):
                         output_dir=None
                     )
                     
+                    # Set Google credentials and other key-specific settings
+                    if hasattr(key, 'google_credentials') and key.google_credentials:
+                        client.current_key_google_creds = key.google_credentials
+                        client.google_creds_path = key.google_credentials
+                    
+                    if hasattr(key, 'google_region') and key.google_region:
+                        client.current_key_google_region = key.google_region
+                    
+                    # Set Azure endpoint settings if configured
+                    if hasattr(key, 'use_individual_endpoint') and key.use_individual_endpoint:
+                        if hasattr(key, 'azure_endpoint') and key.azure_endpoint:
+                            client.current_key_azure_endpoint = key.azure_endpoint
+                            client.current_key_use_individual_endpoint = True
+                        
+                        if hasattr(key, 'azure_api_version') and key.azure_api_version:
+                            client.current_key_azure_api_version = key.azure_api_version
+                    
                     messages = [
                         {"role": "system", "content": "You are a helpful assistant."},
                         {"role": "user", "content": "Say 'API test successful' and nothing else."}
@@ -4038,7 +4100,7 @@ class MultiAPIKeyDialog(QDialog):
                     response = client.send(
                         messages,
                         temperature=0.7,
-                        max_tokens=100
+                        max_tokens=1000
                     )
                     
                     if response and isinstance(response, tuple):
