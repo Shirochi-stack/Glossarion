@@ -1138,11 +1138,11 @@ class GlossaryManagerMixin:
         prompt_frame_layout = QVBoxLayout(prompt_frame)
         manual_layout.addWidget(prompt_frame)
         
-        label1 = QLabel("Use {fields} for field list and {chapter_text} for content placeholder")
+        label1 = QLabel("Use {fields} for field list and {language} for target language")
         # label1.setStyleSheet("color: white; font-size: 9pt;")
         prompt_frame_layout.addWidget(label1)
         
-        label2 = QLabel("The {fields} placeholder will be replaced with the format specification")
+        label2 = QLabel("Placeholders will be replaced with actual values during extraction")
         # label2.setStyleSheet("color: gray; font-size: 9pt;")
         prompt_frame_layout.addWidget(label2)
         

@@ -1244,7 +1244,8 @@ class GlossarionWeb:
         fuzzy_threshold=0.90,
         extraction_prompt=None,
         format_instructions=None,
-        use_legacy_csv=False
+        use_legacy_csv=False,
+        target_language='English'
     ):
         """Extract glossary from EPUB with manual extraction settings - yields progress updates"""
         
@@ -1297,7 +1298,9 @@ class GlossarionWeb:
             
             # Set prompts if provided
             if extraction_prompt:
-                os.environ['GLOSSARY_SYSTEM_PROMPT'] = extraction_prompt
+                # Format the prompt with language placeholder
+                formatted_prompt = extraction_prompt.replace('{language}', target_language)
+                os.environ['GLOSSARY_SYSTEM_PROMPT'] = formatted_prompt
             if format_instructions:
                 os.environ['GLOSSARY_FORMAT_INSTRUCTIONS'] = format_instructions
             

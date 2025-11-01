@@ -900,6 +900,11 @@ def build_prompt(chapter_text: str) -> tuple:
     """Build the extraction prompt with custom types - returns (system_prompt, user_prompt)"""
     custom_prompt = os.getenv('GLOSSARY_SYSTEM_PROMPT', '').strip()
     
+    # Replace {language} placeholder with target language
+    target_language = os.getenv('GLOSSARY_TARGET_LANGUAGE', 'English')
+    if custom_prompt and '{language}' in custom_prompt:
+        custom_prompt = custom_prompt.replace('{language}', target_language)
+    
     if not custom_prompt:
         # If no custom prompt, create a default
         custom_prompt = """Extract all character names and important terms from the text.
@@ -936,8 +941,10 @@ Return the data in the exact format specified above."""
             fields_spec.append(','.join(header_parts))
             
             # Show examples for each type
+            # Get target language from environment
+            target_language = os.getenv('GLOSSARY_TARGET_LANGUAGE', 'English')
             for type_name, type_config in enabled_types:
-                example_parts = [type_name, '<name in original language>', '<English translation>']
+                example_parts = [type_name, '<name in original language>', f'<{target_language} translation>']
                 
                 # Add gender field
                 if type_config.get('has_gender', False):
