@@ -1717,6 +1717,7 @@ def main(log_callback=None, stop_callback=None):
                 mtoks = config.get('max_tokens', 4196)
             
             batch_entry_count = 0
+            stopped_early = False
             
             with ThreadPoolExecutor(max_workers=len(current_batch)) as executor:
                 futures = {}
@@ -1724,12 +1725,7 @@ def main(log_callback=None, stop_callback=None):
                 # Submit all chapters in the batch
                 for idx, chap in current_batch:
                     if check_stop():
-                        # Apply deduplication before breaking
-                        if glossary:
-                            print("🔀 Applying deduplication before stopping...")
-                            glossary[:] = skip_duplicate_entries(glossary)
-                            save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
-                            save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+                        stopped_early = True
                         break
                         
                     # Get system and user prompts
@@ -1763,31 +1759,10 @@ def main(log_callback=None, stop_callback=None):
                 for future in as_completed(futures):
                     if check_stop():
                         print("🛑 Stop detected - cancelling all pending operations...")
+                        stopped_early = True
                         cancelled = cancel_all_futures(list(futures.keys()))
                         if cancelled > 0:
                             print(f"✅ Cancelled {cancelled} pending API calls")
-                        
-                        # Apply deduplication before stopping
-                        if glossary:
-                            print("🔀 Applying deduplication and sorting before exit...")
-                            glossary[:] = skip_duplicate_entries(glossary)
-                            
-                            # Sort glossary
-                            custom_types = get_custom_entry_types()
-                            type_order = {'character': 0, 'term': 1}
-                            other_types = sorted([t for t in custom_types.keys() if t not in ['character', 'term']])
-                            for i, t in enumerate(other_types):
-                                type_order[t] = i + 2
-                            glossary.sort(key=lambda x: (
-                                type_order.get(x.get('type', 'term'), 999),
-                                x.get('raw_name', '').lower()
-                            ))
-                            
-                            save_progress(completed, glossary, history)
-                            save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
-                            save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
-                            print(f"✅ Saved {len(glossary)} deduplicated entries before exit")
-                        
                         executor.shutdown(wait=False)
                         break
                     
@@ -1846,8 +1821,8 @@ def main(log_callback=None, stop_callback=None):
             batch_elapsed = time.time() - batch_start_time
             print(f"[BATCH] Batch {batch_num+1} completed in {batch_elapsed:.1f}s total")
             
-            # After batch completes, apply deduplication and sorting
-            if batch_entry_count > 0:
+            # After batch completes, apply deduplication and sorting (only if not stopped early)
+            if batch_entry_count > 0 and not stopped_early:
                 print(f"\n🔀 Applying deduplication and sorting after batch {batch_num+1}/{total_batches}")
                 original_size = len(glossary)
                 
@@ -1884,6 +1859,28 @@ def main(log_callback=None, stop_callback=None):
                 print(f"   • Chapters processed: {len(current_batch)}")
                 print(f"   • Total entries extracted: {batch_entry_count}")
                 print(f"   • Glossary size: {len(glossary)} unique entries")
+            
+            # If stopped early, deduplicate once and exit
+            if stopped_early:
+                if glossary:
+                    print(f"\n🔀 Deduplicating {len(glossary)} entries before exit...")
+                    glossary[:] = skip_duplicate_entries(glossary)
+                    
+                    custom_types = get_custom_entry_types()
+                    type_order = {'character': 0, 'term': 1}
+                    other_types = sorted([t for t in custom_types.keys() if t not in ['character', 'term']])
+                    for i, t in enumerate(other_types):
+                        type_order[t] = i + 2
+                    glossary.sort(key=lambda x: (
+                        type_order.get(x.get('type', 'term'), 999),
+                        x.get('raw_name', '').lower()
+                    ))
+                    
+                    save_progress(completed, glossary, history)
+                    save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+                    save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+                    print(f"✅ Saved {len(glossary)} deduplicated entries before exit")
+                return
             
             # Handle context history
             if contextual_enabled:
