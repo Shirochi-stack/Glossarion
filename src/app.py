@@ -4658,6 +4658,16 @@ class GlossarionWeb:
                                                     value=self.get_config_value('glossary_chapter_split_threshold', 8192),
                                                     info="Split large texts into chunks (0 = no splitting)"
                                                 )
+                                                
+                                                # Target language dropdown
+                                                target_language = gr.Dropdown(
+                                                    choices=["English", "Spanish", "French", "German", "Italian", "Portuguese",
+                                                            "Russian", "Arabic", "Hindi", "Chinese (Simplified)",
+                                                            "Chinese (Traditional)", "Japanese", "Korean"],
+                                                    value=self.get_config_value('glossary_target_language', 'English'),
+                                                    label="Target language",
+                                                    info="Language for translated glossary entries"
+                                                )
                                         
                                         # Filter mode selection
                                         filter_mode = gr.Radio(
@@ -4696,6 +4706,16 @@ class GlossarionWeb:
                                     Customize how the AI extracts names and terms from your text.
                                     """)
                                     
+                                    # Target language dropdown (synced with extraction settings)
+                                    target_language_prompt = gr.Dropdown(
+                                        choices=["English", "Spanish", "French", "German", "Italian", "Portuguese",
+                                                "Russian", "Arabic", "Hindi", "Chinese (Simplified)",
+                                                "Chinese (Traditional)", "Japanese", "Korean"],
+                                        value=self.get_config_value('glossary_target_language', 'English'),
+                                        label="Target language",
+                                        info="Language for translated glossary entries"
+                                    )
+                                    
                                     extraction_prompt = gr.Textbox(
                                         label="Extraction Template (Use placeholders: {language}, {min_frequency}, {max_names}, {max_titles})",
                                         lines=10,
@@ -4705,7 +4725,9 @@ class GlossarionWeb:
                                             "Rules:\n- Output ONLY CSV lines in the exact format shown above\n"
                                             "- No headers, no extra text, no JSON\n"
                                             "- One entry per line\n"
-                                            "- Leave gender empty for terms (just end with comma)")
+                                            "- Leave gender empty for terms (just end with comma)\n"
+                                            "- Exclude generic entries like pronouns (I, you, he, she, etc.) and common nouns (father, mother, etc.)\n"
+                                            "- For all fields except 'raw_name', use {language} translation")
                                     )
                                     
                                     reset_extraction_prompt_btn = gr.Button(
@@ -4819,7 +4841,8 @@ class GlossarionWeb:
                             fuzzy_threshold,
                             extraction_prompt,
                             format_instructions,
-                            use_legacy_csv
+                            use_legacy_csv,
+                            target_language
                         ],
                         outputs=[
                             glossary_output,
@@ -4839,6 +4862,19 @@ class GlossarionWeb:
                         fn=self.stop_glossary_extraction,
                         inputs=[],
                         outputs=[extract_btn, stop_glossary_btn, glossary_status]
+                    )
+                    
+                    # Sync target language dropdowns
+                    target_language.change(
+                        fn=lambda x: x,
+                        inputs=[target_language],
+                        outputs=[target_language_prompt]
+                    )
+                    
+                    target_language_prompt.change(
+                        fn=lambda x: x,
+                        inputs=[target_language_prompt],
+                        outputs=[target_language]
                     )
                 
                 # QA Scanner Tab

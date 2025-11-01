@@ -521,9 +521,11 @@ class GlossaryManagerMixin:
                         except ValueError:
                             pass  # Keep existing value if invalid
                 
-                # Update target language from combo box
+                # Update target language from combo box (check both auto and manual)
                 if hasattr(self, 'glossary_target_language_combo'):
                     self.config['glossary_target_language'] = self.glossary_target_language_combo.currentText()
+                elif hasattr(self, 'manual_target_language_combo'):
+                    self.config['glossary_target_language'] = self.manual_target_language_combo.currentText()
                 
                 # Update duplicate detection algorithm from combo box
                 if hasattr(self, 'duplicate_algo_combo'):
@@ -1067,6 +1069,70 @@ class GlossaryManagerMixin:
         # Initialize description
         update_manual_fuzzy_label(self.manual_fuzzy_slider.value())
         
+        # Target language dropdown (above prompt)
+        language_frame = QGroupBox("Target Language")
+        language_frame_layout = QVBoxLayout(language_frame)
+        manual_layout.addWidget(language_frame)
+        
+        # Create language dropdown
+        if not hasattr(self, 'manual_target_language_combo'):
+            self.manual_target_language_combo = QComboBox()
+            self.manual_target_language_combo.setMaximumWidth(200)
+            languages = [
+                "English", "Spanish", "French", "German", "Italian", "Portuguese",
+                "Russian", "Arabic", "Hindi", "Chinese (Simplified)",
+                "Chinese (Traditional)", "Japanese", "Korean"
+            ]
+            self.manual_target_language_combo.addItems(languages)
+            
+            # Use icon in dropdown arrow like auto glossary dropdown
+            try:
+                icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+                if os.path.exists(icon_path):
+                    combo_style = """
+                        QComboBox {
+                            padding-right: 28px;
+                        }
+                        QComboBox::drop-down {
+                            subcontrol-origin: padding;
+                            subcontrol-position: top right;
+                            width: 24px;
+                            border-left: 1px solid #4a5568;
+                        }
+                        QComboBox::down-arrow {
+                            width: 16px;
+                            height: 16px;
+                            image: url(""" + icon_path.replace('\\', '/') + """);
+                        }
+                        QComboBox::down-arrow:on {
+                            top: 1px;
+                        }
+                    """
+                    self.manual_target_language_combo.setStyleSheet(combo_style)
+            except Exception:
+                pass
+        
+        saved_language = self.config.get('glossary_target_language', 'English')
+        index = self.manual_target_language_combo.findText(saved_language)
+        if index >= 0:
+            self.manual_target_language_combo.setCurrentIndex(index)
+        
+        # Sync with auto glossary language dropdown
+        def sync_manual_to_auto(text):
+            if hasattr(self, 'glossary_target_language_combo'):
+                auto_index = self.glossary_target_language_combo.findText(text)
+                if auto_index >= 0:
+                    self.glossary_target_language_combo.blockSignals(True)
+                    self.glossary_target_language_combo.setCurrentIndex(auto_index)
+                    self.glossary_target_language_combo.blockSignals(False)
+        
+        self.manual_target_language_combo.currentTextChanged.connect(sync_manual_to_auto)
+        
+        language_frame_layout.addWidget(self.manual_target_language_combo)
+        
+        lang_desc = QLabel("Language for translated glossary entries (synced with Extraction Settings)")
+        language_frame_layout.addWidget(lang_desc)
+        
         # Prompt section
         prompt_frame = QGroupBox("Extraction Prompt")
         prompt_frame_layout = QVBoxLayout(prompt_frame)
@@ -1098,6 +1164,8 @@ Rules:
 - No headers, no extra text, no JSON
 - One entry per line
 - Leave gender empty for terms (just end with comma)
+- Exclude generic entries like pronouns (I, you, he, she, etc.) and common nouns (father, mother, etc.)
+- For all fields except 'raw_name', use {language} translation
     """
         self.manual_glossary_prompt = self.config.get('manual_glossary_prompt', default_manual_prompt)
         
@@ -1122,6 +1190,8 @@ Rules:
     - No headers, no extra text, no JSON
     - One entry per line
     - Leave gender empty for terms (just end with comma)
+    - Exclude generic entries like pronouns (I, you, he, she, etc.) and common nouns (father, mother, etc.)
+    - For all fields except 'raw_name', use {language} translation
     """
                 self.manual_prompt_text.setPlainText(default_prompt)
         
@@ -1514,6 +1584,17 @@ Rules:
         index = self.glossary_target_language_combo.findText(saved_language)
         if index >= 0:
             self.glossary_target_language_combo.setCurrentIndex(index)
+        
+        # Sync with manual glossary language dropdown
+        def sync_auto_to_manual(text):
+            if hasattr(self, 'manual_target_language_combo'):
+                manual_index = self.manual_target_language_combo.findText(text)
+                if manual_index >= 0:
+                    self.manual_target_language_combo.blockSignals(True)
+                    self.manual_target_language_combo.setCurrentIndex(manual_index)
+                    self.manual_target_language_combo.blockSignals(False)
+        
+        self.glossary_target_language_combo.currentTextChanged.connect(sync_auto_to_manual)
         
         extraction_grid.addWidget(_pair("Target language:", self.glossary_target_language_combo), 2, 2, 1, 2)
         

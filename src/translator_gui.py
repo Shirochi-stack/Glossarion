@@ -1727,6 +1727,8 @@ Rules:
 - No headers, no extra text, no JSON
 - One entry per line
 - Leave gender empty for terms (just end with comma)
+- Exclude generic entries like pronouns (I, you, he, she, etc.) and common nouns (father, mother, etc.)
+- For all fields except 'raw_name', use {language} translation
 """
         
         self.default_unified_auto_glossary_prompt = """You are a glossary extraction assistant for Korean / Japanese / Chinese novels.
