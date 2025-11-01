@@ -10,6 +10,7 @@ import threading
 import queue
 import ebooklib
 import re
+import tempfile
 from ebooklib import epub
 from chapter_splitter import ChapterSplitter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -160,6 +161,11 @@ MAX_GLOSSARY_TOKENS, GLOSSARY_LIMIT_STR = parse_glossary_token_limit()
 
 # Global stop flag for GUI integration
 _stop_requested = False
+
+# Threading locks for atomic glossary saves
+_glossary_json_lock = threading.Lock()
+_glossary_csv_lock = threading.Lock()
+_progress_lock = threading.Lock()
 
 def set_stop_flag(value):
     """Set the global stop flag"""
@@ -356,183 +362,266 @@ def get_custom_entry_types():
 
 def save_glossary_json(glossary: List[Dict], output_path: str):
     """Save glossary in the new simple format with automatic sorting by type"""
-    # Get custom types for sorting order
-    custom_types = get_custom_entry_types()
+    global _glossary_json_lock
     
-    # Create sorting order: character=0, term=1, others alphabetically starting from 2
-    type_order = {'character': 0, 'term': 1}
-    other_types = sorted([t for t in custom_types.keys() if t not in ['character', 'term']])
-    for i, t in enumerate(other_types):
-        type_order[t] = i + 2
-    
-    # Sort glossary by type order, then by raw_name
-    sorted_glossary = sorted(glossary, key=lambda x: (
-        type_order.get(x.get('type', 'term'), 999),  # Unknown types go last
-        x.get('raw_name', '').lower()
-    ))
-    
-    with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(sorted_glossary, f, ensure_ascii=False, indent=2)
+    # Acquire lock to prevent concurrent writes
+    with _glossary_json_lock:
+        # Get custom types for sorting order
+        custom_types = get_custom_entry_types()
+        
+        # Create sorting order: character=0, term=1, others alphabetically starting from 2
+        type_order = {'character': 0, 'term': 1}
+        other_types = sorted([t for t in custom_types.keys() if t not in ['character', 'term']])
+        for i, t in enumerate(other_types):
+            type_order[t] = i + 2
+        
+        # Sort glossary by type order, then by raw_name
+        sorted_glossary = sorted(glossary, key=lambda x: (
+            type_order.get(x.get('type', 'term'), 999),  # Unknown types go last
+            x.get('raw_name', '').lower()
+        ))
+        
+        # Use atomic write to prevent corruption during parallel saves
+        try:
+            # Create temp file in the same directory for atomic rename
+            output_dir = os.path.dirname(output_path) or '.'
+            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=output_dir, delete=False, suffix='.tmp') as temp_f:
+                temp_path = temp_f.name
+                json.dump(sorted_glossary, temp_f, ensure_ascii=False, indent=2)
+                temp_f.flush()
+                # Skip fsync - atomic rename is safe, and fsync blocks on Windows
+            
+            # Atomic rename
+            try:
+                if os.path.exists(output_path):
+                    os.remove(output_path)
+                os.rename(temp_path, output_path)
+            except Exception as e:
+                # If rename fails, try to clean up temp file
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except:
+                        pass
+                raise
+        except Exception as e:
+            print(f"[Warning] Atomic write failed for JSON: {e}. Attempting direct write...")
+            try:
+                with open(output_path, 'w', encoding='utf-8') as f:
+                    json.dump(sorted_glossary, f, ensure_ascii=False, indent=2)
+            except Exception as e2:
+                print(f"[Error] Failed to save glossary JSON: {e2}")
 
 def save_glossary_csv(glossary: List[Dict], output_path: str):
     """Save glossary in CSV or token-efficient format based on environment variable"""
+    global _glossary_csv_lock
     import csv
     
-    csv_path = output_path.replace('.json', '.csv')
-    
-    # Get custom types for sorting order and gender info
-    custom_types = get_custom_entry_types()
-    
-    # Create sorting order
-    type_order = {'character': 0, 'term': 1}
-    other_types = sorted([t for t in custom_types.keys() if t not in ['character', 'term']])
-    for i, t in enumerate(other_types):
-        type_order[t] = i + 2
-    
-    # Sort glossary
-    sorted_glossary = sorted(glossary, key=lambda x: (
-        type_order.get(x.get('type', 'term'), 999),
-        x.get('raw_name', '').lower()
-    ))
-    
-    # Check if we should use legacy CSV format
-    use_legacy_format = os.getenv('GLOSSARY_USE_LEGACY_CSV', '0') == '1'
-    
-    if use_legacy_format:
-        # LEGACY CSV FORMAT
-        with open(csv_path, 'w', encoding='utf-8', newline='') as f:
-            writer = csv.writer(f)
-            
-            # Build header row
-            header = ['type', 'raw_name', 'translated_name', 'gender']
-            
-            # Add any custom fields to header
-            custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
-            try:
-                custom_fields = json.loads(custom_fields_json)
-                header.extend(custom_fields)
-            except:
-                custom_fields = []
-            
-            # Write header row
-            writer.writerow(header)
-            
-            # Write data rows
-            for entry in sorted_glossary:
-                entry_type = entry.get('type', 'term')
-                type_config = custom_types.get(entry_type, {})
-                
-                # Base row: type, raw_name, translated_name
-                row = [entry_type, entry.get('raw_name', ''), entry.get('translated_name', '')]
-                
-                # Add gender only if type supports it
-                if type_config.get('has_gender', False):
-                    row.append(entry.get('gender', ''))
-                
-                # Add custom field values
-                for field in custom_fields:
-                    row.append(entry.get(field, ''))
-                
-                # Count how many fields we SHOULD have
-                expected_fields = 4 + len(custom_fields)  # type, raw_name, translated_name, gender + custom fields
-                
-                # Only trim if we have MORE than expected (extra trailing empties)
-                while len(row) > expected_fields and row[-1] == '':
-                    row.pop()
-                
-                # Ensure minimum required fields (type, raw_name, translated_name)
-                while len(row) < 3:
-                    row.append('')
-                
-                # Write row
-                writer.writerow(row)
+    with _glossary_csv_lock:
+        csv_path = output_path.replace('.json', '.csv')
+        custom_types = get_custom_entry_types()
+        type_order = {'character': 0, 'term': 1}
+        other_types = sorted([t for t in custom_types.keys() if t not in ['character', 'term']])
+        for i, t in enumerate(other_types):
+            type_order[t] = i + 2
         
-        print(f"✅ Saved legacy CSV format: {csv_path}")
-    
-    else:
-        # NEW TOKEN-EFFICIENT FORMAT (DEFAULT)
-        # Group entries by type
-        grouped_entries = {}
-        for entry in sorted_glossary:
-            entry_type = entry.get('type', 'term')
-            if entry_type not in grouped_entries:
-                grouped_entries[entry_type] = []
-            grouped_entries[entry_type].append(entry)
+        sorted_glossary = sorted(glossary, key=lambda x: (
+            type_order.get(x.get('type', 'term'), 999),
+            x.get('raw_name', '').lower()
+        ))
         
-        # Get custom fields configuration
-        custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
+        use_legacy_format = os.getenv('GLOSSARY_USE_LEGACY_CSV', '0') == '1'
+        csv_dir = os.path.dirname(csv_path) or '.'
+        
         try:
-            custom_fields = json.loads(custom_fields_json)
-        except:
-            custom_fields = []
-        
-        # Write as plain text format for token efficiency
-        with open(csv_path, 'w', encoding='utf-8') as f:
-            # Write dynamic column header showing all columns
-            column_headers = ['translated_name', 'raw_name']
-            # Add gender if any type supports it
-            has_gender = any(type_config.get('has_gender', False) for type_config in custom_types.values())
-            if has_gender:
-                column_headers.append('gender')
-            if custom_fields:
-                column_headers.extend(custom_fields)
-            f.write(f"Glossary Columns: {', '.join(column_headers)}\n\n")
+            if use_legacy_format:
+                with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=csv_dir, delete=False, newline='', suffix='.tmp') as temp_f:
+                    temp_path = temp_f.name
+                    writer = csv.writer(temp_f)
+                    header = ['type', 'raw_name', 'translated_name', 'gender']
+                    custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
+                    try:
+                        custom_fields = json.loads(custom_fields_json)
+                        header.extend(custom_fields)
+                    except:
+                        custom_fields = []
+                    writer.writerow(header)
+                    for entry in sorted_glossary:
+                        entry_type = entry.get('type', 'term')
+                        type_config = custom_types.get(entry_type, {})
+                        row = [entry_type, entry.get('raw_name', ''), entry.get('translated_name', '')]
+                        if type_config.get('has_gender', False):
+                            row.append(entry.get('gender', ''))
+                        for field in custom_fields:
+                            row.append(entry.get(field, ''))
+                        expected_fields = 4 + len(custom_fields)
+                        while len(row) > expected_fields and row[-1] == '':
+                            row.pop()
+                        while len(row) < 3:
+                            row.append('')
+                        writer.writerow(row)
+                    temp_f.flush()
+                    # Skip fsync - atomic rename is safe
+                
+                try:
+                    if os.path.exists(csv_path):
+                        os.remove(csv_path)
+                    os.rename(temp_path, csv_path)
+                except Exception as e:
+                    if os.path.exists(temp_path):
+                        try:
+                            os.remove(temp_path)
+                        except:
+                            pass
+                    raise
+                print(f"✅ Saved legacy CSV format: {csv_path}")
             
-            # Process each type group
-            for entry_type in sorted(grouped_entries.keys(), key=lambda x: type_order.get(x, 999)):
-                entries = grouped_entries[entry_type]
-                type_config = custom_types.get(entry_type, {})
+            else:
+                grouped_entries = {}
+                for entry in sorted_glossary:
+                    entry_type = entry.get('type', 'term')
+                    if entry_type not in grouped_entries:
+                        grouped_entries[entry_type] = []
+                    grouped_entries[entry_type].append(entry)
                 
-                # Write section header
-                section_name = entry_type.upper() + 'S' if not entry_type.upper().endswith('S') else entry_type.upper()
-                f.write(f"=== {section_name} ===\n")
+                custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
+                try:
+                    custom_fields = json.loads(custom_fields_json)
+                except:
+                    custom_fields = []
                 
-                # Write entries for this type with indentation
-                for entry in entries:
-                    # Build the entry line
-                    raw_name = entry.get('raw_name', '')
-                    translated_name = entry.get('translated_name', '')
+                with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=csv_dir, delete=False, suffix='.tmp') as temp_f:
+                    temp_path = temp_f.name
                     
-                    # Start with asterisk and name
-                    line = f"* {translated_name} ({raw_name})"
-                    
-                    # Add gender if applicable and not Unknown
-                    if type_config.get('has_gender', False):
-                        gender = entry.get('gender', '')
-                        if gender and gender != 'Unknown':
-                            line += f" [{gender}]"
-                    
-                    # Add custom field values if they exist
-                    custom_field_parts = []
-                    for field in custom_fields:
-                        value = entry.get(field, '').strip()
-                        if value:
-                            # For description fields, add as continuation
-                            if field.lower() in ['description', 'notes', 'details']:
-                                line += f": {value}"
-                            else:
-                                custom_field_parts.append(f"{field}: {value}")
-                    
-                    # Add other custom fields in parentheses
-                    if custom_field_parts:
-                        line += f" ({', '.join(custom_field_parts)})"
-                    
-                    # Write the line
-                    f.write(line + "\n")
+                    # Write column header
+                    column_headers = ['translated_name', 'raw_name']
+                    # Add gender if any type supports it
+                    has_gender = any(type_config.get('has_gender', False) for type_config in custom_types.values())
+                    if has_gender:
+                        column_headers.append('gender')
+                    if custom_fields:
+                        column_headers.extend(custom_fields)
+                    temp_f.write(f"Glossary Columns: {', '.join(column_headers)}\n\n")
+                    for entry_type in sorted(grouped_entries.keys(), key=lambda x: type_order.get(x, 999)):
+                        entries = grouped_entries[entry_type]
+                        type_config = custom_types.get(entry_type, {})
+                        section_name = entry_type.upper() + 'S' if not entry_type.upper().endswith('S') else entry_type.upper()
+                        temp_f.write(f"=== {section_name} ===\n")
+                        for entry in entries:
+                            raw_name = entry.get('raw_name', '')
+                            translated_name = entry.get('translated_name', '')
+                            line = f"* {translated_name} ({raw_name})"
+                            if type_config.get('has_gender', False):
+                                gender = entry.get('gender', '')
+                                if gender and gender != 'Unknown':
+                                    line += f" [{gender}]"
+                            custom_field_parts = []
+                            for field in custom_fields:
+                                value = entry.get(field, '').strip()
+                                if value:
+                                    if field.lower() in ['description', 'notes', 'details']:
+                                        line += f": {value}"
+                                    else:
+                                        custom_field_parts.append(f"{field}: {value}")
+                            if custom_field_parts:
+                                line += f" ({', '.join(custom_field_parts)})"
+                            temp_f.write(line + "\n")
+                        temp_f.write("\n")
+                    temp_f.flush()
+                    # Skip fsync on Windows - it's very slow and atomic rename is safe enough
+                    # fsync only needed if system might crash during write, but temp file is tiny
                 
-                # Add blank line between sections
-                f.write("\n")
+                try:
+                    if os.path.exists(csv_path):
+                        os.remove(csv_path)
+                    os.rename(temp_path, csv_path)
+                except Exception as e:
+                    if os.path.exists(temp_path):
+                        try:
+                            os.remove(temp_path)
+                        except:
+                            pass
+                    raise
+                print(f"✅ Saved token-efficient glossary: {csv_path}")
+                type_counts = {}
+                for entry_type in grouped_entries:
+                    type_counts[entry_type] = len(grouped_entries[entry_type])
+                total = sum(type_counts.values())
+                print(f"   Total entries: {total}")
+                for entry_type, count in type_counts.items():
+                    print(f"   - {entry_type}: {count} entries")
         
-        print(f"✅ Saved token-efficient glossary: {csv_path}")
-        
-        # Print summary for both formats
-        type_counts = {}
-        for entry_type in grouped_entries:
-            type_counts[entry_type] = len(grouped_entries[entry_type])
-        total = sum(type_counts.values())
-        print(f"   Total entries: {total}")
-        for entry_type, count in type_counts.items():
-            print(f"   - {entry_type}: {count} entries")
+        except Exception as e:
+            print(f"[Warning] Atomic write failed for CSV: {e}. Attempting direct write...")
+            try:
+                if use_legacy_format:
+                    with open(csv_path, 'w', encoding='utf-8', newline='') as f:
+                        writer = csv.writer(f)
+                        header = ['type', 'raw_name', 'translated_name', 'gender']
+                        try:
+                            custom_fields = json.loads(os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]'))
+                            header.extend(custom_fields)
+                        except:
+                            custom_fields = []
+                        writer.writerow(header)
+                        for entry in sorted_glossary:
+                            entry_type = entry.get('type', 'term')
+                            type_config = custom_types.get(entry_type, {})
+                            row = [entry_type, entry.get('raw_name', ''), entry.get('translated_name', '')]
+                            if type_config.get('has_gender', False):
+                                row.append(entry.get('gender', ''))
+                            for field in custom_fields:
+                                row.append(entry.get(field, ''))
+                            writer.writerow(row)
+                else:
+                    grouped_entries = {}
+                    for entry in sorted_glossary:
+                        entry_type = entry.get('type', 'term')
+                        if entry_type not in grouped_entries:
+                            grouped_entries[entry_type] = []
+                        grouped_entries[entry_type].append(entry)
+                    with open(csv_path, 'w', encoding='utf-8') as f:
+                        # Write column header
+                        custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
+                        try:
+                            custom_fields_list = json.loads(custom_fields_json)
+                        except:
+                            custom_fields_list = []
+                        column_headers = ['translated_name', 'raw_name']
+                        # Add gender if any type supports it
+                        has_gender = any(type_config.get('has_gender', False) for type_config in custom_types.values())
+                        if has_gender:
+                            column_headers.append('gender')
+                        if custom_fields_list:
+                            column_headers.extend(custom_fields_list)
+                        f.write(f"Glossary Columns: {', '.join(column_headers)}\n\n")
+                        for entry_type in sorted(grouped_entries.keys(), key=lambda x: type_order.get(x, 999)):
+                            entries = grouped_entries[entry_type]
+                            type_config = custom_types.get(entry_type, {})
+                            section_name = entry_type.upper() + 'S' if not entry_type.upper().endswith('S') else entry_type.upper()
+                            f.write(f"=== {section_name} ===\n")
+                            for entry in entries:
+                                raw_name = entry.get('raw_name', '')
+                                translated_name = entry.get('translated_name', '')
+                                line = f"* {translated_name} ({raw_name})"
+                                if type_config.get('has_gender', False):
+                                    gender = entry.get('gender', '')
+                                    if gender and gender != 'Unknown':
+                                        line += f" [{gender}]"
+                                custom_field_parts = []
+                                for field in custom_fields:
+                                    value = entry.get(field, '').strip()
+                                    if value:
+                                        if field.lower() in ['description', 'notes', 'details']:
+                                            line += f": {value}"
+                                        else:
+                                            custom_field_parts.append(f"{field}: {value}")
+                                if custom_field_parts:
+                                    line += f" ({', '.join(custom_field_parts)})"
+                                f.write(line + "\n")
+                            f.write("\n")
+            except Exception as e2:
+                print(f"[Error] Failed to save CSV: {e2}")
             
 def extract_chapters_from_epub(epub_path: str) -> List[str]:
     chapters = []
@@ -968,33 +1057,186 @@ def skip_duplicate_entries(glossary):
     else:
         print(f"[Dedup] Pass 2 (translated name deduplication): DISABLED")
     
-    # PASS 1: Raw name deduplication (existing fuzzy matching logic)
+    # PASS 1: Raw name deduplication
     print(f"[Dedup] 🔄 PASS 1: Raw name deduplication...")
     pass1_results = _skip_raw_name_duplicates(glossary, fuzzy_threshold, use_rapidfuzz)
-    pass1_removed = original_count - len(pass1_results)
-    print(f"[Dedup] ✅ PASS 1 complete: {pass1_removed} duplicates removed ({len(pass1_results)} remaining)")
     
     # PASS 2: Translated name deduplication (if enabled)
     if dedupe_translations:
         print(f"[Dedup] 🔄 PASS 2: Translated name deduplication...")
         final_results = _skip_translated_name_duplicates(pass1_results)
-        pass2_removed = len(pass1_results) - len(final_results)
-        print(f"[Dedup] ✅ PASS 2 complete: {pass2_removed} duplicates removed ({len(final_results)} remaining)")
-        total_removed = pass1_removed + pass2_removed
     else:
         final_results = pass1_results
-        total_removed = pass1_removed
         print(f"[Dedup] ⏭️ PASS 2 skipped (translation deduplication disabled)")
     
-    if total_removed > 0:
-        print(f"⏭️ Total skipped: {total_removed} duplicate entries")
-        print(f"✅ Total kept: {len(final_results)} unique entries")
+    total_removed = original_count - len(final_results)
+    print(f"[Dedup] ✨ Deduplication complete: {total_removed} total duplicates removed, {len(final_results)} unique entries kept")
     
     return final_results
 
 
 def _skip_raw_name_duplicates(glossary, fuzzy_threshold, use_rapidfuzz):
-    """Pass 1: Remove entries with similar raw names using fuzzy matching"""
+    """Pass 1: Remove entries with similar raw names using ProcessPoolExecutor"""
+    from concurrent.futures import ProcessPoolExecutor
+    
+    if len(glossary) < 100:
+        # Only serial for very small datasets
+        return _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz)
+    
+    print(f"[Dedup] Using parallel processing for {len(glossary)} entries")
+    
+    # Pre-process: clean all names and build comparison list
+    processed = []
+    for entry in glossary:
+        raw_name = entry.get('raw_name', '')
+        if raw_name:
+            cleaned_name = remove_honorifics(raw_name)
+            processed.append((entry, raw_name, cleaned_name))
+    
+    # Use extraction workers setting or fallback to CPU count
+    try:
+        max_workers = int(os.getenv('EXTRACTION_WORKERS', '4'))
+        max_workers = max(1, min(max_workers, os.cpu_count() or 1))
+    except (ValueError, TypeError):
+        max_workers = min(4, os.cpu_count() or 1)
+    
+    from concurrent.futures import as_completed
+    
+    print(f"[Dedup] Initializing {max_workers} worker processes...")
+    init_start = time.time()
+    
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        init_time = time.time() - init_start
+        print(f"[Dedup] Workers ready in {init_time:.2f}s, submitting {len(processed)} comparison tasks...")
+        
+        # Submit all tasks to executor
+        futures = {}
+        for i, item in enumerate(processed):
+            future = executor.submit(
+                _dedupe_worker,
+                item,
+                processed,
+                fuzzy_threshold,
+                use_rapidfuzz
+            )
+            futures[future] = i
+        
+        # Collect results as they complete, showing progress
+        results = [None] * len(processed)
+        completed_count = 0
+        
+        for future in as_completed(futures):
+            idx = futures[future]
+            results[idx] = future.result()
+            completed_count += 1
+            
+            # Show progress every 50 items or at the end
+            if completed_count % 50 == 0 or completed_count == len(processed):
+                pct = (completed_count / len(processed)) * 100
+                print(f"[Dedup] Progress: {completed_count}/{len(processed)} ({pct:.0f}%) entries analyzed")
+    
+    # Now merge results sequentially (fast operation)
+    deduplicated = []
+    seen_raw_names = []
+    skipped_count = 0
+    replaced_count = 0
+    
+    for entry, raw_name, cleaned_name, is_dup, best_score, best_match in results:
+        if is_dup:
+            existing_entry = None
+            existing_idx = None
+            for i, existing in enumerate(deduplicated):
+                if existing.get('raw_name') == best_match:
+                    existing_entry = existing
+                    existing_idx = i
+                    break
+            
+            if existing_entry:
+                current_field_count = len([v for v in entry.values() if v and str(v).strip()])
+                existing_field_count = len([v for v in existing_entry.values() if v and str(v).strip()])
+                
+                if current_field_count > existing_field_count:
+                    deduplicated[existing_idx] = entry
+                    for j, (sc, so) in enumerate(seen_raw_names):
+                        if so == best_match:
+                            seen_raw_names[j] = (cleaned_name, raw_name)
+                            break
+                    replaced_count += 1
+                    skipped_count += 1
+                    if skipped_count <= 10:
+                        print(f"[Skip] Pass 1: Replacing {best_match} ({existing_field_count} fields) with {raw_name} ({current_field_count} fields) - {best_score*100:.1f}% match")
+                else:
+                    skipped_count += 1
+                    if skipped_count <= 10:
+                        print(f"[Skip] Pass 1: {raw_name} - {best_score*100:.1f}% match with {best_match}")
+        else:
+            seen_raw_names.append((cleaned_name, raw_name))
+            deduplicated.append(entry)
+    
+    print(f"[Dedup] ✅ PASS 1 complete: {skipped_count} duplicates removed ({replaced_count} replaced with more complete entries, {len(deduplicated)} remaining)")
+    return deduplicated
+
+
+def _dedupe_worker(item, all_items, fuzzy_threshold, use_rapidfuzz):
+    """Worker function for ProcessPoolExecutor - process single item with fast pruning"""
+    entry, raw_name, cleaned_name = item
+    name_len = len(cleaned_name)
+    
+    # Fast candidate pruning: only compare if length difference < 40%
+    candidates = []
+    for e in all_items:
+        if e[1] != raw_name:  # Exclude self
+            other_cleaned = remove_honorifics(e[1])
+            other_len = len(other_cleaned)
+            min_len = min(name_len, other_len)
+            max_len = max(name_len, other_len)
+            if max_len > 0 and (max_len - min_len) / max_len <= 0.4:
+                candidates.append((other_cleaned, e[1]))
+    
+    if not candidates:
+        return (entry, raw_name, cleaned_name, False, 0.0, None)
+    
+    is_dup, best_score, best_match = _find_best_duplicate_match(
+        cleaned_name, candidates, fuzzy_threshold, use_rapidfuzz
+    )
+    
+    return (entry, raw_name, cleaned_name, is_dup, best_score, best_match)
+
+
+def _find_best_duplicate_match(cleaned_name, seen_raw_names, fuzzy_threshold, use_rapidfuzz):
+    """Find the best duplicate match using fuzzy matching on pruned candidates"""
+    if use_rapidfuzz:
+        from rapidfuzz import fuzz
+    else:
+        import difflib
+    
+    best_score = 0.0
+    best_match = None
+    name_lower = cleaned_name.lower()
+    
+    for seen_clean, seen_original in seen_raw_names:
+        seen_lower = seen_clean.lower()
+        
+        if use_rapidfuzz:
+            # RapidFuzz ratio is fast and accurate - try it first
+            score = fuzz.ratio(name_lower, seen_lower) / 100.0
+            
+            # Early exit if already matches threshold
+            if score >= fuzzy_threshold and score > best_score:
+                best_score = score
+                best_match = seen_original
+        else:
+            # Fallback to difflib
+            score = difflib.SequenceMatcher(None, name_lower, seen_lower).ratio()
+            if score >= fuzzy_threshold and score > best_score:
+                best_score = score
+                best_match = seen_original
+    
+    return (best_score >= fuzzy_threshold, best_score, best_match)
+
+
+def _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz):
+    """Serial version of Pass 1 for small datasets"""
     if use_rapidfuzz:
         from rapidfuzz import fuzz
     else:
@@ -1013,54 +1255,10 @@ def _skip_raw_name_duplicates(glossary, fuzzy_threshold, use_rapidfuzz):
         # Remove honorifics for comparison (unless disabled)
         cleaned_name = remove_honorifics(raw_name)
         
-        # Check for fuzzy matches with seen names using advanced multi-algorithm approach
-        is_duplicate = False
-        best_score = 0.0
-        best_match = None
-        
-        for seen_clean, seen_original in seen_raw_names:
-            # Try multiple algorithms for better accuracy
-            scores = []
-            
-            if use_rapidfuzz:
-                # RapidFuzz: Multiple methods
-                basic = fuzz.ratio(cleaned_name.lower(), seen_clean.lower()) / 100.0
-                scores.append(basic)
-                
-                # Token sort (handles word order: "Kim Sang" vs "Sang Kim")
-                try:
-                    token_sort = fuzz.token_sort_ratio(cleaned_name.lower(), seen_clean.lower()) / 100.0
-                    scores.append(token_sort)
-                except:
-                    pass
-                
-                # Partial ratio (substring matching: "김상현" in "김상현님")
-                try:
-                    partial = fuzz.partial_ratio(cleaned_name.lower(), seen_clean.lower()) / 100.0
-                    scores.append(partial)
-                except:
-                    pass
-            else:
-                # Fallback to difflib
-                basic = difflib.SequenceMatcher(None, cleaned_name.lower(), seen_clean.lower()).ratio()
-                scores.append(basic)
-            
-            # Try Jaro-Winkler (better for names)
-            try:
-                import jellyfish
-                jaro = jellyfish.jaro_winkler_similarity(cleaned_name, seen_clean)
-                scores.append(jaro)
-            except ImportError:
-                pass
-            
-            # Take the best score from all algorithms
-            similarity = max(scores) if scores else 0.0
-            
-            if similarity >= fuzzy_threshold:
-                if similarity > best_score:
-                    best_score = similarity
-                    best_match = seen_original
-                is_duplicate = True
+        # Check for fuzzy matches with seen names
+        is_duplicate, best_score, best_match = _find_best_duplicate_match(
+            cleaned_name, seen_raw_names, fuzzy_threshold, use_rapidfuzz
+        )
         
         if is_duplicate:
             # Find the existing entry to compare field counts
@@ -1091,14 +1289,14 @@ def _skip_raw_name_duplicates(glossary, fuzzy_threshold, use_rapidfuzz):
                 else:
                     # Keep existing entry
                     skipped_count += 1
-                    if skipped_count <= 10:
-                        extra_info = f" ({current_field_count} vs {existing_field_count} fields)" if current_field_count != existing_field_count else ""
-                        print(f"[Skip] Pass 1: {raw_name} (cleaned: {cleaned_name}) - {best_score*100:.1f}% match with {best_match}{extra_info}")
+                    # Silent skip - duplicate detected, keeping existing entry
+                    # Only show replacements or important changes
+                    pass
             else:
                 # Fallback if we can't find the existing entry
                 skipped_count += 1
-                if skipped_count <= 10:
-                    print(f"[Skip] Pass 1: {raw_name} (cleaned: {cleaned_name}) - {best_score*100:.1f}% match with {best_match}")
+                # Silent skip - duplicate detected but couldn't locate existing entry
+                pass
         else:
             # Add to seen list and keep the entry
             seen_raw_names.append((cleaned_name, entry.get('raw_name', '')))
@@ -1108,24 +1306,27 @@ def _skip_raw_name_duplicates(glossary, fuzzy_threshold, use_rapidfuzz):
 
 
 def _skip_translated_name_duplicates(glossary):
-    """Pass 2: Remove entries with identical translated names"""
-    seen_translations = {}  # translated_name.lower() -> (raw_name, entry)
+    """Pass 2: Remove entries with identical translated names (optimized with indexing)"""
+    seen_translations = {}  # translated_name.lower() -> (raw_name, entry, index_in_deduplicated)
     deduplicated = []
     skipped_count = 0
+    replaced_count = 0
     
     for entry in glossary:
         raw_name = entry.get('raw_name', '')
         translated_name = entry.get('translated_name', '')
+        if not translated_name:
+            deduplicated.append(entry)
+            continue
+        # Pre-compute normalized key once
         translated_lower = translated_name.lower().strip()
-        
-        # Skip empty translations
         if not translated_lower:
             deduplicated.append(entry)
             continue
         
         # Check if we've seen this translation before
         if translated_lower in seen_translations:
-            existing_raw, existing_entry = seen_translations[translated_lower]
+            existing_raw, existing_entry, existing_idx = seen_translations[translated_lower]
             existing_translated = existing_entry.get('translated_name', translated_name)
             
             # Count fields in both entries (more fields = higher priority)
@@ -1134,25 +1335,25 @@ def _skip_translated_name_duplicates(glossary):
             
             # If current entry has more fields, replace the existing one
             if current_field_count > existing_field_count:
-                # Remove existing entry from deduplicated list
-                deduplicated = [e for e in deduplicated if e != existing_entry]
-                # Replace with current entry
-                seen_translations[translated_lower] = (raw_name, entry)
-                deduplicated.append(entry)
+                # Replace in-place using the stored index (faster than list comprehension)
+                deduplicated[existing_idx] = entry
+                # Update tracking with new index
+                seen_translations[translated_lower] = (raw_name, entry, existing_idx)
+                replaced_count += 1
                 skipped_count += 1
-                if skipped_count <= 10:  # Only log first few
-                    print(f"[Skip] Pass 2: Replacing '{existing_raw}' -> '{existing_translated}' ({existing_field_count} fields) with '{raw_name}' -> '{translated_name}' ({current_field_count} fields) - more detailed entry")
+                if skipped_count <= 10:
+                    print(f"[Skip] Pass 2: Replacing '{existing_raw}' -> '{existing_translated}' ({existing_field_count} fields) with '{raw_name}' -> '{translated_name}' ({current_field_count} fields)")
             else:
                 # Keep existing entry (has same or more fields)
                 skipped_count += 1
-                if skipped_count <= 10:  # Only log first few
-                    extra_info = f" ({current_field_count} vs {existing_field_count} fields)" if current_field_count != existing_field_count else ""
-                    print(f"[Skip] Pass 2: Removing '{raw_name}' -> '{translated_name}' (duplicate translation of '{existing_raw}' -> '{existing_translated}'){extra_info}")
+                if skipped_count <= 10:
+                    print(f"[Skip] Pass 2: '{raw_name}' -> '{translated_name}' (duplicate of '{existing_raw}' -> '{existing_translated}')")
         else:
             # New translation, keep it
-            seen_translations[translated_lower] = (raw_name, entry)
             deduplicated.append(entry)
+            seen_translations[translated_lower] = (raw_name, entry, len(deduplicated) - 1)
     
+    print(f"[Dedup] ✅ PASS 2 complete: {skipped_count} duplicates removed ({replaced_count} replaced with more complete entries, {len(deduplicated)} remaining)")
     return deduplicated
 
 
@@ -1654,6 +1855,7 @@ def main(log_callback=None, stop_callback=None):
                 mtoks = config.get('max_tokens', 4196)
             
             batch_entry_count = 0
+            stopped_early = False
             
             with ThreadPoolExecutor(max_workers=len(current_batch)) as executor:
                 futures = {}
@@ -1661,12 +1863,7 @@ def main(log_callback=None, stop_callback=None):
                 # Submit all chapters in the batch
                 for idx, chap in current_batch:
                     if check_stop():
-                        # Apply deduplication before breaking
-                        if glossary:
-                            print("🔀 Applying deduplication before stopping...")
-                            glossary[:] = skip_duplicate_entries(glossary)
-                            save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
-                            save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+                        stopped_early = True
                         break
                         
                     # Get system and user prompts
@@ -1700,31 +1897,10 @@ def main(log_callback=None, stop_callback=None):
                 for future in as_completed(futures):
                     if check_stop():
                         print("🛑 Stop detected - cancelling all pending operations...")
+                        stopped_early = True
                         cancelled = cancel_all_futures(list(futures.keys()))
                         if cancelled > 0:
                             print(f"✅ Cancelled {cancelled} pending API calls")
-                        
-                        # Apply deduplication before stopping
-                        if glossary:
-                            print("🔀 Applying deduplication and sorting before exit...")
-                            glossary[:] = skip_duplicate_entries(glossary)
-                            
-                            # Sort glossary
-                            custom_types = get_custom_entry_types()
-                            type_order = {'character': 0, 'term': 1}
-                            other_types = sorted([t for t in custom_types.keys() if t not in ['character', 'term']])
-                            for i, t in enumerate(other_types):
-                                type_order[t] = i + 2
-                            glossary.sort(key=lambda x: (
-                                type_order.get(x.get('type', 'term'), 999),
-                                x.get('raw_name', '').lower()
-                            ))
-                            
-                            save_progress(completed, glossary, history)
-                            save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
-                            save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
-                            print(f"✅ Saved {len(glossary)} deduplicated entries before exit")
-                        
                         executor.shutdown(wait=False)
                         break
                     
@@ -1743,7 +1919,7 @@ def main(log_callback=None, stop_callback=None):
                             completed.append(idx)
                             continue
                         
-                        # Process and save entries IMMEDIATELY as each chapter completes
+                        # Process entries as each chapter completes
                         if data and len(data) > 0:
                             total_ent = len(data)
                             batch_entry_count += total_ent
@@ -1760,13 +1936,11 @@ def main(log_callback=None, stop_callback=None):
                                 
                                 # Add entry immediately WITHOUT deduplication
                                 glossary.append(entry)
-                                
-                                # Save immediately after EACH entry
-                                save_progress(completed, glossary, history)
-                                save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
-                                save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                         
                         completed.append(idx)
+                        
+                        # Save progress after each chapter completes (crash-safe)
+                        save_progress(completed, glossary, history)
                         
                         # Add to history if contextual is enabled
                         if contextual_enabled and resp and chap:
@@ -1783,8 +1957,8 @@ def main(log_callback=None, stop_callback=None):
             batch_elapsed = time.time() - batch_start_time
             print(f"[BATCH] Batch {batch_num+1} completed in {batch_elapsed:.1f}s total")
             
-            # After batch completes, apply deduplication and sorting
-            if batch_entry_count > 0:
+            # After batch completes, apply deduplication and sorting (only if not stopped early)
+            if batch_entry_count > 0 and not stopped_early:
                 print(f"\n🔀 Applying deduplication and sorting after batch {batch_num+1}/{total_batches}")
                 original_size = len(glossary)
                 
@@ -1821,6 +1995,28 @@ def main(log_callback=None, stop_callback=None):
                 print(f"   • Chapters processed: {len(current_batch)}")
                 print(f"   • Total entries extracted: {batch_entry_count}")
                 print(f"   • Glossary size: {len(glossary)} unique entries")
+            
+            # If stopped early, deduplicate once and exit
+            if stopped_early:
+                if glossary:
+                    print(f"\n🔀 Deduplicating {len(glossary)} entries before exit...")
+                    glossary[:] = skip_duplicate_entries(glossary)
+                    
+                    custom_types = get_custom_entry_types()
+                    type_order = {'character': 0, 'term': 1}
+                    other_types = sorted([t for t in custom_types.keys() if t not in ['character', 'term']])
+                    for i, t in enumerate(other_types):
+                        type_order[t] = i + 2
+                    glossary.sort(key=lambda x: (
+                        type_order.get(x.get('type', 'term'), 999),
+                        x.get('raw_name', '').lower()
+                    ))
+                    
+                    save_progress(completed, glossary, history)
+                    save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+                    save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+                    print(f"✅ Saved {len(glossary)} deduplicated entries before exit")
+                return
             
             # Handle context history
             if contextual_enabled:
@@ -2264,31 +2460,46 @@ def main(log_callback=None, stop_callback=None):
 
 def save_progress(completed: List[int], glossary: List[Dict], context_history: List[Dict]):
     """Save progress to JSON file"""
-    progress_data = {
-        "completed": completed,
-        "glossary": glossary,
-        "context_history": context_history
-    }
+    global _progress_lock
     
-    try:
-        # Use atomic write to prevent corruption
-        temp_file = PROGRESS_FILE + '.tmp'
-        with open(temp_file, 'w', encoding='utf-8') as f:
-            json.dump(progress_data, f, ensure_ascii=False, indent=2)
+    # Acquire lock to prevent concurrent writes
+    with _progress_lock:
+        progress_data = {
+            "completed": completed,
+            "glossary": glossary,
+            "context_history": context_history
+        }
         
-        # Replace the old file with the new one
-        if os.path.exists(PROGRESS_FILE):
-            os.remove(PROGRESS_FILE)
-        os.rename(temp_file, PROGRESS_FILE)
-        
-    except Exception as e:
-        print(f"[Warning] Failed to save progress: {e}")
-        # Try direct write as fallback
         try:
-            with open(PROGRESS_FILE, 'w', encoding='utf-8') as f:
-                json.dump(progress_data, f, ensure_ascii=False, indent=2)
-        except Exception as e2:
-            print(f"[Error] Could not save progress: {e2}")
+            # Use atomic write with proper temp file handling
+            progress_dir = os.path.dirname(PROGRESS_FILE) or '.'
+            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=progress_dir, delete=False, suffix='.tmp') as temp_f:
+                temp_path = temp_f.name
+                json.dump(progress_data, temp_f, ensure_ascii=False, indent=2)
+                temp_f.flush()
+                os.fsync(temp_f.fileno())  # Ensure data is written to disk
+            
+            # Atomic rename
+            try:
+                if os.path.exists(PROGRESS_FILE):
+                    os.remove(PROGRESS_FILE)
+                os.rename(temp_path, PROGRESS_FILE)
+            except Exception as e:
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except:
+                        pass
+                raise
+            
+        except Exception as e:
+            print(f"[Warning] Failed to save progress: {e}")
+            # Try direct write as fallback
+            try:
+                with open(PROGRESS_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(progress_data, f, ensure_ascii=False, indent=2)
+            except Exception as e2:
+                print(f"[Error] Could not save progress: {e2}")
             
 if __name__=='__main__':
     main()
