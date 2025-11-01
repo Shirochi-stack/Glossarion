@@ -389,7 +389,7 @@ def save_glossary_json(glossary: List[Dict], output_path: str):
                 temp_path = temp_f.name
                 json.dump(sorted_glossary, temp_f, ensure_ascii=False, indent=2)
                 temp_f.flush()
-                os.fsync(temp_f.fileno())  # Ensure data is written to disk
+                # Skip fsync - atomic rename is safe, and fsync blocks on Windows
             
             # Atomic rename
             try:
@@ -461,7 +461,7 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                             row.append('')
                         writer.writerow(row)
                     temp_f.flush()
-                    os.fsync(temp_f.fileno())  # Ensure data is written to disk
+                    # Skip fsync - atomic rename is safe
                 
                 try:
                     if os.path.exists(csv_path):
@@ -528,7 +528,8 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                             temp_f.write(line + "\n")
                         temp_f.write("\n")
                     temp_f.flush()
-                    os.fsync(temp_f.fileno())  # Ensure data is written to disk
+                    # Skip fsync on Windows - it's very slow and atomic rename is safe enough
+                    # fsync only needed if system might crash during write, but temp file is tiny
                 
                 try:
                     if os.path.exists(csv_path):
@@ -1099,16 +1100,40 @@ def _skip_raw_name_duplicates(glossary, fuzzy_threshold, use_rapidfuzz):
     except (ValueError, TypeError):
         max_workers = min(4, os.cpu_count() or 1)
     
+    from concurrent.futures import as_completed
+    
+    print(f"[Dedup] Initializing {max_workers} worker processes...")
+    init_start = time.time()
+    
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        # Map all entries - each compares against ALL others in parallel
-        results = list(executor.map(
-            _dedupe_worker,
-            processed,
-            [processed] * len(processed),
-            [fuzzy_threshold] * len(processed),
-            [use_rapidfuzz] * len(processed),
-            chunksize=max(1, len(processed) // (max_workers * 4))  # Smaller chunks for better load balancing
-        ))
+        init_time = time.time() - init_start
+        print(f"[Dedup] Workers ready in {init_time:.2f}s, submitting {len(processed)} comparison tasks...")
+        
+        # Submit all tasks to executor
+        futures = {}
+        for i, item in enumerate(processed):
+            future = executor.submit(
+                _dedupe_worker,
+                item,
+                processed,
+                fuzzy_threshold,
+                use_rapidfuzz
+            )
+            futures[future] = i
+        
+        # Collect results as they complete, showing progress
+        results = [None] * len(processed)
+        completed_count = 0
+        
+        for future in as_completed(futures):
+            idx = futures[future]
+            results[idx] = future.result()
+            completed_count += 1
+            
+            # Show progress every 50 items or at the end
+            if completed_count % 50 == 0 or completed_count == len(processed):
+                pct = (completed_count / len(processed)) * 100
+                print(f"[Dedup] Progress: {completed_count}/{len(processed)} ({pct:.0f}%) entries analyzed")
     
     # Now merge results sequentially (fast operation)
     deduplicated = []
@@ -1894,7 +1919,7 @@ def main(log_callback=None, stop_callback=None):
                             completed.append(idx)
                             continue
                         
-                        # Process and save entries IMMEDIATELY as each chapter completes
+                        # Process entries as each chapter completes
                         if data and len(data) > 0:
                             total_ent = len(data)
                             batch_entry_count += total_ent
@@ -1911,13 +1936,11 @@ def main(log_callback=None, stop_callback=None):
                                 
                                 # Add entry immediately WITHOUT deduplication
                                 glossary.append(entry)
-                                
-                                # Save immediately after EACH entry
-                                save_progress(completed, glossary, history)
-                                save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
-                                save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                         
                         completed.append(idx)
+                        
+                        # Save progress after each chapter completes (crash-safe)
+                        save_progress(completed, glossary, history)
                         
                         # Add to history if contextual is enabled
                         if contextual_enabled and resp and chap:
