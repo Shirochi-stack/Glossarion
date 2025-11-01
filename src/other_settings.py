@@ -3471,7 +3471,7 @@ def _create_prompt_management_section(self, parent):
     section_v.addWidget(ncx_cb)
     
     # CSS Attachment toggle
-    css_cb = self._create_styled_checkbox("Attach CSS to Chapters (May fix or cause styling issues)")
+    css_cb = self._create_styled_checkbox("Attach CSS to Chapters (Fixes styling issues)")
     try:
         css_cb.setChecked(bool(self.attach_css_to_chapters_var))
     except Exception:
@@ -3486,7 +3486,7 @@ def _create_prompt_management_section(self, parent):
     section_v.addWidget(css_cb)
     
     # HTML serialization method toggle
-    html_method_cb = self._create_styled_checkbox("Use HTML Method for EPUB (Better for preserving whitespaces)")
+    html_method_cb = self._create_styled_checkbox("Use HTML Method for EPUB (Fixes spacing issues in Freda Reader)")
     try:
         html_method_cb.setChecked(bool(self.epub_use_html_method_var))
     except Exception:

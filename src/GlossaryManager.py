@@ -668,7 +668,20 @@ def _convert_to_token_efficient_format(csv_lines):
     
     # Rebuild with token-efficient format
     result = []
-    result.append("Glossary: Characters, Terms, and Important Elements\n")
+    # Extract column headers from CSV to show in dynamic header
+    columns = ['translated_name', 'raw_name']
+    # Check for gender and description columns
+    header_parts = [p.strip() for p in header.split(',')] if header else []
+    if 'gender' in header_parts:
+        columns.append('gender')
+    if 'description' in header_parts:
+        columns.append('description')
+    # Add any other custom fields (exclude type, raw_name, translated_name, gender, description)
+    standard_cols = {'type', 'raw_name', 'translated_name', 'gender', 'description'}
+    for col in header_parts:
+        if col.lower() not in standard_cols and col:
+            columns.append(col)
+    result.append(f"Glossary Columns: {', '.join(columns)}\n")
     
     # Process in order: character first, then term, then others
     type_order = ['character', 'term'] + [t for t in grouped.keys() if t not in ['character', 'term']]
