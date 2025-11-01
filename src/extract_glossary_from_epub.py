@@ -475,7 +475,16 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                 
                 with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=csv_dir, delete=False, suffix='.tmp') as temp_f:
                     temp_path = temp_f.name
-                    temp_f.write("Glossary: Characters, Terms, and Important Elements\n\n")
+                    
+                    # Write column header
+                    column_headers = ['raw_name', 'translated_name']
+                    # Add gender if any type supports it
+                    has_gender = any(type_config.get('has_gender', False) for type_config in custom_types.values())
+                    if has_gender:
+                        column_headers.append('gender')
+                    if custom_fields:
+                        column_headers.extend(custom_fields)
+                    temp_f.write(f"Glossary Columns: {', '.join(column_headers)}\n\n")
                     for entry_type in sorted(grouped_entries.keys(), key=lambda x: type_order.get(x, 999)):
                         entries = grouped_entries[entry_type]
                         type_config = custom_types.get(entry_type, {})
@@ -546,7 +555,20 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                             grouped_entries[entry_type] = []
                         grouped_entries[entry_type].append(entry)
                     with open(csv_path, 'w', encoding='utf-8') as f:
-                        f.write("Glossary: Characters, Terms, and Important Elements\n\n")
+                        # Write column header
+                        custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
+                        try:
+                            custom_fields_list = json.loads(custom_fields_json)
+                        except:
+                            custom_fields_list = []
+                        column_headers = ['raw_name', 'translated_name']
+                        # Add gender if any type supports it
+                        has_gender = any(type_config.get('has_gender', False) for type_config in custom_types.values())
+                        if has_gender:
+                            column_headers.append('gender')
+                        if custom_fields_list:
+                            column_headers.extend(custom_fields_list)
+                        f.write(f"Glossary Columns: {', '.join(column_headers)}\n\n")
                         for entry_type in sorted(grouped_entries.keys(), key=lambda x: type_order.get(x, 999)):
                             entries = grouped_entries[entry_type]
                             type_config = custom_types.get(entry_type, {})
