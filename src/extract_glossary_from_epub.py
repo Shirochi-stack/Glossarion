@@ -368,19 +368,19 @@ def save_glossary_json(glossary: List[Dict], output_path: str):
     with _glossary_json_lock:
         # Get custom types for sorting order
         custom_types = get_custom_entry_types()
-    
-    # Create sorting order: character=0, term=1, others alphabetically starting from 2
-    type_order = {'character': 0, 'term': 1}
-    other_types = sorted([t for t in custom_types.keys() if t not in ['character', 'term']])
-    for i, t in enumerate(other_types):
-        type_order[t] = i + 2
-    
-    # Sort glossary by type order, then by raw_name
-    sorted_glossary = sorted(glossary, key=lambda x: (
-        type_order.get(x.get('type', 'term'), 999),  # Unknown types go last
-        x.get('raw_name', '').lower()
-    ))
-    
+        
+        # Create sorting order: character=0, term=1, others alphabetically starting from 2
+        type_order = {'character': 0, 'term': 1}
+        other_types = sorted([t for t in custom_types.keys() if t not in ['character', 'term']])
+        for i, t in enumerate(other_types):
+            type_order[t] = i + 2
+        
+        # Sort glossary by type order, then by raw_name
+        sorted_glossary = sorted(glossary, key=lambda x: (
+            type_order.get(x.get('type', 'term'), 999),  # Unknown types go last
+            x.get('raw_name', '').lower()
+        ))
+        
         # Use atomic write to prevent corruption during parallel saves
         try:
             # Create temp file in the same directory for atomic rename
@@ -404,96 +404,29 @@ def save_glossary_json(glossary: List[Dict], output_path: str):
 def save_glossary_csv(glossary: List[Dict], output_path: str):
     """Save glossary in CSV or token-efficient format based on environment variable"""
     global _glossary_csv_lock
+    import csv
     
-    # Acquire lock to prevent concurrent writes
     with _glossary_csv_lock:
-        import csv
-        
         csv_path = output_path.replace('.json', '.csv')
-        
-        # Get custom types for sorting order and gender info
         custom_types = get_custom_entry_types()
-    
-        # Create sorting order
         type_order = {'character': 0, 'term': 1}
         other_types = sorted([t for t in custom_types.keys() if t not in ['character', 'term']])
         for i, t in enumerate(other_types):
             type_order[t] = i + 2
         
-        # Sort glossary
         sorted_glossary = sorted(glossary, key=lambda x: (
             type_order.get(x.get('type', 'term'), 999),
             x.get('raw_name', '').lower()
         ))
         
-        # Check if we should use legacy CSV format
         use_legacy_format = os.getenv('GLOSSARY_USE_LEGACY_CSV', '0') == '1'
-        
         csv_dir = os.path.dirname(csv_path) or '.'
         
-        if use_legacy_format:
-        # LEGACY CSV FORMAT
         try:
-            # Create temp file in the same directory for atomic rename
-            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=csv_dir, delete=False, newline='', suffix='.tmp') as temp_f:
-                temp_path = temp_f.name
-                writer = csv.writer(temp_f)
-                
-                # Build header row
-                header = ['type', 'raw_name', 'translated_name', 'gender']
-                
-                # Add any custom fields to header
-                custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
-                try:
-                    custom_fields = json.loads(custom_fields_json)
-                    header.extend(custom_fields)
-                except:
-                    custom_fields = []
-                
-                # Write header row
-                writer.writerow(header)
-                
-                # Write data rows
-                for entry in sorted_glossary:
-                    entry_type = entry.get('type', 'term')
-                    type_config = custom_types.get(entry_type, {})
-                    
-                    # Base row: type, raw_name, translated_name
-                    row = [entry_type, entry.get('raw_name', ''), entry.get('translated_name', '')]
-                    
-                    # Add gender only if type supports it
-                    if type_config.get('has_gender', False):
-                        row.append(entry.get('gender', ''))
-                    
-                    # Add custom field values
-                    for field in custom_fields:
-                        row.append(entry.get(field, ''))
-                    
-                    # Count how many fields we SHOULD have
-                    expected_fields = 4 + len(custom_fields)  # type, raw_name, translated_name, gender + custom fields
-                    
-                    # Only trim if we have MORE than expected (extra trailing empties)
-                    while len(row) > expected_fields and row[-1] == '':
-                        row.pop()
-                    
-                    # Ensure minimum required fields (type, raw_name, translated_name)
-                    while len(row) < 3:
-                        row.append('')
-                    
-                    # Write row
-                    writer.writerow(row)
-            
-            # Atomic rename
-            if os.path.exists(csv_path):
-                os.remove(csv_path)
-            os.rename(temp_path, csv_path)
-            print(f"✅ Saved legacy CSV format: {csv_path}")
-        
-        except Exception as e:
-            print(f"[Warning] Atomic write failed for legacy CSV: {e}. Attempting direct write...")
-            try:
-                with open(csv_path, 'w', encoding='utf-8', newline='') as f:
-                    writer = csv.writer(f)
+            if use_legacy_format:
+                with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=csv_dir, delete=False, newline='', suffix='.tmp') as temp_f:
+                    temp_path = temp_f.name
+                    writer = csv.writer(temp_f)
                     header = ['type', 'raw_name', 'translated_name', 'gender']
                     custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
                     try:
@@ -516,98 +449,13 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                         while len(row) < 3:
                             row.append('')
                         writer.writerow(row)
-            except Exception as e2:
-                print(f"[Error] Failed to save legacy CSV: {e2}")
-    
-        else:
-            # NEW TOKEN-EFFICIENT FORMAT (DEFAULT)
-        try:
-            # Group entries by type
-            grouped_entries = {}
-            for entry in sorted_glossary:
-                entry_type = entry.get('type', 'term')
-                if entry_type not in grouped_entries:
-                    grouped_entries[entry_type] = []
-                grouped_entries[entry_type].append(entry)
-            
-            # Get custom fields configuration
-            custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
-            try:
-                custom_fields = json.loads(custom_fields_json)
-            except:
-                custom_fields = []
-            
-            # Create temp file in the same directory for atomic rename
-            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=csv_dir, delete=False, suffix='.tmp') as temp_f:
-                temp_path = temp_f.name
                 
-                # Write header
-                temp_f.write("Glossary: Characters, Terms, and Important Elements\n\n")
-                
-                # Process each type group
-                for entry_type in sorted(grouped_entries.keys(), key=lambda x: type_order.get(x, 999)):
-                    entries = grouped_entries[entry_type]
-                    type_config = custom_types.get(entry_type, {})
-                    
-                    # Write section header
-                    section_name = entry_type.upper() + 'S' if not entry_type.upper().endswith('S') else entry_type.upper()
-                    temp_f.write(f"=== {section_name} ===\n")
-                    
-                    # Write entries for this type with indentation
-                    for entry in entries:
-                        # Build the entry line
-                        raw_name = entry.get('raw_name', '')
-                        translated_name = entry.get('translated_name', '')
-                        
-                        # Start with asterisk and name
-                        line = f"* {translated_name} ({raw_name})"
-                        
-                        # Add gender if applicable and not Unknown
-                        if type_config.get('has_gender', False):
-                            gender = entry.get('gender', '')
-                            if gender and gender != 'Unknown':
-                                line += f" [{gender}]"
-                        
-                        # Add custom field values if they exist
-                        custom_field_parts = []
-                        for field in custom_fields:
-                            value = entry.get(field, '').strip()
-                            if value:
-                                # For description fields, add as continuation
-                                if field.lower() in ['description', 'notes', 'details']:
-                                    line += f": {value}"
-                                else:
-                                    custom_field_parts.append(f"{field}: {value}")
-                        
-                        # Add other custom fields in parentheses
-                        if custom_field_parts:
-                            line += f" ({', '.join(custom_field_parts)})"
-                        
-                        # Write the line
-                        temp_f.write(line + "\n")
-                    
-                    # Add blank line between sections
-                    temp_f.write("\n")
+                if os.path.exists(csv_path):
+                    os.remove(csv_path)
+                os.rename(temp_path, csv_path)
+                print(f"✅ Saved legacy CSV format: {csv_path}")
             
-            # Atomic rename
-            if os.path.exists(csv_path):
-                os.remove(csv_path)
-            os.rename(temp_path, csv_path)
-            
-            print(f"✅ Saved token-efficient glossary: {csv_path}")
-            
-            # Print summary for both formats
-            type_counts = {}
-            for entry_type in grouped_entries:
-                type_counts[entry_type] = len(grouped_entries[entry_type])
-            total = sum(type_counts.values())
-            print(f"   Total entries: {total}")
-            for entry_type, count in type_counts.items():
-                print(f"   - {entry_type}: {count} entries")
-        
-        except Exception as e:
-            print(f"[Warning] Atomic write failed for token-efficient CSV: {e}. Attempting direct write...")
-            try:
+            else:
                 grouped_entries = {}
                 for entry in sorted_glossary:
                     entry_type = entry.get('type', 'term')
@@ -621,13 +469,14 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                 except:
                     custom_fields = []
                 
-                with open(csv_path, 'w', encoding='utf-8') as f:
-                    f.write("Glossary: Characters, Terms, and Important Elements\n\n")
+                with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=csv_dir, delete=False, suffix='.tmp') as temp_f:
+                    temp_path = temp_f.name
+                    temp_f.write("Glossary: Characters, Terms, and Important Elements\n\n")
                     for entry_type in sorted(grouped_entries.keys(), key=lambda x: type_order.get(x, 999)):
                         entries = grouped_entries[entry_type]
                         type_config = custom_types.get(entry_type, {})
                         section_name = entry_type.upper() + 'S' if not entry_type.upper().endswith('S') else entry_type.upper()
-                        f.write(f"=== {section_name} ===\n")
+                        temp_f.write(f"=== {section_name} ===\n")
                         for entry in entries:
                             raw_name = entry.get('raw_name', '')
                             translated_name = entry.get('translated_name', '')
@@ -646,10 +495,79 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                                         custom_field_parts.append(f"{field}: {value}")
                             if custom_field_parts:
                                 line += f" ({', '.join(custom_field_parts)})"
-                            f.write(line + "\n")
-                        f.write("\n")
+                            temp_f.write(line + "\n")
+                        temp_f.write("\n")
+                
+                if os.path.exists(csv_path):
+                    os.remove(csv_path)
+                os.rename(temp_path, csv_path)
+                print(f"✅ Saved token-efficient glossary: {csv_path}")
+                type_counts = {}
+                for entry_type in grouped_entries:
+                    type_counts[entry_type] = len(grouped_entries[entry_type])
+                total = sum(type_counts.values())
+                print(f"   Total entries: {total}")
+                for entry_type, count in type_counts.items():
+                    print(f"   - {entry_type}: {count} entries")
+        
+        except Exception as e:
+            print(f"[Warning] Atomic write failed for CSV: {e}. Attempting direct write...")
+            try:
+                if use_legacy_format:
+                    with open(csv_path, 'w', encoding='utf-8', newline='') as f:
+                        writer = csv.writer(f)
+                        header = ['type', 'raw_name', 'translated_name', 'gender']
+                        try:
+                            custom_fields = json.loads(os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]'))
+                            header.extend(custom_fields)
+                        except:
+                            custom_fields = []
+                        writer.writerow(header)
+                        for entry in sorted_glossary:
+                            entry_type = entry.get('type', 'term')
+                            type_config = custom_types.get(entry_type, {})
+                            row = [entry_type, entry.get('raw_name', ''), entry.get('translated_name', '')]
+                            if type_config.get('has_gender', False):
+                                row.append(entry.get('gender', ''))
+                            for field in custom_fields:
+                                row.append(entry.get(field, ''))
+                            writer.writerow(row)
+                else:
+                    grouped_entries = {}
+                    for entry in sorted_glossary:
+                        entry_type = entry.get('type', 'term')
+                        if entry_type not in grouped_entries:
+                            grouped_entries[entry_type] = []
+                        grouped_entries[entry_type].append(entry)
+                    with open(csv_path, 'w', encoding='utf-8') as f:
+                        f.write("Glossary: Characters, Terms, and Important Elements\n\n")
+                        for entry_type in sorted(grouped_entries.keys(), key=lambda x: type_order.get(x, 999)):
+                            entries = grouped_entries[entry_type]
+                            type_config = custom_types.get(entry_type, {})
+                            section_name = entry_type.upper() + 'S' if not entry_type.upper().endswith('S') else entry_type.upper()
+                            f.write(f"=== {section_name} ===\n")
+                            for entry in entries:
+                                raw_name = entry.get('raw_name', '')
+                                translated_name = entry.get('translated_name', '')
+                                line = f"* {translated_name} ({raw_name})"
+                                if type_config.get('has_gender', False):
+                                    gender = entry.get('gender', '')
+                                    if gender and gender != 'Unknown':
+                                        line += f" [{gender}]"
+                                custom_field_parts = []
+                                for field in custom_fields:
+                                    value = entry.get(field, '').strip()
+                                    if value:
+                                        if field.lower() in ['description', 'notes', 'details']:
+                                            line += f": {value}"
+                                        else:
+                                            custom_field_parts.append(f"{field}: {value}")
+                                if custom_field_parts:
+                                    line += f" ({', '.join(custom_field_parts)})"
+                                f.write(line + "\n")
+                            f.write("\n")
             except Exception as e2:
-                print(f"[Error] Failed to save token-efficient CSV: {e2}")
+                print(f"[Error] Failed to save CSV: {e2}")
             
 def extract_chapters_from_epub(epub_path: str) -> List[str]:
     chapters = []
