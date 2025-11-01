@@ -392,9 +392,18 @@ def save_glossary_json(glossary: List[Dict], output_path: str):
                 os.fsync(temp_f.fileno())  # Ensure data is written to disk
             
             # Atomic rename
-            if os.path.exists(output_path):
-                os.remove(output_path)
-            os.rename(temp_path, output_path)
+            try:
+                if os.path.exists(output_path):
+                    os.remove(output_path)
+                os.rename(temp_path, output_path)
+            except Exception as e:
+                # If rename fails, try to clean up temp file
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except:
+                        pass
+                raise
         except Exception as e:
             print(f"[Warning] Atomic write failed for JSON: {e}. Attempting direct write...")
             try:
@@ -454,9 +463,17 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                     temp_f.flush()
                     os.fsync(temp_f.fileno())  # Ensure data is written to disk
                 
-                if os.path.exists(csv_path):
-                    os.remove(csv_path)
-                os.rename(temp_path, csv_path)
+                try:
+                    if os.path.exists(csv_path):
+                        os.remove(csv_path)
+                    os.rename(temp_path, csv_path)
+                except Exception as e:
+                    if os.path.exists(temp_path):
+                        try:
+                            os.remove(temp_path)
+                        except:
+                            pass
+                    raise
                 print(f"✅ Saved legacy CSV format: {csv_path}")
             
             else:
@@ -477,7 +494,7 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                     temp_path = temp_f.name
                     
                     # Write column header
-                    column_headers = ['raw_name', 'translated_name']
+                    column_headers = ['translated_name', 'raw_name']
                     # Add gender if any type supports it
                     has_gender = any(type_config.get('has_gender', False) for type_config in custom_types.values())
                     if has_gender:
@@ -513,9 +530,17 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                     temp_f.flush()
                     os.fsync(temp_f.fileno())  # Ensure data is written to disk
                 
-                if os.path.exists(csv_path):
-                    os.remove(csv_path)
-                os.rename(temp_path, csv_path)
+                try:
+                    if os.path.exists(csv_path):
+                        os.remove(csv_path)
+                    os.rename(temp_path, csv_path)
+                except Exception as e:
+                    if os.path.exists(temp_path):
+                        try:
+                            os.remove(temp_path)
+                        except:
+                            pass
+                    raise
                 print(f"✅ Saved token-efficient glossary: {csv_path}")
                 type_counts = {}
                 for entry_type in grouped_entries:
@@ -561,7 +586,7 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                             custom_fields_list = json.loads(custom_fields_json)
                         except:
                             custom_fields_list = []
-                        column_headers = ['raw_name', 'translated_name']
+                        column_headers = ['translated_name', 'raw_name']
                         # Add gender if any type supports it
                         has_gender = any(type_config.get('has_gender', False) for type_config in custom_types.values())
                         if has_gender:
@@ -2344,9 +2369,17 @@ def save_progress(completed: List[int], glossary: List[Dict], context_history: L
                 os.fsync(temp_f.fileno())  # Ensure data is written to disk
             
             # Atomic rename
-            if os.path.exists(PROGRESS_FILE):
-                os.remove(PROGRESS_FILE)
-            os.rename(temp_path, PROGRESS_FILE)
+            try:
+                if os.path.exists(PROGRESS_FILE):
+                    os.remove(PROGRESS_FILE)
+                os.rename(temp_path, PROGRESS_FILE)
+            except Exception as e:
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except:
+                        pass
+                raise
             
         except Exception as e:
             print(f"[Warning] Failed to save progress: {e}")
