@@ -1082,7 +1082,161 @@ def skip_duplicate_entries(glossary):
 
 
 def _skip_raw_name_duplicates(glossary, fuzzy_threshold, use_rapidfuzz):
-    """Pass 1: Remove entries with similar raw names using fuzzy matching"""
+    """Pass 1: Remove entries with similar raw names using fuzzy matching with parallel processing"""
+    if use_rapidfuzz:
+        from rapidfuzz import fuzz
+    else:
+        import difflib
+    
+    # For small datasets, use serial processing to avoid overhead
+    if len(glossary) < 100:
+        return _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz)
+    
+    # Parallel processing for larger datasets
+    print(f"[Dedup] Using parallel processing for {len(glossary)} entries")
+    
+    # Pre-process entries: clean names and prepare for comparison
+    processed_entries = []
+    for i, entry in enumerate(glossary):
+        raw_name = entry.get('raw_name', '')
+        if raw_name:
+            cleaned_name = remove_honorifics(raw_name)
+            processed_entries.append((i, entry, raw_name, cleaned_name))
+    
+    if not processed_entries:
+        return []
+    
+    # Use ThreadPoolExecutor for parallel similarity computation
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import threading
+    
+    deduplicated = []
+    seen_raw_names = []  # List of (cleaned_name, original_entry) tuples
+    skipped_count = 0
+    
+    # Process in batches for better memory management
+    batch_size = min(50, len(processed_entries))
+    max_workers = min(4, os.cpu_count() or 1)  # Limit threads to avoid thrashing
+    
+    for batch_start in range(0, len(processed_entries), batch_size):
+        batch_end = min(batch_start + batch_size, len(processed_entries))
+        batch = processed_entries[batch_start:batch_end]
+        
+        # For each entry in batch, find duplicates in parallel
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {}
+            for idx, entry, raw_name, cleaned_name in batch:
+                future = executor.submit(
+                    _find_best_duplicate_match,
+                    cleaned_name, seen_raw_names[:], fuzzy_threshold, use_rapidfuzz
+                )
+                futures[future] = (idx, entry, raw_name, cleaned_name)
+            
+            # Collect results and update deduplicated list
+            for future in as_completed(futures):
+                idx, entry, raw_name, cleaned_name = futures[future]
+                try:
+                    is_duplicate, best_score, best_match = future.result()
+                    
+                    if is_duplicate:
+                        # Find existing entry and handle replacement logic
+                        existing_entry = None
+                        existing_index = None
+                        for i, existing in enumerate(deduplicated):
+                            if existing.get('raw_name') == best_match:
+                                existing_entry = existing
+                                existing_index = i
+                                break
+                        
+                        if existing_entry:
+                            current_field_count = len([v for v in entry.values() if v and str(v).strip()])
+                            existing_field_count = len([v for v in existing_entry.values() if v and str(v).strip()])
+                            
+                            if current_field_count > existing_field_count:
+                                # Replace existing entry
+                                deduplicated[existing_index] = entry
+                                # Update seen_raw_names
+                                for j, (seen_clean, seen_original) in enumerate(seen_raw_names):
+                                    if seen_original == best_match:
+                                        seen_raw_names[j] = (cleaned_name, raw_name)
+                                        break
+                                skipped_count += 1
+                                if skipped_count <= 10:
+                                    print(f"[Skip] Pass 1: Replacing {best_match} with {raw_name} - {best_score*100:.1f}% match, more detailed entry")
+                            else:
+                                skipped_count += 1
+                                if skipped_count <= 10:
+                                    print(f"[Skip] Pass 1: {raw_name} - {best_score*100:.1f}% match with {best_match}")
+                    else:
+                        # No duplicate found, add to results
+                        seen_raw_names.append((cleaned_name, raw_name))
+                        deduplicated.append(entry)
+                
+                except Exception as e:
+                    print(f"[Dedup] Error processing entry {idx}: {e}")
+                    # Add to results anyway to avoid losing data
+                    deduplicated.append(entry)
+    
+    return deduplicated
+
+
+def _find_best_duplicate_match(cleaned_name, seen_raw_names, fuzzy_threshold, use_rapidfuzz):
+    """Find the best duplicate match for a cleaned name - thread-safe function"""
+    if use_rapidfuzz:
+        from rapidfuzz import fuzz
+    else:
+        import difflib
+    
+    best_score = 0.0
+    best_match = None
+    
+    for seen_clean, seen_original in seen_raw_names:
+        # Try multiple algorithms for better accuracy
+        scores = []
+        
+        if use_rapidfuzz:
+            # RapidFuzz: Multiple methods
+            basic = fuzz.ratio(cleaned_name.lower(), seen_clean.lower()) / 100.0
+            scores.append(basic)
+            
+            # Token sort (handles word order)
+            try:
+                token_sort = fuzz.token_sort_ratio(cleaned_name.lower(), seen_clean.lower()) / 100.0
+                scores.append(token_sort)
+            except:
+                pass
+            
+            # Partial ratio (substring matching)
+            try:
+                partial = fuzz.partial_ratio(cleaned_name.lower(), seen_clean.lower()) / 100.0
+                scores.append(partial)
+            except:
+                pass
+        else:
+            # Fallback to difflib
+            basic = difflib.SequenceMatcher(None, cleaned_name.lower(), seen_clean.lower()).ratio()
+            scores.append(basic)
+        
+        # Try Jaro-Winkler (better for names)
+        try:
+            import jellyfish
+            jaro = jellyfish.jaro_winkler_similarity(cleaned_name, seen_clean)
+            scores.append(jaro)
+        except ImportError:
+            pass
+        
+        # Take the best score from all algorithms
+        similarity = max(scores) if scores else 0.0
+        
+        if similarity >= fuzzy_threshold and similarity > best_score:
+            best_score = similarity
+            best_match = seen_original
+    
+    return (best_score >= fuzzy_threshold, best_score, best_match)
+
+
+def _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz):
+    """Serial version of Pass 1 for small datasets"""
     if use_rapidfuzz:
         from rapidfuzz import fuzz
     else:
@@ -1101,54 +1255,10 @@ def _skip_raw_name_duplicates(glossary, fuzzy_threshold, use_rapidfuzz):
         # Remove honorifics for comparison (unless disabled)
         cleaned_name = remove_honorifics(raw_name)
         
-        # Check for fuzzy matches with seen names using advanced multi-algorithm approach
-        is_duplicate = False
-        best_score = 0.0
-        best_match = None
-        
-        for seen_clean, seen_original in seen_raw_names:
-            # Try multiple algorithms for better accuracy
-            scores = []
-            
-            if use_rapidfuzz:
-                # RapidFuzz: Multiple methods
-                basic = fuzz.ratio(cleaned_name.lower(), seen_clean.lower()) / 100.0
-                scores.append(basic)
-                
-                # Token sort (handles word order: "Kim Sang" vs "Sang Kim")
-                try:
-                    token_sort = fuzz.token_sort_ratio(cleaned_name.lower(), seen_clean.lower()) / 100.0
-                    scores.append(token_sort)
-                except:
-                    pass
-                
-                # Partial ratio (substring matching: "김상현" in "김상현님")
-                try:
-                    partial = fuzz.partial_ratio(cleaned_name.lower(), seen_clean.lower()) / 100.0
-                    scores.append(partial)
-                except:
-                    pass
-            else:
-                # Fallback to difflib
-                basic = difflib.SequenceMatcher(None, cleaned_name.lower(), seen_clean.lower()).ratio()
-                scores.append(basic)
-            
-            # Try Jaro-Winkler (better for names)
-            try:
-                import jellyfish
-                jaro = jellyfish.jaro_winkler_similarity(cleaned_name, seen_clean)
-                scores.append(jaro)
-            except ImportError:
-                pass
-            
-            # Take the best score from all algorithms
-            similarity = max(scores) if scores else 0.0
-            
-            if similarity >= fuzzy_threshold:
-                if similarity > best_score:
-                    best_score = similarity
-                    best_match = seen_original
-                is_duplicate = True
+        # Check for fuzzy matches with seen names
+        is_duplicate, best_score, best_match = _find_best_duplicate_match(
+            cleaned_name, seen_raw_names, fuzzy_threshold, use_rapidfuzz
+        )
         
         if is_duplicate:
             # Find the existing entry to compare field counts
@@ -1196,8 +1306,8 @@ def _skip_raw_name_duplicates(glossary, fuzzy_threshold, use_rapidfuzz):
 
 
 def _skip_translated_name_duplicates(glossary):
-    """Pass 2: Remove entries with identical translated names"""
-    seen_translations = {}  # translated_name.lower() -> (raw_name, entry)
+    """Pass 2: Remove entries with identical translated names (optimized with indexing)"""
+    seen_translations = {}  # translated_name.lower() -> (raw_name, entry, index_in_deduplicated)
     deduplicated = []
     skipped_count = 0
     
@@ -1213,7 +1323,7 @@ def _skip_translated_name_duplicates(glossary):
         
         # Check if we've seen this translation before
         if translated_lower in seen_translations:
-            existing_raw, existing_entry = seen_translations[translated_lower]
+            existing_raw, existing_entry, existing_idx = seen_translations[translated_lower]
             existing_translated = existing_entry.get('translated_name', translated_name)
             
             # Count fields in both entries (more fields = higher priority)
@@ -1222,11 +1332,10 @@ def _skip_translated_name_duplicates(glossary):
             
             # If current entry has more fields, replace the existing one
             if current_field_count > existing_field_count:
-                # Remove existing entry from deduplicated list
-                deduplicated = [e for e in deduplicated if e != existing_entry]
-                # Replace with current entry
-                seen_translations[translated_lower] = (raw_name, entry)
-                deduplicated.append(entry)
+                # Replace in-place using the stored index (faster than list comprehension)
+                deduplicated[existing_idx] = entry
+                # Update tracking with new index
+                seen_translations[translated_lower] = (raw_name, entry, existing_idx)
                 skipped_count += 1
                 if skipped_count <= 10:  # Only log first few
                     print(f"[Skip] Pass 2: Replacing '{existing_raw}' -> '{existing_translated}' ({existing_field_count} fields) with '{raw_name}' -> '{translated_name}' ({current_field_count} fields) - more detailed entry")
@@ -1238,8 +1347,8 @@ def _skip_translated_name_duplicates(glossary):
                     print(f"[Skip] Pass 2: Removing '{raw_name}' -> '{translated_name}' (duplicate translation of '{existing_raw}' -> '{existing_translated}'){extra_info}")
         else:
             # New translation, keep it
-            seen_translations[translated_lower] = (raw_name, entry)
             deduplicated.append(entry)
+            seen_translations[translated_lower] = (raw_name, entry, len(deduplicated) - 1)
     
     return deduplicated
 
