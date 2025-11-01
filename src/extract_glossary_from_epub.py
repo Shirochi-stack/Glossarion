@@ -388,6 +388,8 @@ def save_glossary_json(glossary: List[Dict], output_path: str):
             with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=output_dir, delete=False, suffix='.tmp') as temp_f:
                 temp_path = temp_f.name
                 json.dump(sorted_glossary, temp_f, ensure_ascii=False, indent=2)
+                temp_f.flush()
+                os.fsync(temp_f.fileno())  # Ensure data is written to disk
             
             # Atomic rename
             if os.path.exists(output_path):
@@ -449,6 +451,8 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                         while len(row) < 3:
                             row.append('')
                         writer.writerow(row)
+                    temp_f.flush()
+                    os.fsync(temp_f.fileno())  # Ensure data is written to disk
                 
                 if os.path.exists(csv_path):
                     os.remove(csv_path)
@@ -497,6 +501,8 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                                 line += f" ({', '.join(custom_field_parts)})"
                             temp_f.write(line + "\n")
                         temp_f.write("\n")
+                    temp_f.flush()
+                    os.fsync(temp_f.fileno())  # Ensure data is written to disk
                 
                 if os.path.exists(csv_path):
                     os.remove(csv_path)
@@ -2315,6 +2321,8 @@ def save_progress(completed: List[int], glossary: List[Dict], context_history: L
             with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=progress_dir, delete=False, suffix='.tmp') as temp_f:
                 temp_path = temp_f.name
                 json.dump(progress_data, temp_f, ensure_ascii=False, indent=2)
+                temp_f.flush()
+                os.fsync(temp_f.fileno())  # Ensure data is written to disk
             
             # Atomic rename
             if os.path.exists(PROGRESS_FILE):
