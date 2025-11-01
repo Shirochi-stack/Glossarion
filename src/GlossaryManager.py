@@ -265,31 +265,46 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     if use_smart_filter and custom_prompt:  # Only apply for AI extraction
         print(f"📁 Smart filtering enabled - checking effective text size after filtering...")
         # Perform filtering ONCE and reuse for chunking
-        print(f"🔍 [DEBUG] Calling _filter_text_for_glossary with max_sentences={max_sentences}")
         filtered_sample, _ = _filter_text_for_glossary(all_text, min_frequency, max_sentences)
         filtered_text_cache = filtered_sample
         effective_text_size = len(filtered_sample)
-        print(f"📁 Effective text size after filtering: {effective_text_size:,} chars (from {len(all_text):,})")
+        # Calculate token count using tiktoken
+        try:
+            import tiktoken
+            enc = tiktoken.get_encoding("cl100k_base")
+            token_count = len(enc.encode(filtered_sample))
+            print(f"📁 Text reduction: {len(all_text):,} → {effective_text_size:,} chars ({100*(1-effective_text_size/len(all_text)):.1f}% reduction) | {token_count:,} tokens")
+        except:
+            print(f"📁 Text reduction: {len(all_text):,} → {effective_text_size:,} chars ({100*(1-effective_text_size/len(all_text)):.1f}% reduction)")
     
-    # Safety check: Estimate token count and force chunking if it would exceed API limits
-    # Rough estimate: 1 token ≈ 3-4 characters for Asian languages
-    estimated_tokens = effective_text_size // 3
+    # Safety check: Calculate actual token count for chunking decision
+    estimated_tokens = None
+    try:
+        import tiktoken
+        enc = tiktoken.get_encoding("cl100k_base")
+        estimated_tokens = len(enc.encode(filtered_text_cache if filtered_text_cache else all_text))
+    except:
+        # Fallback estimate: 1 token ≈ 3-4 characters for Asian languages
+        estimated_tokens = effective_text_size // 3
+    
     max_output_tokens = int(os.getenv("MAX_OUTPUT_TOKENS", "65536"))
     
-    # Conservative safety margin: use 80% of max tokens for input to leave room for output
-    safe_input_limit = int(max_output_tokens * 0.8)
+    # Use compression factor to determine safe input limit (from CJK→English compression ratio)
+    compression_factor = float(os.getenv("COMPRESSION_FACTOR", "1.0"))
+    # Safe input limit is max_output divided by compression factor
+    # (e.g., if compression is 0.7, output will be 70% of input, so we can use 1/0.7 = 1.43x for safety)
+    safe_input_limit = int(max_output_tokens / max(compression_factor, 0.1)) if compression_factor > 0 else int(max_output_tokens * 0.8)
     
     if estimated_tokens > safe_input_limit:
-        print(f"⚠️ Text too large for single API call!")
-        print(f"   Estimated tokens: {estimated_tokens:,}")
-        print(f"   Safe input limit: {safe_input_limit:,} (80% of {max_output_tokens:,} max tokens)")
+        # Only show detailed token logs if using token-based chunking (threshold == 0)
         if chapter_split_threshold == 0:
+            print(f"⚠️ Text too large for single API call!")
+            print(f"   Estimated tokens: {estimated_tokens:,}")
+            print(f"   Safe input limit: {safe_input_limit:,} (based on {compression_factor:.1f}x compression factor and {max_output_tokens:,} max output tokens)")
             print(f"   Will use ChapterSplitter for token-based chunking...")
         else:
-            print(f"   Forcing automatic chunking to prevent API errors...")
-            # Calculate chunk size in characters that will be ~80% of safe limit in tokens
-            chapter_split_threshold = safe_input_limit * 3  # Convert tokens back to chars
-            print(f"   Auto-set chunk threshold: {chapter_split_threshold:,} characters")
+            # Character-based threshold already set, just use it silently
+            pass
     
     # Check if we need to split into chunks based on EFFECTIVE size after filtering
     needs_chunking = (chapter_split_threshold == 0 and estimated_tokens > safe_input_limit) or \
@@ -612,7 +627,6 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         # Set environment flag to indicate text is already filtered
         if already_filtered:
             os.environ["_TEXT_ALREADY_FILTERED"] = "1"
-            print(f"📁 Using pre-filtered text cache ({len(text_to_process):,} chars) - skipping redundant filtering")
         
         try:
             return _extract_with_custom_prompt(custom_prompt, text_to_process, language, 
