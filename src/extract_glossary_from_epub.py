@@ -1144,30 +1144,24 @@ def _skip_raw_name_duplicates(glossary, fuzzy_threshold, use_rapidfuzz):
     
     # Now merge results sequentially (fast operation)
     deduplicated = []
-    seen_raw_names = []
+    seen_raw_names_list = []  # For iteration
+    raw_name_to_idx = {}  # raw_name -> index in deduplicated (O(1) lookup)
     skipped_count = 0
     replaced_count = 0
     
     for entry, raw_name, cleaned_name, is_dup, best_score, best_match in results:
         if is_dup:
-            existing_entry = None
-            existing_idx = None
-            for i, existing in enumerate(deduplicated):
-                if existing.get('raw_name') == best_match:
-                    existing_entry = existing
-                    existing_idx = i
-                    break
+            existing_idx = raw_name_to_idx.get(best_match)
             
-            if existing_entry:
+            if existing_idx is not None:
+                existing_entry = deduplicated[existing_idx]
                 current_field_count = len([v for v in entry.values() if v and str(v).strip()])
                 existing_field_count = len([v for v in existing_entry.values() if v and str(v).strip()])
                 
                 if current_field_count > existing_field_count:
                     deduplicated[existing_idx] = entry
-                    for j, (sc, so) in enumerate(seen_raw_names):
-                        if so == best_match:
-                            seen_raw_names[j] = (cleaned_name, raw_name)
-                            break
+                    raw_name_to_idx[raw_name] = existing_idx
+                    del raw_name_to_idx[best_match]
                     replaced_count += 1
                     skipped_count += 1
                     if skipped_count <= 10:
@@ -1177,7 +1171,8 @@ def _skip_raw_name_duplicates(glossary, fuzzy_threshold, use_rapidfuzz):
                     if skipped_count <= 10:
                         print(f"[Skip] Pass 1: {raw_name} - {best_score*100:.1f}% match with {best_match}")
         else:
-            seen_raw_names.append((cleaned_name, raw_name))
+            seen_raw_names_list.append((cleaned_name, raw_name))
+            raw_name_to_idx[raw_name] = len(deduplicated)
             deduplicated.append(entry)
     
     print(f"[Dedup] ✅ PASS 1 complete: {skipped_count} duplicates removed ({replaced_count} replaced with more complete entries, {len(deduplicated)} remaining)")
@@ -1188,17 +1183,29 @@ def _dedupe_worker(item, all_items, fuzzy_threshold, use_rapidfuzz):
     """Worker function for ProcessPoolExecutor - process single item with fast pruning"""
     entry, raw_name, cleaned_name = item
     name_len = len(cleaned_name)
+    name_lower = cleaned_name.lower()
     
-    # Fast candidate pruning: only compare if length difference < 40%
+    # Multi-level candidate pruning for maximum speed
     candidates = []
-    for e in all_items:
-        if e[1] != raw_name:  # Exclude self
-            other_cleaned = remove_honorifics(e[1])
-            other_len = len(other_cleaned)
-            min_len = min(name_len, other_len)
-            max_len = max(name_len, other_len)
-            if max_len > 0 and (max_len - min_len) / max_len <= 0.4:
-                candidates.append((other_cleaned, e[1]))
+    for other_entry, other_raw, other_cleaned in all_items:
+        if other_raw == raw_name:  # Exclude self
+            continue
+            
+        other_len = len(other_cleaned)
+        
+        # Fast reject: length difference > 40%
+        min_len = min(name_len, other_len)
+        max_len = max(name_len, other_len)
+        if max_len > 0 and (max_len - min_len) / max_len > 0.4:
+            continue
+        
+        # Fast reject: different first character AND significant length difference
+        # (allows same first char with any length, or different first char if very similar length)
+        if name_len > 0 and other_len > 0:
+            if name_lower[0] != other_cleaned.lower()[0] and abs(name_len - other_len) > 2:
+                continue
+        
+        candidates.append((other_cleaned, other_raw))
     
     if not candidates:
         return (entry, raw_name, cleaned_name, False, 0.0, None)
@@ -1212,34 +1219,59 @@ def _dedupe_worker(item, all_items, fuzzy_threshold, use_rapidfuzz):
 
 def _find_best_duplicate_match(cleaned_name, seen_raw_names, fuzzy_threshold, use_rapidfuzz):
     """Find the best duplicate match using fuzzy matching on pruned candidates"""
-    if use_rapidfuzz:
-        from rapidfuzz import fuzz
-    else:
-        import difflib
+    if not seen_raw_names:
+        return (False, 0.0, None)
     
-    best_score = 0.0
-    best_match = None
     name_lower = cleaned_name.lower()
     
-    for seen_clean, seen_original in seen_raw_names:
-        seen_lower = seen_clean.lower()
+    if use_rapidfuzz:
+        from rapidfuzz import fuzz, process
         
-        if use_rapidfuzz:
-            # RapidFuzz ratio is fast and accurate - try it first
-            score = fuzz.ratio(name_lower, seen_lower) / 100.0
+        # For large candidate lists, use batch processing (much faster)
+        if len(seen_raw_names) > 50:
+            # Extract just the cleaned names for batch comparison
+            candidate_names = [seen_clean.lower() for seen_clean, _ in seen_raw_names]
             
-            # Early exit if already matches threshold
+            # Use extractOne for fast best-match finding
+            result = process.extractOne(
+                name_lower, 
+                candidate_names, 
+                scorer=fuzz.ratio,
+                score_cutoff=fuzzy_threshold * 100
+            )
+            
+            if result:
+                matched_name, score, idx = result
+                best_score = score / 100.0
+                best_match = seen_raw_names[idx][1]  # Get original name
+                return (True, best_score, best_match)
+            return (False, 0.0, None)
+        
+        # For smaller lists, use simple loop (less overhead)
+        best_score = 0.0
+        best_match = None
+        
+        for seen_clean, seen_original in seen_raw_names:
+            score = fuzz.ratio(name_lower, seen_clean.lower()) / 100.0
             if score >= fuzzy_threshold and score > best_score:
                 best_score = score
                 best_match = seen_original
-        else:
-            # Fallback to difflib
-            score = difflib.SequenceMatcher(None, name_lower, seen_lower).ratio()
-            if score >= fuzzy_threshold and score > best_score:
-                best_score = score
-                best_match = seen_original
+        
+        return (best_score >= fuzzy_threshold, best_score, best_match)
     
-    return (best_score >= fuzzy_threshold, best_score, best_match)
+    else:
+        # Fallback to difflib (slower)
+        import difflib
+        best_score = 0.0
+        best_match = None
+        
+        for seen_clean, seen_original in seen_raw_names:
+            score = difflib.SequenceMatcher(None, name_lower, seen_clean.lower()).ratio()
+            if score >= fuzzy_threshold and score > best_score:
+                best_score = score
+                best_match = seen_original
+        
+        return (best_score >= fuzzy_threshold, best_score, best_match)
 
 
 def _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz):
@@ -1250,6 +1282,7 @@ def _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz):
         import difflib
     
     seen_raw_names = []  # List of (cleaned_name, original_entry) tuples
+    raw_name_to_idx = {}  # raw_name -> index in deduplicated (O(1) lookup)
     deduplicated = []
     skipped_count = 0
     
@@ -1268,15 +1301,11 @@ def _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz):
         )
         
         if is_duplicate:
-            # Find the existing entry to compare field counts
-            existing_entry = None
-            for i, existing in enumerate(deduplicated):
-                if existing.get('raw_name') == best_match:
-                    existing_entry = existing
-                    existing_index = i
-                    break
+            # Use O(1) dictionary lookup
+            existing_index = raw_name_to_idx.get(best_match)
             
-            if existing_entry:
+            if existing_index is not None:
+                existing_entry = deduplicated[existing_index]
                 # Count fields in both entries
                 current_field_count = len([v for v in entry.values() if v and str(v).strip()])
                 existing_field_count = len([v for v in existing_entry.values() if v and str(v).strip()])
@@ -1285,28 +1314,22 @@ def _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz):
                 if current_field_count > existing_field_count:
                     # Replace existing entry
                     deduplicated[existing_index] = entry
-                    # Update seen_raw_names
-                    for j, (seen_clean, seen_original) in enumerate(seen_raw_names):
-                        if seen_original == best_match:
-                            seen_raw_names[j] = (cleaned_name, entry.get('raw_name', ''))
-                            break
+                    # Update mappings
+                    raw_name_to_idx[raw_name] = existing_index
+                    del raw_name_to_idx[best_match]
                     skipped_count += 1
                     if skipped_count <= 10:
                         print(f"[Skip] Pass 1: Replacing {best_match} ({existing_field_count} fields) with {raw_name} ({current_field_count} fields) - {best_score*100:.1f}% match, more detailed entry")
                 else:
                     # Keep existing entry
                     skipped_count += 1
-                    # Silent skip - duplicate detected, keeping existing entry
-                    # Only show replacements or important changes
-                    pass
             else:
                 # Fallback if we can't find the existing entry
                 skipped_count += 1
-                # Silent skip - duplicate detected but couldn't locate existing entry
-                pass
         else:
             # Add to seen list and keep the entry
             seen_raw_names.append((cleaned_name, entry.get('raw_name', '')))
+            raw_name_to_idx[raw_name] = len(deduplicated)
             deduplicated.append(entry)
     
     return deduplicated
