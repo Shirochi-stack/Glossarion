@@ -1083,16 +1083,23 @@ def skip_duplicate_entries(glossary):
 
 
 def _skip_raw_name_duplicates(glossary, fuzzy_threshold, use_rapidfuzz):
-    """Pass 1: Remove entries with similar raw names using ProcessPoolExecutor"""
-    from concurrent.futures import ProcessPoolExecutor
+    """Pass 1: Remove entries with similar raw names using optimized serial processing"""
+    # Note: Parallel processing doesn't work well for deduplication because:
+    # 1. Order matters - can't determine if A is duplicate of B until we've processed A
+    # 2. The "seen" list changes as we process, making parallelization complex
+    # 3. The serial version with RapidFuzz batch processing is already very fast
     
-    if len(glossary) < 100:
-        # Only serial for very small datasets
-        return _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz)
+    # Use optimized serial version for all sizes
+    return _skip_raw_name_duplicates_serial(glossary, fuzzy_threshold, use_rapidfuzz)
+
+
+def _skip_raw_name_duplicates_matrix(glossary, fuzzy_threshold):
+    """Ultra-fast matrix-based deduplication for large datasets with RapidFuzz"""
+    from rapidfuzz import fuzz
     
-    print(f"[Dedup] Using parallel processing for {len(glossary)} entries")
+    print(f"[Dedup] Using matrix-based deduplication (optimized for {len(glossary)} entries)")
     
-    # Pre-process: clean all names and build comparison list
+    # Pre-process all entries
     processed = []
     for entry in glossary:
         raw_name = entry.get('raw_name', '')
@@ -1100,59 +1107,74 @@ def _skip_raw_name_duplicates(glossary, fuzzy_threshold, use_rapidfuzz):
             cleaned_name = remove_honorifics(raw_name)
             processed.append((entry, raw_name, cleaned_name))
     
-    # Use extraction workers setting or fallback to CPU count
-    try:
-        max_workers = int(os.getenv('EXTRACTION_WORKERS', '4'))
-        max_workers = max(1, min(max_workers, os.cpu_count() or 1))
-    except (ValueError, TypeError):
-        max_workers = min(4, os.cpu_count() or 1)
+    if not processed:
+        return []
     
-    from concurrent.futures import as_completed
+    # Extract just the cleaned names for comparison
+    cleaned_names = [cleaned.lower() for _, _, cleaned in processed]
     
-    print(f"[Dedup] Initializing {max_workers} worker processes...")
-    init_start = time.time()
+    print(f"[Dedup] Building similarity groups...")
     
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        init_time = time.time() - init_start
-        print(f"[Dedup] Workers ready in {init_time:.2f}s, submitting {len(processed)} comparison tasks...")
+    # Group by length bucket for faster comparison (only compare similar lengths)
+    length_buckets = {}
+    for idx, (entry, raw, cleaned) in enumerate(processed):
+        length = len(cleaned)
+        bucket = length // 3  # Group by length/3 (e.g., 6-8 chars in same bucket)
+        if bucket not in length_buckets:
+            length_buckets[bucket] = []
+        length_buckets[bucket].append(idx)
+    
+    # Track duplicates
+    is_duplicate = [False] * len(processed)
+    duplicate_of = [None] * len(processed)  # Index of the entry this is a duplicate of
+    
+    total_comparisons = 0
+    
+    # Process each bucket independently
+    for bucket, indices in length_buckets.items():
+        if len(indices) < 2:
+            continue
         
-        # Submit all tasks to executor
-        futures = {}
-        for i, item in enumerate(processed):
-            future = executor.submit(
-                _dedupe_worker,
-                item,
-                processed,
-                fuzzy_threshold,
-                use_rapidfuzz
-            )
-            futures[future] = i
+        # Get names for this bucket
+        bucket_names = [cleaned_names[i] for i in indices]
         
-        # Collect results as they complete, showing progress
-        results = [None] * len(processed)
-        completed_count = 0
+        # Use RapidFuzz to find all similar pairs in this bucket
+        for i, idx1 in enumerate(indices):
+            if is_duplicate[idx1]:  # Skip if already marked as duplicate
+                continue
+                
+            for j in range(i + 1, len(indices)):
+                idx2 = indices[j]
+                if is_duplicate[idx2]:  # Skip if already marked as duplicate
+                    continue
+                
+                # Compare
+                score = fuzz.ratio(bucket_names[i], bucket_names[j]) / 100.0
+                total_comparisons += 1
+                
+                if score >= fuzzy_threshold:
+                    # Mark idx2 as duplicate of idx1
+                    is_duplicate[idx2] = True
+                    duplicate_of[idx2] = idx1
         
-        for future in as_completed(futures):
-            idx = futures[future]
-            results[idx] = future.result()
-            completed_count += 1
-            
-            # Show progress every 50 items or at the end
-            if completed_count % 50 == 0 or completed_count == len(processed):
-                pct = (completed_count / len(processed)) * 100
-                print(f"[Dedup] Progress: {completed_count}/{len(processed)} ({pct:.0f}%) entries analyzed")
+        if total_comparisons % 1000 == 0 and total_comparisons > 0:
+            print(f"[Dedup] Processed {total_comparisons} comparisons...")
     
-    # Now merge results sequentially (fast operation)
+    print(f"[Dedup] Completed {total_comparisons} comparisons (reduced from {len(processed) * (len(processed)-1) // 2})")
+    
+    # Build deduplicated list with field count comparison
     deduplicated = []
-    seen_raw_names_list = []  # For iteration
-    raw_name_to_idx = {}  # raw_name -> index in deduplicated (O(1) lookup)
+    raw_name_to_idx = {}
     skipped_count = 0
     replaced_count = 0
     
-    for entry, raw_name, cleaned_name, is_dup, best_score, best_match in results:
-        if is_dup:
-            existing_idx = raw_name_to_idx.get(best_match)
+    for idx, (entry, raw_name, cleaned_name) in enumerate(processed):
+        if is_duplicate[idx]:
+            original_idx = duplicate_of[idx]
+            original_raw = processed[original_idx][1]
             
+            # Check if we should replace the original with this one (more fields)
+            existing_idx = raw_name_to_idx.get(original_raw)
             if existing_idx is not None:
                 existing_entry = deduplicated[existing_idx]
                 current_field_count = len([v for v in entry.values() if v and str(v).strip()])
@@ -1161,22 +1183,25 @@ def _skip_raw_name_duplicates(glossary, fuzzy_threshold, use_rapidfuzz):
                 if current_field_count > existing_field_count:
                     deduplicated[existing_idx] = entry
                     raw_name_to_idx[raw_name] = existing_idx
-                    del raw_name_to_idx[best_match]
+                    del raw_name_to_idx[original_raw]
                     replaced_count += 1
-                    skipped_count += 1
-                    if skipped_count <= 10:
-                        print(f"[Skip] Pass 1: Replacing {best_match} ({existing_field_count} fields) with {raw_name} ({current_field_count} fields) - {best_score*100:.1f}% match")
-                else:
-                    skipped_count += 1
-                    if skipped_count <= 10:
-                        print(f"[Skip] Pass 1: {raw_name} - {best_score*100:.1f}% match with {best_match}")
+                    
+            skipped_count += 1
         else:
-            seen_raw_names_list.append((cleaned_name, raw_name))
             raw_name_to_idx[raw_name] = len(deduplicated)
             deduplicated.append(entry)
     
-    print(f"[Dedup] ✅ PASS 1 complete: {skipped_count} duplicates removed ({replaced_count} replaced with more complete entries, {len(deduplicated)} remaining)")
+    print(f"[Dedup] ✅ Matrix deduplication complete: {skipped_count} duplicates removed ({replaced_count} replaced), {len(deduplicated)} remaining")
     return deduplicated
+
+
+def _dedupe_worker_chunk(chunk_items, all_items, fuzzy_threshold, use_rapidfuzz):
+    """Process a chunk of items in parallel - reduces memory overhead"""
+    results = []
+    for item in chunk_items:
+        result = _dedupe_worker(item, all_items, fuzzy_threshold, use_rapidfuzz)
+        results.append(result)
+    return results
 
 
 def _dedupe_worker(item, all_items, fuzzy_threshold, use_rapidfuzz):
@@ -1185,25 +1210,11 @@ def _dedupe_worker(item, all_items, fuzzy_threshold, use_rapidfuzz):
     name_len = len(cleaned_name)
     name_lower = cleaned_name.lower()
     
-    # Multi-level candidate pruning for maximum speed
+    # Build candidates list - no filtering for maximum quality
     candidates = []
     for other_entry, other_raw, other_cleaned in all_items:
         if other_raw == raw_name:  # Exclude self
             continue
-            
-        other_len = len(other_cleaned)
-        
-        # Fast reject: length difference > 40%
-        min_len = min(name_len, other_len)
-        max_len = max(name_len, other_len)
-        if max_len > 0 and (max_len - min_len) / max_len > 0.4:
-            continue
-        
-        # Fast reject: different first character AND significant length difference
-        # (allows same first char with any length, or different first char if very similar length)
-        if name_len > 0 and other_len > 0:
-            if name_lower[0] != other_cleaned.lower()[0] and abs(name_len - other_len) > 2:
-                continue
         
         candidates.append((other_cleaned, other_raw))
     
