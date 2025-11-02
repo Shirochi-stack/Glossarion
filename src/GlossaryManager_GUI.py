@@ -1556,6 +1556,9 @@ Rules:
             ]
             self.glossary_target_language_combo.addItems(languages)
             
+            # Lock mousewheel scrolling on target language dropdown
+            self._disable_combobox_mousewheel(self.glossary_target_language_combo)
+            
             # Use icon in dropdown arrow like duplicate algorithm dropdown
             try:
                 icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
