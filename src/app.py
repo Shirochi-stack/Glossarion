@@ -4729,7 +4729,7 @@ class GlossarionWeb:
                                             "- No headers, no extra text, no JSON\n"
                                             "- One entry per line\n"
                                             "- Leave gender empty for terms (just end with comma)\n"
-                                            "- Exclude generic entries like pronouns (I, you, he, she, etc.) and common nouns (father, mother, etc.)\n"
+                                            "- Do not add generic pronoun only entries (Example: I, you, he, she, etc.) and common nouns (father, mother, etc.)\n"
                                             "- For all fields except 'raw_name', use {language} translation")
                                     )
                                     

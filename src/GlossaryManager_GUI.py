@@ -1085,6 +1085,9 @@ class GlossaryManagerMixin:
             ]
             self.manual_target_language_combo.addItems(languages)
             
+            # Lock mousewheel scrolling on target language dropdown
+            self._disable_combobox_mousewheel(self.manual_target_language_combo)
+            
             # Use icon in dropdown arrow like auto glossary dropdown
             try:
                 icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
@@ -1164,7 +1167,7 @@ Rules:
 - No headers, no extra text, no JSON
 - One entry per line
 - Leave gender empty for terms (just end with comma)
-- Exclude generic entries like pronouns (I, you, he, she, etc.) and common nouns (father, mother, etc.)
+- Do not add generic pronoun only entries (Example: I, you, he, she, etc.) and common nouns (father, mother, etc.)
 - For all fields except 'raw_name', use {language} translation
     """
         self.manual_glossary_prompt = self.config.get('manual_glossary_prompt', default_manual_prompt)
@@ -1190,7 +1193,7 @@ Rules:
     - No headers, no extra text, no JSON
     - One entry per line
     - Leave gender empty for terms (just end with comma)
-    - Exclude generic entries like pronouns (I, you, he, she, etc.) and common nouns (father, mother, etc.)
+    - Do not add generic pronoun only entries (Example: I, you, he, she, etc.) and common nouns (father, mother, etc.)
     - For all fields except 'raw_name', use {language} translation
     """
                 self.manual_prompt_text.setPlainText(default_prompt)
