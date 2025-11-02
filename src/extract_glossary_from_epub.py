@@ -389,7 +389,7 @@ def save_glossary_json(glossary: List[Dict], output_path: str):
                 temp_path = temp_f.name
                 json.dump(sorted_glossary, temp_f, ensure_ascii=False, indent=2)
                 temp_f.flush()
-                # Skip fsync - atomic rename is safe, and fsync blocks on Windows
+                os.fsync(temp_f.fileno())  # Force immediate disk write
             
             # Atomic rename
             try:
@@ -461,7 +461,7 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                             row.append('')
                         writer.writerow(row)
                     temp_f.flush()
-                    # Skip fsync - atomic rename is safe
+                    os.fsync(temp_f.fileno())  # Force immediate disk write
                 
                 try:
                     if os.path.exists(csv_path):
@@ -528,8 +528,7 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
                             temp_f.write(line + "\n")
                         temp_f.write("\n")
                     temp_f.flush()
-                    # Skip fsync on Windows - it's very slow and atomic rename is safe enough
-                    # fsync only needed if system might crash during write, but temp file is tiny
+                    os.fsync(temp_f.fileno())  # Force immediate disk write
                 
                 try:
                     if os.path.exists(csv_path):
@@ -2013,8 +2012,11 @@ def main(log_callback=None, stop_callback=None):
                         
                         completed.append(idx)
                         
-                        # Save progress after each chapter completes (crash-safe)
+                        # Save progress after each chapter completes (crash-safe with atomic writes)
                         save_progress(completed, glossary, history)
+                        # Also save glossary files for incremental updates
+                        save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
+                        save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                         
                         # Add to history if contextual is enabled
                         if contextual_enabled and resp and chap:
