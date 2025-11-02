@@ -1053,6 +1053,14 @@ def skip_duplicate_entries(glossary):
     original_count = len(glossary)
     print(f"[Dedup] Starting 2-pass deduplication with {original_count} entries...")
     
+    # Show which algorithm mode is configured
+    algo_mode = os.getenv('GLOSSARY_DUPLICATE_ALGORITHM', 'auto')
+    use_advanced = os.getenv('GLOSSARY_USE_ADVANCED_DETECTION', '1') == '1'
+    if use_advanced:
+        print(f"[Dedup] Algorithm Mode: {algo_mode.upper()} (Multi-algorithm detection enabled)")
+    else:
+        print(f"[Dedup] Algorithm Mode: BASIC (Advanced detection disabled)")
+    
     # Show which method we're using
     if use_rapidfuzz:
         print(f"[Dedup] Using RapidFuzz (C++ speed) with threshold {fuzzy_threshold:.2f}")
@@ -1229,12 +1237,37 @@ def _dedupe_worker(item, all_items, fuzzy_threshold, use_rapidfuzz):
 
 
 def _find_best_duplicate_match(cleaned_name, seen_raw_names, fuzzy_threshold, use_rapidfuzz):
-    """Find the best duplicate match using fuzzy matching on pruned candidates"""
+    """Find the best duplicate match using multi-algorithm fuzzy matching"""
     if not seen_raw_names:
         return (False, 0.0, None)
     
     name_lower = cleaned_name.lower()
     
+    # Use advanced multi-algorithm detection if configured
+    use_advanced = os.getenv('GLOSSARY_USE_ADVANCED_DETECTION', '1') == '1'
+    
+    if use_advanced:
+        try:
+            from duplicate_detection_config import calculate_similarity_with_config, get_duplicate_detection_config
+            config = get_duplicate_detection_config()
+            
+            best_score = 0.0
+            best_match = None
+            
+            for seen_clean, seen_original in seen_raw_names:
+                # Use multi-algorithm similarity scoring
+                score = calculate_similarity_with_config(cleaned_name, seen_clean, config)
+                
+                if score >= fuzzy_threshold and score > best_score:
+                    best_score = score
+                    best_match = seen_original
+            
+            return (best_score >= fuzzy_threshold, best_score, best_match)
+        except ImportError:
+            # Fallback to basic if advanced module not available
+            pass
+    
+    # Basic mode (original logic)
     if use_rapidfuzz:
         from rapidfuzz import fuzz, process
         
