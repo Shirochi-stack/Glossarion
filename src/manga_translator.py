@@ -1283,6 +1283,7 @@ class MangaTranslator:
             self.min_readable_size = int(main_gui.config.get('manga_min_readable_size', 16))
         self.max_font_size_limit = main_gui.config.get('manga_max_font_size', 24)
         self.strict_text_wrapping = main_gui.config.get('manga_strict_text_wrapping', True)
+        self.hyphenate_outliers = main_gui.config.get('manga_hyphenate_outliers', False)
         
         # Enhanced text rendering settings - Load from config if available
         config = main_gui.config if hasattr(main_gui, 'config') else {}
@@ -11148,11 +11149,30 @@ class MangaTranslator:
                         lines.append(' '.join(current_line))
                         current_line = [word]
                     else:
-                        # Single word too long - add it anyway if not strict mode
+                        # Single word too long
                         if not self.strict_text_wrapping:
-                            current_line = [word]
+                            # Not in strict mode - check if we should hyphenate outliers
+                            if getattr(self, 'hyphenate_outliers', False) and len(word) > 3:
+                                # Hyphenate this outlier word
+                                try:
+                                    wrapped_word = hyphen_wrap(
+                                        word, 
+                                        width=max(int(max_width / (font.size * 0.6)), 10),  # Estimate character width
+                                        break_long_words=True,
+                                        hyphenate_broken_words=True
+                                    )
+                                    # Add each hyphenated line
+                                    for line in wrapped_word:
+                                        lines.append(line)
+                                    current_line = []
+                                except Exception:
+                                    # Fallback if hyphenation fails
+                                    current_line = [word]
+                            else:
+                                # No hyphenation - allow overflow
+                                current_line = [word]
                         else:
-                            # In strict mode, try to break it
+                            # In strict mode, always try to break it (existing behavior)
                             lines.append(word)
             
             # Add last line
@@ -11272,6 +11292,33 @@ class MangaTranslator:
                         pass
                 
                 i += 1
+            
+            # Step 4: Hyphenate any remaining outlier words that are too long (if enabled)
+            if getattr(self, 'hyphenate_outliers', False):
+                hyphenated_lines = []
+                for line in lines:
+                    if not line:
+                        continue
+                    word = line[0]
+                    # Check if this word is too wide
+                    if twidth(word) > max_width and len(word) > 3:
+                        # Try to hyphenate this word
+                        try:
+                            wrapped_word = hyphen_wrap(
+                                word,
+                                width=max(int(max_width / (font.size * 0.6)), 10),
+                                break_long_words=True,
+                                hyphenate_broken_words=True
+                            )
+                            # Add each hyphenated part as a separate line
+                            for part in wrapped_word:
+                                hyphenated_lines.append([part])
+                        except Exception:
+                            # Fallback if hyphenation fails
+                            hyphenated_lines.append(line)
+                    else:
+                        hyphenated_lines.append(line)
+                lines = hyphenated_lines
             
             # Convert back to string
             return '\n'.join([line[0] for line in lines if line])
