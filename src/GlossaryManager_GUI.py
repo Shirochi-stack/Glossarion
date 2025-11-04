@@ -497,6 +497,13 @@ class GlossaryManagerMixin:
                     use_smart_filter = not self.disable_smart_filtering_checkbox.isChecked()
                     self.config['glossary_use_smart_filter'] = use_smart_filter
                     setattr(self, 'glossary_use_smart_filter_var', use_smart_filter)
+                    
+                    # IMPORTANT: When smart filter is disabled, also disable frequency checking
+                    # This ensures ALL AI-generated entries are kept, not just the pre-filtered text
+                    # Without this, entries get filtered out during post-processing even though full text was sent
+                    skip_frequency = not use_smart_filter  # If smart filter disabled, skip frequency checks
+                    self.config['glossary_skip_frequency_check'] = skip_frequency
+                    setattr(self, 'glossary_skip_frequency_check_var', skip_frequency)
                 for checkbox_name, var_name in checkbox_to_var_mapping:
                     if hasattr(self, checkbox_name):
                         setattr(self, var_name, getattr(self, checkbox_name).isChecked())

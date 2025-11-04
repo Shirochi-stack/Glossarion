@@ -2300,26 +2300,21 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                 text_sample = all_text  # Use as-is since it's already filtered
                 detected_terms = {}
             else:
-                # Apply smart filtering to reduce noise and focus on meaningful content
+            # Apply smart filtering to reduce noise and focus on meaningful content
                 force_disable = os.getenv("GLOSSARY_FORCE_DISABLE_SMART_FILTER", "0") == "1"
                 use_smart_filter = (os.getenv("GLOSSARY_USE_SMART_FILTER", "1") == "1") and not force_disable
                 
-                if not use_smart_filter and not force_disable:
-                    print("📑 Smart filtering DISABLED by user - sending full text to API (this will be expensive!)")
-                    # Use the full text with NO filtering
+                if not use_smart_filter:
+                    # Smart filter disabled - send FULL text without any filtering or truncation
+                    print("📁 Smart filtering DISABLED by user - sending full text to API (this will be expensive!)")
                     text_sample = all_text
                     detected_terms = {}
-                elif use_smart_filter:
+                else:
+                    # Smart filter enabled - apply intelligent filtering
                     print("📁 Applying smart text filtering to reduce noise...")
                     # Use max_sentences parameter (passed from parent, already read from environment)
                     print(f"🔍 [DEBUG] In _extract_with_custom_prompt: max_sentences={max_sentences}")
                     text_sample, detected_terms = _filter_text_for_glossary(all_text, min_frequency, max_sentences)
-                else:
-                    print("📑 Smart filter disabled - using raw text sample")
-                    # Fallback to simple truncation
-                    max_text_size = int(os.getenv("GLOSSARY_MAX_TEXT_SIZE", "50000"))
-                    text_sample = all_text[:max_text_size] if len(all_text) > max_text_size and max_text_size > 0 else all_text
-                    detected_terms = {}
             
             # Replace placeholders in prompt
             # Get target language from environment (used in the prompt for translation output)
