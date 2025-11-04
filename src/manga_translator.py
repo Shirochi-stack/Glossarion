@@ -11152,53 +11152,10 @@ class MangaTranslator:
                         lines.append(' '.join(current_line))
                         current_line = [word]
                     else:
-                        # Single word too long - check if we should hyphenate
-                        should_hyphenate = getattr(self, 'hyphenate_outliers', False)
-                        
-                        if should_hyphenate and len(word) > 3:
-                            # Hyphenate this outlier word
-                            try:
-                                # Calculate character width by measuring average char width
-                                sample_bbox = draw.textbbox((0, 0), "ABCabc", font=font)
-                                avg_char_width = (sample_bbox[2] - sample_bbox[0]) / 6.0
-                                # Calculate how many characters fit in max_width
-                                chars_per_line = max(int(max_width / avg_char_width), 5)
-                                
-                                wrapped_word = hyphen_wrap(
-                                    word, 
-                                    width=chars_per_line,
-                                    break_long_words=True,
-                                    hyphenate_broken_words=True,
-                                    max_lines=None,
-                                    placeholder=''
-                                )
-                                # Clean up double hyphens and ellipsis
-                                cleaned_parts = []
-                                for idx, part in enumerate(wrapped_word):
-                                    if idx > 0 and cleaned_parts and cleaned_parts[-1].endswith('-') and part.startswith('-'):
-                                        part = part[1:]  # Remove leading hyphen
-                                    # Remove trailing ellipsis from middle parts
-                                    if idx < len(wrapped_word) - 1 and part.endswith('...'):
-                                        part = part[:-3].rstrip()
-                                    if part:
-                                        cleaned_parts.append(part)
-                                # Add each hyphenated line
-                                for line in cleaned_parts:
-                                    lines.append(line)
-                                current_line = []
-                            except Exception as e:
-                                # Fallback if hyphenation fails
-                                if not self.strict_text_wrapping:
-                                    # Allow overflow
-                                    current_line = [word]
-                                else:
-                                    # In strict mode, just add as-is
-                                    lines.append(word)
-                        elif not self.strict_text_wrapping:
-                            # No hyphenation - allow overflow in non-strict mode
+                        # Single word too long - let hyphenate_lines_to_fit handle it
+                        if not self.strict_text_wrapping:
                             current_line = [word]
                         else:
-                            # Strict mode without hyphenation - add as-is
                             lines.append(word)
             
             # Add last line
@@ -11319,53 +11276,8 @@ class MangaTranslator:
                 
                 i += 1
             
-            # Step 4: Hyphenate any remaining outlier words that are too long (if enabled)
-            # This runs regardless of allow_overflow setting when hyphenate_outliers is enabled
-            if getattr(self, 'hyphenate_outliers', False):
-                hyphenated_lines = []
-                for line in lines:
-                    if not line:
-                        continue
-                    word = line[0]
-                    word_width = twidth(word)
-                    # Check if this word is too wide (exceeds max_width)
-                    # Note: We check this even if allow_overflow was True during merging
-                    if word_width > max_width and len(word) > 3:
-                        # Try to hyphenate this word
-                        try:
-                            # Calculate character width by measuring average char width
-                            sample_bbox = draw.textbbox((0, 0), "ABCabc", font=font)
-                            avg_char_width = (sample_bbox[2] - sample_bbox[0]) / 6.0
-                            # Calculate how many characters fit in max_width
-                            chars_per_line = max(int(max_width / avg_char_width), 5)
-                            
-                            wrapped_word = hyphen_wrap(
-                                word,
-                                width=chars_per_line,
-                                break_long_words=True,
-                                hyphenate_broken_words=True,
-                                max_lines=None,
-                                placeholder=''
-                            )
-                            # Clean up double hyphens and ellipsis
-                            cleaned_parts = []
-                            for idx, part in enumerate(wrapped_word):
-                                if idx > 0 and cleaned_parts and cleaned_parts[-1].endswith('-') and part.startswith('-'):
-                                    part = part[1:]  # Remove leading hyphen
-                                # Remove trailing ellipsis from middle parts
-                                if idx < len(wrapped_word) - 1 and part.endswith('...'):
-                                    part = part[:-3].rstrip()
-                                if part:
-                                    cleaned_parts.append(part)
-                            # Add each hyphenated part as a separate line
-                            for part in cleaned_parts:
-                                hyphenated_lines.append([part])
-                        except Exception as e:
-                            # Fallback if hyphenation fails - keep original word
-                            hyphenated_lines.append(line)
-                    else:
-                        hyphenated_lines.append(line)
-                lines = hyphenated_lines
+            # Step 4: Internal hyphenation disabled - we use hyphenate_lines_to_fit instead
+            # This prevents double-hyphenation and interference
             
             # Convert back to string
             return '\n'.join([line[0] for line in lines if line])
@@ -11405,80 +11317,101 @@ class MangaTranslator:
             return (max_width, total_height)
         
         def hyphenate_lines_to_fit(lines_list, font, max_width):
-            """Hyphenate any over-wide words so each resulting line fits within max_width.
-            lines_list is a list of strings (each a line). Returns a list of lines.
+            """Aggressively hyphenate to force each line within max_width.
+            Will recursively break words until they fit.
             """
             result = []
-            # Compute average character width for current font
-            try:
-                sample_bbox = draw.textbbox((0, 0), "ABCabc", font=font)
-                avg_char_width = max(1.0, (sample_bbox[2] - sample_bbox[0]) / 6.0)
-            except Exception:
-                # Fallback estimate
-                avg_char_width = max(1.0, getattr(font, 'size', 12) * 0.6)
-            chars_per_line = max(int(max_width / avg_char_width), 5)
-
+            
+            def measure(s):
+                bb = draw.textbbox((0, 0), s if s else "A", font=font)
+                return bb[2] - bb[0]
+            
+            def force_break_word(word, max_w):
+                """Force break a word to fit within max_w, character by character if needed."""
+                if measure(word) <= max_w:
+                    return [word]
+                
+                # Try hyphen_wrap first
+                try:
+                    sample_bbox = draw.textbbox((0, 0), "ABCabc", font=font)
+                    avg_char_width = max(1.0, (sample_bbox[2] - sample_bbox[0]) / 6.0)
+                    chars_per_line = max(int(max_w / avg_char_width), 3)
+                    parts = hyphen_wrap(word, width=chars_per_line, break_long_words=True, hyphenate_broken_words=True, max_lines=None, placeholder='')
+                    
+                    # Verify each part actually fits
+                    final_parts = []
+                    for part in parts:
+                        # Clean up
+                        if final_parts and final_parts[-1].endswith('-') and part.startswith('-'):
+                            part = part[1:]
+                        if part.endswith('...') and parts.index(part) < len(parts) - 1:
+                            part = part[:-3].rstrip()
+                        
+                        # If still too wide, force split character by character
+                        if measure(part) > max_w:
+                            char_parts = []
+                            current_part = ''
+                            for char in part:
+                                test = current_part + char
+                                if measure(test + '-') <= max_w:
+                                    current_part = test
+                                else:
+                                    if current_part:
+                                        char_parts.append(current_part + '-')
+                                    current_part = char
+                            if current_part:
+                                char_parts.append(current_part)
+                            final_parts.extend(char_parts)
+                        else:
+                            final_parts.append(part)
+                    return final_parts if final_parts else [word]
+                except Exception:
+                    # Last resort: character-by-character split
+                    parts = []
+                    current = ''
+                    for char in word:
+                        test = current + char
+                        if measure(test + '-') <= max_w:
+                            current = test
+                        else:
+                            if current:
+                                parts.append(current + '-')
+                            current = char
+                    if current:
+                        parts.append(current)
+                    return parts if parts else [word]
+            
             for line in lines_list:
-                # Quick fit
-                bbox = draw.textbbox((0, 0), line if line else "A", font=font)
-                if (bbox[2] - bbox[0]) <= max_width:
+                if measure(line) <= max_width:
                     result.append(line)
                     continue
-
-                # Rebuild line with per-word packing, hyphenating long words
+                
+                # Line too wide - repack words
                 words = line.split()
                 current = []
-                def measure(s):
-                    bb = draw.textbbox((0, 0), s if s else "A", font=font)
-                    return bb[2] - bb[0]
-                i = 0
-                while i < len(words):
-                    word = words[i]
-                    tentative = (current + [word])
-                    test_text = ' '.join(tentative)
+                
+                for word in words:
+                    test_text = ' '.join(current + [word])
                     if measure(test_text) <= max_width:
                         current.append(word)
-                        i += 1
-                        continue
-                    # The word doesn't fit on this line
-                    if current:
-                        # flush current line
-                        result.append(' '.join(current))
-                        current = []
-                        # try again without advancing i
-                        continue
-                    # Single word exceeds max_width: hyphen-wrap the word
-                    try:
-                        parts = hyphen_wrap(
-                            word, 
-                            width=chars_per_line, 
-                            break_long_words=True, 
-                            hyphenate_broken_words=True,
-                            max_lines=None,  # Don't truncate
-                            placeholder=''    # No placeholder when breaking words
-                        )
-                    except Exception:
-                        parts = [word]
-                    if parts:
-                        # Clean up hyphenation artifacts:
-                        # If a part ends with '-' and the next part starts with '-', remove the duplicate
-                        cleaned_parts = []
-                        for idx, part in enumerate(parts):
-                            if idx > 0 and cleaned_parts and cleaned_parts[-1].endswith('-') and part.startswith('-'):
-                                # Remove leading hyphen from current part (already have trailing hyphen on previous)
-                                part = part[1:]
-                            # Remove trailing ellipsis from middle parts (keep only on final part)
-                            if idx < len(parts) - 1 and part.endswith('...'):
-                                part = part[:-3].rstrip()
-                            if part:  # Only add non-empty parts
-                                cleaned_parts.append(part)
+                    else:
+                        # Flush current
+                        if current:
+                            result.append(' '.join(current))
+                            current = []
                         
-                        # Add all hyphenated parts as separate lines
-                        for part in cleaned_parts:
-                            result.append(part)
-                    i += 1
+                        # Check if word alone fits
+                        if measure(word) <= max_width:
+                            current = [word]
+                        else:
+                            # Word too long - force break it
+                            broken = force_break_word(word, max_width)
+                            result.extend(broken[:-1])  # Add all but last
+                            current = [broken[-1]] if broken else []  # Keep last for potential merging
+                
                 if current:
                     result.append(' '.join(current))
+            
             return result
         
         # Get initial font
