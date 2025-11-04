@@ -4563,19 +4563,13 @@ class MangaTranslationTab(QObject):
         self.strict_wrap_checkbox.stateChanged.connect(lambda: (setattr(self, 'strict_text_wrapping_value', self.strict_wrap_checkbox.isChecked()), self._save_rendering_settings(), self._apply_rendering_settings()))
         wrap_layout.addWidget(self.strict_wrap_checkbox)
 
-        wrap_help_label = QLabel("(Uses legacy column-based text wrapping algorithm)")
+        wrap_help_label = QLabel("(Break words with hyphens if needed)")
         wrap_help_font = QFont('Arial', 9)
         wrap_help_label.setFont(wrap_help_font)
         wrap_help_label.setStyleSheet("color: gray; margin-left: 20px;")
         wrap_layout.addWidget(wrap_help_label)
 
-        # Hyphenate outliers toggle - below strict wrapping
-        self.hyphenate_outliers_checkbox = self._create_styled_checkbox("Hyphenate outliers instead of allowing overflow")
-        self.hyphenate_outliers_checkbox.setChecked(self.hyphenate_outliers_value)
-        self.hyphenate_outliers_checkbox.stateChanged.connect(lambda: (setattr(self, 'hyphenate_outliers_value', self.hyphenate_outliers_checkbox.isChecked()), self._save_rendering_settings(), self._apply_rendering_settings()))
-        wrap_layout.addWidget(self.hyphenate_outliers_checkbox)
-
-        # Force CAPS LOCK directly below hyphenate outliers
+        # Force CAPS LOCK directly below strict wrapping
         self.force_caps_checkbox = self._create_styled_checkbox("Force CAPS LOCK")
         self.force_caps_checkbox.setChecked(self.force_caps_lock_value)
         self.force_caps_checkbox.stateChanged.connect(lambda: (setattr(self, 'force_caps_lock_value', self.force_caps_checkbox.isChecked()), self._save_rendering_settings(), self._apply_rendering_settings()))
@@ -5725,7 +5719,6 @@ class MangaTranslationTab(QObject):
             self.main_gui.config['manga_max_font_size'] = int(effective_max)
         
         self.strict_text_wrapping_value = config.get('manga_strict_text_wrapping', True)
-        self.hyphenate_outliers_value = config.get('manga_hyphenate_outliers', False)
         
         # Safe area controls
         self.safe_area_enabled_value = bool(config.get('manga_safe_area_enabled', False))
@@ -5966,8 +5959,6 @@ class MangaTranslationTab(QObject):
                 self.main_gui.config['manga_constrain_to_bubble'] = self.constrain_to_bubble_value
             if hasattr(self, 'strict_text_wrapping_value'):
                 self.main_gui.config['manga_strict_text_wrapping'] = self.strict_text_wrapping_value
-            if hasattr(self, 'hyphenate_outliers_value'):
-                self.main_gui.config['manga_hyphenate_outliers'] = self.hyphenate_outliers_value
             if hasattr(self, 'force_caps_lock_value'):
                 self.main_gui.config['manga_force_caps_lock'] = self.force_caps_lock_value
             
@@ -6082,7 +6073,6 @@ class MangaTranslationTab(QObject):
             
             # Text wrapping and constraints
             self.strict_text_wrapping_value = True
-            self.hyphenate_outliers_value = False
             self.constrain_to_bubble_value = True
             self.force_caps_lock_value = True
             
@@ -6143,10 +6133,6 @@ class MangaTranslationTab(QObject):
             # Update text wrapping checkbox
             if hasattr(self, 'strict_wrap_checkbox'):
                 self.strict_wrap_checkbox.setChecked(True)
-            
-            # Update hyphenate outliers checkbox
-            if hasattr(self, 'hyphenate_outliers_checkbox'):
-                self.hyphenate_outliers_checkbox.setChecked(False)
             
             # Update constrain checkbox
             if hasattr(self, 'constrain_checkbox'):
@@ -10709,7 +10695,6 @@ class MangaTranslationTab(QObject):
         self.translator.min_readable_size = self.auto_min_size_value
         self.translator.max_font_size_limit = self.max_font_size_value
         self.translator.strict_text_wrapping = self.strict_text_wrapping_value
-        self.translator.hyphenate_outliers = getattr(self, 'hyphenate_outliers_value', False)
         self.translator.force_caps_lock = self.force_caps_lock_value
         
         # Update constrain to bubble setting

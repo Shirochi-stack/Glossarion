@@ -8440,7 +8440,6 @@ def _render_with_manga_translator(self, image_path: str, regions, output_path: s
                 translator_inst.min_readable_size = int(getattr(self, 'auto_min_size_value', 10))
                 translator_inst.max_font_size_limit = int(getattr(self, 'max_font_size_value', 48))
                 translator_inst.strict_text_wrapping = getattr(self, 'strict_text_wrapping_value', True)
-                translator_inst.hyphenate_outliers = getattr(self, 'hyphenate_outliers_value', False)
                 translator_inst.force_caps_lock = getattr(self, 'force_caps_lock_value', True)
                 translator_inst.constrain_to_bubble = getattr(self, 'constrain_to_bubble_value', True)
                 # Free-text-only BG opacity toggle
