@@ -1059,8 +1059,17 @@ def _looks_like_name(text):
     if (has_kanji or has_kana) and 2 <= len(text) <= 6:
         return True
     
-    # Chinese names (2-4 Chinese characters)
-    if all(0x4E00 <= ord(char) <= 0x9FFF for char in text) and 2 <= len(text) <= 4:
+    # Chinese names (EXPANDED: 2-6 Chinese characters for cultivation novels)
+    if all(0x4E00 <= ord(char) <= 0x9FFF for char in text) and 2 <= len(text) <= 6:
+        # Check if it starts with a known surname (1 or 2 chars)
+        if len(text) >= 2:
+            # Check single-char surname
+            if text[0] in PM.CHINESE_SINGLE_SURNAMES:
+                return True
+            # Check two-char compound surname
+            if len(text) >= 3 and text[:2] in PM.CHINESE_COMPOUND_SURNAMES:
+                return True
+        # Even without surname match, if it's 2-6 chars it could be a valid term
         return True
     
     # English names (starts with capital, mostly letters)
@@ -1533,9 +1542,15 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     print(f"📑 Detected primary language: {primary_lang}")
     
     # Split into sentences for better context
-    print(f"📑 Step 3/7: Splitting text into sentences...")
-    sentences = re.split(r'[.!?。！？]+', clean_text)
-    print(f"📑 Found {len(sentences):,} sentences")
+    print(f"📁 Step 3/7: Splitting text into sentences...")
+    # Use language-specific sentence splitting for better accuracy
+    if primary_lang == 'chinese':
+        # Split on major punctuation, but keep 、 and ， within sentences
+        # This preserves more context for Chinese cultivation/wuxia terms
+        sentences = re.split(r'[。！？；：]+', clean_text)
+    else:
+        sentences = re.split(r'[.!?。！？]+', clean_text)
+    print(f"📁 Found {len(sentences):,} sentences")
     
     # Extract potential terms (words/phrases that appear multiple times)
     print(f"📑 Step 4/7: Setting up extraction patterns and exclusion rules...")
@@ -1546,8 +1561,9 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     korean_pattern = r'[가-힣]{2,4}'
     # Japanese names: kanji/hiragana/katakana combinations
     japanese_pattern = r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]{2,6}'
-    # Chinese names: 2-4 Chinese characters
-    chinese_pattern = r'[\u4e00-\u9fff]{2,4}'
+    # Chinese names: EXPANDED to 2-8 characters for cultivation/wuxia novels
+    # This captures longer compound names, titles, and cultivation terms
+    chinese_pattern = r'[\u4e00-\u9fff]{2,8}'
     # English proper nouns: Capitalized words
     english_pattern = r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b'
     
@@ -1593,6 +1609,58 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         # Check if it's just digits
         if term.isdigit():
             return True
+        
+        # For Chinese text, INCLUDE domain-specific terms (don't exclude them)
+        if primary_lang == 'chinese' and len(term) >= 2:
+            # Check if it's a cultivation term - these should NOT be excluded
+            for category in PM.CHINESE_CULTIVATION_TERMS.values():
+                if term in category:
+                    return False  # Keep cultivation terms!
+            
+            # Check if it's a wuxia term - these should NOT be excluded
+            for category in PM.CHINESE_WUXIA_TERMS.values():
+                if term in category:
+                    return False  # Keep wuxia terms!
+            
+            # Check relationship terms (important character relationships)
+            for category in PM.CHINESE_RELATIONSHIP_TERMS.values():
+                if term in category:
+                    return False  # Keep relationship terms!
+            
+            # Check mythological terms (creatures, artifacts, legendary beings)
+            for category in PM.CHINESE_MYTHOLOGICAL_TERMS.values():
+                if term in category:
+                    return False  # Keep mythological terms!
+            
+            # Check elemental/natural force terms
+            for category in PM.CHINESE_ELEMENTAL_TERMS.values():
+                if term in category:
+                    return False  # Keep elemental terms!
+            
+            # Check physique/spiritual root terms
+            for category in PM.CHINESE_PHYSIQUE_TERMS.values():
+                if term in category:
+                    return False  # Keep physique terms!
+            
+            # Check treasure grades
+            for category in PM.CHINESE_TREASURE_GRADES.values():
+                if term in category:
+                    return False  # Keep treasure grade terms!
+            
+            # Check power system terms (levels, stars, etc.)
+            for category in PM.CHINESE_POWER_SYSTEMS.values():
+                if term in category:
+                    return False  # Keep power system terms!
+            
+            # Check location types
+            for category in PM.CHINESE_LOCATION_TYPES.values():
+                if term in category:
+                    return False  # Keep location terms!
+            
+            # Check battle terms
+            for category in PM.CHINESE_BATTLE_TERMS.values():
+                if term in category:
+                    return False  # Keep battle terms!
         
         return False
     
