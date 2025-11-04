@@ -11086,6 +11086,9 @@ class MangaTranslator:
         mutable_message = text
         font_size = init_font_size
         
+        # Global flag for hyphenation within this wrap routine
+        should_hyphenate = bool(getattr(self, 'hyphenate_outliers', False))
+        
         def get_median_word_width(txt, font, use_strict=False):
             """Calculate median word width to avoid outlier-based sizing.
             
@@ -11149,30 +11152,53 @@ class MangaTranslator:
                         lines.append(' '.join(current_line))
                         current_line = [word]
                     else:
-                        # Single word too long
-                        if not self.strict_text_wrapping:
-                            # Not in strict mode - check if we should hyphenate outliers
-                            if getattr(self, 'hyphenate_outliers', False) and len(word) > 3:
-                                # Hyphenate this outlier word
-                                try:
-                                    wrapped_word = hyphen_wrap(
-                                        word, 
-                                        width=max(int(max_width / (font.size * 0.6)), 10),  # Estimate character width
-                                        break_long_words=True,
-                                        hyphenate_broken_words=True
-                                    )
-                                    # Add each hyphenated line
-                                    for line in wrapped_word:
-                                        lines.append(line)
-                                    current_line = []
-                                except Exception:
-                                    # Fallback if hyphenation fails
+                        # Single word too long - check if we should hyphenate
+                        should_hyphenate = getattr(self, 'hyphenate_outliers', False)
+                        
+                        if should_hyphenate and len(word) > 3:
+                            # Hyphenate this outlier word
+                            try:
+                                # Calculate character width by measuring average char width
+                                sample_bbox = draw.textbbox((0, 0), "ABCabc", font=font)
+                                avg_char_width = (sample_bbox[2] - sample_bbox[0]) / 6.0
+                                # Calculate how many characters fit in max_width
+                                chars_per_line = max(int(max_width / avg_char_width), 5)
+                                
+                                wrapped_word = hyphen_wrap(
+                                    word, 
+                                    width=chars_per_line,
+                                    break_long_words=True,
+                                    hyphenate_broken_words=True,
+                                    max_lines=None,
+                                    placeholder=''
+                                )
+                                # Clean up double hyphens and ellipsis
+                                cleaned_parts = []
+                                for idx, part in enumerate(wrapped_word):
+                                    if idx > 0 and cleaned_parts and cleaned_parts[-1].endswith('-') and part.startswith('-'):
+                                        part = part[1:]  # Remove leading hyphen
+                                    # Remove trailing ellipsis from middle parts
+                                    if idx < len(wrapped_word) - 1 and part.endswith('...'):
+                                        part = part[:-3].rstrip()
+                                    if part:
+                                        cleaned_parts.append(part)
+                                # Add each hyphenated line
+                                for line in cleaned_parts:
+                                    lines.append(line)
+                                current_line = []
+                            except Exception as e:
+                                # Fallback if hyphenation fails
+                                if not self.strict_text_wrapping:
+                                    # Allow overflow
                                     current_line = [word]
-                            else:
-                                # No hyphenation - allow overflow
-                                current_line = [word]
+                                else:
+                                    # In strict mode, just add as-is
+                                    lines.append(word)
+                        elif not self.strict_text_wrapping:
+                            # No hyphenation - allow overflow in non-strict mode
+                            current_line = [word]
                         else:
-                            # In strict mode, always try to break it (existing behavior)
+                            # Strict mode without hyphenation - add as-is
                             lines.append(word)
             
             # Add last line
@@ -11294,27 +11320,48 @@ class MangaTranslator:
                 i += 1
             
             # Step 4: Hyphenate any remaining outlier words that are too long (if enabled)
+            # This runs regardless of allow_overflow setting when hyphenate_outliers is enabled
             if getattr(self, 'hyphenate_outliers', False):
                 hyphenated_lines = []
                 for line in lines:
                     if not line:
                         continue
                     word = line[0]
-                    # Check if this word is too wide
-                    if twidth(word) > max_width and len(word) > 3:
+                    word_width = twidth(word)
+                    # Check if this word is too wide (exceeds max_width)
+                    # Note: We check this even if allow_overflow was True during merging
+                    if word_width > max_width and len(word) > 3:
                         # Try to hyphenate this word
                         try:
+                            # Calculate character width by measuring average char width
+                            sample_bbox = draw.textbbox((0, 0), "ABCabc", font=font)
+                            avg_char_width = (sample_bbox[2] - sample_bbox[0]) / 6.0
+                            # Calculate how many characters fit in max_width
+                            chars_per_line = max(int(max_width / avg_char_width), 5)
+                            
                             wrapped_word = hyphen_wrap(
                                 word,
-                                width=max(int(max_width / (font.size * 0.6)), 10),
+                                width=chars_per_line,
                                 break_long_words=True,
-                                hyphenate_broken_words=True
+                                hyphenate_broken_words=True,
+                                max_lines=None,
+                                placeholder=''
                             )
+                            # Clean up double hyphens and ellipsis
+                            cleaned_parts = []
+                            for idx, part in enumerate(wrapped_word):
+                                if idx > 0 and cleaned_parts and cleaned_parts[-1].endswith('-') and part.startswith('-'):
+                                    part = part[1:]  # Remove leading hyphen
+                                # Remove trailing ellipsis from middle parts
+                                if idx < len(wrapped_word) - 1 and part.endswith('...'):
+                                    part = part[:-3].rstrip()
+                                if part:
+                                    cleaned_parts.append(part)
                             # Add each hyphenated part as a separate line
-                            for part in wrapped_word:
+                            for part in cleaned_parts:
                                 hyphenated_lines.append([part])
-                        except Exception:
-                            # Fallback if hyphenation fails
+                        except Exception as e:
+                            # Fallback if hyphenation fails - keep original word
                             hyphenated_lines.append(line)
                     else:
                         hyphenated_lines.append(line)
@@ -11356,6 +11403,83 @@ class MangaTranslator:
             total_height = len(lines) * line_height
             
             return (max_width, total_height)
+        
+        def hyphenate_lines_to_fit(lines_list, font, max_width):
+            """Hyphenate any over-wide words so each resulting line fits within max_width.
+            lines_list is a list of strings (each a line). Returns a list of lines.
+            """
+            result = []
+            # Compute average character width for current font
+            try:
+                sample_bbox = draw.textbbox((0, 0), "ABCabc", font=font)
+                avg_char_width = max(1.0, (sample_bbox[2] - sample_bbox[0]) / 6.0)
+            except Exception:
+                # Fallback estimate
+                avg_char_width = max(1.0, getattr(font, 'size', 12) * 0.6)
+            chars_per_line = max(int(max_width / avg_char_width), 5)
+
+            for line in lines_list:
+                # Quick fit
+                bbox = draw.textbbox((0, 0), line if line else "A", font=font)
+                if (bbox[2] - bbox[0]) <= max_width:
+                    result.append(line)
+                    continue
+
+                # Rebuild line with per-word packing, hyphenating long words
+                words = line.split()
+                current = []
+                def measure(s):
+                    bb = draw.textbbox((0, 0), s if s else "A", font=font)
+                    return bb[2] - bb[0]
+                i = 0
+                while i < len(words):
+                    word = words[i]
+                    tentative = (current + [word])
+                    test_text = ' '.join(tentative)
+                    if measure(test_text) <= max_width:
+                        current.append(word)
+                        i += 1
+                        continue
+                    # The word doesn't fit on this line
+                    if current:
+                        # flush current line
+                        result.append(' '.join(current))
+                        current = []
+                        # try again without advancing i
+                        continue
+                    # Single word exceeds max_width: hyphen-wrap the word
+                    try:
+                        parts = hyphen_wrap(
+                            word, 
+                            width=chars_per_line, 
+                            break_long_words=True, 
+                            hyphenate_broken_words=True,
+                            max_lines=None,  # Don't truncate
+                            placeholder=''    # No placeholder when breaking words
+                        )
+                    except Exception:
+                        parts = [word]
+                    if parts:
+                        # Clean up hyphenation artifacts:
+                        # If a part ends with '-' and the next part starts with '-', remove the duplicate
+                        cleaned_parts = []
+                        for idx, part in enumerate(parts):
+                            if idx > 0 and cleaned_parts and cleaned_parts[-1].endswith('-') and part.startswith('-'):
+                                # Remove leading hyphen from current part (already have trailing hyphen on previous)
+                                part = part[1:]
+                            # Remove trailing ellipsis from middle parts (keep only on final part)
+                            if idx < len(parts) - 1 and part.endswith('...'):
+                                part = part[:-3].rstrip()
+                            if part:  # Only add non-empty parts
+                                cleaned_parts.append(part)
+                        
+                        # Add all hyphenated parts as separate lines
+                        for part in cleaned_parts:
+                            result.append(part)
+                    i += 1
+                if current:
+                    result.append(' '.join(current))
+            return result
         
         # Get initial font
         try:
@@ -11415,6 +11539,9 @@ class MangaTranslator:
                     merge_width = roi_width
                     
                     best_wrapped = wrap_narrow_bubble_with_shortword_merge(text, ImageFont.truetype(font_path, max(min_font_size, 10)) if font_path else ImageFont.load_default(), merge_width, allow_overflow)
+                    # Enforce hyphenation post-process if enabled
+                    if should_hyphenate:
+                        best_wrapped = '\n'.join(hyphenate_lines_to_fit(best_wrapped.split('\n'), ImageFont.truetype(font_path, max(min_font_size, 10)) if font_path else ImageFont.load_default(), merge_width))
                     
                     while low <= high:
                         mid = (low + high) // 2
@@ -11427,6 +11554,9 @@ class MangaTranslator:
                         
                         # Wrap: one word per line, merge short words
                         wrapped = wrap_narrow_bubble_with_shortword_merge(text, test_font, merge_width, allow_overflow)
+                        # Enforce hyphenation post-process if enabled (ensure no over-wide lines)
+                        if should_hyphenate:
+                            wrapped = '\n'.join(hyphenate_lines_to_fit(wrapped.split('\n'), test_font, merge_width))
                         
                         # Measure height and width
                         width, height = eval_metrics(wrapped, test_font)
@@ -11448,13 +11578,18 @@ class MangaTranslator:
                             # Too large, try smaller
                             high = mid - 1
                     
-                    return best_wrapped, int(best_font_size)
+                    # Ensure we never go below minimum font size
+                    final_size = max(min_font_size, int(best_font_size))
+                    return best_wrapped, final_size
                 else:
                     # Fallback
                     allow_overflow = (auto_fit_style in ['readable', 'balanced'])
                     merge_width = roi_width
                     wrapped = wrap_narrow_bubble_with_shortword_merge(text, ImageFont.truetype(font_path, max(min_font_size, 10)) if font_path else ImageFont.load_default(), merge_width, allow_overflow)
-                    return wrapped, init_font_size
+                    if should_hyphenate:
+                        wrapped = '\n'.join(hyphenate_lines_to_fit(wrapped.split('\n'), ImageFont.truetype(font_path, max(min_font_size, 10)) if font_path else ImageFont.load_default(), merge_width))
+                    # Ensure fallback respects minimum font size
+                    return wrapped, max(min_font_size, init_font_size)
             
             # For narrow bubbles with compact mode: strict fitting (no overflow allowed)
             if is_narrow and auto_fit_style == 'compact':
@@ -11476,10 +11611,13 @@ class MangaTranslator:
                     
                     # Wrap: one word per line, merge short words (strict width in compact mode)
                     wrapped = wrap_narrow_bubble_with_shortword_merge(text, test_font, roi_width, allow_overflow=False)
+                    # Enforce hyphenation post-process if enabled (ensure no over-wide lines)
+                    if should_hyphenate:
+                        wrapped = '\n'.join(hyphenate_lines_to_fit(wrapped.split('\n'), test_font, roi_width))
                     
                     # Measure both width and height - STRICT (no overflow)
-                    # Apply Qt rendering overhead (40% wider) to match actual rendering
-                    width, height = eval_metrics(wrapped, test_font, apply_qt_overhead=True)
+                    # Don't apply Qt overhead - it causes text to leak
+                    width, height = eval_metrics(wrapped, test_font, apply_qt_overhead=False)
                     
                     #print(f"[COMPACT DEBUG] font_size={mid}, width={width:.1f} (with Qt overhead), roi_width={roi_width}, height={height:.1f}, roi_height={roi_height}")
                     #print(f"[COMPACT DEBUG] wrapped text:\n{wrapped}\n")
@@ -11496,7 +11634,9 @@ class MangaTranslator:
                         high = mid - 1
                         #print(f"[COMPACT DEBUG] -> TOO LARGE, trying smaller")
                 
-                return best_wrapped, int(best_font_size)
+                # Ensure we never go below minimum font size
+                final_size = max(min_font_size, int(best_font_size))
+                return best_wrapped, final_size
             
             # For normal bubbles: original greedy wrapping logic
             high = init_font_size
@@ -11515,6 +11655,9 @@ class MangaTranslator:
                 
                 # Normal: greedy word wrapping with short-word protection
                 wrapped = greedy_word_wrap(text, test_font, roi_width)
+                # Enforce hyphenation post-process if enabled (ensure no over-wide lines)
+                if should_hyphenate:
+                    wrapped = '\n'.join(hyphenate_lines_to_fit(wrapped.split('\n'), test_font, roi_width))
                 # Post-process to merge orphaned short words
                 lines = wrapped.split('\n')
                 merged_lines = []
@@ -11549,7 +11692,9 @@ class MangaTranslator:
                     # Too large, try smaller
                     high = mid - 1
             
-            return best_wrapped, int(best_font_size)
+            # Ensure we never go below minimum font size
+            final_size = max(min_font_size, int(best_font_size))
+            return best_wrapped, final_size
         
         # STRICT MODE: Original algorithm (unused code below, kept for fallback)
         if False:
