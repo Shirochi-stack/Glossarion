@@ -11335,7 +11335,8 @@ class MangaTranslator:
                 try:
                     sample_bbox = draw.textbbox((0, 0), "ABCabc", font=font)
                     avg_char_width = max(1.0, (sample_bbox[2] - sample_bbox[0]) / 6.0)
-                    chars_per_line = max(int(max_w / avg_char_width), 3)
+                    # Add 20% buffer to char count to prevent overly aggressive splits
+                    chars_per_line = max(int((max_w / avg_char_width) * 1.2), 5)
                     parts = hyphen_wrap(word, width=chars_per_line, break_long_words=True, hyphenate_broken_words=True, max_lines=None, placeholder='')
                     
                     # Verify each part actually fits
@@ -11347,13 +11348,16 @@ class MangaTranslator:
                         if part.endswith('...') and parts.index(part) < len(parts) - 1:
                             part = part[:-3].rstrip()
                         
-                        # If still too wide, force split character by character
-                        if measure(part) > max_w:
+                        # If still too wide after hyphen_wrap, force split by syllables/chars
+                        # Only trigger this for extremely long parts
+                        if measure(part) > max_w and len(part) > 15:
+                            # Very aggressive case - split character by character
                             char_parts = []
                             current_part = ''
                             for char in part:
                                 test = current_part + char
-                                if measure(test + '-') <= max_w:
+                                # Measure without hyphen first - add hyphen later
+                                if measure(test) <= max_w - measure('-'):
                                     current_part = test
                                 else:
                                     if current_part:
@@ -11366,6 +11370,7 @@ class MangaTranslator:
                                 char_parts[i] += '-'
                             final_parts.extend(char_parts)
                         else:
+                            # Part is acceptable, even if slightly over
                             final_parts.append(part)
                     return final_parts if final_parts else [word]
                 except Exception:
