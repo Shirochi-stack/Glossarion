@@ -11357,10 +11357,13 @@ class MangaTranslator:
                                     current_part = test
                                 else:
                                     if current_part:
-                                        char_parts.append(current_part + '-')
+                                        char_parts.append(current_part)
                                     current_part = char
                             if current_part:
                                 char_parts.append(current_part)
+                            # Add hyphens only between parts, not after last
+                            for i in range(len(char_parts) - 1):
+                                char_parts[i] += '-'
                             final_parts.extend(char_parts)
                         else:
                             final_parts.append(part)
@@ -11375,10 +11378,13 @@ class MangaTranslator:
                             current = test
                         else:
                             if current:
-                                parts.append(current + '-')
+                                parts.append(current)
                             current = char
                     if current:
                         parts.append(current)
+                    # Add hyphens only between parts, not after last
+                    for i in range(len(parts) - 1):
+                        parts[i] += '-'
                     return parts if parts else [word]
             
             for line in lines_list:
@@ -11494,8 +11500,11 @@ class MangaTranslator:
                         # Measure height and width
                         width, height = eval_metrics(wrapped, test_font)
                         
-                        # Validation based on auto_fit_style
-                        if auto_fit_style == 'readable':
+                        # Validation based on auto_fit_style and hyphenation
+                        if should_hyphenate:
+                            # When hyphenation is enabled, enforce strict width limits
+                            fits = height <= roi_height and width <= merge_width
+                        elif auto_fit_style == 'readable':
                             # Readable mode: IGNORE width validation entirely, only check height
                             fits = height <= roi_height
                         else:
@@ -11675,6 +11684,9 @@ class MangaTranslator:
             elif width > roi_width:
                 # Text is too wide, try word-based greedy wrapping
                 wrapped = greedy_word_wrap(text, font, roi_width)
+                # Apply hyphenation if enabled
+                if should_hyphenate:
+                    wrapped = '\n'.join(hyphenate_lines_to_fit(wrapped.split('\n'), font, roi_width))
                 wrapped_width, wrapped_height = eval_metrics(wrapped, font)
                 
                 if wrapped_width <= roi_width and wrapped_height <= roi_height:
@@ -11702,6 +11714,9 @@ class MangaTranslator:
             
             # Use greedy word wrap for best fit at minimum font size
             mutable_message = greedy_word_wrap(text, font, roi_width)
+            # Apply hyphenation if enabled
+            if should_hyphenate:
+                mutable_message = '\n'.join(hyphenate_lines_to_fit(mutable_message.split('\n'), font, roi_width))
         
         return mutable_message, int(font_size)
     
