@@ -190,7 +190,7 @@ class QAScannerMixin:
             screen = QApplication.primaryScreen().geometry()
             screen_width = screen.width()
             screen_height = screen.height()
-            dialog_width = int(screen_width * 0.45)  # 50% of screen width
+            dialog_width = int(screen_width * 0.47)  # 50% of screen width
             dialog_height = int(screen_height * 0.43)  # 45% of screen height
             
             mode_dialog = QDialog(self)
@@ -230,7 +230,7 @@ class QAScannerMixin:
         if selected_mode_value is None:
             # Set minimum size to prevent dialog from being too small (using ratios)
             # 35% width, 35% height for better content fit
-            min_width = int(screen_width * 0.35)
+            min_width = int(screen_width * 0.37)
             min_height = int(screen_height * 0.35)
             mode_dialog.setMinimumSize(min_width, min_height)
             
@@ -604,7 +604,7 @@ class QAScannerMixin:
             custom_dialog.setModal(True)
             # Use screen ratios: 20% width, 50% height for better content fit
             screen = QApplication.primaryScreen().geometry()
-            custom_width = int(screen.width() * 0.42)
+            custom_width = int(screen.width() * 0.45)
             custom_height = int(screen.height() * 0.60)
             custom_dialog.resize(custom_width, custom_height)
             # Set window icon
@@ -644,7 +644,8 @@ class QAScannerMixin:
                 'consecutive_chapters': 2,
                 'check_all_pairs': False,
                 'sample_size': 3000,
-                'min_text_length': 500
+                'min_text_length': 500,
+                'min_duplicate_word_count': 500
             }
             
             # Override with saved settings if they exist
@@ -1847,6 +1848,31 @@ class QAScannerMixin:
         min_length_layout.addWidget(min_length_spinbox)
         min_length_layout.addStretch()
         file_layout.addWidget(min_length_widget)
+        
+        # Minimum duplicate word count
+        min_dup_words_widget = QWidget()
+        min_dup_words_layout = QHBoxLayout(min_dup_words_widget)
+        min_dup_words_layout.setContentsMargins(0, 10, 0, 10)
+        
+        min_dup_words_label = QLabel("Skip small files as duplicates if <N words:")
+        min_dup_words_label.setFont(QFont('Arial', 10))
+        min_dup_words_layout.addWidget(min_dup_words_label)
+        
+        min_dup_words_spinbox = QSpinBox()
+        min_dup_words_spinbox.setMinimum(100)
+        min_dup_words_spinbox.setMaximum(2000)
+        min_dup_words_spinbox.setSingleStep(50)
+        min_dup_words_spinbox.setValue(qa_settings.get('min_duplicate_word_count', 500))
+        min_dup_words_spinbox.setMinimumWidth(100)
+        disable_wheel_event(min_dup_words_spinbox)
+        min_dup_words_layout.addWidget(min_dup_words_spinbox)
+        
+        min_dup_hint = QLabel("(prevents section/notice files from being flagged)")
+        min_dup_hint.setFont(QFont('Arial', 9))
+        min_dup_hint.setStyleSheet("color: gray;")
+        min_dup_words_layout.addWidget(min_dup_hint)
+        min_dup_words_layout.addStretch()
+        file_layout.addWidget(min_dup_words_widget)
 
         scroll_layout.addSpacing(15)
         
@@ -2370,6 +2396,7 @@ class QAScannerMixin:
                     'check_translation_artifacts': (check_artifacts_checkbox, lambda x: x.isChecked()),
                     'check_glossary_leakage': (check_glossary_checkbox, lambda x: x.isChecked()),
                     'min_file_length': (min_length_spinbox, lambda x: x.value()),
+                    'min_duplicate_word_count': (min_dup_words_spinbox, lambda x: x.value()),
                     'report_format': (format_radio_buttons, get_selected_radio_value),
                     'auto_save_report': (auto_save_checkbox, lambda x: x.isChecked()),
                     'check_word_count_ratio': (check_word_count_checkbox, lambda x: x.isChecked()),
@@ -2751,7 +2778,7 @@ def show_custom_detection_dialog(parent=None):
     dialog_layout.addWidget(scroll)
     
     # Default settings
-    custom_settings = {
+    default_settings = {
         'text_similarity': 85,
         'semantic_analysis': 80,
         'structural_patterns': 90,
@@ -2760,7 +2787,8 @@ def show_custom_detection_dialog(parent=None):
         'consecutive_chapters': 2,
         'check_all_pairs': False,
         'sample_size': 3000,
-        'min_text_length': 500
+        'min_text_length': 500,
+        'min_duplicate_word_count': 500
     }
     
     # Store widget references
@@ -2917,6 +2945,27 @@ def show_custom_detection_dialog(parent=None):
     options_layout.addWidget(min_length_widget)
     custom_widgets['min_text_length'] = min_length_spinbox
     
+    # Minimum word count for duplicate detection
+    min_dup_words_widget = QWidget()
+    min_dup_words_layout = QHBoxLayout(min_dup_words_widget)
+    min_dup_words_layout.setContentsMargins(0, 5, 0, 5)
+    
+    min_dup_words_label = QLabel("Minimum words to flag as duplicate (skip small files like sections/notices):")
+    min_dup_words_label.setFont(QFont('Arial', 11))
+    min_dup_words_layout.addWidget(min_dup_words_label)
+    
+    min_dup_words_spinbox = QSpinBox()
+    min_dup_words_spinbox.setMinimum(100)
+    min_dup_words_spinbox.setMaximum(2000)
+    min_dup_words_spinbox.setSingleStep(50)
+    min_dup_words_spinbox.setValue(custom_settings.get('min_duplicate_word_count', 500))
+    min_dup_words_spinbox.setMinimumWidth(100)
+    min_dup_words_spinbox.wheelEvent = lambda event: event.ignore()
+    min_dup_words_layout.addWidget(min_dup_words_spinbox)
+    min_dup_words_layout.addStretch()
+    options_layout.addWidget(min_dup_words_widget)
+    custom_widgets['min_duplicate_word_count'] = min_dup_words_spinbox
+    
     # Check all file pairs option
     check_all_checkbox = QCheckBox("Check all file pairs (slower but more thorough)")
     check_all_checkbox.setChecked(custom_settings['check_all_pairs'])
@@ -2948,7 +2997,8 @@ def show_custom_detection_dialog(parent=None):
             'consecutive_chapters': custom_widgets['consecutive_chapters'].value(),
             'check_all_pairs': custom_widgets['check_all_pairs'].isChecked(),
             'sample_size': custom_widgets['sample_size'].value(),
-            'min_text_length': custom_widgets['min_text_length'].value()
+            'min_text_length': custom_widgets['min_text_length'].value(),
+            'min_duplicate_word_count': custom_widgets['min_duplicate_word_count'].value()
         }
         settings_confirmed = True
         custom_dialog.accept()
@@ -2968,6 +3018,7 @@ def show_custom_detection_dialog(parent=None):
             custom_widgets['check_all_pairs'].setChecked(False)
             custom_widgets['sample_size'].setValue(3000)
             custom_widgets['min_text_length'].setValue(500)
+            custom_widgets['min_duplicate_word_count'].setValue(500)
     
     # Create buttons
     cancel_btn = QPushButton("Cancel")

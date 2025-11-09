@@ -1979,13 +1979,40 @@ def detect_duplicates(results, log, should_stop, config):
     # Initialize comparisons_done at the function level
     comparisons_done = 0
     
+    # Get minimum word count threshold for duplicate detection (default 500)
+    # This prevents small files (sections, notices) from being flagged as duplicates
+    min_dup_words = config.thresholds.get(config.mode, {}).get('min_duplicate_word_count', 500)
+    
+    # Filter out files that are too small for duplicate detection
+    # These are likely section headers, notices, or metadata files
+    results_for_dup_check = []
+    skipped_small_files = []
+    
+    for result in results:
+        text = result.get('raw_text', '')
+        word_count = len(text.split())
+        
+        if word_count < min_dup_words:
+            skipped_small_files.append(result['filename'])
+        else:
+            results_for_dup_check.append(result)
+    
+    if skipped_small_files:
+        log(f"⏭️  Skipping {len(skipped_small_files)} files with <{min_dup_words} words (likely sections/notices)")
+    
+    # Use filtered results for duplicate detection
+    total_files = len(results_for_dup_check)
+    if total_files == 0:
+        log("⚠️ No files with sufficient word count for duplicate detection")
+        return duplicate_groups, near_duplicate_groups, duplicate_confidence
+    
     # Create local cached functions for this detection run
     @lru_cache(maxsize=10000)
     def compare_texts_cached(text1_hash, text2_hash, max_length=2000):
         """Cached text comparison"""
         # Find texts by hash
         text1, text2 = None, None
-        for result in results:
+        for result in results_for_dup_check:
             text = result.get('raw_text', '')[:max_length]
             text_hash = hashlib.md5(text.encode()).hexdigest()
             if text_hash == text1_hash:
@@ -1999,7 +2026,7 @@ def detect_duplicates(results, log, should_stop, config):
     
     # Pre-compute text hashes for caching
     text_hashes = {}
-    for idx, result in enumerate(results):
+    for idx, result in enumerate(results_for_dup_check):
         text = result.get('raw_text', '')
         text_hashes[idx] = {
             'hash_2k': hashlib.md5(text[:2000].encode()).hexdigest() if len(text) >= 2000 else None,
@@ -2007,9 +2034,9 @@ def detect_duplicates(results, log, should_stop, config):
             'full_text': text
         }
     
-    # Extract additional signatures for all results
+    # Extract additional signatures for filtered results
     log("🔍 Extracting semantic and structural signatures...")
-    for idx, result in enumerate(results):
+    for idx, result in enumerate(results_for_dup_check):
         if should_stop():
             log("⛔ Signature extraction interrupted by user.")
             return duplicate_groups, near_duplicate_groups, duplicate_confidence
@@ -2027,14 +2054,14 @@ def detect_duplicates(results, log, should_stop, config):
     
     # Create MinHash index if available
     lsh, minhashes = None, None
-    if MINHASH_AVAILABLE and len(results) > 50:  # Use MinHash for larger datasets
+    if MINHASH_AVAILABLE and len(results_for_dup_check) > 50:  # Use MinHash for larger datasets
         log("🔍 Building MinHash index for fast similarity detection...")
-        lsh, minhashes = create_minhash_index(results, config)
+        lsh, minhashes = create_minhash_index(results_for_dup_check, config)
     
     # 1. Hash-based detection (exact and near-exact matches)
     content_hashes = defaultdict(lambda: defaultdict(list))
     
-    for idx, result in enumerate(results):
+    for idx, result in enumerate(results_for_dup_check):
         hashes = result['hashes']
         file_info = {
             'filename': result['filename'],
@@ -2075,12 +2102,12 @@ def detect_duplicates(results, log, should_stop, config):
     
     # 2. Enhanced duplicate detection for different naming formats
     log("🔍 Checking for same chapters with different naming...")
-    enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence, config, log, should_stop)
+    enhance_duplicate_detection(results_for_dup_check, duplicate_groups, duplicate_confidence, config, log, should_stop)
     
     # 3. MinHash-based detection (if available)
     if lsh:
         log("🔍 Performing MinHash similarity detection...")
-        for result in results:
+        for result in results_for_dup_check:
             if result['filename'] in minhashes:
                 candidates = lsh.query(minhashes[result['filename']])
                 for candidate in candidates:
@@ -2101,14 +2128,14 @@ def detect_duplicates(results, log, should_stop, config):
         checked_count = 0
         
         # For non-AI Hunter modes, use MinHash to limit comparisons
-        for result in results:
+        for result in results_for_dup_check:
             if should_stop():
                 log("⛔ Semantic check interrupted by user.")
                 break
             
             checked_count += 1
             if checked_count % 10 == 0:
-                log(f"   📊 MinHash semantic check: {checked_count}/{len(results)} files processed...")
+                log(f"   📊 MinHash semantic check: {checked_count}/{len(results_for_dup_check)} files processed...")
                 
             if result['filename'] in minhashes:
                 candidates = lsh.query(minhashes[result['filename']])
@@ -2117,7 +2144,7 @@ def detect_duplicates(results, log, should_stop, config):
                         continue
                     
                     # Find the candidate result
-                    candidate_result = next((r for r in results if r['filename'] == candidate_filename), None)
+                    candidate_result = next((r for r in results_for_dup_check if r['filename'] == candidate_filename), None)
                     if not candidate_result:
                         continue
                     
