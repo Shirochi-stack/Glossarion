@@ -282,7 +282,12 @@ class QtDownloadJob(QObject):
                 return
         except Exception:
             pass
-        self.error.emit(int(code), err)
+        # Convert code to int (it's a QNetworkReply.NetworkError enum)
+        try:
+            error_code = int(code)
+        except (TypeError, ValueError):
+            error_code = -1
+        self.error.emit(error_code, err)
 
 class UpdateManager(QObject):
     """Handles automatic update checking and installation for Glossarion"""
