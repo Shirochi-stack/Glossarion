@@ -950,10 +950,6 @@ class GlossaryManagerMixin:
         algo_layout.addWidget(algo_info_btn)
         algo_layout.addStretch()
         
-        algo_desc = QLabel("🎯 Auto mode uses multiple algorithms for best accuracy")
-        algo_desc.setStyleSheet("color: gray; font-size: 9pt; margin-bottom: 15px;")
-        duplicate_frame_layout.addWidget(algo_desc)
-        
         # Update description when algorithm changes
         def update_algo_description(index):
             descriptions = [
@@ -964,6 +960,13 @@ class GlossaryManagerMixin:
                 "📄 Basic mode: Simple matching (faster, less accurate)"
             ]
             algo_desc.setText(descriptions[index])
+        
+        algo_desc = QLabel()
+        algo_desc.setStyleSheet("color: gray; font-size: 9pt; margin-bottom: 15px;")
+        duplicate_frame_layout.addWidget(algo_desc)
+        
+        # Set initial description based on saved algorithm
+        update_algo_description(self.duplicate_algo_combo.currentIndex())
         
         self.duplicate_algo_combo.currentIndexChanged.connect(update_algo_description)
         
