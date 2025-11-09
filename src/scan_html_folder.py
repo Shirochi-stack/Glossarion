@@ -4425,67 +4425,34 @@ def check_html_structure_issues(file_path, log=print):
         except Exception as e:
             log(f"   Warning: Could not parse HTML structure: {e}")
         
-        # Check 4: Unclosed HTML tags
+        # Check 4: Unclosed HTML tags - Check common tags with simple logic
         import re
         
-        # Track key structural tags for later validation
         content_lower = content.lower()
-        html_open_exists = bool(re.search(r'<html[^>]*>', content_lower))
-        html_close_exists = bool(re.search(r'</html>', content_lower))
-        body_open_exists = bool(re.search(r'<body[^>]*>', content_lower))
-        body_close_exists = bool(re.search(r'</body>', content_lower))
         
-        # Tags that require closing tags (not self-closing)
-        # Include html and body explicitly in this check
-        paired_tags = [
-            'html', 'body', 'head', 'title', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
-            'p', 'div', 'span', 'a', 'ul', 'ol', 'li', 'table', 'tr', 'td', 'th',
-            'form', 'button', 'script', 'style', 'nav', 'header', 'footer', 'main',
-            'article', 'section', 'aside', 'strong', 'em', 'b', 'i', 'u', 'small',
-            'blockquote', 'pre', 'code', 'kbd', 'var', 'samp', 'cite', 'q', 'mark',
-            'time', 'address', 'figcaption', 'figure', 'label', 'select', 'option',
-            'textarea', 'fieldset', 'legend', 'details', 'summary', 'dialog'
-        ]
+        # Tags to check: structural + commonly unclosed tags
+        # Use simple regex: <tag followed by space or >
+        tags_to_check = ['html', 'body', 'head', 'p', 'div', 'span']
+        problematic_tags = []
         
-        unclosed_tags = []
+        for tag in tags_to_check:
+            # Count: <tag (with space, attributes, or direct close)
+            open_count = len(re.findall(rf'<{tag}(?:\s[^>]*)?>', content_lower))
+            # Count: </tag>
+            close_count = len(re.findall(rf'</{tag}>', content_lower))
+            
+            # Flag only if there's a real imbalance
+            # Allow 1-2 difference for edge cases, but flag significant mismatches
+            diff = abs(open_count - close_count)
+            
+            if open_count > 0 or close_count > 0:  # Tag exists in file
+                if diff > 2:  # Significant mismatch
+                    problematic_tags.append(f"{tag} (open: {open_count}, close: {close_count})")
         
-        for tag in paired_tags:
-            # Count opening tags (including those with attributes)
-            # CRITICAL FIX: Match <tag ...> but NOT <tag ... /> or <tag.../>
-            # The key is to match > that is NOT preceded by / (with optional whitespace)
-            open_pattern = rf'<{tag}(?:\s+[^/>]*)?(?<!\s)/?>|<{tag}(?:\s+[^/>]*)?>'
-            close_pattern = rf'</{tag}>'
-            
-            # Self-closing tags: anything ending with /> (with possible space before /)
-            self_closing_pattern = rf'<{tag}(?:\s+[^>]*)?>'
-            
-            # Find all matches
-            open_matches = re.findall(open_pattern, content_lower, re.IGNORECASE)
-            close_matches = re.findall(close_pattern, content_lower, re.IGNORECASE)
-            self_closing_matches = re.findall(self_closing_pattern, content_lower, re.IGNORECASE)
-            
-            # Better approach: Count total opening tags, then subtract self-closing ones
-            total_open = len(open_matches)
-            self_closing_count = 0
-            
-            # Count self-closing variants
-            for match in open_matches:
-                # Check if this match is a self-closing tag (ends with or contains />)
-                if '/>' in match or match.rstrip().endswith('/'):
-                    self_closing_count += 1
-            
-            effective_open_count = total_open - self_closing_count
-            close_count = len(close_matches)
-            
-            if effective_open_count > close_count:
-                unclosed_tags.append(f"{tag} ({effective_open_count - close_count} unclosed)")
-            elif close_count > effective_open_count:
-                unclosed_tags.append(f"{tag} ({close_count - effective_open_count} extra closing tags)")
-        
-        if unclosed_tags:
+        if problematic_tags:
             issues.append('unclosed_html_tags')
-            log(f"   Found unclosed/mismatched tags: {', '.join(unclosed_tags[:5])}" + 
-                (" ..." if len(unclosed_tags) > 5 else ""))
+            log(f"   Found tag mismatches: {', '.join(problematic_tags[:3])}" + 
+                (" ..." if len(problematic_tags) > 3 else ""))
         
         # Check 5: Basic HTML structure validation - only check for consistency, not completeness
         # Note: Variables like html_open_exists are already defined in Check 4
