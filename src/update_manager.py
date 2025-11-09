@@ -337,6 +337,12 @@ class UpdateManager(QObject):
     GITHUB_API_URL = "https://api.github.com/repos/Shirochi-stack/Glossarion/releases"
     GITHUB_LATEST_URL = "https://api.github.com/repos/Shirochi-stack/Glossarion/releases/latest"
     
+    # Signals for thread-safe communication
+    _download_progress_signal = Signal(int, float, float)
+    _download_complete_signal = Signal(str)
+    _download_error_signal = Signal(str)
+    _download_cancelled_signal = Signal()
+    
     def __init__(self, main_gui, base_dir):
         super().__init__()
         self.main_gui = main_gui
@@ -344,6 +350,7 @@ class UpdateManager(QObject):
         self.base_dir = base_dir
         self.update_available = False
         self._check_in_progress = False  # Prevent concurrent checks
+        self._current_dialog = None  # Store current dialog for signal handlers
         # Use shared executor from main GUI if available
         try:
             if hasattr(self.main_gui, '_ensure_executor'):
@@ -1597,32 +1604,57 @@ class UpdateManager(QObject):
         # Fallback: Use plain threading.Thread (QThread + requests causes deadlock)
         print(f"[DEBUG] Using requests downloader for {url}")
         self._download_cancelled = False
+        self._current_dialog = dialog
+        
+        # Connect signals to handlers
+        self._download_progress_signal.connect(self._on_download_progress)
+        self._download_complete_signal.connect(lambda fp: self.download_complete(self._current_dialog, fp))
+        self._download_error_signal.connect(lambda msg: self._show_download_error(self._current_dialog, msg))
+        self._download_cancelled_signal.connect(lambda: self._on_download_cancelled(self._current_dialog))
         
         def download_thread_func():
-            try:
-                import certifi
-                ca_bundle = certifi.where()
-                print(f"[DEBUG] Using CA bundle: {ca_bundle}")
-            except Exception as e:
-                print(f"[DEBUG] Certifi error: {e}, using default SSL")
-                ca_bundle = True
+            # In frozen builds, SSL verification can be problematic - disable it
+            if getattr(sys, 'frozen', False):
+                print(f"[DEBUG] Frozen build detected, disabling SSL verification")
+                ca_bundle = False
+                # Suppress SSL warnings
+                import urllib3
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            else:
+                try:
+                    import certifi
+                    ca_bundle = certifi.where()
+                    print(f"[DEBUG] Using CA bundle: {ca_bundle}")
+                except Exception as e:
+                    print(f"[DEBUG] Certifi error: {e}, using default SSL")
+                    ca_bundle = True
             
             try:
                 print("[DEBUG] Starting download...")
-                with requests.Session() as s:
-                    headers = {
+                
+                # Use urllib for frozen builds (requests has SSL issues)
+                if getattr(sys, 'frozen', False):
+                    print("[DEBUG] Using urllib for download")
+                    import urllib.request
+                    import ssl                   
+                    
+                    # Create unverified SSL context
+                    ssl_context = ssl._create_unverified_context()
+                    
+                    req = urllib.request.Request(url, headers={
                         'User-Agent': 'Glossarion-Updater',
                         'Accept': 'application/octet-stream'
-                    }
-                    with s.get(url, headers=headers, stream=True, timeout=(30, 300), allow_redirects=True, verify=ca_bundle) as r:
-                        print(f"[DEBUG] Got response: {r.status_code}")
-                        r.raise_for_status()
-                        total_size = int(r.headers.get('content-length', 0))
+                    })
+                    
+                    with urllib.request.urlopen(req, context=ssl_context, timeout=30) as response:
+                        print(f"[DEBUG] Got response: {response.status}")
+                        total_size = int(response.headers.get('content-length', 0))
                         print(f"[DEBUG] Content length: {total_size} bytes")
                         downloaded = 0
                         last_emit_time = time.time()
+                        
                         with open(download_path, 'wb') as f:
-                            for chunk in r.iter_content(chunk_size=65536):
+                            while True:
                                 if self._download_cancelled:
                                     try:
                                         f.close()
@@ -1630,21 +1662,63 @@ class UpdateManager(QObject):
                                             os.remove(download_path)
                                     except Exception:
                                         pass
-                                    QTimer.singleShot(0, lambda: self._on_download_cancelled(dialog))
+                                    self._download_cancelled_signal.emit()
                                     return
+                                
+                                chunk = response.read(65536)
                                 if not chunk:
-                                    continue
+                                    break
+                                    
                                 f.write(chunk)
                                 downloaded += len(chunk)
                                 now = time.time()
+                                
                                 if total_size > 0:
                                     p = int(downloaded * 100 / total_size)
                                     if (now - last_emit_time) >= 0.1:
                                         last_emit_time = now
-                                        QTimer.singleShot(0, lambda p=p, d=downloaded, t=total_size: 
-                                            self._on_download_progress(p, d / (1024 * 1024), t / (1024 * 1024)))
+                                        self._download_progress_signal.emit(p, downloaded / (1024 * 1024), total_size / (1024 * 1024))
+                        
                         print(f"[DEBUG] Download complete: {downloaded} bytes")
-                        QTimer.singleShot(0, lambda: self.download_complete(dialog, download_path))
+                        self._download_complete_signal.emit(download_path)
+                else:
+                    # Use requests for source builds
+                    print("[DEBUG] Using requests for download")
+                    with requests.Session() as s:
+                        headers = {
+                            'User-Agent': 'Glossarion-Updater',
+                            'Accept': 'application/octet-stream'
+                        }
+                        with s.get(url, headers=headers, stream=True, timeout=(30, 300), allow_redirects=True, verify=ca_bundle) as r:
+                            print(f"[DEBUG] Got response: {r.status_code}")
+                            r.raise_for_status()
+                            total_size = int(r.headers.get('content-length', 0))
+                            print(f"[DEBUG] Content length: {total_size} bytes")
+                            downloaded = 0
+                            last_emit_time = time.time()
+                            with open(download_path, 'wb') as f:
+                                for chunk in r.iter_content(chunk_size=65536):
+                                    if self._download_cancelled:
+                                        try:
+                                            f.close()
+                                            if os.path.exists(download_path):
+                                                os.remove(download_path)
+                                        except Exception:
+                                            pass
+                                        QTimer.singleShot(0, lambda: self._on_download_cancelled(dialog))
+                                        return
+                                    if not chunk:
+                                        continue
+                                    f.write(chunk)
+                                    downloaded += len(chunk)
+                                    now = time.time()
+                                    if total_size > 0:
+                                        p = int(downloaded * 100 / total_size)
+                                        if (now - last_emit_time) >= 0.1:
+                                            last_emit_time = now
+                                            self._download_progress_signal.emit(p, downloaded / (1024 * 1024), total_size / (1024 * 1024))
+                            print(f"[DEBUG] Download complete: {downloaded} bytes")
+                            self._download_complete_signal.emit(download_path)
             except Exception as e:
                 print(f"[DEBUG] Download error: {type(e).__name__}: {e}")
                 import traceback
@@ -1654,7 +1728,7 @@ class UpdateManager(QObject):
                         os.remove(download_path)
                 except Exception:
                     pass
-                QTimer.singleShot(0, lambda: self._show_download_error(dialog, str(e)))
+                self._download_error_signal.emit(str(e))
         
         self.download_thread = threading.Thread(target=download_thread_func, daemon=True)
         # Watchdog: cancel if no progress
