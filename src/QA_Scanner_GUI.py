@@ -1670,7 +1670,7 @@ class QAScannerMixin:
         dialog.setModal(True)
         # Use screen ratios: 40% width, 85% height (decreased from 100%)
         screen = QApplication.primaryScreen().geometry()
-        settings_width = int(screen.width() * 0.41)
+        settings_width = int(screen.width() * 0.43)
         settings_height = int(screen.height() * 0.85)
         dialog.resize(settings_width, settings_height)
         
@@ -1873,6 +1873,31 @@ class QAScannerMixin:
         min_dup_words_layout.addWidget(min_dup_hint)
         min_dup_words_layout.addStretch()
         file_layout.addWidget(min_dup_words_widget)
+        
+        # Minimum text length for spacing/linebreaks check
+        min_spacing_text_widget = QWidget()
+        min_spacing_text_layout = QHBoxLayout(min_spacing_text_widget)
+        min_spacing_text_layout.setContentsMargins(0, 10, 0, 10)
+        
+        min_spacing_text_label = QLabel("Minimum text length for spacing check (characters):")
+        min_spacing_text_label.setFont(QFont('Arial', 10))
+        min_spacing_text_layout.addWidget(min_spacing_text_label)
+        
+        min_spacing_text_spinbox = QSpinBox()
+        min_spacing_text_spinbox.setMinimum(10)
+        min_spacing_text_spinbox.setMaximum(1000)
+        min_spacing_text_spinbox.setSingleStep(10)
+        min_spacing_text_spinbox.setValue(qa_settings.get('min_text_length_for_spacing', 100))
+        min_spacing_text_spinbox.setMinimumWidth(100)
+        disable_wheel_event(min_spacing_text_spinbox)
+        min_spacing_text_layout.addWidget(min_spacing_text_spinbox)
+        
+        min_spacing_hint = QLabel("(skips files with very little content like cover pages)")
+        min_spacing_hint.setFont(QFont('Arial', 9))
+        min_spacing_hint.setStyleSheet("color: gray;")
+        min_spacing_text_layout.addWidget(min_spacing_hint)
+        min_spacing_text_layout.addStretch()
+        file_layout.addWidget(min_spacing_text_widget)
 
         scroll_layout.addSpacing(15)
         
@@ -2397,6 +2422,7 @@ class QAScannerMixin:
                     'check_glossary_leakage': (check_glossary_checkbox, lambda x: x.isChecked()),
                     'min_file_length': (min_length_spinbox, lambda x: x.value()),
                     'min_duplicate_word_count': (min_dup_words_spinbox, lambda x: x.value()),
+                    'min_text_length_for_spacing': (min_spacing_text_spinbox, lambda x: x.value()),
                     'report_format': (format_radio_buttons, get_selected_radio_value),
                     'auto_save_report': (auto_save_checkbox, lambda x: x.isChecked()),
                     'check_word_count_ratio': (check_word_count_checkbox, lambda x: x.isChecked()),

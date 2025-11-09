@@ -551,8 +551,13 @@ def filter_dash_lines(text):
     lines = text.split('\n')
     return '\n'.join(line for line in lines if not is_dash_separator_line(line))
 
-def has_no_spacing_or_linebreaks(text, space_threshold=0.01):
+def has_no_spacing_or_linebreaks(text, space_threshold=0.01, min_text_length=100):
     filtered_text = filter_dash_lines(text)
+    
+    # Skip check for very short text (e.g., cover pages with just image + title)
+    if len(filtered_text) < min_text_length:
+        return False
+    
     space_ratio = filtered_text.count(" ") / max(1, len(filtered_text))
     newline_count = filtered_text.count("\n")
     # Flag as issue only if both conditions are met:
@@ -4346,7 +4351,8 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         
         # Spacing/formatting issues
         if qa_settings.get('check_encoding_issues', True):
-            if has_no_spacing_or_linebreaks(raw_text):
+            min_text_len = qa_settings.get('min_text_length_for_spacing', 100)
+            if has_no_spacing_or_linebreaks(raw_text, min_text_length=min_text_len):
                 issues.append("no_spacing_or_linebreaks")
         
         # Repetitive content
