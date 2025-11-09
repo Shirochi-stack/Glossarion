@@ -3500,7 +3500,11 @@ def update_legacy_format_progress(prog, faulty_chapters, log):
     log(f"🔧 Removed {removed_count} chapters from legacy completed list")
 
 def extract_epub_word_counts(epub_path, log=print):
-    """Extract word counts for each chapter from the original EPUB"""
+    """Extract word counts for each chapter from the original EPUB.
+    
+    Uses the content.opf manifest to ensure accurate chapter identification
+    and avoid false positives when multiple files share the same chapter number.
+    """
     
     def count_cjk_words(text):
         """Count actual words in CJK text with better segmentation"""
@@ -3537,11 +3541,39 @@ def extract_epub_word_counts(epub_path, log=print):
         word_counts = {}
         
         with zipfile.ZipFile(epub_path, 'r') as zf:
+            # Try to read content.opf to get the proper reading order
+            content_opf_data = None
+            try:
+                for fname in zf.namelist():
+                    if 'content.opf' in fname.lower():
+                        content_opf_data = zf.read(fname).decode('utf-8', errors='ignore')
+                        break
+            except Exception as e:
+                log(f"⚠️ Could not read content.opf: {e}")
+            
+            # Parse content.opf to get reading order if available
+            manifest_order = []
+            if content_opf_data:
+                try:
+                    soup_opf = BeautifulSoup(content_opf_data, 'xml')
+                    spine = soup_opf.find('spine')
+                    if spine:
+                        for itemref in spine.find_all('itemref'):
+                            idref = itemref.get('idref')
+                            if idref:
+                                manifest_order.append(idref)
+                except Exception as e:
+                    log(f"⚠️ Could not parse content.opf spine: {e}")
+            
             # Get all HTML/XHTML files from inside the EPUB (no .txt files in EPUBs)
             html_files = [f for f in zf.namelist() 
                          if f.lower().endswith(('.html', '.xhtml', '.htm'))]
             
             log(f"📚 Found {len(html_files)} HTML files in EPUB.")
+            
+            # Use a unique key combining chapter number and file type to avoid collisions
+            # If manifest_order is available, use sequential indexing from it
+            chapter_index = 0
             
             for file_path in html_files:
                 try:
@@ -3549,21 +3581,37 @@ def extract_epub_word_counts(epub_path, log=print):
                     basename = os.path.basename(file_path)
                     chapter_num = None
                     
-                    # Try various patterns to extract chapter number
-                    patterns = [
-                        r'(\d{3,4})',  # 3-4 digit numbers
-                        r'chapter[\s_-]*(\d+)',
-                        r'ch[\s_-]*(\d+)',
-                        r'c(\d+)',
-                        r'第(\d+)[章话回]',
-                        r'제(\d+)[장화회]'
-                    ]
+                    # PRIORITY 1: Use manifest order if available (most reliable)
+                    if manifest_order:
+                        # Find this file in manifest order
+                        for idx, item_id in enumerate(manifest_order):
+                            # The item_id references items in the manifest, try to match
+                            if item_id.lower() in basename.lower() or item_id.lower() in file_path.lower():
+                                chapter_num = idx + 1  # Use 1-based indexing
+                                break
                     
-                    for pattern in patterns:
-                        match = re.search(pattern, basename, re.IGNORECASE)
-                        if match:
-                            chapter_num = int(match.group(1))
-                            break
+                    # PRIORITY 2: Extract from filename patterns if not found in manifest
+                    if chapter_num is None:
+                        patterns = [
+                            r'chapter[\s_-]*(\d+)',  # chapter1, chapter_2, chapter-3
+                            r'ch[\s_-]*(\d+)',       # ch1, ch_2, ch-3
+                            r'^(\d{3,4})(?:[_-]|$)', # 0001_*, 0001-*, 0001 at start
+                            r'c(\d+)',               # c1, c02
+                            r'第(\d+)[章话回]',       # Chinese
+                            r'제(\d+)[장화회]'        # Korean
+                        ]
+                        
+                        for pattern in patterns:
+                            match = re.search(pattern, basename, re.IGNORECASE)
+                            if match:
+                                chapter_num = int(match.group(1))
+                                break
+                    
+                    # PRIORITY 3: Use sequential index as fallback
+                    if chapter_num is None:
+                        chapter_num = chapter_index + 1
+                    
+                    chapter_index += 1
                     
                     # Read and parse the file
                     content = zf.read(file_path).decode('utf-8', errors='ignore')
@@ -3586,13 +3634,18 @@ def extract_epub_word_counts(epub_path, log=print):
                         # For other languages, count space-separated words
                         word_count = len(text.split())
                     
+                    # Store with full path info to avoid collisions
+                    # Use chapter_num as key, but store full details including filename
                     if chapter_num is not None:
-                        word_counts[chapter_num] = {
-                            'word_count': word_count,
-                            'filename': basename,
-                            'full_path': file_path,
-                            'is_cjk': has_cjk  # Track if source was CJK
-                        }
+                        # Only store if this chapter number hasn't been seen, or if this has more content
+                        if chapter_num not in word_counts or len(text) > len(word_counts[chapter_num].get('full_text', '')):
+                            word_counts[chapter_num] = {
+                                'word_count': word_count,
+                                'filename': basename,
+                                'full_path': file_path,
+                                'is_cjk': has_cjk,  # Track if source was CJK
+                                'full_text': text[:1000]  # Store first 1000 chars for validation
+                            }
                     
                 except Exception as e:
                     log(f"⚠️ Error processing {file_path}: {e}")
