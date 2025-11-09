@@ -1,6 +1,10 @@
 # update_manager.py - Auto-update functionality for Glossarion
 import os
 import sys
+
+# Suppress Qt SSL warnings in frozen builds (no SSL backend available, using verify=none)
+if getattr(sys, 'frozen', False):
+    os.environ['QT_LOGGING_RULES'] = 'qt.network.ssl=false'
 import json
 import requests
 import threading
@@ -55,21 +59,40 @@ class DownloadWorker(QObject):
 
     @Slot()
     def run(self):
+        print(f"[DEBUG] DownloadWorker.run() started for {self.url}")
         try:
+            # Get certifi CA bundle path for SSL verification in frozen builds
+            try:
+                import certifi
+                ca_bundle = certifi.where()
+                print(f"[DEBUG] Using CA bundle: {ca_bundle}")
+            except Exception as e:
+                print(f"[DEBUG] Certifi error: {e}, using default SSL")
+                ca_bundle = True  # Use default
+            
             with requests.Session() as s:
                 self._session = s
                 headers = {
                     'User-Agent': 'Glossarion-Updater',
                     'Accept': 'application/octet-stream'
                 }
-                with s.get(self.url, headers=headers, stream=True, timeout=(30, 300), allow_redirects=True) as r:
+                print(f"[DEBUG] Making GET request...")
+                with s.get(self.url, headers=headers, stream=True, timeout=(30, 300), allow_redirects=True, verify=ca_bundle) as r:
+                    print(f"[DEBUG] Got response: {r.status_code}")
                     r.raise_for_status()
                     total_size = int(r.headers.get('content-length', 0))
+                    print(f"[DEBUG] Content length: {total_size} bytes")
                     downloaded = 0
                     last_emit_percent = -1
                     last_emit_time = time.time()
+                    print(f"[DEBUG] Opening file for writing: {self.path}")
                     with open(self.path, 'wb') as f:
+                        print("[DEBUG] Starting chunk iteration...")
+                        chunk_count = 0
                         for chunk in r.iter_content(chunk_size=65536):
+                            chunk_count += 1
+                            if chunk_count == 1:
+                                print(f"[DEBUG] First chunk received, size: {len(chunk) if chunk else 0}")
                             if self._cancel:
                                 try:
                                     f.flush()
@@ -111,6 +134,9 @@ class DownloadWorker(QObject):
                 pass
             self.finished.emit(self.path)
         except Exception as e:
+            print(f"[DEBUG] DownloadWorker error: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
             # On error, ensure partial file is removed
             try:
                 if os.path.exists(self.path):
@@ -157,7 +183,23 @@ class QtDownloadJob(QObject):
             req.setAttribute(QNetworkRequest.FollowRedirectsAttribute, True)
         except Exception:
             pass
+        # Disable SSL verification in frozen builds (no SSL backend available)
+        try:
+            import sys
+            if getattr(sys, 'frozen', False):
+                from PySide6.QtNetwork import QSslConfiguration
+                ssl_config = QSslConfiguration.defaultConfiguration()
+                ssl_config.setPeerVerifyMode(QSslConfiguration.VerifyNone)
+                req.setSslConfiguration(ssl_config)
+        except Exception:
+            pass
         self.reply = self.nam.get(req)
+        # Ignore SSL errors in frozen builds (no SSL backend)
+        try:
+            if getattr(sys, 'frozen', False):
+                self.reply.ignoreSslErrors()
+        except Exception:
+            pass
         self.reply.downloadProgress.connect(self._on_progress)
         self.reply.readyRead.connect(self._on_ready_read)
         self.reply.finished.connect(self._on_finished)
@@ -1512,60 +1554,109 @@ class UpdateManager(QObject):
         self.progress_label.setText("Connecting to GitHub...")
         self.status_label.setText("")
 
-        # Prefer Qt's network stack for async download
-        try:
-            # Clean up any previous job
-            if hasattr(self, 'qt_downloader') and self.qt_downloader:
+        # Use Qt network only when NOT frozen (frozen builds lack SSL support)
+        if not getattr(sys, 'frozen', False):
+            try:
+                # Clean up any previous job
+                if hasattr(self, 'qt_downloader') and self.qt_downloader:
+                    try:
+                        self.qt_downloader.deleteLater()
+                    except Exception:
+                        pass
+                self.qt_downloader = QtDownloadJob()
+                # Reset cancel handled flag for this run
+                self._cancel_handled = False
+                self.qt_downloader.progress.connect(self._on_download_progress)
+                self.qt_downloader.finished.connect(lambda fp: self.download_complete(dialog, fp))
+                self.qt_downloader.cancelled.connect(lambda: self._on_download_cancelled(dialog))
+                self.qt_downloader.error.connect(lambda code, msg: self._on_qtnetwork_error(dialog, code, msg))
+                # Watchdog for no progress
                 try:
-                    self.qt_downloader.deleteLater()
+                    if hasattr(self, '_download_watchdog') and self._download_watchdog:
+                        self._download_watchdog.stop()
+                        self._download_watchdog.deleteLater()
                 except Exception:
                     pass
-            self.qt_downloader = QtDownloadJob()
-            # Reset cancel handled flag for this run
-            self._cancel_handled = False
-            self.qt_downloader.progress.connect(self._on_download_progress)
-            self.qt_downloader.finished.connect(lambda fp: self.download_complete(dialog, fp))
-            self.qt_downloader.cancelled.connect(lambda: self._on_download_cancelled(dialog))
-            self.qt_downloader.error.connect(lambda code, msg: self._on_qtnetwork_error(dialog, code, msg))
-            # Watchdog for no progress
-            try:
-                if hasattr(self, '_download_watchdog') and self._download_watchdog:
-                    self._download_watchdog.stop()
-                    self._download_watchdog.deleteLater()
+                self._download_watchdog = QTimer(self)
+                self._download_watchdog.setInterval(90000)
+                self._download_watchdog.timeout.connect(lambda: self._on_download_timeout(dialog))
+                self._download_watchdog.start()
+                self.qt_downloader.start(url, download_path)
+                # Hook cancel
+                if hasattr(self, 'cancel_btn') and self.cancel_btn:
+                    try:
+                        self.cancel_btn.clicked.disconnect()
+                    except Exception:
+                        pass
+                    # Cancel and immediately reflect UI as cancelled
+                    self.cancel_btn.clicked.connect(lambda: (self.cancel_btn.setEnabled(False), self.qt_downloader.cancel(), self._on_download_cancelled(dialog)))
+                return
             except Exception:
                 pass
-            self._download_watchdog = QTimer(self)
-            self._download_watchdog.setInterval(90000)
-            self._download_watchdog.timeout.connect(lambda: self._on_download_timeout(dialog))
-            self._download_watchdog.start()
-            self.qt_downloader.start(url, download_path)
-            # Hook cancel
-            if hasattr(self, 'cancel_btn') and self.cancel_btn:
+
+        # Fallback: Use plain threading.Thread (QThread + requests causes deadlock)
+        print(f"[DEBUG] Using requests downloader for {url}")
+        self._download_cancelled = False
+        
+        def download_thread_func():
+            try:
+                import certifi
+                ca_bundle = certifi.where()
+                print(f"[DEBUG] Using CA bundle: {ca_bundle}")
+            except Exception as e:
+                print(f"[DEBUG] Certifi error: {e}, using default SSL")
+                ca_bundle = True
+            
+            try:
+                print("[DEBUG] Starting download...")
+                with requests.Session() as s:
+                    headers = {
+                        'User-Agent': 'Glossarion-Updater',
+                        'Accept': 'application/octet-stream'
+                    }
+                    with s.get(url, headers=headers, stream=True, timeout=(30, 300), allow_redirects=True, verify=ca_bundle) as r:
+                        print(f"[DEBUG] Got response: {r.status_code}")
+                        r.raise_for_status()
+                        total_size = int(r.headers.get('content-length', 0))
+                        print(f"[DEBUG] Content length: {total_size} bytes")
+                        downloaded = 0
+                        last_emit_time = time.time()
+                        with open(download_path, 'wb') as f:
+                            for chunk in r.iter_content(chunk_size=65536):
+                                if self._download_cancelled:
+                                    try:
+                                        f.close()
+                                        if os.path.exists(download_path):
+                                            os.remove(download_path)
+                                    except Exception:
+                                        pass
+                                    QTimer.singleShot(0, lambda: self._on_download_cancelled(dialog))
+                                    return
+                                if not chunk:
+                                    continue
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                                now = time.time()
+                                if total_size > 0:
+                                    p = int(downloaded * 100 / total_size)
+                                    if (now - last_emit_time) >= 0.1:
+                                        last_emit_time = now
+                                        QTimer.singleShot(0, lambda p=p, d=downloaded, t=total_size: 
+                                            self._on_download_progress(p, d / (1024 * 1024), t / (1024 * 1024)))
+                        print(f"[DEBUG] Download complete: {downloaded} bytes")
+                        QTimer.singleShot(0, lambda: self.download_complete(dialog, download_path))
+            except Exception as e:
+                print(f"[DEBUG] Download error: {type(e).__name__}: {e}")
+                import traceback
+                traceback.print_exc()
                 try:
-                    self.cancel_btn.clicked.disconnect()
+                    if os.path.exists(download_path):
+                        os.remove(download_path)
                 except Exception:
                     pass
-                # Cancel and immediately reflect UI as cancelled
-                self.cancel_btn.clicked.connect(lambda: (self.cancel_btn.setEnabled(False), self.qt_downloader.cancel(), self._on_download_cancelled(dialog)))
-            return
-        except Exception:
-            pass
-
-        # Fallback: Create worker thread and start download with requests
-        self.download_thread = QThread(self)
-        self.download_worker = DownloadWorker(url, download_path)
-        self.download_worker.moveToThread(self.download_thread)
-        # Show indeterminate until first data arrives
-        self.download_thread.started.connect(lambda: self._on_download_progress(-1, 0.0, 0.0))
-        self.download_thread.started.connect(self.download_worker.run)
-        self.download_worker.progress.connect(self._on_download_progress)
-        self.download_worker.finished.connect(lambda fp: self.download_complete(dialog, fp))
-        self.download_worker.cancelled.connect(lambda: self._on_download_cancelled(dialog))
-        self.download_worker.error.connect(lambda msg: self._show_download_error(dialog, msg))
-        self.download_worker.finished.connect(self.download_thread.quit)
-        self.download_worker.error.connect(self.download_thread.quit)
-        self.download_thread.finished.connect(self.download_worker.deleteLater)
-        self.download_thread.finished.connect(self.download_thread.deleteLater)
+                QTimer.singleShot(0, lambda: self._show_download_error(dialog, str(e)))
+        
+        self.download_thread = threading.Thread(target=download_thread_func, daemon=True)
         # Watchdog: cancel if no progress
         try:
             if hasattr(self, '_download_watchdog') and self._download_watchdog:
@@ -1577,7 +1668,16 @@ class UpdateManager(QObject):
         self._download_watchdog.setInterval(90000)
         self._download_watchdog.timeout.connect(lambda: self._on_download_timeout(dialog))
         self._download_watchdog.start()
+        # Hook cancel button
+        if hasattr(self, 'cancel_btn') and self.cancel_btn:
+            try:
+                self.cancel_btn.clicked.disconnect()
+            except Exception:
+                pass
+            self.cancel_btn.clicked.connect(lambda: (self.cancel_btn.setEnabled(False), setattr(self, '_download_cancelled', True)))
+        print("[DEBUG] Starting download thread...")
         self.download_thread.start()
+        print("[DEBUG] Download thread started")
     
     def _on_download_timeout(self, dialog):
         try:
