@@ -4403,18 +4403,21 @@ def check_html_structure_issues(file_path, log=print):
         
         for tag in paired_tags:
             # Count opening tags (including those with attributes)
-            open_pattern = rf'<{tag}(?:\s+[^>]*)?>'
+            # IMPORTANT: Use negative lookbehind to exclude self-closing tags like <tag/> or <tag />
+            # This prevents false positives where self-closing tags are counted as unclosed
+            open_pattern = rf'<{tag}(?:\s+[^>]*?)(?<!/)>'
             close_pattern = rf'</{tag}>'
             
-            # Also check for self-closing tags like <tag />
-            self_closing_pattern = rf'<{tag}(?:\s+[^>]*)?/>'
+            # Also check for self-closing tags like <tag /> or <tag/>
+            self_closing_pattern = rf'<{tag}(?:\s+[^>]*)?\s*/>'
             
             open_count = len(re.findall(open_pattern, content_lower, re.IGNORECASE))
             close_count = len(re.findall(close_pattern, content_lower, re.IGNORECASE))
             self_closing_count = len(re.findall(self_closing_pattern, content_lower, re.IGNORECASE))
             
-            # Adjust open count by removing self-closing tags
-            effective_open_count = open_count - self_closing_count
+            # Note: effective_open_count no longer needs to subtract self_closing_count
+            # because the open_pattern now excludes self-closing tags entirely
+            effective_open_count = open_count
             
             if effective_open_count > close_count:
                 unclosed_tags.append(f"{tag} ({effective_open_count - close_count} unclosed)")
