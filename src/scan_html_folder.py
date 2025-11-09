@@ -3500,10 +3500,11 @@ def update_legacy_format_progress(prog, faulty_chapters, log):
     log(f"🔧 Removed {removed_count} chapters from legacy completed list")
 
 def extract_epub_word_counts(epub_path, log=print):
-    """Extract word counts for each chapter from the original EPUB.
+    """Extract word counts for each chapter from the original EPUB using spine order.
     
-    Uses the content.opf manifest to ensure accurate chapter identification
-    and avoid false positives when multiple files share the same chapter number.
+    Key: Uses content.opf SPINE ORDER (reading order) as the authoritative chapter sequence.
+    This ensures that files like 0001_chapter.xhtml and 0001_section.xhtml both get
+    correctly indexed by their actual position in the book, not just their filenames.
     """
     
     def count_cjk_words(text):
@@ -3539,10 +3540,13 @@ def extract_epub_word_counts(epub_path, log=print):
     
     try:
         word_counts = {}
+        spine_files = {}  # Maps spine index to file info
         
         with zipfile.ZipFile(epub_path, 'r') as zf:
-            # Try to read content.opf to get the proper reading order
+            # Step 1: Read and parse content.opf to get SPINE ORDER
             content_opf_data = None
+            manifest_map = {}  # Maps item id to href
+            
             try:
                 for fname in zf.namelist():
                     if 'content.opf' in fname.lower():
@@ -3551,105 +3555,86 @@ def extract_epub_word_counts(epub_path, log=print):
             except Exception as e:
                 log(f"⚠️ Could not read content.opf: {e}")
             
-            # Parse content.opf to get reading order if available
-            manifest_order = []
+            # Parse manifest and spine from content.opf
             if content_opf_data:
                 try:
                     soup_opf = BeautifulSoup(content_opf_data, 'xml')
+                    
+                    # Build manifest map (id -> href)
+                    manifest = soup_opf.find('manifest')
+                    if manifest:
+                        for item in manifest.find_all('item'):
+                            item_id = item.get('id')
+                            href = item.get('href')
+                            if item_id and href:
+                                manifest_map[item_id] = href
+                    
+                    # Process spine in order
                     spine = soup_opf.find('spine')
                     if spine:
+                        spine_index = 1  # Start from 1 for chapter numbering
                         for itemref in spine.find_all('itemref'):
                             idref = itemref.get('idref')
-                            if idref:
-                                manifest_order.append(idref)
-                except Exception as e:
-                    log(f"⚠️ Could not parse content.opf spine: {e}")
-            
-            # Get all HTML/XHTML files from inside the EPUB (no .txt files in EPUBs)
-            html_files = [f for f in zf.namelist() 
-                         if f.lower().endswith(('.html', '.xhtml', '.htm'))]
-            
-            log(f"📚 Found {len(html_files)} HTML files in EPUB.")
-            
-            # Use a unique key combining chapter number and file type to avoid collisions
-            # If manifest_order is available, use sequential indexing from it
-            chapter_index = 0
-            
-            for file_path in html_files:
-                try:
-                    # Extract chapter number from filename
-                    basename = os.path.basename(file_path)
-                    chapter_num = None
-                    
-                    # PRIORITY 1: Use manifest order if available (most reliable)
-                    if manifest_order:
-                        # Find this file in manifest order
-                        for idx, item_id in enumerate(manifest_order):
-                            # The item_id references items in the manifest, try to match
-                            if item_id.lower() in basename.lower() or item_id.lower() in file_path.lower():
-                                chapter_num = idx + 1  # Use 1-based indexing
-                                break
-                    
-                    # PRIORITY 2: Extract from filename patterns if not found in manifest
-                    if chapter_num is None:
-                        patterns = [
-                            r'chapter[\s_-]*(\d+)',  # chapter1, chapter_2, chapter-3
-                            r'ch[\s_-]*(\d+)',       # ch1, ch_2, ch-3
-                            r'^(\d{3,4})(?:[_-]|$)', # 0001_*, 0001-*, 0001 at start
-                            r'c(\d+)',               # c1, c02
-                            r'第(\d+)[章话回]',       # Chinese
-                            r'제(\d+)[장화회]'        # Korean
-                        ]
+                            if idref and idref in manifest_map:
+                                href = manifest_map[idref]
+                                spine_files[spine_index] = {
+                                    'href': href,
+                                    'idref': idref
+                                }
+                                spine_index += 1
                         
-                        for pattern in patterns:
-                            match = re.search(pattern, basename, re.IGNORECASE)
-                            if match:
-                                chapter_num = int(match.group(1))
-                                break
-                    
-                    # PRIORITY 3: Use sequential index as fallback
-                    if chapter_num is None:
-                        chapter_num = chapter_index + 1
-                    
-                    chapter_index += 1
-                    
-                    # Read and parse the file
-                    content = zf.read(file_path).decode('utf-8', errors='ignore')
-                    soup = BeautifulSoup(content, 'html.parser')
-                    
-                    # Get text and count words
-                    text = soup.get_text(strip=True)
-                    
-                    # Check if text contains CJK characters
-                    has_cjk = any('\u4e00' <= char <= '\u9fff' or  # Chinese
-                                  '\u3040' <= char <= '\u309f' or  # Hiragana
-                                  '\u30a0' <= char <= '\u30ff' or  # Katakana
-                                  '\uac00' <= char <= '\ud7af'     # Korean
-                                  for char in text)
-                    
-                    if has_cjk:
-                        # Use proper CJK word counting
-                        word_count = count_cjk_words(text)
-                    else:
-                        # For other languages, count space-separated words
-                        word_count = len(text.split())
-                    
-                    # Store with full path info to avoid collisions
-                    # Use chapter_num as key, but store full details including filename
-                    if chapter_num is not None:
-                        # Only store if this chapter number hasn't been seen, or if this has more content
-                        if chapter_num not in word_counts or len(text) > len(word_counts[chapter_num].get('full_text', '')):
-                            word_counts[chapter_num] = {
-                                'word_count': word_count,
-                                'filename': basename,
-                                'full_path': file_path,
-                                'is_cjk': has_cjk,  # Track if source was CJK
-                                'full_text': text[:1000]  # Store first 1000 chars for validation
-                            }
-                    
+                        if spine_files:
+                            log(f"📚 Found {len(spine_files)} chapters in EPUB spine order.")
                 except Exception as e:
-                    log(f"⚠️ Error processing {file_path}: {e}")
-                    continue
+                    log(f"⚠️ Could not parse content.opf: {e}")
+            
+            # Step 2: Process files in spine order
+            if spine_files:
+                for spine_index, file_info in sorted(spine_files.items()):
+                    try:
+                        file_path = file_info['href']
+                        
+                        # Handle relative paths in EPUB
+                        try:
+                            content = zf.read(file_path).decode('utf-8', errors='ignore')
+                        except KeyError:
+                            # Try with different path resolution
+                            continue
+                        
+                        basename = os.path.basename(file_path)
+                        soup = BeautifulSoup(content, 'html.parser')
+                        text = soup.get_text(strip=True)
+                        
+                        # Skip nav/cover pages (very short content)
+                        if len(text) < 100:
+                            continue
+                        
+                        # Check if text contains CJK characters
+                        has_cjk = any('\u4e00' <= char <= '\u9fff' or  # Chinese
+                                      '\u3040' <= char <= '\u309f' or  # Hiragana
+                                      '\u30a0' <= char <= '\u30ff' or  # Katakana
+                                      '\uac00' <= char <= '\ud7af'     # Korean
+                                      for char in text)
+                        
+                        if has_cjk:
+                            word_count = count_cjk_words(text)
+                        else:
+                            word_count = len(text.split())
+                        
+                        # Store using spine index as the authoritative chapter number
+                        word_counts[spine_index] = {
+                            'word_count': word_count,
+                            'filename': basename,
+                            'full_path': file_path,
+                            'is_cjk': has_cjk,
+                            'spine_index': spine_index
+                        }
+                        
+                    except Exception as e:
+                        log(f"⚠️ Error processing spine item {spine_index}: {e}")
+                        continue
+            else:
+                log("⚠️ Could not read spine order, falling back to file extraction")
         
         return word_counts
         
@@ -3676,28 +3661,38 @@ def detect_multiple_headers(html_content):
     return False, len(headers), []
 
 def cross_reference_word_counts(original_counts, translated_file, translated_text, log=print):
-    """Cross-reference word counts between original and translated files"""
-    # Extract chapter number from translated filename
+    """Cross-reference word counts between original and translated files.
+    
+    Matches translated files (which may have response_ prefix) to original EPUB chapters
+    using the most specific filename patterns first. Ignores file extensions.
+    """
     basename = os.path.basename(translated_file)
+    # Remove extension for matching (don't consider .html, .xhtml, .htm, etc.)
+    basename_no_ext = os.path.splitext(basename)[0]
     chapter_num = None
     
-    # Try to extract chapter number
+    # PRIORITY 1: Extract from filename patterns (most specific first)
+    # Important: Check "response_No" patterns BEFORE generic "response_" patterns
+    # to avoid extracting just the first number from "response_No00001Chapter"
     patterns = [
-        r'response_(\d+)',
-        r'response_chapter(\d+)',
-        r'chapter[\s_-]*(\d+)',
-        r'(\d{3,4})',
-        r'ch[\s_-]*(\d+)'
+        r'response_[Nn]o(\d{4,5})(?:[_-]|$)',   # response_No00001 or response_No00001Chapter
+        r'response_(\d{4,5})(?:[_-]|$)',         # response_00001 or response_00001Chapter
+        r'response_chapter(\d+)',                 # response_chapter1
+        r'chapter[\s_-]*(\d+)',                  # chapter1, chapter_2
+        r'ch[\s_-]*(\d+)',                       # ch1, ch_2
     ]
     
     for pattern in patterns:
-        match = re.search(pattern, basename, re.IGNORECASE)
+        match = re.search(pattern, basename_no_ext, re.IGNORECASE)
         if match:
             chapter_num = int(match.group(1))
+            # Remove leading zeros for matching
+            if chapter_num > 1000:
+                chapter_num = chapter_num % 1000  # e.g., 00001 -> 1
             break
     
     if chapter_num is None:
-        # Try content-based matching as fallback
+        # PRIORITY 2: Try content-based matching as fallback
         content_patterns = [
             r'Chapter\s+(\d+)',
             r'第\s*(\d+)\s*章',
@@ -4456,21 +4451,31 @@ def check_html_structure_issues(file_path, log=print):
         
         for tag in paired_tags:
             # Count opening tags (including those with attributes)
-            # IMPORTANT: Use negative lookbehind to exclude self-closing tags like <tag/> or <tag />
-            # This prevents false positives where self-closing tags are counted as unclosed
-            open_pattern = rf'<{tag}(?:\s+[^>]*?)(?<!/)>'
+            # CRITICAL FIX: Match <tag ...> but NOT <tag ... /> or <tag.../>
+            # The key is to match > that is NOT preceded by / (with optional whitespace)
+            open_pattern = rf'<{tag}(?:\s+[^/>]*)?(?<!\s)/?>|<{tag}(?:\s+[^/>]*)?>'
             close_pattern = rf'</{tag}>'
             
-            # Also check for self-closing tags like <tag /> or <tag/>
-            self_closing_pattern = rf'<{tag}(?:\s+[^>]*)?\s*/>'
+            # Self-closing tags: anything ending with /> (with possible space before /)
+            self_closing_pattern = rf'<{tag}(?:\s+[^>]*)?>'
             
-            open_count = len(re.findall(open_pattern, content_lower, re.IGNORECASE))
-            close_count = len(re.findall(close_pattern, content_lower, re.IGNORECASE))
-            self_closing_count = len(re.findall(self_closing_pattern, content_lower, re.IGNORECASE))
+            # Find all matches
+            open_matches = re.findall(open_pattern, content_lower, re.IGNORECASE)
+            close_matches = re.findall(close_pattern, content_lower, re.IGNORECASE)
+            self_closing_matches = re.findall(self_closing_pattern, content_lower, re.IGNORECASE)
             
-            # Note: effective_open_count no longer needs to subtract self_closing_count
-            # because the open_pattern now excludes self-closing tags entirely
-            effective_open_count = open_count
+            # Better approach: Count total opening tags, then subtract self-closing ones
+            total_open = len(open_matches)
+            self_closing_count = 0
+            
+            # Count self-closing variants
+            for match in open_matches:
+                # Check if this match is a self-closing tag (ends with or contains />)
+                if '/>' in match or match.rstrip().endswith('/'):
+                    self_closing_count += 1
+            
+            effective_open_count = total_open - self_closing_count
+            close_count = len(close_matches)
             
             if effective_open_count > close_count:
                 unclosed_tags.append(f"{tag} ({effective_open_count - close_count} unclosed)")
