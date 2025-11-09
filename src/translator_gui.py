@@ -613,7 +613,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
             }
         """)
         
-        self.max_output_tokens = 8192
+        self.max_output_tokens = 32768
         self.proc = self.glossary_proc = None
         __version__ = "6.3.6"
         self.__version__ = __version__
