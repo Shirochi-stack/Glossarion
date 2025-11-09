@@ -1670,7 +1670,7 @@ class QAScannerMixin:
         dialog.setModal(True)
         # Use screen ratios: 40% width, 85% height (decreased from 100%)
         screen = QApplication.primaryScreen().geometry()
-        settings_width = int(screen.width() * 0.37)
+        settings_width = int(screen.width() * 0.41)
         settings_height = int(screen.height() * 0.85)
         dialog.resize(settings_width, settings_height)
         
@@ -2744,7 +2744,7 @@ def show_custom_detection_dialog(parent=None):
     
     # Set dialog size
     screen = QApplication.primaryScreen().geometry()
-    custom_width = int(screen.width() * 0.41)
+    custom_width = int(screen.width() * 0.42)
     custom_height = int(screen.height() * 0.60)
     custom_dialog.resize(custom_width, custom_height)
     

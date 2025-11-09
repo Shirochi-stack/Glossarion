@@ -555,7 +555,11 @@ def has_no_spacing_or_linebreaks(text, space_threshold=0.01):
     filtered_text = filter_dash_lines(text)
     space_ratio = filtered_text.count(" ") / max(1, len(filtered_text))
     newline_count = filtered_text.count("\n")
-    return space_ratio < space_threshold or newline_count == 0
+    # Flag as issue only if both conditions are met:
+    # - very few spaces (minified/malformed) AND
+    # - no linebreaks (compacted content)
+    # A single-line file with proper spacing is valid
+    return space_ratio < space_threshold and newline_count == 0
 
 def has_repeating_sentences(text, min_repeats=10):
     filtered_text = filter_dash_lines(text)
