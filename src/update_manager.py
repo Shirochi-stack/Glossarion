@@ -77,7 +77,7 @@ class DownloadWorker(QObject):
                     'Accept': 'application/octet-stream'
                 }
                 print(f"[DEBUG] Making GET request...")
-                with s.get(self.url, headers=headers, stream=True, timeout=(30, 300), allow_redirects=True, verify=ca_bundle) as r:
+                with s.get(self.url, headers=headers, stream=True, timeout=(60, 300), allow_redirects=True, verify=ca_bundle) as r:
                     print(f"[DEBUG] Got response: {r.status_code}")
                     r.raise_for_status()
                     total_size = int(r.headers.get('content-length', 0))
@@ -388,7 +388,7 @@ class UpdateManager(QObject):
             
             # Fetch multiple releases with minimal retry logic
             max_retries = 1  # Reduced to prevent hanging
-            timeout = 5  # Very short timeout
+            timeout = 20  # Very short timeout
             
             for attempt in range(max_retries + 1):
                 try:
@@ -499,7 +499,7 @@ class UpdateManager(QObject):
             
             # Try with reasonable timeout and minimal retries to prevent hanging
             max_retries = 0  # No retries to prevent hanging
-            timeout = 10  # Reasonable timeout
+            timeout = 30  # Reasonable timeout
             
             for attempt in range(max_retries + 1):
                 try:
