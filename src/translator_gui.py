@@ -1885,7 +1885,7 @@ Recent translations to summarize:
             ('chunk_timeout_var', 'chunk_timeout', '900'),
             ('batch_size_var', 'batch_size', '3'),
             ('chapter_number_offset_var', 'chapter_number_offset', '0'),
-            ('compression_factor_var', 'compression_factor', '0.7'),
+            ('compression_factor_var', 'compression_factor', '1.0'),
             # NEW: scanning phase mode (quick-scan/aggressive/ai-hunter/custom)
             ('scan_phase_mode_var', 'scan_phase_mode', 'quick-scan'),
             ('break_split_count_var', 'break_split_count', '')
@@ -7691,10 +7691,11 @@ Important rules:
     def browse_files(self):
         """Select one or more files - automatically handles single/multiple selection"""
         file_filter = (
-            "Supported files (*.epub *.cbz *.txt *.json *.csv *.png *.jpg *.jpeg *.gif *.bmp *.webp);;"
+            "Supported files (*.epub *.cbz *.pdf *.txt *.json *.csv *.png *.jpg *.jpeg *.gif *.bmp *.webp);;"
             "EPUB/CBZ (*.epub *.cbz);;"
             "EPUB files (*.epub);;"
             "Comic Book Zip (*.cbz);;"
+            "PDF files (*.pdf);;"
             "Text files (*.txt *.json *.csv);;"
             "CSV files (*.csv);;"
             "Image files (*.png *.jpg *.jpeg *.gif *.bmp *.webp);;"
@@ -7723,7 +7724,7 @@ Important rules:
         )
         if folder_path:
             # Find all supported files in the folder
-            supported_extensions = {'.epub', '.cbz', '.txt', '.json', '.csv', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
+            supported_extensions = {'.epub', '.cbz', '.pdf', '.txt', '.json', '.csv', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
             files = []
             
             # Recursively find files if deep scan is enabled
@@ -7778,16 +7779,34 @@ Important rules:
         if not paths:
             return
         
-        # Initialize JSON conversion tracking if not exists
+        # Initialize conversion tracking if not exists
         if not hasattr(self, 'json_conversions'):
             self.json_conversions = {}  # Maps converted .txt paths to original .json paths
+        if not hasattr(self, 'pdf_conversions'):
+            self.pdf_conversions = {}  # Maps converted .txt paths to original .pdf paths
         
-        # Process CBZ files - extract images
+        # Process PDF and CBZ files
         processed_paths = []
         
         for path in paths:
             lower = path.lower()
-            if lower.endswith('.cbz'):
+            if lower.endswith('.pdf'):
+                # Convert PDF to text
+                try:
+                    from pdf_extractor import convert_pdf_to_temp_txt, is_pdf_library_available
+                    
+                    if not is_pdf_library_available():
+                        self.append_log(f"❌ No PDF library available. Install with: pip install PyMuPDF")
+                        self.append_log(f"   Skipping: {os.path.basename(path)}")
+                        continue
+                    
+                    txt_path = convert_pdf_to_temp_txt(path)
+                    self.pdf_conversions[txt_path] = path
+                    processed_paths.append(txt_path)
+                    self.append_log(f"📄 Converted PDF to text: {os.path.basename(path)}")
+                except Exception as e:
+                    self.append_log(f"❌ Failed to convert PDF: {os.path.basename(path)} - {e}")
+            elif lower.endswith('.cbz'):
                 # Extract images from CBZ (ZIP) to a temp folder and add them
                 try:
                     import zipfile, tempfile, shutil
@@ -7834,11 +7853,16 @@ Important rules:
         
         if len(processed_paths) == 1:
             # Single file - display full path
-            # Check if this was a JSON conversion
+            # Check if this was a conversion
             if processed_paths[0] in self.json_conversions:
-                # Show original JSON filename in parentheses
+                # Show original JSON filename
                 original_json = self.json_conversions[processed_paths[0]]
                 display_path = f"{processed_paths[0]} (from {os.path.basename(original_json)})"
+                self.entry_epub.setText(display_path)
+            elif processed_paths[0] in self.pdf_conversions:
+                # Show original PDF filename
+                original_pdf = self.pdf_conversions[processed_paths[0]]
+                display_path = f"{processed_paths[0]} (from {os.path.basename(original_pdf)})"
                 self.entry_epub.setText(display_path)
             else:
                 self.entry_epub.setText(processed_paths[0])
@@ -7848,13 +7872,15 @@ Important rules:
             # Group by type (count original types, not processed)
             images = [p for p in processed_paths if os.path.splitext(p)[1].lower() in image_extensions]
             epubs = [p for p in processed_paths if p.lower().endswith('.epub')]
-            txts = [p for p in processed_paths if p.lower().endswith('.txt') and p not in self.json_conversions]
+            txts = [p for p in processed_paths if p.lower().endswith('.txt') and p not in self.json_conversions and p not in self.pdf_conversions]
             jsons = [p for p in self.json_conversions.values()]  # Count original JSON files
-            converted_txts = [p for p in processed_paths if p in self.json_conversions]
+            pdfs = [p for p in self.pdf_conversions.values()]  # Count original PDF files
             
             summary_parts = []
             if epubs:
                 summary_parts.append(f"{len(epubs)} EPUB")
+            if pdfs:
+                summary_parts.append(f"{len(pdfs)} PDF")
             if txts:
                 summary_parts.append(f"{len(txts)} TXT")
             if jsons:

@@ -142,7 +142,7 @@ class TranslationConfig:
         self.SAVE_CLEANED_IMAGES = os.getenv("SAVE_CLEANED_IMAGES", "1") == "1"
         self.WATERMARK_PATTERN_THRESHOLD = int(os.getenv("WATERMARK_PATTERN_THRESHOLD", "10"))
         self.WATERMARK_CLAHE_LIMIT = float(os.getenv("WATERMARK_CLAHE_LIMIT", "3.0"))
-        self.COMPRESSION_FACTOR = float(os.getenv("COMPRESSION_FACTOR", "0.7"))
+        self.COMPRESSION_FACTOR = float(os.getenv("COMPRESSION_FACTOR", "1.0"))
         
         # Multi API key support
         self.use_multi_api_keys = os.environ.get('USE_MULTI_API_KEYS', '0') == '1'
