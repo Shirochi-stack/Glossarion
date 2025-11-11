@@ -2455,7 +2455,7 @@ class BatchTranslationProcessor:
             
             # Check if chapter needs chunking
             from chapter_splitter import ChapterSplitter
-            chapter_splitter = ChapterSplitter(self.config)
+            chapter_splitter = ChapterSplitter(model_name=self.config.MODEL)
             
             # Get token budget
             token_env = os.getenv("MAX_INPUT_TOKENS", "1000000").strip()
@@ -2526,7 +2526,7 @@ class BatchTranslationProcessor:
                 # Generate filename before API call
                 if chunk_idx < total_chunks:
                     # This is a chunk - use chunk naming format
-                    fname = f"response_{chap_num:03d}_chunk_{chunk_idx}.html"
+                    fname = f"response_{actual_num:03d}_chunk_{chunk_idx}.html"
                 else:
                     # Last chunk or single chunk - use regular naming
                     fname = FileUtilities.create_chapter_filename(chapter, actual_num)
