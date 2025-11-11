@@ -114,8 +114,9 @@ app_files = [
     ('Halgakos.ico', '.'),
 	
 	('enhanced_text_extractor.py', '.'),	
+	('pdf_extractor.py', '.'),
 	
-	('multi_api_key_manager.py', '.'),	
+	('multi_api_key_manager.py', '.'),
 	('individual_endpoint_dialog.py', '.'),
 	('model_options.py', '.'),
 	('hyphen_textwrap.py', '.'),
@@ -172,6 +173,7 @@ app_modules = [
 	'metadata_batch_translator',
 	'translate_headers_standalone',
 	'enhanced_text_extractor.py',
+	'pdf_extractor',
 	'multi_api_key_manager.py',
 	'individual_endpoint_dialog.py',
 	'model_options',
