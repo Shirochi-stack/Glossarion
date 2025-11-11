@@ -3442,6 +3442,10 @@ def update_new_format_progress(prog, faulty_chapters, log, folder_path):
             chapter_info["qa_issues_found"] = faulty_row.get("issues", [])
             chapter_info["duplicate_confidence"] = faulty_row.get("duplicate_confidence", 0)
             
+            # Ensure output_file is set (use faulty_filename if null)
+            if not chapter_info.get("output_file"):
+                chapter_info["output_file"] = faulty_filename
+            
             updated_count += 1
             
             # Use chapter_num from faulty_row if available, otherwise fall back to actual_num
