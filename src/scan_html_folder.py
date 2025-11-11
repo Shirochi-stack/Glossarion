@@ -3586,12 +3586,14 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
         with zipfile.ZipFile(epub_path, 'r') as zf:
             # Step 1: Read and parse content.opf to get SPINE ORDER
             content_opf_data = None
+            content_opf_path = None
             manifest_map = {}  # Maps item id to href
             
             try:
                 for fname in zf.namelist():
                     if 'content.opf' in fname.lower():
                         content_opf_data = zf.read(fname).decode('utf-8', errors='ignore')
+                        content_opf_path = fname
                         break
             except Exception as e:
                 log(f"⚠️ Could not read content.opf: {e}")
@@ -3631,15 +3633,39 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
             
             # Step 2: Process files in spine order
             if spine_files:
+                # Determine the base directory from content.opf location
+                base_dir = ''
+                if content_opf_path:
+                    # content.opf is often in OEBPS/ or similar
+                    base_dir = os.path.dirname(content_opf_path)
+                    if base_dir:
+                        base_dir = base_dir + '/'
+                
+                extracted_count = 0
                 for spine_index, file_info in sorted(spine_files.items()):
                     try:
                         file_path = file_info['href']
                         
-                        # Handle relative paths in EPUB
-                        try:
-                            content = zf.read(file_path).decode('utf-8', errors='ignore')
-                        except KeyError:
-                            # Try with different path resolution
+                        # Try multiple path resolutions
+                        possible_paths = [
+                            file_path,                          # As-is from manifest
+                            base_dir + file_path,               # Relative to content.opf
+                            'OEBPS/' + file_path,               # Common EPUB structure
+                            'OPS/' + file_path,                 # Alternative structure
+                        ]
+                        
+                        content = None
+                        successful_path = None
+                        for try_path in possible_paths:
+                            try:
+                                content = zf.read(try_path).decode('utf-8', errors='ignore')
+                                successful_path = try_path
+                                break
+                            except KeyError:
+                                continue
+                        
+                        if content is None:
+                            log(f"⚠️ Could not find spine item {spine_index}: tried {possible_paths}")
                             continue
                         
                         basename = os.path.basename(file_path)
@@ -3670,12 +3696,19 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
                             'is_cjk': has_cjk,
                             'spine_index': spine_index
                         }
+                        extracted_count += 1
                         
                     except Exception as e:
-                        log(f"⚠️ Error processing spine item {spine_index}: {e}")
+                        log(f"⚠️ Error processing spine item {spine_index} ({file_info.get('href', 'unknown')}): {e}")
+                        import traceback
+                        log(f"   Traceback: {traceback.format_exc()}")
                         continue
             else:
                 log("⚠️ Could not read spine order, falling back to file extraction")
+            
+            if spine_files and extracted_count == 0:
+                log(f"⚠️ Failed to extract any word counts from {len(spine_files)} spine items")
+                log(f"   First spine item path: {spine_files.get(1, {}).get('href', 'unknown')}")
         
         return word_counts
         
@@ -3704,12 +3737,48 @@ def detect_multiple_headers(html_content):
 def cross_reference_word_counts(original_counts, translated_file, translated_text, log=print):
     """Cross-reference word counts between original and translated files.
     
-    Matches translated files (which may have response_ prefix) to original EPUB chapters
-    using the most specific filename patterns first. Ignores file extensions.
+    Matches translated files to original EPUB chapters by filename.
+    Handles response_ prefix and ignores file extensions.
     """
     basename = os.path.basename(translated_file)
     # Remove extension for matching (don't consider .html, .xhtml, .htm, etc.)
     basename_no_ext = os.path.splitext(basename)[0]
+    
+    # Remove response_ prefix if present
+    search_name = basename_no_ext
+    if search_name.lower().startswith('response_'):
+        search_name = search_name[9:]  # Remove 'response_' prefix
+    
+    # Try to find matching filename in original_counts
+    for spine_idx, count_info in original_counts.items():
+        epub_filename = os.path.splitext(count_info['filename'])[0]  # Remove extension from EPUB filename
+        
+        # Direct filename match (case-insensitive)
+        if search_name.lower() == epub_filename.lower():
+            original_wc = count_info['word_count']
+            is_cjk = count_info.get('is_cjk', True)
+            
+            # Count words in translated text
+            translated_wc = len(translated_text.split())
+            
+            # Calculate ratio
+            ratio = translated_wc / max(1, original_wc)
+            
+            result = {
+                'found_match': True,
+                'chapter_num': spine_idx,
+                'original_wc': original_wc,
+                'translated_wc': translated_wc,
+                'ratio': ratio,
+                'percentage': ratio * 100,
+                'is_reasonable': True,  # Not used anymore since we removed threshold logic
+                'is_typical': True,
+                'original_file': count_info['filename']
+            }
+            
+            return result
+    
+    # Fallback: old chapter number extraction logic (kept for backwards compatibility)
     chapter_num = None
     
     # PRIORITY 1: Extract from filename patterns (most specific first)
