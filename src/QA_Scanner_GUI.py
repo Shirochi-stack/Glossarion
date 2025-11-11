@@ -1859,8 +1859,8 @@ class QAScannerMixin:
         min_dup_words_layout.addWidget(min_dup_words_label)
         
         min_dup_words_spinbox = QSpinBox()
-        min_dup_words_spinbox.setMinimum(100)
-        min_dup_words_spinbox.setMaximum(2000)
+        min_dup_words_spinbox.setMinimum(0)
+        min_dup_words_spinbox.setMaximum(999999)
         min_dup_words_spinbox.setSingleStep(50)
         min_dup_words_spinbox.setValue(qa_settings.get('min_duplicate_word_count', 500))
         min_dup_words_spinbox.setMinimumWidth(100)
@@ -1884,8 +1884,8 @@ class QAScannerMixin:
         min_spacing_text_layout.addWidget(min_spacing_text_label)
         
         min_spacing_text_spinbox = QSpinBox()
-        min_spacing_text_spinbox.setMinimum(10)
-        min_spacing_text_spinbox.setMaximum(1000)
+        min_spacing_text_spinbox.setMinimum(0)
+        min_spacing_text_spinbox.setMaximum(999999)
         min_spacing_text_spinbox.setSingleStep(10)
         min_spacing_text_spinbox.setValue(qa_settings.get('min_text_length_for_spacing', 100))
         min_spacing_text_spinbox.setMinimumWidth(100)

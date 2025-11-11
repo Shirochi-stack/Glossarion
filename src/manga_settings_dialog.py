@@ -446,16 +446,16 @@ class MangaSettingsDialog(QDialog):
         
         constraints_layout.addWidget(QLabel("Min:"))
         self.min_font_size_spin = QSpinBox()
-        self.min_font_size_spin.setRange(6, 20)
+        self.min_font_size_spin.setRange(1, 999)
         self.min_font_size_spin.setValue(10)
-        self.min_font_size_spin.valueChanged.connect(self._save_rendering_settings)
+        self.min_font_size_spin.valueChanged.connect(self._validate_font_size_range)
         constraints_layout.addWidget(self.min_font_size_spin)
         
         constraints_layout.addWidget(QLabel("Max:"))
         self.max_font_size_spin = QSpinBox()
-        self.max_font_size_spin.setRange(16, 48)
+        self.max_font_size_spin.setRange(1, 999)
         self.max_font_size_spin.setValue(28)
-        self.max_font_size_spin.valueChanged.connect(self._save_rendering_settings)
+        self.max_font_size_spin.valueChanged.connect(self._validate_font_size_range)
         constraints_layout.addWidget(self.max_font_size_spin)
         
         constraints_layout.addStretch()
@@ -538,6 +538,27 @@ class MangaSettingsDialog(QDialog):
     def _on_fit_style_change(self, style):
         """Handle fit style change"""
         self.auto_fit_style = style
+        self._save_rendering_settings()
+    
+    def _validate_font_size_range(self):
+        """Ensure min font size doesn't exceed max font size"""
+        min_val = self.min_font_size_spin.value()
+        max_val = self.max_font_size_spin.value()
+        
+        if min_val > max_val:
+            # Adjust the value that was just changed
+            sender = self.sender()
+            if sender == self.min_font_size_spin:
+                # User changed min, so adjust it to match max
+                self.min_font_size_spin.blockSignals(True)
+                self.min_font_size_spin.setValue(max_val)
+                self.min_font_size_spin.blockSignals(False)
+            elif sender == self.max_font_size_spin:
+                # User changed max, so adjust it to match min
+                self.max_font_size_spin.blockSignals(True)
+                self.max_font_size_spin.setValue(min_val)
+                self.max_font_size_spin.blockSignals(False)
+        
         self._save_rendering_settings()
     
     def _create_tooltip(self, widget, text):
