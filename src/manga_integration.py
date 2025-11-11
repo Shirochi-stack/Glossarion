@@ -4386,11 +4386,12 @@ class MangaTranslationTab(QObject):
         min_size_layout.addWidget(min_size_label)
 
         self.min_size_spinbox = QSpinBox()
-        self.min_size_spinbox.setMinimum(8)
-        self.min_size_spinbox.setMaximum(20)
+        self.min_size_spinbox.setMinimum(1)
+        self.min_size_spinbox.setMaximum(999)
         self.min_size_spinbox.setValue(self.auto_min_size_value)
         self.min_size_spinbox.setMinimumWidth(100)
-        self.min_size_spinbox.valueChanged.connect(lambda value: (setattr(self, 'auto_min_size_value', value), self._save_rendering_settings(), self._apply_rendering_settings()))
+        self.min_size_spinbox.valueChanged.connect(lambda value: setattr(self, 'auto_min_size_value', value))
+        self.min_size_spinbox.editingFinished.connect(lambda: self._validate_font_size_range_manga('min'))
         self._disable_spinbox_mousewheel(self.min_size_spinbox)
         min_size_layout.addWidget(self.min_size_spinbox)
 
@@ -4414,11 +4415,12 @@ class MangaTranslationTab(QObject):
         max_size_layout.addWidget(max_size_label)
 
         self.max_size_spinbox = QSpinBox()
-        self.max_size_spinbox.setMinimum(20)
-        self.max_size_spinbox.setMaximum(100)
+        self.max_size_spinbox.setMinimum(1)
+        self.max_size_spinbox.setMaximum(999)
         self.max_size_spinbox.setValue(self.max_font_size_value)
         self.max_size_spinbox.setMinimumWidth(100)
-        self.max_size_spinbox.valueChanged.connect(lambda value: (setattr(self, 'max_font_size_value', value), self._save_rendering_settings(), self._apply_rendering_settings()))
+        self.max_size_spinbox.valueChanged.connect(lambda value: setattr(self, 'max_font_size_value', value))
+        self.max_size_spinbox.editingFinished.connect(lambda: self._validate_font_size_range_manga('max'))
         self._disable_spinbox_mousewheel(self.max_size_spinbox)
         max_size_layout.addWidget(self.max_size_spinbox)
 
@@ -5354,6 +5356,22 @@ class MangaTranslationTab(QObject):
             self._save_rendering_settings()
             self._apply_rendering_settings()
 
+    def _validate_font_size_range_manga(self, which):
+        """Ensure min font size doesn't exceed max font size in manga integration"""
+        min_val = self.min_size_spinbox.value()
+        max_val = self.max_size_spinbox.value()
+        
+        if min_val > max_val:
+            # Adjust min to match max since that's the safer default
+            self.min_size_spinbox.blockSignals(True)
+            self.min_size_spinbox.setValue(max_val)
+            self.min_size_spinbox.blockSignals(False)
+            self.auto_min_size_value = max_val
+        
+        # Always save and apply after validation
+        self._save_rendering_settings()
+        self._apply_rendering_settings()
+    
     def _update_multiplier_label(self, value):
         """Update multiplier label and value variable"""
         self.font_size_multiplier_value = float(value)  # UPDATE THE VALUE VARIABLE!

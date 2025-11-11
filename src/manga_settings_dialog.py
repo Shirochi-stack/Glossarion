@@ -448,14 +448,14 @@ class MangaSettingsDialog(QDialog):
         self.min_font_size_spin = QSpinBox()
         self.min_font_size_spin.setRange(1, 999)
         self.min_font_size_spin.setValue(10)
-        self.min_font_size_spin.valueChanged.connect(self._validate_font_size_range)
+        self.min_font_size_spin.editingFinished.connect(self._validate_font_size_range)
         constraints_layout.addWidget(self.min_font_size_spin)
         
         constraints_layout.addWidget(QLabel("Max:"))
         self.max_font_size_spin = QSpinBox()
         self.max_font_size_spin.setRange(1, 999)
         self.max_font_size_spin.setValue(28)
-        self.max_font_size_spin.valueChanged.connect(self._validate_font_size_range)
+        self.max_font_size_spin.editingFinished.connect(self._validate_font_size_range)
         constraints_layout.addWidget(self.max_font_size_spin)
         
         constraints_layout.addStretch()
@@ -546,18 +546,10 @@ class MangaSettingsDialog(QDialog):
         max_val = self.max_font_size_spin.value()
         
         if min_val > max_val:
-            # Adjust the value that was just changed
-            sender = self.sender()
-            if sender == self.min_font_size_spin:
-                # User changed min, so adjust it to match max
-                self.min_font_size_spin.blockSignals(True)
-                self.min_font_size_spin.setValue(max_val)
-                self.min_font_size_spin.blockSignals(False)
-            elif sender == self.max_font_size_spin:
-                # User changed max, so adjust it to match min
-                self.max_font_size_spin.blockSignals(True)
-                self.max_font_size_spin.setValue(min_val)
-                self.max_font_size_spin.blockSignals(False)
+            # Adjust min to match max since that's the safer default
+            self.min_font_size_spin.blockSignals(True)
+            self.min_font_size_spin.setValue(max_val)
+            self.min_font_size_spin.blockSignals(False)
         
         self._save_rendering_settings()
     

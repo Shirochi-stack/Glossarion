@@ -3535,12 +3535,17 @@ def update_legacy_format_progress(prog, faulty_chapters, log):
     
     log(f"🔧 Removed {removed_count} chapters from legacy completed list")
 
-def extract_epub_word_counts(epub_path, log=print):
+def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
     """Extract word counts for each chapter from the original EPUB using spine order.
     
     Key: Uses content.opf SPINE ORDER (reading order) as the authoritative chapter sequence.
     This ensures that files like 0001_chapter.xhtml and 0001_section.xhtml both get
     correctly indexed by their actual position in the book, not just their filenames.
+    
+    Args:
+        epub_path: Path to the EPUB file
+        log: Logging function
+        min_file_length: Minimum character length to include a file (from qa_settings)
     """
     
     def count_cjk_words(text):
@@ -3641,8 +3646,8 @@ def extract_epub_word_counts(epub_path, log=print):
                         soup = BeautifulSoup(content, 'html.parser')
                         text = soup.get_text(strip=True)
                         
-                        # Skip nav/cover pages (very short content)
-                        if len(text) < 100:
+                        # Skip files shorter than minimum length setting
+                        if len(text) < min_file_length:
                             continue
                         
                         # Check if text contains CJK characters
@@ -3952,8 +3957,8 @@ def process_html_file_batch(args):
             
             if wc_result['found_match']:
                 word_count_check = wc_result
-                if not wc_result['is_reasonable']:
-                    issues.append(f"word_count_mismatch_ratio_{wc_result['ratio']:.2f}")
+                # Always add word count info as an issue for visibility
+                issues.append(f"word_count_ratio_{wc_result['ratio']:.2f}")
             else:
                 word_count_check = wc_result
                 issues.append("word_count_no_match_found")
@@ -4090,8 +4095,9 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     if check_word_count:
         if epub_path and os.path.exists(epub_path):
             log(f"📚 Extracting word counts from original EPUB: {os.path.basename(epub_path)}")
-            original_word_counts = extract_epub_word_counts(epub_path, log)
-            log(f"   Found word counts for {len(original_word_counts)} chapters")
+            min_length = qa_settings.get('min_file_length', 0)
+            original_word_counts = extract_epub_word_counts(epub_path, log, min_file_length=min_length)
+            log(f"   Found word counts for {len(original_word_counts)} chapters (min length: {min_length} chars)")
         else:
             log("⚠️ Word count cross-reference enabled but no valid EPUB provided - skipping this check")
             check_word_count = False
