@@ -1085,17 +1085,28 @@ class RetranslationMixin:
                 
                 # Format: [OPF Position] Chapter Number | Status | Original File -> Response File
                 if isinstance(chapter_num, float) and chapter_num.is_integer():
-                    display = f"[{opf_pos:03d}] Ch.{int(chapter_num):03d} | {icon} {status_label:15s} | {original_file:<{max_original_len}} -> {output_file}"
+                    display = f"[{opf_pos:03d}] Ch.{int(chapter_num):03d} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_file}"
                 else:
-                    display = f"[{opf_pos:03d}] Ch.{chapter_num:03d} | {icon} {status_label:15s} | {original_file:<{max_original_len}} -> {output_file}"
+                    display = f"[{opf_pos:03d}] Ch.{chapter_num:03d} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_file}"
             else:
                 # Original format
                 if isinstance(chapter_num, float) and chapter_num.is_integer():
-                    display = f"Chapter {int(chapter_num):03d} | {icon} {status_label:15s} | {output_file}"
+                    display = f"Chapter {int(chapter_num):03d} | {icon} {status_label:11s} | {output_file}"
                 elif isinstance(chapter_num, float):
-                    display = f"Chapter {chapter_num:06.1f} | {icon} {status_label:15s} | {output_file}"
+                    display = f"Chapter {chapter_num:06.1f} | {icon} {status_label:11s} | {output_file}"
                 else:
-                    display = f"Chapter {chapter_num:03d} | {icon} {status_label:15s} | {output_file}"
+                    display = f"Chapter {chapter_num:03d} | {icon} {status_label:11s} | {output_file}"
+            
+            # Add QA issues if status is qa_failed
+            if status == 'qa_failed':
+                chapter_info = info.get('info', {})
+                qa_issues = chapter_info.get('qa_issues_found', [])
+                if qa_issues:
+                    # Format issues for display (show first 2)
+                    issues_display = ', '.join(qa_issues[:2])
+                    if len(qa_issues) > 2:
+                        issues_display += f' (+{len(qa_issues)-2} more)'
+                    display += f" | {issues_display}"
             
             if info.get('duplicate_count', 1) > 1:
                 display += f" | ({info['duplicate_count']} entries)"
@@ -1741,17 +1752,28 @@ class RetranslationMixin:
                 
                 # Format: [OPF Position] Chapter Number | Status | Original File -> Response File
                 if isinstance(chapter_num, float) and chapter_num.is_integer():
-                    display = f"[{opf_pos:03d}] Ch.{int(chapter_num):03d} | {icon} {status_label:15s} | {original_file:<{max_original_len}} -> {output_file}"
+                    display = f"[{opf_pos:03d}] Ch.{int(chapter_num):03d} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_file}"
                 else:
-                    display = f"[{opf_pos:03d}] Ch.{chapter_num:03d} | {icon} {status_label:15s} | {original_file:<{max_original_len}} -> {output_file}"
+                    display = f"[{opf_pos:03d}] Ch.{chapter_num:03d} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_file}"
             else:
                 # Original format
                 if isinstance(chapter_num, float) and chapter_num.is_integer():
-                    display = f"Chapter {int(chapter_num):03d} | {icon} {status_label:15s} | {output_file}"
+                    display = f"Chapter {int(chapter_num):03d} | {icon} {status_label:11s} | {output_file}"
                 elif isinstance(chapter_num, float):
-                    display = f"Chapter {chapter_num:06.1f} | {icon} {status_label:15s} | {output_file}"
+                    display = f"Chapter {chapter_num:06.1f} | {icon} {status_label:11s} | {output_file}"
                 else:
-                    display = f"Chapter {chapter_num:03d} | {icon} {status_label:15s} | {output_file}"
+                    display = f"Chapter {chapter_num:03d} | {icon} {status_label:11s} | {output_file}"
+            
+            # Add QA issues if status is qa_failed
+            if status == 'qa_failed':
+                chapter_info = info.get('info', {})
+                qa_issues = chapter_info.get('qa_issues_found', [])
+                if qa_issues:
+                    # Format issues for display (show first 2)
+                    issues_display = ', '.join(qa_issues[:2])
+                    if len(qa_issues) > 2:
+                        issues_display += f' (+{len(qa_issues)-2} more)'
+                    display += f" | {issues_display}"
             
             if info.get('duplicate_count', 1) > 1:
                 display += f" | ({info['duplicate_count']} entries)"
