@@ -3764,17 +3764,60 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
             # Calculate ratio
             ratio = translated_wc / max(1, original_wc)
             
+            # Define VERY PERMISSIVE ratio ranges for novel translation
+            if is_cjk:
+                # CJK to English novel translation - reasonable bounds
+                min_ratio = 0.6   # 60% - catches significant omissions
+                max_ratio = 2.5   # 250% - catches excessive padding
+                
+                # Typical healthy range
+                typical_min = 0.8   # 80%
+                typical_max = 1.8   # 180%
+            else:
+                # Non-CJK source
+                min_ratio = 0.7
+                max_ratio = 1.5
+                typical_min = 0.8
+                typical_max = 1.2
+            
+            is_reasonable = min_ratio <= ratio <= max_ratio
+            is_typical = typical_min <= ratio <= typical_max
+            percentage = ratio * 100
+            
             result = {
                 'found_match': True,
                 'chapter_num': spine_idx,
                 'original_wc': original_wc,
                 'translated_wc': translated_wc,
                 'ratio': ratio,
-                'percentage': ratio * 100,
-                'is_reasonable': True,  # Not used anymore since we removed threshold logic
-                'is_typical': True,
+                'percentage': percentage,
+                'is_reasonable': is_reasonable,
+                'is_typical': is_typical,
                 'original_file': count_info['filename']
             }
+            
+            # Add descriptive warnings for extreme but acceptable ratios
+            if ratio < 0.5:
+                result['warning'] = 'very_concise_translation'
+                result['warning_desc'] = 'Translation is less than 50% of original - possible summary style'
+            elif ratio < typical_min:
+                result['warning'] = 'concise_translation'
+                result['warning_desc'] = f'Translation is {percentage:.0f}% of original - somewhat concise'
+            elif ratio > 4.0:
+                result['warning'] = 'very_expansive_translation'
+                result['warning_desc'] = 'Translation is over 400% of original - extensive additions'
+            elif ratio > typical_max:
+                result['warning'] = 'expansive_translation'
+                result['warning_desc'] = f'Translation is {percentage:.0f}% of original - somewhat expansive'
+            
+            # Only flag as error if REALLY extreme
+            if not is_reasonable:
+                if ratio < min_ratio:
+                    result['error'] = 'possibly_missing_content'
+                    result['error_desc'] = f'Translation is only {percentage:.0f}% of original'
+                else:
+                    result['error'] = 'possibly_excessive_content'
+                    result['error_desc'] = f'Translation is {percentage:.0f}% of original'
             
             return result
     
@@ -4026,8 +4069,9 @@ def process_html_file_batch(args):
             
             if wc_result['found_match']:
                 word_count_check = wc_result
-                # Always add word count info as an issue for visibility
-                issues.append(f"word_count_ratio_{wc_result['ratio']:.2f}")
+                # Only mark as issue if ratio is unreasonable (outside safe bounds)
+                if not wc_result['is_reasonable']:
+                    issues.append(f"word_count_mismatch_ratio_{wc_result['ratio']:.2f}")
             else:
                 word_count_check = wc_result
                 issues.append("word_count_no_match_found")
