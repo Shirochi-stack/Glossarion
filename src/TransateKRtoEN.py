@@ -2469,9 +2469,13 @@ class BatchTranslationProcessor:
                 max_input_tokens = 1000000
                 budget_str = "unlimited"
             
-            # Calculate available tokens for content
-            system_tokens = chapter_splitter.count_tokens(chapter_system_prompt)
-            available_tokens = max_input_tokens - system_tokens - 100  # 100 token safety margin
+            # Calculate available tokens for content based on OUTPUT limit (same as calculation phase)
+            # Use output token limit with compression factor, not input limit
+            max_output_tokens = self.config.MAX_OUTPUT_TOKENS
+            safety_margin_output = 500
+            compression_factor = self.config.COMPRESSION_FACTOR
+            available_tokens = int((max_output_tokens - safety_margin_output) / compression_factor)
+            available_tokens = max(available_tokens, 1000)  # Ensure minimum
             
             # Split into chunks if needed
             # Get filename for content type detection
