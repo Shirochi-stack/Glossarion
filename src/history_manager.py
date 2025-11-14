@@ -112,7 +112,7 @@ class HistoryManager:
                 messages_to_keep = (hist_limit - 1) * 2
                 if messages_to_keep > 0:
                     history = history[-messages_to_keep:]
-                    print(f"🔄 Rolling history window: keeping last {hist_limit-1} exchanges")
+                    print(f"📌 Rolling history window: keeping last {hist_limit-1} exchanges")
                 else:
                     history = []
             elif reset_on_limit:

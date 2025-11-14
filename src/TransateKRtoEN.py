@@ -2286,9 +2286,7 @@ class TranslationProcessor:
                                 user_prompt = f"Chapter {c['num']}:\n{chunk_html}"
                             
                             msgs[-1] = {"role": "user", "content": user_prompt}
-                    elif not duplicate_enabled:
-                        print(f"    ⏭️ Duplicate detection is DISABLED - skipping check")
-                
+                    
                 if retry_needed:
                     if is_duplicate_retry:
                         print(f"    🔄 Duplicate retry {duplicate_retry_count}/{max_duplicate_retries}")
@@ -5940,7 +5938,8 @@ def main(log_callback=None, stop_callback=None):
     elif not config.BATCH_TRANSLATION:
         translation_processor = TranslationProcessor(config, client, out, log_callback, check_stop, uses_zero_based, is_text_file)
         
-        if config.DUPLICATE_DETECTION_MODE == 'ai-hunter':
+        # Only initialize AI Hunter when both the detection mode AND duplicate retry are enabled.
+        if config.DUPLICATE_DETECTION_MODE == 'ai-hunter' and getattr(config, 'RETRY_DUPLICATE_BODIES', False):
             # Build the main config from environment variables and config object
             main_config = {
                 'duplicate_lookback_chapters': config.DUPLICATE_LOOKBACK_CHAPTERS,
@@ -6416,20 +6415,6 @@ def main(log_callback=None, stop_callback=None):
                     # Force retranslation of qa_failed chapters
                     print(f"  [RETRY] Chunk {chunk_idx}/{total_chunks} - retranslating due to QA failure")
                         
-                # When contextual history is near its limit, warn how it will behave
-                if config.CONTEXTUAL and config.HIST_LIMIT > 0:
-                    will_roll_or_reset = history_manager.will_reset_on_next_append(
-                        config.HIST_LIMIT,
-                        config.TRANSLATION_HISTORY_ROLLING
-                    )
-                    if will_roll_or_reset:
-                        mode = "roll over (drop oldest exchanges)" if config.TRANSLATION_HISTORY_ROLLING else "reset"
-                        current_exchanges = len(history_manager.load_history()) // 2
-                        print(
-                            f"  📌 History window will {mode} after this chunk "
-                            f"(current: {current_exchanges}/{config.HIST_LIMIT} exchanges)"
-                        )
-                    
                 if check_stop():
                     print(f"❌ Translation stopped during chapter {actual_num}, chunk {chunk_idx}")
                     return
