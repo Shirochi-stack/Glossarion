@@ -1141,7 +1141,7 @@ class MultiAPIKeyDialog(QDialog):
         self.setWindowTitle("Multi API Key Manager")
         # Use screen ratios for sizing
         screen = QApplication.primaryScreen().geometry()
-        width = int(screen.width() * 0.5)  # 50% of screen width
+        width = int(screen.width() * 0.52)  # 52% of screen width
         height = int(screen.height() * 0.68)  # 68% of screen height
         self.resize(width, height)
         
