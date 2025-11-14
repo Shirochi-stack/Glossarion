@@ -244,7 +244,8 @@ def _make_request_id(url: str, body_obj) -> str:
 
 def _save_outgoing_request(provider: str, method: str, url: str, headers: dict, body, request_id: str = None, out_dir: str = None):
     try:
-        if os.getenv("DEBUG_SAVE_REQUEST_PAYLOADS", "1") != "1":
+        # Disabled by default; set DEBUG_SAVE_REQUEST_PAYLOADS=1 to re-enable
+        if os.getenv("DEBUG_SAVE_REQUEST_PAYLOADS", "0") != "1":
             return
         out_dir = out_dir or _payloads_dir()
         try:
@@ -283,7 +284,8 @@ def _save_outgoing_request(provider: str, method: str, url: str, headers: dict, 
 
 def _save_incoming_response(provider: str, url: str, status: int, headers: dict, body, request_id: str, out_dir: str = None):
     try:
-        if os.getenv("DEBUG_SAVE_REQUEST_PAYLOADS", "1") != "1":
+        # Disabled by default; set DEBUG_SAVE_REQUEST_PAYLOADS=1 to re-enable
+        if os.getenv("DEBUG_SAVE_REQUEST_PAYLOADS", "0") != "1":
             return
         out_dir = out_dir or _payloads_dir()
         try:
@@ -1144,6 +1146,9 @@ class UnifiedClient:
         
         # Image payload directory caching
         self._image_thread_dir_cache = {}  # {thread_id: directory_path}
+        
+        # Track last saved payload per thread so we can enrich it with usage after response
+        self._thread_last_payload_paths = {}  # {thread_id: filepath}
         
         # Timeout configuration
         enabled, window = self._get_timeout_config()
@@ -3534,6 +3539,9 @@ class UnifiedClient:
         # Determine if this is an image request
         is_image_request = image_data is not None
         
+        # Usage info (filled when provider returns UnifiedResponse)
+        usage = None
+        
         # Use appropriate context default
         if context is None:
             context = 'image_translation' if is_image_request else 'translation'
@@ -3565,10 +3573,28 @@ class UnifiedClient:
             
             # File names and payload save
             payload_name, response_name = self._get_file_names(messages, context=self.context or context)
-            self._save_payload(messages, payload_name, retry_reason=retry_reason)
+            
+            # Compute effective token limits for debug/inspection
+            try:
+                eff_max_tokens, eff_max_completion_tokens = self._normalize_token_params(max_tokens, max_completion_tokens)
+            except Exception:
+                eff_max_tokens, eff_max_completion_tokens = max_tokens, max_completion_tokens
+            request_params = {
+                'temperature': temperature,
+                'max_tokens': max_tokens,
+                'max_completion_tokens': max_completion_tokens,
+                'effective_max_tokens': eff_max_tokens,
+                'effective_max_completion_tokens': eff_max_completion_tokens,
+                'per_key_output_token_limit': getattr(self, 'current_key_output_token_limit', None),
+            }
+            self._save_payload(messages, payload_name, retry_reason=retry_reason, request_params=request_params)
             
             # Get response via provider router
             response = self._get_response(messages, temperature, max_tokens, max_completion_tokens, response_name)
+            
+            # Capture usage if UnifiedResponse
+            if isinstance(response, UnifiedResponse):
+                usage = response.usage
             
             # Extract text uniformly
             extracted_content, finish_reason = self._extract_response_text(response, provider=getattr(self, 'client_type', 'unknown'))
@@ -3580,6 +3606,9 @@ class UnifiedClient:
             # Stats and success mark
             self._track_stats(context, True, None, time.time() - t0)
             self._mark_key_success()
+            
+            # Attach usage info to the last payload for this thread
+            self._attach_usage_to_last_payload(usage)
             
             # API delay between calls (respects GUI setting)
             self._apply_api_delay()
@@ -3661,6 +3690,20 @@ class UnifiedClient:
                 # Add request ID and attempt to filename for complete isolation
                 payload_name, response_name = self._with_attempt_suffix(payload_name, response_name, request_id, attempt, is_image=bool(image_data))
                 
+                # Compute effective token limits for debug/inspection
+                try:
+                    eff_max_tokens, eff_max_completion_tokens = self._normalize_token_params(max_tokens, max_completion_tokens)
+                except Exception:
+                    eff_max_tokens, eff_max_completion_tokens = max_tokens, max_completion_tokens
+                request_params = {
+                    'temperature': temperature,
+                    'max_tokens': max_tokens,
+                    'max_completion_tokens': max_completion_tokens,
+                    'effective_max_tokens': eff_max_tokens,
+                    'effective_max_completion_tokens': eff_max_completion_tokens,
+                    'per_key_output_token_limit': getattr(self, 'current_key_output_token_limit', None),
+                }
+                
                 # Save payload with retry reason
                 # On internal retries (500 errors), add that info too
                 if attempt > 0:
@@ -3669,9 +3712,9 @@ class UnifiedClient:
                         combined_reason = f"{retry_reason}_{internal_retry_reason}"
                     else:
                         combined_reason = internal_retry_reason
-                    self._save_payload(messages, payload_name, retry_reason=combined_reason)
+                    self._save_payload(messages, payload_name, retry_reason=combined_reason, request_params=request_params)
                 else:
-                    self._save_payload(messages, payload_name, retry_reason=retry_reason)
+                    self._save_payload(messages, payload_name, retry_reason=retry_reason, request_params=request_params)
                 
                 # FIX: Define payload_messages BEFORE using it
                 # Create a sanitized version for payload (without actual image data)
@@ -3690,6 +3733,10 @@ class UnifiedClient:
                 # Unified provider dispatch: for image requests, messages already embed the image.
                 # Route via the same _get_response used for text; Gemini handler internally detects images.
                 response = self._get_response(messages, temperature, max_tokens, max_completion_tokens, response_name)
+                
+                # Capture usage if UnifiedResponse
+                if isinstance(response, UnifiedResponse):
+                    usage = response.usage
                 
                 # Check for cancellation (from timeout or stop button)
                 if self._cancelled:
@@ -3807,6 +3854,8 @@ class UnifiedClient:
                     
                     # Finalize empty handling
                     req_type = 'image' if image_data else 'text'
+                    # Attach usage info for transparency even on empty/safety-filtered results
+                    self._attach_usage_to_last_payload(usage)
                     return self._finalize_empty_response(messages, context, response, extracted_content or "", finish_reason, getattr(self, 'client_type', 'unknown'), req_type, start_time)
                                 
                 # Track success
@@ -3814,6 +3863,9 @@ class UnifiedClient:
                 
                 # Mark key as successful in multi-key mode
                 self._mark_key_success()
+                
+                # Attach usage info to the last payload for this thread
+                self._attach_usage_to_last_payload(usage)
                 
                 # Check for truncation and handle retry if enabled
                 if finish_reason in ['length', 'max_tokens']:
@@ -5751,7 +5803,7 @@ class UnifiedClient:
         self._last_response_filename = response_name
         return payload_name, response_name
     
-    def _save_payload(self, messages, filename, retry_reason=None):
+    def _save_payload(self, messages, filename, retry_reason=None, request_params=None):
         """Save request payload for debugging with retry reason tracking
         
         Automatically organizes:
@@ -5836,6 +5888,13 @@ class UnifiedClient:
                         debug_info['system_prompt_length'] = len(msg.get('content', ''))
                         break
                 
+                # Track last payload path for this thread so we can enrich it later with usage
+                try:
+                    if hasattr(self, '_thread_last_payload_paths'):
+                        self._thread_last_payload_paths[thread_id] = filepath
+                except Exception:
+                    pass
+                
                 # Write the payload (keep original messages with base64)
                 with open(filepath, 'w', encoding='utf-8') as f:
                     json.dump({
@@ -5844,6 +5903,7 @@ class UnifiedClient:
                         'messages': messages,
                         'timestamp': datetime.now().isoformat(),
                         'debug': debug_info,
+                        'request_params': request_params,
                         'key_identifier': getattr(self, 'key_identifier', None),
                         'retry_info': {
                             'reason': retry_reason,
@@ -5859,6 +5919,34 @@ class UnifiedClient:
                 
         except Exception as e:
             print(f"Failed to save payload: {e}")
+
+
+    def _attach_usage_to_last_payload(self, usage: Optional[Dict[str, Any]]) -> None:
+        """Attach usage information (token counts, etc.) to the most recent payload for this thread."""
+        if not usage:
+            return
+        try:
+            thread_id = threading.current_thread().ident
+            path = None
+            try:
+                path = getattr(self, '_thread_last_payload_paths', {}).get(thread_id)
+            except Exception:
+                path = None
+            if not path or not os.path.exists(path):
+                return
+            with self._file_write_lock:
+                try:
+                    with open(path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                except Exception:
+                    return
+                # Do not overwrite if usage already present
+                if 'usage' not in data:
+                    data['usage'] = usage
+                    with open(path, 'w', encoding='utf-8') as f:
+                        json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"Failed to attach usage to payload: {e}")
 
 
     def _payload_has_images(self, messages) -> bool:
