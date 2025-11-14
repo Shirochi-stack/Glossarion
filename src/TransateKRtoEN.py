@@ -6327,7 +6327,7 @@ def main(log_callback=None, stop_callback=None):
                     # Ensure minimum
                     available_tokens = max(available_tokens, 1000)
                     
-                    print(f"📊 Chunk size: {available_tokens:,} tokens (based on {max_output_tokens:,} output limit, compression: {compression_factor})")
+                    print(f"📊 Max Chunk size: {available_tokens:,} tokens (based on {max_output_tokens:,} output limit, compression: {compression_factor})")
                     
                     chapter_tokens = chapter_splitter.count_tokens(c["body"])
                     
@@ -6354,7 +6354,7 @@ def main(log_callback=None, stop_callback=None):
                     # Ensure minimum
                     available_tokens = max(available_tokens, 1000)
                     
-                    print(f"📊 Chunk size: {available_tokens:,} tokens (based on {max_output_tokens:,} output limit, compression: {compression_factor})")
+                    print(f"📊 Max Chunk size: {available_tokens:,} tokens (based on {max_output_tokens:,} output limit, compression: {compression_factor})")
                     
                     # Get filename for content type detection
                     chapter_filename = c.get('filename') or c.get('original_basename', '')
