@@ -894,6 +894,20 @@ def _create_context_management_section(self, parent):
     section_v.setContentsMargins(8, 8, 8, 8)  # Compact margins
     section_v.setSpacing(4)  # Compact spacing between widgets
 
+    # Include previous source text toggle (controls whether source-side history is reused)
+    include_source_cb = self._create_styled_checkbox("Include previous source text in history/memory")
+    try:
+        include_source_cb.setChecked(bool(self.include_source_in_history_var))
+    except Exception:
+        pass
+    def _on_include_source_toggled(checked):
+        try:
+            self.include_source_in_history_var = bool(checked)
+        except Exception:
+            pass
+    include_source_cb.toggled.connect(_on_include_source_toggled)
+    section_v.addWidget(include_source_cb)
+
     # Rolling summary toggle
     rolling_cb = self._create_styled_checkbox("Use Rolling Summary (Memory)")
     try:

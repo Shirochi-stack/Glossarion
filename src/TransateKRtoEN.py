@@ -6484,8 +6484,11 @@ def main(log_callback=None, stop_callback=None):
                     trimmed = history[-config.HIST_LIMIT*2:]
                     chunk_context = chunk_context_manager.get_context_messages(limit=2)
 
-                    # Wrap history messages as explicit memory so the AI treats them as context only
-                    memory_msgs = []
+                    # Determine whether to include previous source text (user messages) as memory
+                    include_source = os.getenv("INCLUDE_SOURCE_IN_HISTORY", "0") == "1"
+
+                    # Collect memory blocks (source + translation) and emit as a single assistant message
+                    memory_blocks = []
                     for h in trimmed:
                         if not isinstance(h, dict):
                             continue
@@ -6493,6 +6496,11 @@ def main(log_callback=None, stop_callback=None):
                         content = h.get('content', '')
                         if not content:
                             continue
+
+                        # Optionally skip previous source text when disabled
+                        if role == 'user' and not include_source:
+                            continue
+
                         if role == 'user':
                             prefix = (
                                 "[MEMORY - PREVIOUS SOURCE TEXT]\\n"
@@ -6506,10 +6514,18 @@ def main(log_callback=None, stop_callback=None):
                                 "Do NOT repeat or re-output this translation.\\n\\n"
                             )
                         footer = "\\n\\n[END MEMORY BLOCK]\n"
-                        memory_msgs.append({
-                            'role': role,
-                            'content': prefix + content + footer
-                        })
+                        memory_blocks.append(prefix + content + footer)
+
+                    if memory_blocks:
+                        combined_memory = "\n".join(memory_blocks)
+                        # Always present history as an assistant message so the model
+                        # treats it as prior context, not a new user instruction.
+                        memory_msgs = [{
+                            'role': 'assistant',
+                            'content': combined_memory
+                        }]
+                    else:
+                        memory_msgs = []
                 else:
                     history = []  # Set empty history when not contextual
                     trimmed = []

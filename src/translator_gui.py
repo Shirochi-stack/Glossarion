@@ -1817,6 +1817,8 @@ Recent translations to summarize:
         # Boolean variables
         bool_vars = [
             ('rolling_summary_var', 'use_rolling_summary', False),
+            # Controls whether previous source text (user messages) are reused as memory
+            ('include_source_in_history_var', 'include_source_in_history', False),
             ('translation_history_rolling_var', 'translation_history_rolling', False),
             ('glossary_history_rolling_var', 'glossary_history_rolling', False),
             ('translate_book_title_var', 'translate_book_title', True),
@@ -5409,6 +5411,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'TRANSLATION_TEMPERATURE': str(self.trans_temp.text()),
             'TRANSLATION_HISTORY_LIMIT': str(self.trans_history.text()),
             'EPUB_OUTPUT_DIR': os.getcwd(),
+            # Whether to include previous source text as memory context
+            'INCLUDE_SOURCE_IN_HISTORY': "1" if getattr(self, 'include_source_in_history_var', False) else "0",
             'APPEND_GLOSSARY': "1" if self.append_glossary_var else "0",
             'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt,
             'EMERGENCY_PARAGRAPH_RESTORE': "1" if self.emergency_restore_var else "0",
@@ -8566,6 +8570,8 @@ Important rules:
                 ('attach_css_to_chapters', ['attach_css_to_chapters_var'], False, bool),
                 ('epub_use_html_method', ['epub_use_html_method_var'], False, bool),
                 ('use_rolling_summary', ['rolling_summary_var'], False, bool),
+                # Whether to reuse previous source text as memory/history context
+                ('include_source_in_history', ['include_source_in_history_var'], False, bool),
                 ('translate_book_title', ['translate_book_title_var'], False, bool),
                 ('emergency_paragraph_restore', ['emergency_restore_var'], False, bool),
                 ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),
