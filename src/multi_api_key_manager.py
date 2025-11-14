@@ -1141,7 +1141,7 @@ class MultiAPIKeyDialog(QDialog):
         self.setWindowTitle("Multi API Key Manager")
         # Use screen ratios for sizing
         screen = QApplication.primaryScreen().geometry()
-        width = int(screen.width() * 0.47)  # 47% of screen width
+        width = int(screen.width() * 0.5)  # 50% of screen width
         height = int(screen.height() * 0.68)  # 68% of screen height
         self.resize(width, height)
         
@@ -1645,11 +1645,13 @@ class MultiAPIKeyDialog(QDialog):
         
         # Right side: TreeWidget with drag and drop
         self.fallback_tree = QTreeWidget()
-        self.fallback_tree.setHeaderLabels(['API Key', 'Model', 'Status', 'Times Used'])
+        # Add explicit column for per-key output token limit
+        self.fallback_tree.setHeaderLabels(['API Key', 'Model', 'Output Limit', 'Status', 'Times Used'])
         self.fallback_tree.setColumnWidth(0, 220)
         self.fallback_tree.setColumnWidth(1, 220)
-        self.fallback_tree.setColumnWidth(2, 120)
-        self.fallback_tree.setColumnWidth(3, 100)
+        self.fallback_tree.setColumnWidth(2, 110)  # Output Limit
+        self.fallback_tree.setColumnWidth(3, 120)  # Status
+        self.fallback_tree.setColumnWidth(4, 100)  # Times Used
         self.fallback_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.fallback_tree.customContextMenuRequested.connect(self._show_fallback_context_menu)
         self.fallback_tree.setMinimumHeight(150)
@@ -1707,7 +1709,8 @@ class MultiAPIKeyDialog(QDialog):
         for i in range(self.fallback_tree.topLevelItemCount()):
             item = self.fallback_tree.topLevelItem(i)
             if item:
-                item.setText(2, "⏳ Testing...")
+                # Status column is index 3 (after Output Limit)
+                item.setText(3, "⏳ Testing...")
         
         # Ensure UnifiedClient uses the same shared pool instance
         try:
@@ -1905,19 +1908,24 @@ class MultiAPIKeyDialog(QDialog):
             # Mask API key
             masked_key = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else api_key
             
-            # Insert into tree
-            item = QTreeWidgetItem([masked_key, model, "Not tested", str(times_used)])
-            item.setForeground(0, Qt.gray)  # Untested styling
-            item.setForeground(1, Qt.gray)
-            item.setForeground(2, Qt.gray)
-            item.setForeground(3, Qt.gray)
-            
-            # Tooltip for per-key output token limit
+            # Determine per-key output token limit display value
             try:
                 raw_limit = key_data.get('individual_output_token_limit')
                 per_key_limit = int(raw_limit) if raw_limit not in (None, "") else None
             except Exception:
                 per_key_limit = None
+            if per_key_limit and per_key_limit > 0:
+                output_limit_str = str(per_key_limit)
+            else:
+                output_limit_str = "global"
+            
+            # Insert into tree
+            item = QTreeWidgetItem([masked_key, model, output_limit_str, "Not tested", str(times_used)])
+            # Untested styling
+            for col in range(item.columnCount()):
+                item.setForeground(col, Qt.gray)
+            
+            # Tooltip for per-key output token limit
             if per_key_limit and per_key_limit > 0:
                 tooltip = f"Individual Output Token Limit: {per_key_limit}"
             else:
@@ -2055,7 +2063,8 @@ class MultiAPIKeyDialog(QDialog):
         if index < self.fallback_tree.topLevelItemCount():
             item = self.fallback_tree.topLevelItem(index)
             if item:
-                item.setText(2, "⏳ Testing...")
+                # Status column is index 3 (after Output Limit)
+                item.setText(3, "⏳ Testing...")
         
         key_data = fallback_keys[index]
         
@@ -2085,14 +2094,14 @@ class MultiAPIKeyDialog(QDialog):
         if index < self.fallback_tree.topLevelItemCount():
             item = self.fallback_tree.topLevelItem(index)
             if item:
-                # Update status (column 2)
-                item.setText(2, "✅ Passed" if success else "❌ Failed")
-                # Update times used cell (column 3)
+                # Update status (column 3)
+                item.setText(3, "✅ Passed" if success else "❌ Failed")
+                # Update times used cell (column 4)
                 try:
-                    current_times = int(item.text(3))
-                    item.setText(3, str(current_times + 1))
+                    current_times = int(item.text(4))
+                    item.setText(4, str(current_times + 1))
                 except Exception:
-                    item.setText(3, "1")
+                    item.setText(4, "1")
 
     def _test_single_fallback_key(self, key_data, index):
         """Test a single fallback key - REAL API TEST"""
@@ -2620,15 +2629,17 @@ class MultiAPIKeyDialog(QDialog):
         
         # Right side: TreeWidget with drag and drop support
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(['API Key', 'Model', 'Cooldown', 'Status', 'Success', 'Errors', 'Times Used'])
+        # Add explicit column for per-key output token limit
+        self.tree.setHeaderLabels(['API Key', 'Model', 'Cooldown', 'Output Limit', 'Status', 'Success', 'Errors', 'Times Used'])
         # Adjusted column widths: balanced distribution
         self.tree.setColumnWidth(0, 125)  # API Key (decreased from 140)
         self.tree.setColumnWidth(1, 230)  # Model (decreased from 320)
         self.tree.setColumnWidth(2, 80)   # Cooldown
-        self.tree.setColumnWidth(3, 80)   # Status
-        self.tree.setColumnWidth(4, 65)   # Success (increased from 40)
-        self.tree.setColumnWidth(5, 60)   # Errors (increased from 40)
-        self.tree.setColumnWidth(6, 90)   # Times Used
+        self.tree.setColumnWidth(3, 100)  # Output Limit
+        self.tree.setColumnWidth(4, 80)   # Status
+        self.tree.setColumnWidth(5, 65)   # Success (increased from 40)
+        self.tree.setColumnWidth(6, 60)   # Errors (increased from 40)
+        self.tree.setColumnWidth(7, 90)   # Times Used
         
         # Set header font
         header = self.tree.header()
@@ -3106,7 +3117,14 @@ class MultiAPIKeyDialog(QDialog):
             # Mask API key for display
             masked_key = key.api_key[:8] + "..." + key.api_key[-4:] if len(key.api_key) > 12 else key.api_key
             
-            # Position indicator
+            # Determine per-key output token limit display value
+            per_key_limit = getattr(key, 'individual_output_token_limit', None)
+            if per_key_limit and per_key_limit > 0:
+                output_limit_str = str(per_key_limit)
+            else:
+                output_limit_str = "global"
+            
+            # Position indicator (not currently shown in a column, but kept for potential future use)
             position = f"#{i+1}"
             if i == 0:
                 position = "⭐ #1"
@@ -3148,14 +3166,19 @@ class MultiAPIKeyDialog(QDialog):
             # Times used (counter)
             times_used = getattr(key, 'times_used', key.success_count + key.error_count)
             
-            # Insert into tree with position column
+            # Insert into tree (now includes explicit Output Limit column)
             item = QTreeWidgetItem([
-                masked_key, key.model, f"{key.cooldown}s", status,
-                str(key.success_count), str(key.error_count), str(times_used)
+                masked_key,
+                key.model,
+                f"{key.cooldown}s",
+                output_limit_str,
+                status,
+                str(key.success_count),
+                str(key.error_count),
+                str(times_used),
             ])
             
             # Tooltip for per-key output token limit
-            per_key_limit = getattr(key, 'individual_output_token_limit', None)
             if per_key_limit and per_key_limit > 0:
                 tooltip = f"Individual Output Token Limit: {per_key_limit}"
             else:
@@ -3165,28 +3188,28 @@ class MultiAPIKeyDialog(QDialog):
             
             # Set colors based on status
             if tags == ('active',):
-                for col in range(7):
+                for col in range(item.columnCount()):
                     item.setForeground(col, Qt.green)
             elif tags == ('cooling',):
-                for col in range(7):
+                for col in range(item.columnCount()):
                     item.setForeground(col, Qt.darkYellow)
             elif tags == ('disabled',):
-                for col in range(7):
+                for col in range(item.columnCount()):
                     item.setForeground(col, Qt.gray)
             elif tags == ('testing',):
-                for col in range(7):
+                for col in range(item.columnCount()):
                     item.setForeground(col, Qt.blue)
             elif tags == ('passed',):
-                for col in range(7):
+                for col in range(item.columnCount()):
                     item.setForeground(col, Qt.darkGreen)
             elif tags == ('failed',):
-                for col in range(7):
+                for col in range(item.columnCount()):
                     item.setForeground(col, Qt.red)
             elif tags == ('ratelimited',):
-                for col in range(7):
+                for col in range(item.columnCount()):
                     item.setForeground(col, Qt.darkYellow)
             elif tags == ('error',):
-                for col in range(7):
+                for col in range(item.columnCount()):
                     item.setForeground(col, Qt.darkRed)
             
             self.tree.addTopLevelItem(item)
