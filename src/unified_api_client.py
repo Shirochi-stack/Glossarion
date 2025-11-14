@@ -244,8 +244,8 @@ def _make_request_id(url: str, body_obj) -> str:
 
 def _save_outgoing_request(provider: str, method: str, url: str, headers: dict, body, request_id: str = None, out_dir: str = None):
     try:
-        # Disabled by default; set DEBUG_SAVE_REQUEST_PAYLOADS=1 to re-enable
-        if os.getenv("DEBUG_SAVE_REQUEST_PAYLOADS", "0") != "1":
+        # Enabled by default; set DEBUG_SAVE_REQUEST_PAYLOADS=0 to disable
+        if os.getenv("DEBUG_SAVE_REQUEST_PAYLOADS", "1") != "1":
             return
         out_dir = out_dir or _payloads_dir()
         try:
@@ -284,8 +284,8 @@ def _save_outgoing_request(provider: str, method: str, url: str, headers: dict, 
 
 def _save_incoming_response(provider: str, url: str, status: int, headers: dict, body, request_id: str, out_dir: str = None):
     try:
-        # Disabled by default; set DEBUG_SAVE_REQUEST_PAYLOADS=1 to re-enable
-        if os.getenv("DEBUG_SAVE_REQUEST_PAYLOADS", "0") != "1":
+        # Enabled by default; set DEBUG_SAVE_REQUEST_PAYLOADS=0 to disable
+        if os.getenv("DEBUG_SAVE_REQUEST_PAYLOADS", "1") != "1":
             return
         out_dir = out_dir or _payloads_dir()
         try:
@@ -8697,10 +8697,65 @@ class UnifiedClient:
                         print(f"   ⚠️ Warning: No text content extracted from Gemini response")
                         print(f"   🔍 Response attributes: {list(response.__dict__.keys()) if hasattr(response, '__dict__') else 'No __dict__'}")
                     
+                    # Build usage metadata dict for logging and payloads
+                    usage_dict = None
+                    try:
+                        if hasattr(response, 'usage_metadata') and response.usage_metadata is not None:
+                            um = response.usage_metadata
+                            # Base token counts (handle multiple possible field names defensively)
+                            pt = (
+                                getattr(um, 'prompt_token_count', None)
+                                or getattr(um, 'input_tokens', None)
+                                or getattr(um, 'input_token_count', None)
+                                or 0
+                            )
+                            ct = (
+                                getattr(um, 'candidates_token_count', None)
+                                or getattr(um, 'output_tokens', None)
+                                or getattr(um, 'output_token_count', None)
+                                or 0
+                            )
+                            tt = getattr(um, 'total_token_count', None)
+                            if tt is None:
+                                # Fallback: derive total from prompt + completion
+                                try:
+                                    tt = (pt or 0) + (ct or 0)
+                                except Exception:
+                                    tt = 0
+                            try:
+                                usage_dict = {
+                                    'prompt_tokens': int(pt) if pt is not None else 0,
+                                    'completion_tokens': int(ct) if ct is not None else 0,
+                                    'total_tokens': int(tt) if tt is not None else int((pt or 0) + (ct or 0)),
+                                }
+                            except Exception:
+                                # Best-effort; if casting fails, fall back to raw values
+                                usage_dict = {
+                                    'prompt_tokens': pt,
+                                    'completion_tokens': ct,
+                                    'total_tokens': tt,
+                                }
+                            # Thinking / reasoning token counts when available
+                            thinking_tokens = (
+                                getattr(um, 'thoughts_token_count', None)
+                                or getattr(um, 'thinking_tokens', None)
+                                or getattr(um, 'reasoning_tokens', None)
+                            )
+                            if thinking_tokens is not None:
+                                try:
+                                    usage_dict['thinking_tokens'] = int(thinking_tokens)
+                                except Exception:
+                                    usage_dict['thinking_tokens'] = thinking_tokens
+                    except Exception as e:
+                        print(f"   ⚠️ Failed to build Gemini usage metadata: {e}")
+                        # Keep usage_dict as None on failure
+                        usage_dict = usage_dict if isinstance(usage_dict, dict) else None
+                    
                     # Return with the actual content populated
                     return UnifiedResponse(
                         content=text_content,  # Properly populated with the actual response text
                         finish_reason=finish_reason,
+                        usage=usage_dict,
                         raw_response=response,
                         error_details=error_details if error_details else None
                     )
