@@ -6454,10 +6454,38 @@ def main(log_callback=None, stop_callback=None):
                     history = history_manager.load_history()
                     trimmed = history[-config.HIST_LIMIT*2:]
                     chunk_context = chunk_context_manager.get_context_messages(limit=2)
+
+                    # Wrap history messages as explicit memory so the AI treats them as context only
+                    memory_msgs = []
+                    for h in trimmed:
+                        if not isinstance(h, dict):
+                            continue
+                        role = h.get('role', 'user')
+                        content = h.get('content', '')
+                        if not content:
+                            continue
+                        if role == 'user':
+                            prefix = (
+                                "[MEMORY - PREVIOUS SOURCE TEXT]\\n"
+                                "This is prior source content provided for context only.\\n"
+                                "Do NOT translate or repeat this text directly in your response.\\n\\n"
+                            )
+                        else:
+                            prefix = (
+                                "[MEMORY - PREVIOUS TRANSLATION]\\n"
+                                "This is prior translated content provided for context only.\\n"
+                                "Do NOT repeat or re-output this translation.\\n\\n"
+                            )
+                        footer = "\\n\\n[END MEMORY BLOCK]\n"
+                        memory_msgs.append({
+                            'role': role,
+                            'content': prefix + content + footer
+                        })
                 else:
                     history = []  # Set empty history when not contextual
                     trimmed = []
                     chunk_context = []
+                    memory_msgs = []
 
                 # Build the current system prompt from the original each time, and append the last summary block if present
                 # Apply per-chunk glossary compression if enabled
@@ -6496,7 +6524,7 @@ def main(log_callback=None, stop_callback=None):
                     except Exception:
                         pass
 
-                msgs = current_base + summary_msgs_list + chunk_context + trimmed + [{"role": "user", "content": user_prompt}]
+                msgs = current_base + summary_msgs_list + chunk_context + memory_msgs + [{"role": "user", "content": user_prompt}]
 
                 c['__index'] = idx
                 c['__progress'] = progress_manager.prog
