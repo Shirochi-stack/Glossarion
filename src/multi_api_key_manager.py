@@ -78,7 +78,7 @@ class APIKeyEntry:
     """Enhanced API key entry with thread-safe operations"""
     def __init__(self, api_key: str, model: str, cooldown: int = 60, enabled: bool = True, 
                  google_credentials: str = None, azure_endpoint: str = None, google_region: str = None,
-                 azure_api_version: str = None, use_individual_endpoint: bool = False):
+                 azure_api_version: str = None, use_individual_endpoint: bool = False, individual_output_token_limit: Optional[int] = None):
         self.api_key = api_key
         self.model = model
         self.cooldown = cooldown
@@ -88,6 +88,14 @@ class APIKeyEntry:
         self.google_region = google_region  # Google Cloud region (e.g., us-east5, us-central1)
         self.azure_api_version = azure_api_version or '2025-01-01-preview'  # Azure API version
         self.use_individual_endpoint = use_individual_endpoint  # Toggle to enable/disable individual endpoint
+        # Individual output token limit for this key (overrides global limit when set)
+        try:
+            if individual_output_token_limit is not None and individual_output_token_limit != "" and int(individual_output_token_limit) > 0:
+                self.individual_output_token_limit = int(individual_output_token_limit)
+            else:
+                self.individual_output_token_limit = None
+        except (ValueError, TypeError):
+            self.individual_output_token_limit = None
         self.last_error_time = None
         self.error_count = 0
         self.success_count = 0
@@ -149,6 +157,7 @@ class APIKeyEntry:
             'google_region': self.google_region,
             'azure_api_version': self.azure_api_version,
             'use_individual_endpoint': self.use_individual_endpoint,
+            'individual_output_token_limit': self.individual_output_token_limit,
             # Persist times used and test results
             'times_used': getattr(self, 'times_used', 0),
             'last_test_result': getattr(self, 'last_test_result', None),
@@ -195,7 +204,8 @@ class APIKeyPool:
                     azure_endpoint=key_data.get('azure_endpoint'),
                     google_region=key_data.get('google_region'),
                     azure_api_version=key_data.get('azure_api_version'),
-                    use_individual_endpoint=key_data.get('use_individual_endpoint', False)
+                    use_individual_endpoint=key_data.get('use_individual_endpoint', False),
+                    individual_output_token_limit=key_data.get('individual_output_token_limit')
                 )
                 # Load saved test results and usage counter
                 entry.times_used = key_data.get('times_used', 0)
@@ -1568,6 +1578,20 @@ class MultiAPIKeyDialog(QDialog):
         self._disable_combobox_mousewheel(self.fallback_azure_api_version_combo)  # Disable mousewheel
         add_fallback_grid.addWidget(self.fallback_azure_api_version_combo, 3, 4, 1, 1, Qt.AlignLeft)
         
+        # Row 4: Individual Output Token Limit (fallback)
+        fallback_output_label = QLabel("Output Token Limit:")
+        fallback_output_label.setStyleSheet("color: gray; font-size: 9pt;")
+        add_fallback_grid.addWidget(fallback_output_label, 4, 0, Qt.AlignLeft)
+        self.fallback_output_token_spinbox = QSpinBox()
+        self.fallback_output_token_spinbox.setRange(0, 2000000)
+        self.fallback_output_token_spinbox.setValue(0)
+        self.fallback_output_token_spinbox.setMaximumWidth(120)
+        self._disable_spinbox_mousewheel(self.fallback_output_token_spinbox)
+        add_fallback_grid.addWidget(self.fallback_output_token_spinbox, 4, 1, Qt.AlignLeft)
+        fallback_output_hint = QLabel("0 = use global limit")
+        fallback_output_hint.setStyleSheet("color: gray; font-size: 8pt;")
+        add_fallback_grid.addWidget(fallback_output_hint, 4, 2, 1, 2, Qt.AlignLeft)
+        
         # Initially hide the endpoint fields when toggle is off
         self._toggle_fallback_individual_endpoint_fields()
         
@@ -1753,6 +1777,19 @@ class MultiAPIKeyDialog(QDialog):
         
         menu.addSeparator()
         
+        # Per-key output token limit options for fallback keys
+        selected_items = self.fallback_tree.selectedItems()
+        selected_count = len(selected_items)
+        if selected_count > 1:
+            set_limit_action = menu.addAction(f"Set Output Token Limit ({selected_count} selected)")
+        else:
+            set_limit_action = menu.addAction("Set Output Token Limit")
+        set_limit_action.triggered.connect(self._set_fallback_output_token_limit_for_selected)
+        clear_limit_action = menu.addAction("Clear Output Token Limit")
+        clear_limit_action.triggered.connect(self._clear_fallback_output_token_limit_for_selected)
+        
+        menu.addSeparator()
+        
         # Test and Remove options
         test_action = menu.addAction("Test")
         test_action.triggered.connect(self._test_selected_fallback)
@@ -1874,6 +1911,20 @@ class MultiAPIKeyDialog(QDialog):
             item.setForeground(1, Qt.gray)
             item.setForeground(2, Qt.gray)
             item.setForeground(3, Qt.gray)
+            
+            # Tooltip for per-key output token limit
+            try:
+                raw_limit = key_data.get('individual_output_token_limit')
+                per_key_limit = int(raw_limit) if raw_limit not in (None, "") else None
+            except Exception:
+                per_key_limit = None
+            if per_key_limit and per_key_limit > 0:
+                tooltip = f"Individual Output Token Limit: {per_key_limit}"
+            else:
+                tooltip = "Using global output token limit"
+            for col in range(item.columnCount()):
+                item.setToolTip(col, tooltip)
+            
             self.fallback_tree.addTopLevelItem(item)
 
     def _add_fallback_key(self):
@@ -1895,6 +1946,16 @@ class MultiAPIKeyDialog(QDialog):
         # Get current fallback keys
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
         
+        # Determine per-key output token limit (0 = use global limit)
+        individual_output_token_limit = None
+        if hasattr(self, 'fallback_output_token_spinbox'):
+            try:
+                val = int(self.fallback_output_token_spinbox.value())
+                if val > 0:
+                    individual_output_token_limit = val
+            except Exception:
+                individual_output_token_limit = None
+        
         # Add new key with additional fields
         fallback_keys.append({
             'api_key': api_key,
@@ -1904,6 +1965,7 @@ class MultiAPIKeyDialog(QDialog):
             'google_region': google_region,
             'azure_api_version': azure_api_version,
             'use_individual_endpoint': use_individual_endpoint,
+            'individual_output_token_limit': individual_output_token_limit,
             'times_used': 0
         })
         
@@ -1919,6 +1981,8 @@ class MultiAPIKeyDialog(QDialog):
         self.fallback_google_region_entry.setText("us-east5")
         self.fallback_azure_api_version_combo.setCurrentText('2025-01-01-preview')
         self.fallback_individual_endpoint_toggle.setChecked(False)
+        if hasattr(self, 'fallback_output_token_spinbox'):
+            self.fallback_output_token_spinbox.setValue(0)
         # Update the UI to disable endpoint fields
         self._toggle_fallback_individual_endpoint_fields()
         
@@ -2276,6 +2340,73 @@ class MultiAPIKeyDialog(QDialog):
             return
         dialog = IndividualEndpointDialog(self, self.translator_gui, temp_key, on_endpoint_configured, self._show_status)
         dialog.exec_()
+    
+    def _set_fallback_output_token_limit_for_selected(self):
+        """Set per-key output token limit for selected fallback keys"""
+        from PySide6.QtWidgets import QInputDialog
+        selected = self.fallback_tree.selectedItems()
+        if not selected:
+            return
+        
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        selected_indices = [self.fallback_tree.indexOfTopLevelItem(item) for item in selected]
+        if not selected_indices:
+            return
+        
+        # Determine default from first selected fallback key or global setting
+        default_val = None
+        first_idx = selected_indices[0]
+        if 0 <= first_idx < len(fallback_keys):
+            try:
+                raw = fallback_keys[first_idx].get('individual_output_token_limit')
+                if raw not in (None, ""):
+                    iv = int(raw)
+                    if iv > 0:
+                        default_val = iv
+            except Exception:
+                default_val = None
+        if default_val is None:
+            try:
+                default_val = int(getattr(self.translator_gui, 'max_output_tokens', 8192))
+            except Exception:
+                default_val = 8192
+        
+        value, ok = QInputDialog.getInt(
+            self,
+            "Set Fallback Output Token Limit",
+            "Max output tokens for selected fallback key(s):",
+            default_val,
+            1,
+            2000000,
+            512,
+        )
+        if not ok or value <= 0:
+            return
+        
+        for idx in selected_indices:
+            if 0 <= idx < len(fallback_keys):
+                fallback_keys[idx]['individual_output_token_limit'] = int(value)
+        self.translator_gui.config['fallback_keys'] = fallback_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_fallback_keys()
+        self._show_status(f"Set fallback output token limit to {value} for {len(selected_indices)} key(s)")
+    
+    def _clear_fallback_output_token_limit_for_selected(self):
+        """Clear per-key output token limit for selected fallback keys"""
+        selected = self.fallback_tree.selectedItems()
+        if not selected:
+            return
+        
+        fallback_keys = self.translator_gui.config.get('fallback_keys', [])
+        selected_indices = [self.fallback_tree.indexOfTopLevelItem(item) for item in selected]
+        for idx in selected_indices:
+            if 0 <= idx < len(fallback_keys):
+                if 'individual_output_token_limit' in fallback_keys[idx]:
+                    del fallback_keys[idx]['individual_output_token_limit']
+        self.translator_gui.config['fallback_keys'] = fallback_keys
+        self.translator_gui.save_config(show_message=False)
+        self._load_fallback_keys()
+        self._show_status(f"Cleared fallback output token limit for {len(selected_indices)} key(s)")
     
     def _toggle_fallback_individual_endpoint(self, fallback_index, enabled):
         """Quick toggle individual endpoint on/off for fallback key"""
@@ -2698,6 +2829,20 @@ class MultiAPIKeyDialog(QDialog):
         self._disable_combobox_mousewheel(self.azure_api_version_combo)  # Disable mousewheel
         add_grid.addWidget(self.azure_api_version_combo, 4, 4, 1, 1, Qt.AlignLeft)
         
+        # Row 5: Individual Output Token Limit
+        output_label = QLabel("Output Token Limit:")
+        output_label.setStyleSheet("color: gray; font-size: 9pt;")
+        add_grid.addWidget(output_label, 5, 0, Qt.AlignLeft)
+        self.output_token_spinbox = QSpinBox()
+        self.output_token_spinbox.setRange(0, 2000000)
+        self.output_token_spinbox.setValue(0)
+        self.output_token_spinbox.setMaximumWidth(120)
+        self._disable_spinbox_mousewheel(self.output_token_spinbox)
+        add_grid.addWidget(self.output_token_spinbox, 5, 1, Qt.AlignLeft)
+        output_hint = QLabel("0 = use global limit")
+        output_hint.setStyleSheet("color: gray; font-size: 8pt;")
+        add_grid.addWidget(output_hint, 5, 2, 1, 2, Qt.AlignLeft)
+        
         # Set column stretch
         add_grid.setColumnStretch(1, 1)
         add_grid.setColumnStretch(4, 1)
@@ -3009,6 +3154,15 @@ class MultiAPIKeyDialog(QDialog):
                 str(key.success_count), str(key.error_count), str(times_used)
             ])
             
+            # Tooltip for per-key output token limit
+            per_key_limit = getattr(key, 'individual_output_token_limit', None)
+            if per_key_limit and per_key_limit > 0:
+                tooltip = f"Individual Output Token Limit: {per_key_limit}"
+            else:
+                tooltip = "Using global output token limit"
+            for col in range(item.columnCount()):
+                item.setToolTip(col, tooltip)
+            
             # Set colors based on status
             if tags == ('active',):
                 for col in range(7):
@@ -3123,7 +3277,7 @@ class MultiAPIKeyDialog(QDialog):
         return (value, ok)
 
     def _show_context_menu(self, position):
-        """Show context menu with reorder options"""
+        """Show context menu with reorder and per-key settings"""
         # Get item at position
         item = self.tree.itemAt(position)
         if not item:
@@ -3150,12 +3304,22 @@ class MultiAPIKeyDialog(QDialog):
         menu.addSeparator()
         
         # Add change model option
-        selected_count = len(self.tree.selectedItems())
+        selected_items = self.tree.selectedItems()
+        selected_count = len(selected_items)
         if selected_count > 1:
             change_action = menu.addAction(f"Change Model ({selected_count} selected)")
         else:
             change_action = menu.addAction("Change Model")
         change_action.triggered.connect(self._change_model_for_selected)
+        
+        # Per-key output token limit options
+        if selected_count > 1:
+            set_limit_action = menu.addAction(f"Set Output Token Limit ({selected_count} selected)")
+        else:
+            set_limit_action = menu.addAction("Set Output Token Limit")
+        set_limit_action.triggered.connect(self._set_output_token_limit_for_selected)
+        clear_limit_action = menu.addAction("Clear Output Token Limit")
+        clear_limit_action.triggered.connect(self._clear_output_token_limit_for_selected)
         
         menu.addSeparator()
         
@@ -3169,8 +3333,8 @@ class MultiAPIKeyDialog(QDialog):
             if endpoint_enabled and endpoint_url:
                 config_action = menu.addAction("✅ Individual Endpoint")
                 config_action.triggered.connect(lambda: self._configure_individual_endpoint(index))
-                disable_action = menu.addAction("Disable Individual Endpoint")
-                disable_action.triggered.connect(lambda: self._toggle_individual_endpoint(index, False))
+                disable_endpoint_action = menu.addAction("Disable Individual Endpoint")
+                disable_endpoint_action.triggered.connect(lambda: self._toggle_individual_endpoint(index, False))
             else:
                 config_action = menu.addAction("🔧 Configure Individual Endpoint")
                 config_action.triggered.connect(lambda: self._configure_individual_endpoint(index))
@@ -3189,6 +3353,59 @@ class MultiAPIKeyDialog(QDialog):
         # Show menu
         menu.exec_(self.tree.viewport().mapToGlobal(position))
 
+    def _set_output_token_limit_for_selected(self):
+        """Set per-key output token limit for selected multi-key entries"""
+        from PySide6.QtWidgets import QInputDialog
+        selected = self.tree.selectedItems()
+        if not selected:
+            return
+        
+        # Determine default value from first selected key or global setting
+        selected_indices = [self.tree.indexOfTopLevelItem(item) for item in selected]
+        default_val = None
+        for idx in selected_indices:
+            if 0 <= idx < len(self.key_pool.keys):
+                key = self.key_pool.keys[idx]
+                per_key = getattr(key, 'individual_output_token_limit', None)
+                if per_key and per_key > 0:
+                    default_val = per_key
+                    break
+        if default_val is None:
+            try:
+                default_val = int(getattr(self.translator_gui, 'max_output_tokens', 8192))
+            except Exception:
+                default_val = 8192
+        
+        value, ok = QInputDialog.getInt(
+            self,
+            "Set Output Token Limit",
+            "Max output tokens for selected key(s):",
+            default_val,
+            1,
+            2000000,
+            512,
+        )
+        if not ok or value <= 0:
+            return
+        
+        for idx in selected_indices:
+            if 0 <= idx < len(self.key_pool.keys):
+                self.key_pool.keys[idx].individual_output_token_limit = value
+        self._refresh_key_list()
+        self._show_status(f"Set output token limit to {value} for {len(selected_indices)} key(s)")
+    
+    def _clear_output_token_limit_for_selected(self):
+        """Clear per-key output token limit for selected multi-key entries"""
+        selected = self.tree.selectedItems()
+        if not selected:
+            return
+        selected_indices = [self.tree.indexOfTopLevelItem(item) for item in selected]
+        for idx in selected_indices:
+            if 0 <= idx < len(self.key_pool.keys):
+                self.key_pool.keys[idx].individual_output_token_limit = None
+        self._refresh_key_list()
+        self._show_status(f"Cleared output token limit for {len(selected_indices)} key(s)")
+    
     def _change_model_for_selected(self):
         """Change model for all selected entries"""
         selected = self.tree.selectedItems()
@@ -3579,13 +3796,29 @@ class MultiAPIKeyDialog(QDialog):
             QMessageBox.critical(self, "Error", "Please enter both API key and model name")
             return
         
+        # Determine per-key output token limit (0 = use global limit)
+        individual_output_token_limit = None
+        try:
+            if hasattr(self, 'output_token_spinbox'):
+                val = int(self.output_token_spinbox.value())
+                if val > 0:
+                    individual_output_token_limit = val
+        except Exception:
+            individual_output_token_limit = None
+        
         # Add to pool with new fields
-        key_entry = APIKeyEntry(api_key, model, cooldown, enabled=True, 
-                               google_credentials=google_credentials, 
-                               azure_endpoint=azure_endpoint,
-                               google_region=google_region,
-                               azure_api_version=azure_api_version,
-                               use_individual_endpoint=use_individual_endpoint)
+        key_entry = APIKeyEntry(
+            api_key,
+            model,
+            cooldown,
+            enabled=True,
+            google_credentials=google_credentials,
+            azure_endpoint=azure_endpoint,
+            google_region=google_region,
+            azure_api_version=azure_api_version,
+            use_individual_endpoint=use_individual_endpoint,
+            individual_output_token_limit=individual_output_token_limit,
+        )
         self.key_pool.add_key(key_entry)
         
         # Clear inputs
@@ -3597,6 +3830,8 @@ class MultiAPIKeyDialog(QDialog):
         self.google_region_entry.setText("us-east5")
         self.azure_api_version_combo.setCurrentText('2025-01-01-preview')
         self.individual_endpoint_toggle.setChecked(False)
+        if hasattr(self, 'output_token_spinbox'):
+            self.output_token_spinbox.setValue(0)
         # Update the UI to hide endpoint fields
         self._toggle_individual_endpoint_fields()
         

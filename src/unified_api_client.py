@@ -715,11 +715,37 @@ class UnifiedClient:
         return min(delay, cap)
 
     def _normalize_token_params(self, max_tokens: Optional[int], max_completion_tokens: Optional[int]) -> Tuple[Optional[int], Optional[int]]:
+        """Normalize token parameters and apply per-key output token limit if configured.
+
+        - For o-series models, prefer max_completion_tokens.
+        - For others, prefer max_tokens.
+        - If current_key_output_token_limit is set (>0), treat it as an upper bound that can lower but not raise
+          the effective limit relative to the caller's requested value.
+        """
+        per_key_limit = getattr(self, 'current_key_output_token_limit', None)
+        if isinstance(per_key_limit, str):
+            try:
+                per_key_limit = int(per_key_limit)
+            except Exception:
+                per_key_limit = None
+        if per_key_limit is not None and per_key_limit <= 0:
+            per_key_limit = None
+
         if self._is_o_series_model():
             mct = max_completion_tokens if max_completion_tokens is not None else (max_tokens or getattr(self, 'default_max_tokens', 8192))
+            if per_key_limit is not None:
+                if mct is None or mct <= 0:
+                    mct = per_key_limit
+                else:
+                    mct = min(mct, per_key_limit)
             return None, mct
         else:
             mt = max_tokens if max_tokens is not None else (max_completion_tokens or getattr(self, 'default_max_tokens', 8192))
+            if per_key_limit is not None:
+                if mt is None or mt <= 0:
+                    mt = per_key_limit
+                else:
+                    mt = min(mt, per_key_limit)
             return mt, None
     def _apply_api_delay(self) -> None:
         if getattr(self, '_in_cleanup', False):
@@ -759,11 +785,31 @@ class UnifiedClient:
         return min(delay, cap)
 
     def _normalize_token_params(self, max_tokens: Optional[int], max_completion_tokens: Optional[int]) -> Tuple[Optional[int], Optional[int]]:
+        """Duplicate helper for normalizing token params with per-key cap (kept for backward compatibility)."""
+        per_key_limit = getattr(self, 'current_key_output_token_limit', None)
+        if isinstance(per_key_limit, str):
+            try:
+                per_key_limit = int(per_key_limit)
+            except Exception:
+                per_key_limit = None
+        if per_key_limit is not None and per_key_limit <= 0:
+            per_key_limit = None
+
         if self._is_o_series_model():
             mct = max_completion_tokens if max_completion_tokens is not None else (max_tokens or getattr(self, 'default_max_tokens', 8192))
+            if per_key_limit is not None:
+                if mct is None or mct <= 0:
+                    mct = per_key_limit
+                else:
+                    mct = min(mct, per_key_limit)
             return None, mct
         else:
             mt = max_tokens if max_tokens is not None else (max_completion_tokens or getattr(self, 'default_max_tokens', 8192))
+            if per_key_limit is not None:
+                if mt is None or mt <= 0:
+                    mt = per_key_limit
+                else:
+                    mt = min(mt, per_key_limit)
             return mt, None
     """
     Unified client with fixed thread-safe multi-key support
@@ -1123,6 +1169,8 @@ class UnifiedClient:
         self.current_key_google_creds = None
         self.current_key_azure_endpoint = None
         self.current_key_google_region = None
+        # Optional per-key output token limit (overrides global limit for this key when set)
+        self.current_key_output_token_limit = None
         
         # Azure-specific flags
         self.is_azure = False
@@ -1302,6 +1350,7 @@ class UnifiedClient:
             self._thread_local.cohere_client = None
             self._thread_local.client_type = None
             self._thread_local.current_request_label = None
+            self._thread_local.output_token_limit = None
             
             # THREAD-LOCAL CACHE
             self._thread_local.request_cache = {}  # Each thread gets its own cache!
@@ -1389,6 +1438,7 @@ class UnifiedClient:
                     tls.azure_api_version = getattr(key, 'azure_api_version', None)
                     tls.google_region = getattr(key, 'google_region', None)
                     tls.use_individual_endpoint = getattr(key, 'use_individual_endpoint', False)
+                    tls.output_token_limit = getattr(key, 'individual_output_token_limit', None)
                     tls.initialized = True
                     tls.last_rotation = time.time()
                     
@@ -1404,6 +1454,7 @@ class UnifiedClient:
                         self.current_key_azure_api_version = tls.azure_api_version
                         self.current_key_google_region = tls.google_region
                         self.current_key_use_individual_endpoint = tls.use_individual_endpoint
+                        self.current_key_output_token_limit = getattr(tls, 'output_token_limit', None)
                     
                     # Log key assignment - FIX: Add None check for api_key
                     if self.api_key and len(self.api_key) > 12:
@@ -1438,6 +1489,7 @@ class UnifiedClient:
                         self.current_key_azure_api_version = getattr(tls, 'azure_api_version', None)
                         self.current_key_google_region = getattr(tls, 'google_region', None)
                         self.current_key_use_individual_endpoint = getattr(tls, 'use_individual_endpoint', False)
+                        self.current_key_output_token_limit = getattr(tls, 'output_token_limit', None)
         
         # Single key mode
         elif not tls.initialized:
@@ -1446,12 +1498,14 @@ class UnifiedClient:
             tls.key_identifier = "Single Key"
             tls.initialized = True
             tls.request_count = 0
+            tls.output_token_limit = None
             
             # MICROSECOND LOCK: When setting instance variables
             with self._model_lock:
                 self.api_key = tls.api_key
                 self.model = tls.model
                 self.key_identifier = tls.key_identifier
+                self.current_key_output_token_limit = None
             
             logger.debug(f"[Thread-{thread_name}] Single-key mode: Using {self.model}")
             self._setup_client()
@@ -4565,6 +4619,16 @@ class UnifiedClient:
                         output_dir=self.output_dir
                     )
                     
+                    # Apply per-key output token limit for this fallback key, if configured
+                    try:
+                        raw_limit = fb.get('individual_output_token_limit')
+                        if raw_limit not in (None, ""):
+                            iv = int(raw_limit)
+                            if iv > 0:
+                                temp_client.current_key_output_token_limit = iv
+                    except Exception:
+                        pass
+                    
                     # CRITICAL: Mark this client as a retry client BEFORE setup to prevent recursive fallback
                     # This flag tells _send_internal to NOT attempt fallback keys if it hits prohibited content
                     temp_client._is_retry_client = True
@@ -6152,6 +6216,19 @@ class UnifiedClient:
                 # If not provided, use the environment variable or a reasonable default
                 if max_tokens is None:
                     max_tokens = int(os.getenv('MAX_OUTPUT_TOKENS', '8192'))
+                
+                # Apply per-key output token limit for Vertex/Anthropic path as well
+                per_key_limit = getattr(self, 'current_key_output_token_limit', None)
+                try:
+                    if isinstance(per_key_limit, str):
+                        per_key_limit = int(per_key_limit)
+                except Exception:
+                    per_key_limit = None
+                if per_key_limit is not None and per_key_limit > 0:
+                    if max_tokens is None or max_tokens <= 0:
+                        max_tokens = per_key_limit
+                    else:
+                        max_tokens = min(max_tokens, per_key_limit)
                 
                 kwargs = {
                     "model": model_name,
