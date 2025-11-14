@@ -7194,9 +7194,21 @@ class UnifiedClient:
         elif max_tokens is None and max_completion_tokens is not None:
             # For o-series models, use max_completion_tokens as fallback
             max_tokens = max_completion_tokens
-        # Check if this is actually Gemini (including when using OpenAI endpoint)
+
+        # Apply global normalization and per-key output token limit across all providers.
+        # This ensures that every downstream handler sees a value already capped by the
+        # individual key limit (if any), and mapped correctly for o-series vs non-o-series.
+        try:
+            norm_max_tokens, norm_max_completion_tokens = self._normalize_token_params(max_tokens, max_completion_tokens)
+            max_tokens = norm_max_tokens
+            max_completion_tokens = norm_max_completion_tokens
+        except Exception:
+            # On any failure, fall back to original values to avoid breaking calls
+            pass
+
+        # Determine actual provider (e.g., Gemini using OpenAI endpoint still reports 'gemini')
         actual_provider = self._get_actual_provider()
-        
+
         # Detect if this is an image request (messages contain image parts)
         has_images = False
         for _m in messages:

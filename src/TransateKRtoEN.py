@@ -157,7 +157,69 @@ class TranslationConfig:
                 print(f"Failed to load multi API keys: {e}")
                 self.use_multi_api_keys = False
         
-        
+        # Fallback keys (for direct fallback retries)
+        self.use_fallback_keys = os.environ.get('USE_FALLBACK_KEYS', '0') == '1'
+        self.fallback_keys = []
+        if self.use_fallback_keys:
+            fk_json = os.environ.get('FALLBACK_KEYS', '[]')
+            try:
+                self.fallback_keys = json.loads(fk_json)
+            except Exception as e:
+                print(f"Failed to load fallback keys: {e}")
+                self.use_fallback_keys = False
+
+    def get_effective_output_limit(self) -> int:
+        """Return the effective output token limit, considering per-key overrides.
+
+        - Start from the global MAX_OUTPUT_TOKENS.
+        - If multi-key mode is enabled, intersect with any per-key
+          individual_output_token_limit values (min of all >0 limits).
+        - If fallback keys are enabled, also intersect with their per-key
+          individual_output_token_limit values.
+        """
+        effective = self.MAX_OUTPUT_TOKENS
+
+        # Collect per-key limits from multi-key pool
+        per_key_limits = []
+        try:
+            for key_data in self.multi_api_keys or []:
+                if not isinstance(key_data, dict):
+                    continue
+                raw = key_data.get('individual_output_token_limit')
+                if raw in (None, "", 0):
+                    continue
+                try:
+                    val = int(raw)
+                    if val > 0:
+                        per_key_limits.append(val)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # Collect per-key limits from fallback keys
+        try:
+            for fb in self.fallback_keys or []:
+                if not isinstance(fb, dict):
+                    continue
+                raw = fb.get('individual_output_token_limit')
+                if raw in (None, "", 0):
+                    continue
+                try:
+                    val = int(raw)
+                    if val > 0:
+                        per_key_limits.append(val)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        if per_key_limits:
+            effective = min(effective, min(per_key_limits))
+
+        return effective
+
+
 # =====================================================
 # UNIFIED PATTERNS AND CONSTANTS
 # =====================================================
@@ -2469,9 +2531,9 @@ class BatchTranslationProcessor:
                 max_input_tokens = 1000000
                 budget_str = "unlimited"
             
-            # Calculate available tokens for content based on OUTPUT limit (same as calculation phase)
+            # Calculate available tokens for content based on effective OUTPUT limit (same as calculation phase)
             # Use output token limit with compression factor, not input limit
-            max_output_tokens = self.config.MAX_OUTPUT_TOKENS
+            max_output_tokens = self.config.get_effective_output_limit()
             safety_margin_output = 500
             compression_factor = self.config.COMPRESSION_FACTOR
             available_tokens = int((max_output_tokens - safety_margin_output) / compression_factor)
@@ -5453,8 +5515,8 @@ def main(log_callback=None, stop_callback=None):
         if chapter_key in progress_manager.prog["chapters"] and progress_manager.prog["chapters"][chapter_key].get("status") == "in_progress":
             pass
         
-        # Calculate based on OUTPUT limit only
-        max_output_tokens = config.MAX_OUTPUT_TOKENS 
+        # Calculate based on effective OUTPUT limit only
+        max_output_tokens = config.get_effective_output_limit() 
         safety_margin_output = 500
         
         # Korean to English typically compresses to 0.7-0.9x
@@ -6194,8 +6256,8 @@ def main(log_callback=None, stop_callback=None):
                 # Check if this chapter is already a chunk from text file splitting
                 if c.get('is_chunk', False):
                     # This is already a pre-split chunk, but still check if it needs further splitting
-                    # Calculate based on OUTPUT limit only
-                    max_output_tokens = config.MAX_OUTPUT_TOKENS
+                    # Calculate based on effective OUTPUT limit only
+                    max_output_tokens = config.get_effective_output_limit()
                     safety_margin_output = 500
                     
                     # CJK to English typically compresses to 0.7-0.9x
@@ -6221,8 +6283,8 @@ def main(log_callback=None, stop_callback=None):
                         print(f"📄 Section {c['num']} (pre-split from text file)")
                 else:
                     # Normal splitting logic for non-text files
-                    # Calculate based on OUTPUT limit only
-                    max_output_tokens = config.MAX_OUTPUT_TOKENS
+                    # Calculate based on effective OUTPUT limit only
+                    max_output_tokens = config.get_effective_output_limit()
                     safety_margin_output = 500
                     
                     # CJK to English typically compresses to 0.7-0.9x
