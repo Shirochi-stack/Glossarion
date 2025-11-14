@@ -4540,10 +4540,18 @@ def main(log_callback=None, stop_callback=None):
     os.environ["EPUB_OUTPUT_DIR"] = out
     payloads_dir = out
 
-    # clear history if CONTEXTUAL is disabled
-    if not config.CONTEXTUAL:
-        history_file = os.path.join(payloads_dir, "translation_history.json")
-        if os.path.exists(history_file):
+    # Manage translation history persistence based on contextual + rolling settings
+    history_file = os.path.join(payloads_dir, "translation_history.json")
+    if os.path.exists(history_file):
+        if config.CONTEXTUAL and config.TRANSLATION_HISTORY_ROLLING:
+            # Preserve existing history across runs when using rolling window
+            print(f"[DEBUG] Preserving translation history (rolling window enabled) → {history_file}")
+        elif config.CONTEXTUAL:
+            # Contextual on but rolling disabled: start fresh each run
+            os.remove(history_file)
+            print(f"[DEBUG] CONTEXTUAL enabled without rolling - purged translation history → {history_file}")
+        else:
+            # Contextual off: never keep history
             os.remove(history_file)
             print("[DEBUG] CONTEXTUAL disabled - cleared translation history")
             
@@ -4595,11 +4603,6 @@ def main(log_callback=None, stop_callback=None):
     # Import Chapter_Extractor module functions
     import Chapter_Extractor
     # GlossaryManager is now a module with functions, not a class
-
-    history_file = os.path.join(payloads_dir, "translation_history.json")
-    if os.path.exists(history_file):
-        os.remove(history_file)
-        print(f"[DEBUG] Purged translation history → {history_file}")
 
     print("🔍 Checking for deleted output files...")
     progress_manager.cleanup_missing_files(out)
@@ -6413,8 +6416,19 @@ def main(log_callback=None, stop_callback=None):
                     # Force retranslation of qa_failed chapters
                     print(f"  [RETRY] Chunk {chunk_idx}/{total_chunks} - retranslating due to QA failure")
                         
-                if config.CONTEXTUAL and history_manager.will_reset_on_next_append(config.HIST_LIMIT):
-                    print(f"  📌 History will reset after this chunk (current: {len(history_manager.load_history())//2}/{config.HIST_LIMIT} exchanges)")
+                # When contextual history is near its limit, warn how it will behave
+                if config.CONTEXTUAL and config.HIST_LIMIT > 0:
+                    will_roll_or_reset = history_manager.will_reset_on_next_append(
+                        config.HIST_LIMIT,
+                        config.TRANSLATION_HISTORY_ROLLING
+                    )
+                    if will_roll_or_reset:
+                        mode = "roll over (drop oldest exchanges)" if config.TRANSLATION_HISTORY_ROLLING else "reset"
+                        current_exchanges = len(history_manager.load_history()) // 2
+                        print(
+                            f"  📌 History window will {mode} after this chunk "
+                            f"(current: {current_exchanges}/{config.HIST_LIMIT} exchanges)"
+                        )
                     
                 if check_stop():
                     print(f"❌ Translation stopped during chapter {actual_num}, chunk {chunk_idx}")
