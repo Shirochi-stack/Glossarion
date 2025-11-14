@@ -2096,6 +2096,10 @@ class TranslationProcessor:
         original_max_tokens = self.config.MAX_OUTPUT_TOKENS
         original_temp = self.config.TEMP
         original_user_prompt = msgs[-1]["content"]
+
+        # Determine stable chapter number for this chunk (used for payload metadata)
+        idx = c.get('__index', 0)
+        actual_num = c.get('actual_chapter_num', c.get('num', idx + 1))
         
         chunk_timeout = None
         if self.config.RETRY_TIMEOUT:
@@ -2145,9 +2149,21 @@ class TranslationProcessor:
                 # Generate unique request ID for this chunk
                 #request_id = f"{c['num']:03d}_chunk{chunk_idx}_{uuid.uuid4().hex[:8]}"
 
+                chapter_ctx = {
+                    'chapter': actual_num,
+                    'chunk': chunk_idx,
+                    'total_chunks': total_chunks,
+                }
+                
                 result, finish_reason = send_with_interrupt(
-                    msgs, self.client, current_temp, current_max_tokens, 
-                    self.check_stop, chunk_timeout
+                    msgs,
+                    self.client,
+                    current_temp,
+                    current_max_tokens,
+                    self.check_stop,
+                    chunk_timeout,
+                    context='translation',
+                    chapter_context=chapter_ctx,
                 )
                 # Enhanced mode workflow:
                 # 1. Original HTML -> html2text -> Markdown/plain text (during extraction)
@@ -2574,13 +2590,7 @@ class BatchTranslationProcessor:
                 else:
                     user_prompt = chunk_html
                 
-                # Optionally provide structured chapter/chunk context to the client for better payload metadata
-                if hasattr(self.client, 'set_chapter_context'):
-                    try:
-                        self.client.set_chapter_context(chapter=actual_num, chunk=chunk_idx, total_chunks=total_chunks)
-                    except Exception:
-                        pass
-                
+                # Build messages for this chunk
                 chapter_msgs = [{"role": "system", "content": chapter_system_prompt}, {"role": "user", "content": user_prompt}]
                 
                 # Log combined prompt token count
@@ -2611,9 +2621,19 @@ class BatchTranslationProcessor:
                     self.client._current_output_file = fname
 
                 print(f"📤 Sending Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks} to API...")
+                chapter_ctx = {
+                    'chapter': actual_num,
+                    'chunk': chunk_idx,
+                    'total_chunks': total_chunks,
+                }
                 result, finish_reason = send_with_interrupt(
-                    chapter_msgs, self.client, self.config.TEMP, 
-                    self.config.MAX_OUTPUT_TOKENS, self.check_stop_fn
+                    chapter_msgs,
+                    self.client,
+                    self.config.TEMP,
+                    self.config.MAX_OUTPUT_TOKENS,
+                    self.check_stop_fn,
+                    context='translation',
+                    chapter_context=chapter_ctx,
                 )
                 
                 print(f"📥 Received Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks} response, finish_reason: {finish_reason}")
@@ -3634,40 +3654,49 @@ def cleanup_previous_extraction(output_dir):
 # =====================================================
 # API AND TRANSLATION UTILITIES
 # =====================================================
-def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None, request_id=None, context=None):
+def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn,
+                       chunk_timeout=None, request_id=None, context=None,
+                       chapter_context=None):
     """Send API request with interrupt capability and optional timeout retry.
     Optional context parameter is passed through to the client to improve payload labeling.
+
+    chapter_context (dict) may contain "chapter", "chunk", and "total_chunks".
+    When provided and the client supports set_chapter_context, it will be applied
+    inside the API thread so that thread-local payload metadata is accurate.
     """
     # Import UnifiedClientError at function level to avoid scoping issues
     from unified_api_client import UnifiedClientError
     
     # The client.send() call will handle multi-key rotation automatically
     
-    # Generate request_id if not provided
-    #if request_id is None:
-    #    request_id = str(uuid.uuid4())[:8]
-    
     result_queue = queue.Queue()
     
     def api_call():
         try:
             start_time = time.time()
+
+            # Apply chapter/chunk context in THIS thread so UnifiedClient's
+            # thread-local chapter_info is visible to payload saving.
+            if chapter_context and hasattr(client, 'set_chapter_context'):
+                try:
+                    client.set_chapter_context(
+                        chapter=chapter_context.get('chapter'),
+                        chunk=chapter_context.get('chunk'),
+                        total_chunks=chapter_context.get('total_chunks'),
+                    )
+                except Exception:
+                    # Context is best-effort and should never break the call
+                    pass
             
-            # Check if client.send accepts request_id parameter
+            # Build send parameters (context is optional)
             send_params = {
                 'messages': messages,
                 'temperature': temperature,
-                'max_tokens': max_tokens
+                'max_tokens': max_tokens,
             }
-            # Add context if supported
             sig = inspect.signature(client.send)
             if 'context' in sig.parameters and context is not None:
                 send_params['context'] = context
-            
-            # Add request_id if the client supports it
-            sig = inspect.signature(client.send)
-            #if 'request_id' in sig.parameters:
-            #    send_params['request_id'] = request_id
             
             result = client.send(**send_params)
             elapsed = time.time() - start_time
@@ -6517,13 +6546,7 @@ def main(log_callback=None, stop_callback=None):
                             "END OF CONTEXT - BEGIN ACTUAL CONTENT TO TRANSLATE:"
                         )
                     }]
-                # Optionally provide structured chapter/chunk context to the client for better payload metadata
-                if hasattr(client, 'set_chapter_context'):
-                    try:
-                        client.set_chapter_context(chapter=actual_num, chunk=chunk_idx, total_chunks=total_chunks)
-                    except Exception:
-                        pass
-
+                # Build final message list for this chunk
                 msgs = current_base + summary_msgs_list + chunk_context + memory_msgs + [{"role": "user", "content": user_prompt}]
 
                 c['__index'] = idx
