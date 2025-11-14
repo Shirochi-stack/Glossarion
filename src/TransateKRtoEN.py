@@ -2116,7 +2116,17 @@ class TranslationProcessor:
                 current_max_tokens = self.config.MAX_OUTPUT_TOKENS
                 current_temp = self.config.TEMP
                 
-                total_tokens = sum(self.chapter_splitter.count_tokens(m["content"]) for m in msgs)
+                # Compute token counts, separating assistant (memory/context) tokens when present
+                total_tokens = 0
+                assistant_tokens = 0
+                for m in msgs:
+                    content = m.get("content", "")
+                    tokens = self.chapter_splitter.count_tokens(content)
+                    total_tokens += tokens
+                    if m.get("role") == "assistant":
+                        assistant_tokens += tokens
+                non_assistant_tokens = total_tokens - assistant_tokens
+
                 # Determine file reference
                 if c.get('is_chunk', False):
                     file_ref = f"Section_{c['num']}"
@@ -2126,7 +2136,19 @@ class TranslationProcessor:
                     terminology = "Section" if is_text_source else "Chapter"
                     file_ref = c.get('original_basename', f'{terminology}_{c["num"]}')
 
-                print(f"💬 Chunk {chunk_idx}/{total_chunks} combined prompt: {total_tokens:,} tokens (system + user) / {self.get_token_budget_str()} [File: {file_ref}]")
+                # When contextual translation is enabled and we have assistant-role
+                # context (memory, summaries, etc.), surface its token share explicitly.
+                if getattr(self.config, 'CONTEXTUAL', False) and assistant_tokens > 0:
+                    print(
+                        f"💬 Chunk {chunk_idx}/{total_chunks} combined prompt: "
+                        f"{total_tokens:,} tokens (system + user: {non_assistant_tokens:,}, "
+                        f"assistant/memory: {assistant_tokens:,}) / {self.get_token_budget_str()} [File: {file_ref}]"
+                    )
+                else:
+                    print(
+                        f"💬 Chunk {chunk_idx}/{total_chunks} combined prompt: "
+                        f"{total_tokens:,} tokens (system + user) / {self.get_token_budget_str()} [File: {file_ref}]"
+                    )
                 
                 self.client.context = 'translation'
 
