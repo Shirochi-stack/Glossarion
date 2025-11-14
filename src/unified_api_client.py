@@ -1150,6 +1150,10 @@ class UnifiedClient:
         # Track last saved payload per thread so we can enrich it with usage after response
         self._thread_last_payload_paths = {}  # {thread_id: filepath}
         
+        # Track per-thread chapter/chunk context for richer payload metadata
+        # Structure: {thread_id: {'chapter': str, 'chunk': int, 'total_chunks': int}}
+        self._thread_chapter_info = {}
+        
         # Timeout configuration
         enabled, window = self._get_timeout_config()
         self.request_timeout = int(os.getenv("CHUNK_TIMEOUT", "900")) if enabled else 36000  # 10 hours
@@ -2796,6 +2800,26 @@ class UnifiedClient:
         with self._file_lock:
             self._active_files.discard(filepath)
 
+    def set_chapter_context(self, chapter: Optional[Any] = None, chunk: Optional[int] = None, total_chunks: Optional[int] = None) -> None:
+        """Set per-thread chapter/chunk context for debug payloads without altering prompts."""
+        try:
+            thread_id = threading.current_thread().ident
+            if not hasattr(self, '_thread_chapter_info'):
+                self._thread_chapter_info = {}
+            info = dict(self._thread_chapter_info.get(thread_id, {}))
+            if chapter is not None:
+                try:
+                    info['chapter'] = str(chapter)
+                except Exception:
+                    info['chapter'] = chapter
+            if chunk is not None:
+                info['chunk'] = int(chunk)
+            if total_chunks is not None:
+                info['total_chunks'] = int(total_chunks)
+            self._thread_chapter_info[thread_id] = info
+        except Exception as e:
+            print(f"Failed to set chapter context: {e}")
+
     def _extract_chapter_info(self, messages) -> dict:
         """Extract chapter and chunk information from messages and progress file
         
@@ -2810,6 +2834,23 @@ class UnifiedClient:
             'chunk': None,
             'total_chunks': None
         }
+        
+        # Prefer explicit per-thread context set by callers (does NOT affect prompts)
+        try:
+            thread_id = threading.current_thread().ident
+            ctx = getattr(self, '_thread_chapter_info', {}).get(thread_id)
+            if isinstance(ctx, dict):
+                if ctx.get('chapter') is not None:
+                    info['chapter'] = str(ctx['chapter'])
+                if ctx.get('chunk') is not None:
+                    info['chunk'] = str(ctx['chunk'])
+                if ctx.get('total_chunks') is not None:
+                    info['total_chunks'] = str(ctx['total_chunks'])
+                # If caller provided full context, we can skip regex/progress parsing
+                if info['chapter'] is not None and info['chunk'] is not None and info['total_chunks'] is not None:
+                    return info
+        except Exception:
+            pass
         
         messages_str = str(messages)
         
@@ -2867,7 +2908,11 @@ class UnifiedClient:
         
         # If we didn't get chunk info from progress file, try regex
         if not info['chunk']:
+            # First look for explicit "Chunk X/Y" markers
             chunk_match = re.search(r'Chunk\s+(\d+)/(\d+)', messages_str)
+            if not chunk_match:
+                # Fallback: also support default chunk prompt marker "PART X/Y"
+                chunk_match = re.search(r'PART\s+(\d+)/(\d+)', messages_str, re.IGNORECASE)
             if chunk_match:
                 info['chunk'] = chunk_match.group(1)
                 info['total_chunks'] = chunk_match.group(2)

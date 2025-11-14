@@ -2565,7 +2565,7 @@ class BatchTranslationProcessor:
                 
                 # Build messages for this chunk
                 if total_chunks > 1:
-                    chunk_prompt_template = os.getenv("TRANSLATION_CHUNK_PROMPT", "[PART {chunk_idx}/{total_chunks}]\n{chunk_html}")
+                    chunk_prompt_template = os.getenv("TRANSLATION_CHUNK_PROMPT", "[PART {chunk_idx}/{total_chunks}]\\n{chunk_html}")
                     user_prompt = chunk_prompt_template.format(
                         chunk_idx=chunk_idx,
                         total_chunks=total_chunks,
@@ -2573,6 +2573,13 @@ class BatchTranslationProcessor:
                     )
                 else:
                     user_prompt = chunk_html
+                
+                # Optionally provide structured chapter/chunk context to the client for better payload metadata
+                if hasattr(self.client, 'set_chapter_context'):
+                    try:
+                        self.client.set_chapter_context(chapter=actual_num, chunk=chunk_idx, total_chunks=total_chunks)
+                    except Exception:
+                        pass
                 
                 chapter_msgs = [{"role": "system", "content": chapter_system_prompt}, {"role": "user", "content": user_prompt}]
                 
@@ -6482,6 +6489,13 @@ def main(log_callback=None, stop_callback=None):
                             "END OF CONTEXT - BEGIN ACTUAL CONTENT TO TRANSLATE:"
                         )
                     }]
+                # Optionally provide structured chapter/chunk context to the client for better payload metadata
+                if hasattr(client, 'set_chapter_context'):
+                    try:
+                        client.set_chapter_context(chapter=actual_num, chunk=chunk_idx, total_chunks=total_chunks)
+                    except Exception:
+                        pass
+
                 msgs = current_base + summary_msgs_list + chunk_context + trimmed + [{"role": "user", "content": user_prompt}]
 
                 c['__index'] = idx
