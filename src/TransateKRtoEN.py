@@ -2373,7 +2373,7 @@ class BatchTranslationProcessor:
     
     def __init__(self, config, client, base_msg, out_dir, progress_lock, 
                  save_progress_fn, update_progress_fn, check_stop_fn, 
-                 image_translator=None, is_text_file=False):
+                 image_translator=None, is_text_file=False, history_manager=None):
         self.config = config
         self.client = client
         self.base_msg = base_msg
@@ -2386,6 +2386,8 @@ class BatchTranslationProcessor:
         self.chapters_completed = 0
         self.chunks_completed = 0
         self.is_text_file = is_text_file
+        # Optional shared HistoryManager for contextual translation across chapters
+        self.history_manager = history_manager
         
        # Optionally log multi-key status
         if hasattr(self.client, 'use_multi_keys') and self.client.use_multi_keys:
@@ -2599,7 +2601,7 @@ class BatchTranslationProcessor:
                 if self.check_stop_fn():
                     return None, chunk_idx
                 
-                # Build messages for this chunk
+                # Build user prompt for this chunk
                 if total_chunks > 1:
                     chunk_prompt_template = os.getenv("TRANSLATION_CHUNK_PROMPT", "[PART {chunk_idx}/{total_chunks}]\\n{chunk_html}")
                     user_prompt = chunk_prompt_template.format(
@@ -2610,21 +2612,86 @@ class BatchTranslationProcessor:
                 else:
                     user_prompt = chunk_html
                 
-                # Build messages for this chunk
-                chapter_msgs = [{"role": "system", "content": chapter_system_prompt}, {"role": "user", "content": user_prompt}]
-                
-                # Log combined prompt token count
-                try:
-                    import tiktoken
+                # Build history-based memory when contextual translation is enabled
+                memory_msgs = []
+                if (
+                    self.config.CONTEXTUAL
+                    and self.history_manager is not None
+                    and getattr(self.config, 'HIST_LIMIT', 0) > 0
+                ):
                     try:
-                        enc = tiktoken.encoding_for_model(self.config.MODEL)
-                    except:
-                        enc = tiktoken.get_encoding('cl100k_base')
-                    
-                    total_tokens = sum(len(enc.encode(msg["content"])) for msg in chapter_msgs)
-                    print(f"💬 Chunk {chunk_idx}/{total_chunks} combined prompt: {total_tokens:,} tokens (system + user) / {budget_str} [File: {file_ref}]")
-                except ImportError:
-                    print(f"💬 Chunk {chunk_idx}/{total_chunks} prepared [File: {file_ref}]")
+                        history = self.history_manager.load_history()
+                        hist_limit = getattr(self.config, 'HIST_LIMIT', 0)
+                        trimmed = history[-hist_limit * 2:]
+                        include_source = os.getenv("INCLUDE_SOURCE_IN_HISTORY", "0") == "1"
+
+                        memory_blocks = []
+                        for h in trimmed:
+                            if not isinstance(h, dict):
+                                continue
+                            role = h.get('role', 'user')
+                            content = h.get('content', '')
+                            if not content:
+                                continue
+                            # Optionally skip previous source text when disabled
+                            if role == 'user' and not include_source:
+                                continue
+                            if role == 'user':
+                                prefix = (
+                                    "[MEMORY - PREVIOUS SOURCE TEXT]\\n"
+                                    "This is prior source content provided for context only.\\n"
+                                    "Do NOT translate or repeat this text directly in your response.\\n\\n"
+                                )
+                            else:
+                                prefix = (
+                                    "[MEMORY - PREVIOUS TRANSLATION]\\n"
+                                    "This is prior translated content provided for context only.\\n"
+                                    "Do NOT repeat or re-output this translation.\\n\\n"
+                                )
+                            footer = "\\n\\n[END MEMORY BLOCK]\\n"
+                            memory_blocks.append(prefix + content + footer)
+
+                        if memory_blocks:
+                            combined_memory = "\n".join(memory_blocks)
+                            # Present history as an assistant message so the model
+                            # treats it as prior context, not a new user instruction.
+                            memory_msgs = [{
+                                'role': 'assistant',
+                                'content': combined_memory
+                            }]
+                    except Exception as e:
+                        print(f"⚠️ Failed to build contextual memory for batch chunk: {e}")
+                        memory_msgs = []
+                
+                # Build messages for this chunk (system + optional memory + user)
+                chapter_msgs = (
+                    [{"role": "system", "content": chapter_system_prompt}]
+                    + memory_msgs
+                    + [{"role": "user", "content": user_prompt}]
+                )
+                
+                # Log combined prompt token count, including assistant/memory tokens when present
+                total_tokens = 0
+                assistant_tokens = 0
+                for msg in chapter_msgs:
+                    content = msg.get("content", "")
+                    tokens = chapter_splitter.count_tokens(content)
+                    total_tokens += tokens
+                    if msg.get("role") == "assistant":
+                        assistant_tokens += tokens
+                non_assistant_tokens = total_tokens - assistant_tokens
+
+                if self.config.CONTEXTUAL and assistant_tokens > 0:
+                    print(
+                        f"💬 Chunk {chunk_idx}/{total_chunks} combined prompt: "
+                        f"{total_tokens:,} tokens (system + user: {non_assistant_tokens:,}, "
+                        f"assistant/memory: {assistant_tokens:,}) / {budget_str} [File: {file_ref}]"
+                    )
+                else:
+                    print(
+                        f"💬 Chunk {chunk_idx}/{total_chunks} combined prompt: "
+                        f"{total_tokens:,} tokens (system + user) / {budget_str} [File: {file_ref}]"
+                    )
                 
                 # Generate filename before API call
                 if chunk_idx < total_chunks:
@@ -2731,6 +2798,20 @@ class BatchTranslationProcessor:
             cleaned = re.sub(r"^```(?:html)?\s*\n?", "", result, count=1, flags=re.MULTILINE)
             cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
             cleaned = ContentProcessor.clean_ai_artifacts(cleaned, remove_artifacts=self.config.REMOVE_AI_ARTIFACTS)
+            
+            # Append full-chapter translation to history when contextual mode is enabled
+            try:
+                if self.config.CONTEXTUAL and getattr(self.config, 'HIST_LIMIT', 0) > 0 and self.history_manager:
+                    hist_limit = getattr(self.config, 'HIST_LIMIT', 0)
+                    self.history_manager.append_to_history(
+                        chapter_body,
+                        cleaned,
+                        hist_limit,
+                        reset_on_limit=True,
+                        rolling_window=getattr(self.config, 'TRANSLATION_HISTORY_ROLLING', False)
+                    )
+            except Exception as e:
+                print(f"⚠️ Failed to append Chapter {actual_num} to translation history (batch): {e}")
             
             fname = FileUtilities.create_chapter_filename(chapter, actual_num)
             
@@ -5814,7 +5895,8 @@ def main(log_callback=None, stop_callback=None):
             lambda idx, actual_num, content_hash, output_file=None, status="completed", **kwargs: progress_manager.update(idx, actual_num, content_hash, output_file, status, **kwargs),
             check_stop,
             image_translator,
-            is_text_file=is_text_file
+            is_text_file=is_text_file,
+            history_manager=history_manager
         )
         
         total_to_process = len(chapters_to_translate)
