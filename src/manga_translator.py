@@ -6766,15 +6766,61 @@ class MangaTranslator:
         result = cv2.addWeighted(img, 0.7, heatmap_colored, 0.3, 0)
         return result
 
-    def _get_translation_history_context(self) -> List[Dict[str, str]]:
+    def _build_memory_image_part(self, image_path: str) -> Optional[Dict[str, Any]]:
+        """Build an image_url content part for memory messages.
+
+        Uses similar resizing logic as translate_text / full-page context to
+        keep images within reasonable size limits.
+        """
+        if not image_path or not self.visual_context_enabled:
+            return None
+        try:
+            import base64
+            from PIL import Image as PILImage
+            from io import BytesIO
+
+            if not os.path.exists(image_path):
+                self._log(f"⚠️ Memory image not found: {image_path}", "warning")
+                return None
+
+            with open(image_path, "rb") as img_file:
+                img_data = img_file.read()
+
+            img_size_mb = len(img_data) / (1024 * 1024)
+            if img_size_mb > 10:
+                # Resize large images to stay within API limits
+                pil_image = PILImage.open(image_path)
+                max_size = 2048
+                ratio = min(max_size / pil_image.width, max_size / pil_image.height)
+                if ratio < 1:
+                    new_size = (int(pil_image.width * ratio), int(pil_image.height * ratio))
+                    pil_image = pil_image.resize(new_size, PILImage.Resampling.LANCZOS)
+                    buffered = BytesIO()
+                    pil_image.save(buffered, format="PNG", optimize=True)
+                    img_data = buffered.getvalue()
+
+            img_b64 = base64.b64encode(img_data).decode("utf-8")
+            return {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{img_b64}"},
+            }
+        except Exception as e:
+            self._log(f"⚠️ Failed to build memory image from '{image_path}': {e}", "warning")
+            return None
+
+    def _get_translation_history_context(self) -> List[Dict[str, Any]]:
         """Get translation history as a single assistant memory block.
 
-        This mirrors the main text translator semantics more closely:
+        This mirrors the main text translator semantics more closely and adds
+        optional visual context when enabled:
         - History is stored as a list of chat messages (role/content).
+        - CONTENT can be either plain text (legacy) or a structured dict with
+          image_path/text fields for manga.
         - INCLUDE_SOURCE_IN_HISTORY controls whether previous *source* text
           (user messages) are reused as memory.
-        - When used, memory is wrapped in [MEMORY] blocks inside one
-          assistant message so the model treats it as prior context.
+        - When used, memory is wrapped in [MEMORY] blocks inside one assistant
+          message so the model treats it as prior context, with optional
+          image_url parts when visual context is enabled.
         """
         if not self.history_manager or not self.contextual_enabled:
             return []
@@ -6800,41 +6846,130 @@ class MangaTranslator:
                 # Keep up to hist_limit exchanges (user+assistant) like main translator
                 trimmed = full_history[-hist_limit * 2 :]
 
-                memory_blocks: List[str] = []
-
-                for h in trimmed:
-                    if not isinstance(h, dict):
-                        continue
-                    role = h.get("role", "user")
-                    content = (h.get("content") or "").strip()
-                    if not content:
-                        continue
-
-                    # Optionally skip previous source text when disabled
-                    if role == "user" and not include_source:
-                        continue
-
-                    if role == "user":
-                        prefix = (
-                            "[MEMORY - PREVIOUS SOURCE TEXT]\n"
-                            "This is prior source content provided for context only.\n"
-                            "Do NOT translate or repeat this text directly in your response.\n\n"
-                        )
-                    else:
-                        prefix = (
-                            "[MEMORY - PREVIOUS TRANSLATION]\n"
-                            "This is prior translated content provided for context only.\n"
-                            "Do NOT repeat or re-output this translation.\n\n"
-                        )
-                    footer = "\n\n[END MEMORY BLOCK]\n"
-                    memory_blocks.append(prefix + content + footer)
-
-                if not memory_blocks:
+                if not trimmed:
                     return []
 
-                combined_memory = "\n".join(memory_blocks)
+                # Helper to extract text and image metadata from stored content
+                def _extract_payload(content):
+                    image_path = None
+                    source_text = None
+                    translated_text = None
+
+                    if isinstance(content, dict):
+                        ctype = content.get("type")
+                        if ctype in {"manga_exchange", "manga_page"}:
+                            image_path = content.get("image_path") or content.get("page_image_path")
+                            # Source-side fields
+                            if "text" in content:
+                                source_text = content.get("text")
+                            elif "texts" in content and isinstance(content.get("texts"), list):
+                                source_text = "\n".join(str(t) for t in content.get("texts") if t)
+                            # Translation-side fields
+                            if "translated_text" in content:
+                                translated_text = content.get("translated_text")
+                            elif "translations" in content and isinstance(content.get("translations"), list):
+                                translated_text = "\n".join(str(t) for t in content.get("translations") if t)
+                        else:
+                            # Unknown dict payload - treat as plain text
+                            text_val = str(content)
+                            source_text = text_val
+                            translated_text = text_val
+                    else:
+                        text_val = str(content) if content is not None else ""
+                        source_text = text_val
+                        translated_text = text_val
+
+                    return image_path, source_text, translated_text
+
+                # Build memory content parts (text + optional images)
+                memory_content_parts: List[Dict[str, Any]] = []
+
+                i = 0
+                while i < len(trimmed):
+                    entry = trimmed[i]
+                    if not isinstance(entry, dict):
+                        i += 1
+                        continue
+
+                    role = entry.get("role", "user")
+                    # Expect pairs: user then assistant. If not, fall back to single-entry handling.
+                    if role == "user" and i + 1 < len(trimmed) and isinstance(trimmed[i + 1], dict):
+                        user_entry = entry
+                        assistant_entry = trimmed[i + 1]
+                        if assistant_entry.get("role") != "assistant":
+                            # Roles out of sync, treat current entry alone
+                            assistant_entry = None
+                            i += 1
+                        else:
+                            i += 2
+                    else:
+                        user_entry = entry if role == "user" else None
+                        assistant_entry = None
+                        i += 1
+
+                    image_path = None
+                    source_text = None
+                    translated_text = None
+
+                    if user_entry is not None:
+                        img_u, src_text, _ = _extract_payload(user_entry.get("content"))
+                        image_path = img_u or image_path
+                        source_text = src_text
+
+                    if assistant_entry is not None:
+                        img_a, _, trans_text = _extract_payload(assistant_entry.get("content"))
+                        image_path = img_a or image_path
+                        translated_text = trans_text
+
+                    # Build source memory block (optional)
+                    if include_source and source_text:
+                        source_text = str(source_text).strip()
+                        if source_text:
+                            prefix = (
+                                "[MEMORY - PREVIOUS SOURCE TEXT]\n"
+                                "This is prior source content provided for context only.\n"
+                                "Do NOT translate or repeat this text directly in your response.\n\n"
+                            )
+                            footer = "\n\n[END MEMORY BLOCK]\n"
+                            memory_content_parts.append({
+                                "type": "text",
+                                "text": prefix + source_text + footer,
+                            })
+
+                    # Build translation memory block (always, if we have translations)
+                    if translated_text:
+                        translated_text = str(translated_text).strip()
+                        if translated_text:
+                            prefix = (
+                                "[MEMORY - PREVIOUSLY TRANSLATED MANGA PANELS]\\n"
+                                "These are previously translated manga panels or page text provided for context only.\\n"
+                                "Do NOT repeat or re-output these translations directly in your response.\\n\\n"
+                            )
+                            footer = "\\n\\n[END MEMORY BLOCK]\\n"
+
+                            if self.visual_context_enabled and image_path:
+                                # When image context is enabled and we have an image path,
+                                # include the image in the translation memory block.
+                                memory_content_parts.append({"type": "text", "text": prefix})
+                                img_part = self._build_memory_image_part(image_path)
+                                if img_part is not None:
+                                    memory_content_parts.append(img_part)
+                                memory_content_parts.append({
+                                    "type": "text",
+                                    "text": translated_text + footer,
+                                })
+                            else:
+                                # Text-only memory block
+                                memory_content_parts.append({
+                                    "type": "text",
+                                    "text": prefix + translated_text + footer,
+                                })
+
+                if not memory_content_parts:
+                    return []
+
                 # Present history as an assistant message so the model uses it as context
-                return [{"role": "assistant", "content": combined_memory}]
+                return [{"role": "assistant", "content": memory_content_parts}]
 
             except Exception as e:
                 self._log(f"⚠️ Error loading history context: {str(e)}", "warning")
@@ -7314,19 +7449,46 @@ class MangaTranslator:
                 # Thread-safe history update (prevents race conditions if used in batch mode)
                 with self._contextual_lock:
                     try:
+                        # Build structured payload so we can reconstruct image context later
+                        user_payload: Any = text
+                        assistant_payload: Any = translated
+
+                        if image_path and self.visual_context_enabled:
+                            bbox = None
+                            try:
+                                if region and hasattr(region, "bounding_box") and region.bounding_box:
+                                    bbox = [int(v) for v in region.bounding_box]
+                            except Exception:
+                                bbox = None
+
+                            user_payload = {
+                                "type": "manga_exchange",
+                                "version": 1,
+                                "text": text,
+                                "image_path": image_path,
+                                "region_bbox": bbox,
+                            }
+                            assistant_payload = {
+                                "type": "manga_exchange",
+                                "version": 1,
+                                "translated_text": translated,
+                                "image_path": image_path,
+                                "region_bbox": bbox,
+                            }
+
                         # Append to history with proper limit handling
                         self.history_manager.append_to_history(
-                            user_content=text,
-                            assistant_content=translated,
+                            user_content=user_payload,
+                            assistant_content=assistant_payload,
                             hist_limit=self.translation_history_limit,
                             reset_on_limit=not self.rolling_history_enabled,
-                            rolling_window=self.rolling_history_enabled
+                            rolling_window=self.rolling_history_enabled,
                         )
                         
                         # Check if we're about to hit the limit
                         if self.history_manager.will_reset_on_next_append(
                             self.translation_history_limit, 
-                            self.rolling_history_enabled
+                            self.rolling_history_enabled,
                         ):
                             mode = "roll over" if self.rolling_history_enabled else "reset"
                             self._log(f"📚 History will {mode} on next translation (at limit: {self.translation_history_limit})")
@@ -8170,12 +8332,30 @@ class MangaTranslator:
                     combined_original = "\n".join(all_originals)
                     combined_translation = "\n".join(all_translations)
                     
+                    # Build structured payload so we can reconstruct page-level image context
+                    user_payload: Any = combined_original
+                    assistant_payload: Any = combined_translation
+
+                    if image_path and self.visual_context_enabled:
+                        user_payload = {
+                            "type": "manga_page",
+                            "version": 1,
+                            "texts": all_originals,
+                            "image_path": image_path,
+                        }
+                        assistant_payload = {
+                            "type": "manga_page",
+                            "version": 1,
+                            "translations": all_translations,
+                            "image_path": image_path,
+                        }
+                    
                     self.history_manager.append_to_history(
-                        user_content=combined_original,
-                        assistant_content=combined_translation,
+                        user_content=user_payload,
+                        assistant_content=assistant_payload,
                         hist_limit=self.translation_history_limit,
                         reset_on_limit=not self.rolling_history_enabled,
-                        rolling_window=self.rolling_history_enabled
+                        rolling_window=self.rolling_history_enabled,
                     )
                     
                     self._log(f"📚 Saved {len(all_originals)} translations as 1 combined history entry", "success")
@@ -13028,18 +13208,9 @@ class MangaTranslator:
                     self._log(f"Translated: {translated}")
                     
                     # SAVE TO HISTORY HERE
-                    if self.history_manager and self.contextual_enabled and translated:
-                        try:
-                            self.history_manager.append_to_history(
-                                user_content=region.text,
-                                assistant_content=translated,
-                                hist_limit=self.translation_history_limit,
-                                reset_on_limit=not self.rolling_history_enabled,
-                                rolling_window=self.rolling_history_enabled
-                            )
-                            self._log(f"📚 Saved to history (exchange {i+1})")
-                        except Exception as e:
-                            self._log(f"⚠️ Failed to save history: {e}", "warning")
+                    # NOTE: History is now appended inside translate_text() so that
+                    # we can capture image_path and region metadata. Avoid
+                    # double-appending here.
                     
                     # Apply API delay
                     if i < len(regions) - 1:  # Don't delay after last translation

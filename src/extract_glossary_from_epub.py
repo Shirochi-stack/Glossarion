@@ -737,12 +737,12 @@ def trim_context_history(history: List[Dict], limit: int, rolling_window: bool =
             footer = "\n\n[END MEMORY BLOCK]\n"
             memory_blocks.append(prefix + user_text + footer)
 
-        # Always include previous extracted glossary/translation as MEMORY
+        # Always include previously extracted glossary entries as MEMORY
         if assistant_text:
             prefix = (
-                "[MEMORY - PREVIOUS TRANSLATION]\n"
-                "This is prior translated content provided for context only.\n"
-                "Do NOT repeat or re-output this translation.\n\n"
+                "[MEMORY - PREVIOUSLY EXTRACTED GLOSSARY]\n"
+                "These are previously extracted glossary entries provided for context only.\n"
+                "Do NOT repeat or re-output these entries verbatim in your response.\n\n"
             )
             footer = "\n\n[END MEMORY BLOCK]\n"
             memory_blocks.append(prefix + assistant_text + footer)
