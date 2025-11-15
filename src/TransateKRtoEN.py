@@ -2799,20 +2799,8 @@ class BatchTranslationProcessor:
             cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
             cleaned = ContentProcessor.clean_ai_artifacts(cleaned, remove_artifacts=self.config.REMOVE_AI_ARTIFACTS)
             
-            # Append full-chapter translation to history when contextual mode is enabled
-            try:
-                if self.config.CONTEXTUAL and getattr(self.config, 'HIST_LIMIT', 0) > 0 and self.history_manager:
-                    hist_limit = getattr(self.config, 'HIST_LIMIT', 0)
-                    self.history_manager.append_to_history(
-                        chapter_body,
-                        cleaned,
-                        hist_limit,
-                        reset_on_limit=True,
-                        rolling_window=getattr(self.config, 'TRANSLATION_HISTORY_ROLLING', False)
-                    )
-            except Exception as e:
-                print(f"⚠️ Failed to append Chapter {actual_num} to translation history (batch): {e}")
-            
+            # NOTE: We no longer append to translation history here in the worker thread.
+            # History is now written in the main thread per batch, in a stable order.
             fname = FileUtilities.create_chapter_filename(chapter, actual_num)
             
             if self.is_text_file:
@@ -2893,14 +2881,17 @@ class BatchTranslationProcessor:
                     # Note: chunks_completed is already incremented in the loop above
             
             print(f"✅ Chapter {actual_num} completed successfully")
-            return True, actual_num
+            # Return chapter body and final cleaned translation so the main thread
+            # can append to translation history in a stable batch order.
+            return True, actual_num, chapter_body, cleaned
             
         except Exception as e:
             print(f"❌ Chapter {actual_num} failed: {e}")
             with self.progress_lock:
                 self.update_progress_fn(idx, actual_num, content_hash, None, status="failed")
                 self.save_progress_fn()
-            return False, actual_num
+            # No history for failed chapters
+            return False, actual_num, None, None
             
 
 
@@ -5933,6 +5924,9 @@ def main(log_callback=None, stop_callback=None):
                 completed_in_batch = 0
                 failed_in_batch = 0
                 
+                # Collect history entries for this batch keyed by chapter index
+                batch_history_map = {}
+                
                 for future in concurrent.futures.as_completed(future_to_chapter):
                     if check_stop():
                         print("❌ Translation stopped")
@@ -5943,10 +5937,12 @@ def main(log_callback=None, stop_callback=None):
                     idx, chapter = chapter_data
                     
                     try:
-                        success, chap_num = future.result()
+                        success, chap_num, hist_user, hist_assistant = future.result()
                         if success:
                             completed_in_batch += 1
                             print(f"✅ Chapter {chap_num} done ({completed_in_batch + failed_in_batch}/{len(current_batch)} in batch)")
+                            if hist_user and hist_assistant:
+                                batch_history_map[idx] = (hist_user, hist_assistant)
                         else:
                             failed_in_batch += 1
                             print(f"❌ Chapter {chap_num} failed ({completed_in_batch + failed_in_batch}/{len(current_batch)} in batch)")
@@ -5958,6 +5954,24 @@ def main(log_callback=None, stop_callback=None):
                     
                     progress_percent = (processed / total_to_process) * 100
                     print(f"📊 Overall Progress: {processed}/{total_to_process} ({progress_percent:.1f}%)")
+                
+                # After all futures in this batch complete, append their history entries
+                if config.CONTEXTUAL and getattr(config, 'HIST_LIMIT', 0) > 0:
+                    hist_limit = getattr(config, 'HIST_LIMIT', 0)
+                    for idx, chapter in current_batch:
+                        if idx in batch_history_map:
+                            user_content, assistant_content = batch_history_map[idx]
+                            try:
+                                history_manager.append_to_history(
+                                    user_content,
+                                    assistant_content,
+                                    hist_limit,
+                                    reset_on_limit=True,
+                                    rolling_window=config.TRANSLATION_HISTORY_ROLLING
+                                )
+                            except Exception as e:
+                                actual_num_for_log = chapter.get('actual_chapter_num', chapter.get('num'))
+                                print(f"⚠️ Failed to append Chapter {actual_num_for_log} to translation history (batch): {e}")
                 
                 print(f"\n📦 Batch Summary:")
                 print(f"   ✅ Successful: {completed_in_batch}")
