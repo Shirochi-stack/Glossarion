@@ -6767,41 +6767,75 @@ class MangaTranslator:
         return result
 
     def _get_translation_history_context(self) -> List[Dict[str, str]]:
-        """Get translation history context from HistoryManager"""
+        """Get translation history as a single assistant memory block.
+
+        This mirrors the main text translator semantics more closely:
+        - History is stored as a list of chat messages (role/content).
+        - INCLUDE_SOURCE_IN_HISTORY controls whether previous *source* text
+          (user messages) are reused as memory.
+        - When used, memory is wrapped in [MEMORY] blocks inside one
+          assistant message so the model treats it as prior context.
+        """
         if not self.history_manager or not self.contextual_enabled:
             return []
-        
+
+        include_source = os.getenv("INCLUDE_SOURCE_IN_HISTORY", "0") == "1"
+
+        # Determine how many past exchanges to keep (same semantics as HIST_LIMIT)
+        hist_limit = getattr(self, "translation_history_limit", 0) or 0
+        try:
+            hist_limit = int(hist_limit)
+        except (TypeError, ValueError):
+            hist_limit = 0
+        if hist_limit <= 0:
+            return []
+
         # Thread-safe history access (prevents race conditions if used in batch mode)
         with self._contextual_lock:
             try:
-                # Load full history
-                full_history = self.history_manager.load_history()
-                
+                full_history = self.history_manager.load_history() or []
                 if not full_history:
                     return []
-                
-                # Extract only the contextual messages up to the limit
-                context = []
-                exchange_count = 0
-                
-                # Process history in pairs (user + assistant messages)
-                for i in range(0, len(full_history), 2):
-                    if i + 1 < len(full_history):
-                        user_msg = full_history[i]
-                        assistant_msg = full_history[i + 1]
-                        
-                        if user_msg.get("role") == "user" and assistant_msg.get("role") == "assistant":
-                            context.extend([user_msg, assistant_msg])
-                            exchange_count += 1
-                            
-                            # Only keep up to the history limit
-                            if exchange_count >= self.translation_history_limit:
-                                # Get only the most recent exchanges
-                                context = context[-(self.translation_history_limit * 2):]
-                                break
-                
-                return context
-                
+
+                # Keep up to hist_limit exchanges (user+assistant) like main translator
+                trimmed = full_history[-hist_limit * 2 :]
+
+                memory_blocks: List[str] = []
+
+                for h in trimmed:
+                    if not isinstance(h, dict):
+                        continue
+                    role = h.get("role", "user")
+                    content = (h.get("content") or "").strip()
+                    if not content:
+                        continue
+
+                    # Optionally skip previous source text when disabled
+                    if role == "user" and not include_source:
+                        continue
+
+                    if role == "user":
+                        prefix = (
+                            "[MEMORY - PREVIOUS SOURCE TEXT]\n"
+                            "This is prior source content provided for context only.\n"
+                            "Do NOT translate or repeat this text directly in your response.\n\n"
+                        )
+                    else:
+                        prefix = (
+                            "[MEMORY - PREVIOUS TRANSLATION]\n"
+                            "This is prior translated content provided for context only.\n"
+                            "Do NOT repeat or re-output this translation.\n\n"
+                        )
+                    footer = "\n\n[END MEMORY BLOCK]\n"
+                    memory_blocks.append(prefix + content + footer)
+
+                if not memory_blocks:
+                    return []
+
+                combined_memory = "\n".join(memory_blocks)
+                # Present history as an assistant message so the model uses it as context
+                return [{"role": "assistant", "content": combined_memory}]
+
             except Exception as e:
                 self._log(f"⚠️ Error loading history context: {str(e)}", "warning")
                 return []
@@ -6857,17 +6891,22 @@ class MangaTranslator:
             
             # Add contextual translations if enabled
             if self.contextual_enabled and self.history_manager:
-                # Get history from HistoryManager
+                # Get history from HistoryManager as a [MEMORY] assistant block
                 history_context = self._get_translation_history_context()
                 
                 if history_context:
-                    context_count = len(history_context) // 2  # Each exchange is 2 messages
-                    self._log(f"🔗 Adding {context_count} previous exchanges from history (limit: {self.translation_history_limit})")
+                    self._log(
+                        f"🔗 Adding contextual memory from previous translations "
+                        f"(limit: {self.translation_history_limit})"
+                    )
                     messages.extend(history_context)
                 else:
-                    self._log(f"🔗 Contextual enabled but no history available yet")
+                    self._log("🔗 Contextual enabled but no history available yet")
             else:
-                self._log(f"{prefix} 🔗 Contextual: {'Disabled' if not self.contextual_enabled else 'No HistoryManager'}")
+                self._log(
+                    f"{prefix} 🔗 Contextual: "
+                    f"{'Disabled' if not self.contextual_enabled else 'No HistoryManager'}"
+                )
             
             # Add full image context if available AND visual context is enabled
             if image_path and self.visual_context_enabled:
@@ -6959,16 +6998,25 @@ class MangaTranslator:
             # Check input token limit
             text_tokens = 0
             image_tokens = 0
+            assistant_tokens = 0
 
             for msg in messages:
-                if isinstance(msg.get("content"), str):
+                content = msg.get("content")
+                if isinstance(content, str):
                     # Simple text message
-                    text_tokens += len(msg["content"]) // 4
-                elif isinstance(msg.get("content"), list):
+                    tokens_here = len(content) // 4
+                    text_tokens += tokens_here
+                    if msg.get("role") == "assistant":
+                        assistant_tokens += tokens_here
+                elif isinstance(content, list):
                     # Message with mixed content (text + image)
-                    for content_part in msg["content"]:
+                    for content_part in content:
                         if content_part.get("type") == "text":
-                            text_tokens += len(content_part.get("text", "")) // 4
+                            part_text = content_part.get("text", "")
+                            tokens_here = len(part_text) // 4
+                            text_tokens += tokens_here
+                            if msg.get("role") == "assistant":
+                                assistant_tokens += tokens_here
                         elif content_part.get("type") == "image_url":
                             # Only count image tokens if visual context is enabled
                             if self.visual_context_enabled:
@@ -6989,14 +7037,35 @@ class MangaTranslator:
                         messages = [messages[0], messages[-1]]  
                     else:
                         messages = [messages[0], {"role": "user", "content": text}]
-                    # Recalculate tokens after trimming
+                    # Recalculate tokens after trimming (no assistant memory in trimmed mode)
                     text_tokens = len(messages[0]["content"]) // 4
                     if isinstance(messages[-1].get("content"), str):
                         text_tokens += len(messages[-1]["content"]) // 4
                     else:
                         text_tokens += len(messages[-1]["content"][0]["text"]) // 4
+                    assistant_tokens = 0
                     estimated_tokens = text_tokens + image_tokens
                     self._log(f"📊 Trimmed token estimate: {estimated_tokens}")
+
+            # Log combined prompt summary similar to main translator
+            try:
+                budget_str = "unlimited" if self.input_token_limit is None else f"{self.input_token_limit:,}"
+                non_assistant_tokens = estimated_tokens - assistant_tokens
+                if assistant_tokens > 0:
+                    self._log(
+                        f"{prefix} 💬 Combined prompt: {estimated_tokens} tokens "
+                        f"(system + user: {non_assistant_tokens}, assistant/memory: {assistant_tokens}) / {budget_str}",
+                        "debug" if getattr(self, "concise_logs", False) else "info",
+                    )
+                else:
+                    self._log(
+                        f"{prefix} 💬 Combined prompt: {estimated_tokens} tokens "
+                        f"(system + user) / {budget_str}",
+                        "debug" if getattr(self, "concise_logs", False) else "info",
+                    )
+            except Exception:
+                # Never let logging break translation
+                pass
             
             start_time = time.time()
             api_time = 0  # Initialize to avoid NameError
@@ -7341,8 +7410,10 @@ class MangaTranslator:
             if self.contextual_enabled and self.history_manager:
                 history_context = self._get_translation_history_context()
                 if history_context:
-                    context_count = len(history_context) // 2
-                    self._log(f"🔗 Adding {context_count} previous exchanges from history")
+                    self._log(
+                        f"🔗 Adding contextual memory from previous translations "
+                        f"(limit: {self.translation_history_limit})"
+                    )
                     messages.extend(history_context)
             
             # Prepare text segments with indices
@@ -7485,6 +7556,41 @@ class MangaTranslator:
                     estimated_tokens = text_tokens + image_tokens
                     self._log(f"📊 Trimmed token estimate: {estimated_tokens}")
             
+            # Log combined prompt summary similar to single-region translation
+            try:
+                budget_str = "unlimited" if self.input_token_limit is None else f"{self.input_token_limit:,}"
+                assistant_tokens = 0
+                for msg in messages:
+                    role = msg.get("role")
+                    content = msg.get("content")
+                    if isinstance(content, str):
+                        tokens_here = len(content) // 4
+                        if role == "assistant":
+                            assistant_tokens += tokens_here
+                    elif isinstance(content, list):
+                        for content_part in content:
+                            if content_part.get("type") == "text":
+                                part_text = content_part.get("text", "")
+                                tokens_here = len(part_text) // 4
+                                if role == "assistant":
+                                    assistant_tokens += tokens_here
+                non_assistant_tokens = estimated_tokens - assistant_tokens
+                if assistant_tokens > 0:
+                    self._log(
+                        f"💬 Combined prompt: {estimated_tokens} tokens "
+                        f"(system + user: {non_assistant_tokens}, assistant/memory: {assistant_tokens}) / {budget_str}",
+                        "debug" if getattr(self, "concise_logs", False) else "info",
+                    )
+                else:
+                    self._log(
+                        f"💬 Combined prompt: {estimated_tokens} tokens "
+                        f"(system + user) / {budget_str}",
+                        "debug" if getattr(self, "concise_logs", False) else "info",
+                    )
+            except Exception:
+                # Never let logging break translation
+                pass
+
             # Make API call using the client's send method (matching translate_text)
             self._log(f"🌐 Sending full page context to API...")
             self._log(f"   API Model: {self.client.model if hasattr(self.client, 'model') else 'unknown'}")

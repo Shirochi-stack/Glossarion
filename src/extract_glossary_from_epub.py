@@ -691,35 +691,67 @@ def extract_chapters_from_epub(epub_path: str) -> List[str]:
     return chapters
 
 def trim_context_history(history: List[Dict], limit: int, rolling_window: bool = False) -> List[Dict]:
-    """
-    Handle context history with either reset or rolling window mode
-    
-    Args:
-        history: List of conversation history
-        limit: Maximum number of exchanges to keep
-        rolling_window: Whether to use rolling window mode
+    """Convert stored glossary context into a memory block assistant message.
+
+    This mirrors the main translation pipeline semantics more closely:
+    - History is stored as a list of {"user": ..., "assistant": ...} entries.
+    - We respect the INCLUDE_SOURCE_IN_HISTORY environment variable to decide
+      whether previous *source* text (user side) is reused as memory.
+    - When context is used, it is wrapped in clearly marked [MEMORY] blocks
+      inside a single assistant message, just like the main translator.
+    - We support either reset or rolling window mode based on limit/rolling_window.
     """
     # Count current exchanges
     current_exchanges = len(history)
-    
+
     # Handle based on mode
     if limit > 0 and current_exchanges >= limit:
         if rolling_window:
             # Rolling window: keep the most recent exchanges
             print(f"🔄 Rolling glossary context window: keeping last {limit} chapters")
-            # Keep only the most recent exchanges
-            history = history[-(limit-1):] if limit > 1 else []
+            history = history[-(limit - 1):] if limit > 1 else []
         else:
             # Reset mode (original behavior)
             print(f"🔄 Reset glossary context after {limit} chapters")
             return []  # Return empty to reset context
-    
-    # Convert to message format
-    trimmed = []
+
+    # Decide whether to include previous *source* text in memory
+    include_source = os.getenv("INCLUDE_SOURCE_IN_HISTORY", "0") == "1"
+
+    memory_blocks: List[str] = []
+
     for entry in history:
-        trimmed.append({"role": "user", "content": entry["user"]})
-        trimmed.append({"role": "assistant", "content": entry["assistant"]})
-    return trimmed
+        if not isinstance(entry, dict):
+            continue
+
+        user_text = (entry.get("user") or "").strip()
+        assistant_text = (entry.get("assistant") or "").strip()
+
+        # Optionally include previous source text as a MEMORY block
+        if include_source and user_text:
+            prefix = (
+                "[MEMORY - PREVIOUS SOURCE TEXT]\n"
+                "This is prior source content provided for context only.\n"
+                "Do NOT translate or repeat this text directly in your response.\n\n"
+            )
+            footer = "\n\n[END MEMORY BLOCK]\n"
+            memory_blocks.append(prefix + user_text + footer)
+
+        # Always include previous extracted glossary/translation as MEMORY
+        if assistant_text:
+            prefix = (
+                "[MEMORY - PREVIOUS TRANSLATION]\n"
+                "This is prior translated content provided for context only.\n"
+                "Do NOT repeat or re-output this translation.\n\n"
+            )
+            footer = "\n\n[END MEMORY BLOCK]\n"
+            memory_blocks.append(prefix + assistant_text + footer)
+
+    if not memory_blocks:
+        return []
+
+    combined_memory = "\n".join(memory_blocks)
+    return [{"role": "assistant", "content": combined_memory}]
 
 def load_progress() -> Dict:
     if os.path.exists(PROGRESS_FILE):
@@ -1440,8 +1472,13 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
                          rolling_window: bool,
                          check_stop,
                          chunk_timeout: int = None) -> List[Dict]:
-    """
-    Process a batch of chapters in parallel with improved interrupt support
+    """Process a batch of chapters in parallel with improved interrupt support.
+
+    Contextual mode mirrors the main translator:
+    - When CONTEXTUAL is enabled, previous chapters are converted to
+      chat messages via trim_context_history(), respecting
+      INCLUDE_SOURCE_IN_HISTORY.
+    - We also log an approximate combined prompt size per chapter.
     """
     temp = float(os.getenv("GLOSSARY_TEMPERATURE") or config.get('temperature', 0.1))
     
@@ -1451,10 +1488,10 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
     else:
         mtoks = config.get('max_tokens', 4196)
     
-    results = []
+    results: List[Dict] = []
     
     with ThreadPoolExecutor(max_workers=len(chapters_batch)) as executor:
-        futures = {}
+        futures: Dict = {}
         
         for idx, chap in chapters_batch:
             if check_stop():
@@ -1470,11 +1507,39 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
                     {"role": "user", "content": user_prompt}
                 ]
             else:
-                msgs = [{"role": "system", "content": system_prompt}] \
-                     + trim_context_history(history, ctx_limit, rolling_window) \
-                     + [{"role": "user", "content": user_prompt}]
+                msgs = (
+                    [{"role": "system", "content": system_prompt}]
+                    + trim_context_history(history, ctx_limit, rolling_window)
+                    + [{"role": "user", "content": user_prompt}]
+                )
 
-            
+            # Approximate combined prompt tokens for this chapter
+            try:
+                total_tokens = 0
+                assistant_tokens = 0
+                for m in msgs:
+                    content = m.get("content", "") or ""
+                    tokens = count_tokens(content)
+                    total_tokens += tokens
+                    if m.get("role") == "assistant":
+                        assistant_tokens += tokens
+                non_assistant = total_tokens - assistant_tokens
+
+                if contextual_enabled and assistant_tokens > 0:
+                    print(
+                        f"💬 Batch Chapter {idx+1} combined prompt: "
+                        f"{total_tokens:,} tokens (system + user: {non_assistant:,}, "
+                        f"assistant/memory: {assistant_tokens:,}) / {GLOSSARY_LIMIT_STR}"
+                    )
+                else:
+                    print(
+                        f"💬 Batch Chapter {idx+1} combined prompt: "
+                        f"{total_tokens:,} tokens (system + user) / {GLOSSARY_LIMIT_STR}"
+                    )
+            except Exception:
+                # Never let logging break batch processing
+                pass
+
             # Submit to thread pool
             future = executor.submit(
                 process_single_chapter_api_call,
@@ -2177,7 +2242,16 @@ def main(log_callback=None, stop_callback=None):
                          + trim_context_history(history, ctx_limit, rolling_window) \
                          + [{"role": "user", "content": user_prompt}]
                 
-                total_tokens = sum(count_tokens(m["content"]) for m in msgs)
+                # Compute total and assistant/memory tokens for this chapter
+                total_tokens = 0
+                assistant_tokens = 0
+                for m in msgs:
+                    content = m.get("content", "") or ""
+                    tokens = count_tokens(content)
+                    total_tokens += tokens
+                    if m.get("role") == "assistant":
+                        assistant_tokens += tokens
+                non_assistant_tokens = total_tokens - assistant_tokens
                 
                 # READ THE TOKEN LIMIT
                 env_value = os.getenv("MAX_INPUT_TOKENS", "1000000").strip()
@@ -2191,7 +2265,18 @@ def main(log_callback=None, stop_callback=None):
                     token_limit = 1000000
                     limit_str = "1000000 (default)"
                 
-                print(f"[DEBUG] Glossary prompt tokens = {total_tokens} / {limit_str}")
+                # Log combined prompt similar to main translator
+                if contextual_enabled and assistant_tokens > 0:
+                    print(
+                        f"💬 Chapter {idx+1} combined prompt: "
+                        f"{total_tokens:,} tokens (system + user: {non_assistant_tokens:,}, "
+                        f"assistant/memory: {assistant_tokens:,}) / {limit_str}"
+                    )
+                else:
+                    print(
+                        f"💬 Chapter {idx+1} combined prompt: "
+                        f"{total_tokens:,} tokens (system + user) / {limit_str}"
+                    )
                 
                 # Check if we're over the token limit and need to split
                 if token_limit is not None and total_tokens > token_limit:
