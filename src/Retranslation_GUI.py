@@ -1001,17 +1001,20 @@ class RetranslationMixin:
             lbl_completed.setStyleSheet("color: green;")
             stats_layout.addWidget(lbl_completed)
             
-            lbl_missing = QLabel(f"❌ Missing: {missing} | ")
+            # Not Translated: unique emoji/color (distinct from failures)
+            lbl_missing = QLabel(f"⬜ Not Translated: {missing} | ")
             lbl_missing.setFont(stats_font)
-            lbl_missing.setStyleSheet("color: red;")
+            lbl_missing.setStyleSheet("color: #2b6cb0;")
             stats_layout.addWidget(lbl_missing)
             
-            lbl_failed = QLabel(f"⚠️ Failed: {failed} | ")
+            # Match list status: failed/qa_failed use ❌ and red
+            lbl_failed = QLabel(f"❌ Failed: {failed} | ")
             lbl_failed.setFont(stats_font)
-            lbl_failed.setStyleSheet("color: orange;")
+            lbl_failed.setStyleSheet("color: red;")
             stats_layout.addWidget(lbl_failed)
             
-            lbl_file_missing = QLabel(f"📁 File Missing: {file_missing}")
+            # Match list status: file_missing uses ⚠️ and purple
+            lbl_file_missing = QLabel(f"⚠️ File Missing: {file_missing}")
             lbl_file_missing.setFont(stats_font)
             lbl_file_missing.setStyleSheet("color: purple;")
             stats_layout.addWidget(lbl_file_missing)
@@ -1041,7 +1044,7 @@ class RetranslationMixin:
             'qa_failed': '❌',
             'file_missing': '⚠️',
             'in_progress': '🔄',
-            'not_translated': '❌',
+            'not_translated': '⬜',
             'unknown': '❓'
         }
         
@@ -1116,8 +1119,10 @@ class RetranslationMixin:
             # Color code based on status
             if status == 'completed':
                 item.setForeground(QColor('green'))
-            elif status in ['failed', 'qa_failed', 'not_translated']:
+            elif status in ['failed', 'qa_failed']:
                 item.setForeground(QColor('red'))
+            elif status == 'not_translated':
+                item.setForeground(QColor('#2b6cb0'))
             elif status == 'file_missing':
                 item.setForeground(QColor('purple'))
             elif status == 'in_progress':
@@ -1423,13 +1428,15 @@ class RetranslationMixin:
         
         btn_select_missing = QPushButton("Select Missing")
         btn_select_missing.setMinimumHeight(32)
-        btn_select_missing.setStyleSheet("QPushButton { background-color: #dc3545; color: white; padding: 6px 16px; font-weight: bold; font-size: 10pt; }")
+        # Use amber for Not Translated / Missing (distinct from failures)
+        btn_select_missing.setStyleSheet("QPushButton { background-color: #d39e00; color: white; padding: 6px 16px; font-weight: bold; font-size: 10pt; }")
         btn_select_missing.clicked.connect(lambda: select_status('missing'))
         button_layout.addWidget(btn_select_missing, 0, 3)
         
         btn_select_failed = QPushButton("Select Failed")
         btn_select_failed.setMinimumHeight(32)
-        btn_select_failed.setStyleSheet("QPushButton { background-color: #d39e00; color: white; padding: 6px 16px; font-weight: bold; font-size: 10pt; }")
+        # Use red for Failed / QA Failed
+        btn_select_failed.setStyleSheet("QPushButton { background-color: #dc3545; color: white; padding: 6px 16px; font-weight: bold; font-size: 10pt; }")
         btn_select_failed.clicked.connect(lambda: select_status('failed'))
         button_layout.addWidget(btn_select_failed, 0, 4)
         
@@ -1707,7 +1714,7 @@ class RetranslationMixin:
             'qa_failed': '❌',
             'file_missing': '⚠️',
             'in_progress': '🔄',
-            'not_translated': '❌',
+'not_translated': '⬜',
             'unknown': '❓'
         }
         
@@ -1785,8 +1792,10 @@ class RetranslationMixin:
             # Color code based on status
             if status == 'completed':
                 item.setForeground(QColor('green'))
-            elif status in ['failed', 'qa_failed', 'not_translated']:
+            elif status in ['failed', 'qa_failed']:
                 item.setForeground(QColor('red'))
+            elif status == 'not_translated':
+                item.setForeground(QColor('#2b6cb0'))
             elif status == 'file_missing':
                 item.setForeground(QColor('purple'))
             elif status == 'in_progress':
@@ -1813,11 +1822,11 @@ class RetranslationMixin:
                             labels['total'] = child
                         elif text.startswith('✅ Completed:'):
                             labels['completed'] = child
-                        elif text.startswith('❌ Missing:'):
+                        elif text.startswith('⬜ Not Translated:'):
                             labels['missing'] = child
-                        elif text.startswith('⚠️ Failed:'):
+                        elif text.startswith('❌ Failed:'):
                             labels['failed'] = child
-                        elif text.startswith('📁 File Missing:'):
+                        elif text.startswith('⚠️ File Missing:'):
                             labels['file_missing'] = child
                     
                     # Recursively search children
@@ -1841,11 +1850,11 @@ class RetranslationMixin:
             if 'completed' in stats_labels:
                 stats_labels['completed'].setText(f"✅ Completed: {completed} | ")
             if 'missing' in stats_labels:
-                stats_labels['missing'].setText(f"❌ Missing: {missing} | ")
+                stats_labels['missing'].setText(f"⬜ Not Translated: {missing} | ")
             if 'failed' in stats_labels:
-                stats_labels['failed'].setText(f"⚠️ Failed: {failed} | ")
+                stats_labels['failed'].setText(f"❌ Failed: {failed} | ")
             if 'file_missing' in stats_labels:
-                stats_labels['file_missing'].setText(f"📁 File Missing: {file_missing}")
+                stats_labels['file_missing'].setText(f"⚠️ File Missing: {file_missing}")
 
 
     def _force_retranslation_multiple_files(self):
