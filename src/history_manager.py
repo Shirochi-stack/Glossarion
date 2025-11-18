@@ -127,16 +127,24 @@ class HistoryManager:
         assistant_msg = {"role": "assistant", "content": assistant_content}
         if raw_assistant_object is not None:
             try:
+                print(f"🔍 [HistoryManager] Attempting to save thought signature (Type: {type(raw_assistant_object)})")
                 # Attempt to serialize raw object for thought signatures
                 if hasattr(raw_assistant_object, 'to_dict'):
+                    print("   -> Using .to_dict()")
                     assistant_msg['_raw_content_object'] = raw_assistant_object.to_dict()
+                elif hasattr(raw_assistant_object, 'model_dump'):
+                    print("   -> Using .model_dump() (Pydantic/New SDK)")
+                    assistant_msg['_raw_content_object'] = raw_assistant_object.model_dump()
                 elif isinstance(raw_assistant_object, (dict, list, str, int, float, bool)):
+                    print("   -> Object is already primitive")
                     assistant_msg['_raw_content_object'] = raw_assistant_object
                 else:
                     # Try best effort serialization or skipping
+                    print(f"   ⚠️ [HistoryManager] Object has no known serialization method. Dir: {dir(raw_assistant_object)}")
                     # For complex objects that are not JSON serializable, we skip to avoid breaking history
                     pass
-            except Exception:
+            except Exception as e:
+                print(f"   ❌ [HistoryManager] Serialization failed: {e}")
                 pass
                 
         history.append(assistant_msg)
