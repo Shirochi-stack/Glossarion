@@ -868,7 +868,7 @@ class GlossaryManagerMixin:
         
         self.duplicate_algo_combo = QComboBox()
         self.duplicate_algo_combo.addItems([
-            "Auto (Recommended) - Uses all algorithms",
+            "Auto - Uses all algorithms",
             "Strict - High precision, minimal merging",
             "Balanced - Token + Partial matching",
             "Aggressive - Maximum duplicate detection",
@@ -931,7 +931,7 @@ class GlossaryManagerMixin:
             msg_box.setWindowTitle("Algorithm Information")
             msg_box.setIcon(QMessageBox.Information)
             msg_box.setText(
-                "<b>Auto (Recommended)</b>: Uses all available algorithms (RapidFuzz, Jaro-Winkler, Token matching) and takes the best score. Best for most cases.<br><br>"
+                "<b>Auto</b>: Uses all available algorithms (RapidFuzz, Jaro-Winkler, Token matching) and takes the best score.<br><br>"
                 "<b>Strict</b>: Only matches very similar names (95%+ similarity). Keeps more entries, minimal merging. Good if you want to review duplicates manually.<br><br>"
                 "<b>Balanced</b>: Uses token-based and partial matching. Handles word order (‘Park Ji-sung’ = ‘Ji-sung Park’) and substrings. Good middle ground.<br><br>"
                 "<b>Aggressive</b>: Lower threshold (80%) with all algorithms. Catches romanization variants (‘Catherine’ = ‘Katherine’). May over-merge similar names.<br><br>"

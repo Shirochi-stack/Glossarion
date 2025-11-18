@@ -540,20 +540,59 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
                     os.environ["GLOSSARY_FORCE_DISABLE_SMART_FILTER"] = _prev_force_disable
         
         # Build CSV from aggregated entries
+        print(f"📑 DEBUG: all_glossary_entries count before merge: {len(all_glossary_entries)}")
+        
+        # START WITH INCREMENTAL GLOSSARY AS BASE IF IT EXISTS AND IS LARGER
+        # This ensures that if memory was lost (e.g. during a long sequential run), we rely on the disk backup
+        incremental_path = os.path.join(output_dir, "glossary.incremental.csv")
+        base_entries = list(all_glossary_entries)
+        using_incremental_as_base = False
+        
+        if os.path.exists(incremental_path):
+            try:
+                with open(incremental_path, 'r', encoding='utf-8') as f:
+                    inc_content = f.read()
+                
+                # Simple parse to count lines/entries
+                inc_lines = [line for line in inc_content.split('\n') if line.strip() and not line.startswith('type,')]
+                print(f"📑 Found incremental glossary: {len(inc_lines)} entries (Memory: {len(all_glossary_entries)} entries)")
+                
+                if len(inc_lines) > len(all_glossary_entries):
+                    print("📑 🔄 Incremental glossary is larger than memory - using it as primary source")
+                    # We need to ensure it has the header for csv_lines logic below
+                    # But csv_lines construction adds header anyway.
+                    # So we just REPLACE base_entries with inc_lines
+                    base_entries = inc_lines
+                    using_incremental_as_base = True
+            except Exception as e:
+                print(f"⚠️ Failed to check incremental glossary: {e}")
+        
         include_gender_context = os.getenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
         include_description = os.getenv("GLOSSARY_INCLUDE_DESCRIPTION", "0") == "1"
-        if include_description:
-            csv_lines = ["type,raw_name,translated_name,gender,description"] + all_glossary_entries
-        elif include_gender_context:
-            csv_lines = ["type,raw_name,translated_name,gender"] + all_glossary_entries
-        else:
-            csv_lines = ["type,raw_name,translated_name"] + all_glossary_entries
         
+        if include_description:
+            csv_lines = ["type,raw_name,translated_name,gender,description"] + base_entries
+        elif include_gender_context:
+            csv_lines = ["type,raw_name,translated_name,gender"] + base_entries
+        else:
+            csv_lines = ["type,raw_name,translated_name"] + base_entries
+            
+        # If we used incremental as base, we must merge MEMORY into it (to capture the last chunk if it wasn't in incremental yet)
+        if using_incremental_as_base and all_glossary_entries:
+             print("📑 Merging memory entries into incremental base...")
+             # Create a mini-CSV for memory entries
+             mem_csv = ["type,raw_name,translated_name"] + all_glossary_entries
+             csv_lines = _merge_csv_entries(csv_lines, '\n'.join(mem_csv), strip_honorifics, language)
+
         # Merge with any provided existing glossary AND on-disk glossary to avoid overwriting
         on_disk_path = os.path.join(output_dir, "glossary.csv")
+        
         merge_sources = []
         if existing_glossary:
             merge_sources.append(existing_glossary)
+            
+        # We already handled incremental above as the base, so we don't add it to merge_sources here
+        
         if os.path.exists(on_disk_path):
             try:
                 with open(on_disk_path, 'r', encoding='utf-8') as f:
@@ -565,7 +604,9 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         if existing_glossary_content:
             csv_lines = _merge_csv_entries(csv_lines, existing_glossary_content, strip_honorifics, language)
         for src in merge_sources:
+            before_merge_count = len(csv_lines)
             csv_lines = _merge_csv_entries(csv_lines, src, strip_honorifics, language)
+            print(f"📑 DEBUG: Merged source. Count: {before_merge_count} -> {len(csv_lines)}")
         
         # Apply filter mode to final results
         csv_lines = _filter_csv_by_mode(csv_lines, filter_mode)
