@@ -2723,6 +2723,13 @@ class BatchTranslationProcessor:
                     chapter_context=chapter_ctx,
                 )
                 
+                # Capture raw response object for thought signatures
+                raw_obj = None
+                if hasattr(self.client, 'get_last_response_object'):
+                    resp_obj = self.client.get_last_response_object()
+                    if resp_obj and hasattr(resp_obj, 'raw_content_object'):
+                        raw_obj = resp_obj.raw_content_object
+                
                 print(f"📥 Received Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks} response, finish_reason: {finish_reason}")
                 
                 if finish_reason in ["length", "max_tokens"]:
@@ -2731,13 +2738,15 @@ class BatchTranslationProcessor:
                 if result:
                     # Remove chunk markers from result
                     result = re.sub(r'\[PART \d+/\d+\]\s*', '', result, flags=re.IGNORECASE)
-                    return result, chunk_idx
+                    return result, chunk_idx, raw_obj
                 else:
                     raise Exception(f"Empty result for chunk {chunk_idx}/{total_chunks}")
             
             # Use ThreadPoolExecutor to process chunks in parallel
             # Use same batch size as chapter-level parallelism
             max_chunk_workers = min(total_chunks, self.config.BATCH_SIZE)
+            
+            last_chunk_raw_obj = None
             
             with ThreadPoolExecutor(max_workers=max_chunk_workers, thread_name_prefix=f"Ch{actual_num}Chunk") as chunk_executor:
                 # Submit all chunks
@@ -2753,13 +2762,16 @@ class BatchTranslationProcessor:
                         raise Exception("Translation stopped by user")
                     
                     try:
-                        result, chunk_idx = future.result()
+                        result, chunk_idx, raw_obj = future.result()
                         if result:
                             # Store result at correct index to maintain order
                             with chunks_lock:
                                 translated_chunks[chunk_idx - 1] = result  # chunk_idx is 1-based
                                 self.chunks_completed += 1
                                 completed_chunks += 1
+                                # Store the raw object if it's the last chunk (or the only chunk)
+                                if chunk_idx == total_chunks:
+                                    last_chunk_raw_obj = raw_obj
                             
                             print(f"✅ Chunk {chunk_idx}/{total_chunks} completed ({completed_chunks}/{total_chunks})")
                     except Exception as e:
@@ -2883,7 +2895,7 @@ class BatchTranslationProcessor:
             print(f"✅ Chapter {actual_num} completed successfully")
             # Return chapter body and final cleaned translation so the main thread
             # can append to translation history in a stable batch order.
-            return True, actual_num, chapter_body, cleaned
+            return True, actual_num, chapter_body, cleaned, last_chunk_raw_obj
             
         except Exception as e:
             print(f"❌ Chapter {actual_num} failed: {e}")
@@ -2891,7 +2903,7 @@ class BatchTranslationProcessor:
                 self.update_progress_fn(idx, actual_num, content_hash, None, status="failed")
                 self.save_progress_fn()
             # No history for failed chapters
-            return False, actual_num, None, None
+            return False, actual_num, None, None, None
             
 
 
@@ -5937,12 +5949,12 @@ def main(log_callback=None, stop_callback=None):
                     idx, chapter = chapter_data
                     
                     try:
-                        success, chap_num, hist_user, hist_assistant = future.result()
+                        success, chap_num, hist_user, hist_assistant, raw_obj = future.result()
                         if success:
                             completed_in_batch += 1
                             print(f"✅ Chapter {chap_num} done ({completed_in_batch + failed_in_batch}/{len(current_batch)} in batch)")
                             if hist_user and hist_assistant:
-                                batch_history_map[idx] = (hist_user, hist_assistant)
+                                batch_history_map[idx] = (hist_user, hist_assistant, raw_obj)
                         else:
                             failed_in_batch += 1
                             print(f"❌ Chapter {chap_num} failed ({completed_in_batch + failed_in_batch}/{len(current_batch)} in batch)")
@@ -5960,14 +5972,15 @@ def main(log_callback=None, stop_callback=None):
                     hist_limit = getattr(config, 'HIST_LIMIT', 0)
                     for idx, chapter in current_batch:
                         if idx in batch_history_map:
-                            user_content, assistant_content = batch_history_map[idx]
+                            user_content, assistant_content, raw_obj = batch_history_map[idx]
                             try:
                                 history_manager.append_to_history(
                                     user_content,
                                     assistant_content,
                                     hist_limit,
                                     reset_on_limit=True,
-                                    rolling_window=config.TRANSLATION_HISTORY_ROLLING
+                                    rolling_window=config.TRANSLATION_HISTORY_ROLLING,
+                                    raw_assistant_object=raw_obj
                                 )
                             except Exception as e:
                                 actual_num_for_log = chapter.get('actual_chapter_num', chapter.get('num'))

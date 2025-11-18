@@ -2437,6 +2437,7 @@ def main(log_callback=None, stop_callback=None):
                         print(f"❌ Glossary extraction stopped before API call for chapter {idx+1}")
                         return
                 
+                    raw_obj = None
                     try:
                         # Use send_with_interrupt for API call
                         raw = send_with_interrupt(
@@ -2447,6 +2448,13 @@ def main(log_callback=None, stop_callback=None):
                             stop_check_fn=check_stop,
                             chunk_timeout=chunk_timeout
                         )
+                        
+                        # Capture raw object for thought signatures
+                        if hasattr(client, 'get_last_response_object'):
+                            last_resp = client.get_last_response_object()
+                            if last_resp and hasattr(last_resp, 'raw_content_object'):
+                                raw_obj = last_resp.raw_content_object
+                                
                     except UnifiedClientError as e:
                         if "stopped by user" in str(e).lower():
                             print(f"❌ Glossary extraction stopped during API call for chapter {idx+1}")
@@ -2552,7 +2560,18 @@ def main(log_callback=None, stop_callback=None):
 
                 # Only add to history if contextual is enabled
                 if contextual_enabled and 'resp' in locals() and resp:
-                    history.append({"user": user_prompt, "assistant": resp})
+                    entry = {"user": user_prompt, "assistant": resp}
+                    # Add thought signatures if available
+                    if 'raw_obj' in locals() and raw_obj:
+                        try:
+                            if hasattr(raw_obj, 'to_dict'):
+                                entry["_raw_content_object"] = raw_obj.to_dict()
+                            elif isinstance(raw_obj, (dict, list)):
+                                entry["_raw_content_object"] = raw_obj
+                        except Exception:
+                            pass
+                            
+                    history.append(entry)
                     
                     # Reset history when limit reached without rolling window
                     if not rolling_window and len(history) >= ctx_limit and ctx_limit > 0:

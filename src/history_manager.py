@@ -83,7 +83,7 @@ class HistoryManager:
                         os.remove(temp_path)
                     raise e
     
-    def append_to_history(self, user_content, assistant_content, hist_limit, reset_on_limit=True, rolling_window=False):
+    def append_to_history(self, user_content, assistant_content, hist_limit, reset_on_limit=True, rolling_window=False, raw_assistant_object=None):
         """
         Append to history with automatic reset or rolling window when limit is reached
         
@@ -93,6 +93,7 @@ class HistoryManager:
             hist_limit: Maximum number of exchanges to keep (0 = no history)
             reset_on_limit: Whether to reset when limit is reached (old behavior)
             rolling_window: Whether to use rolling window mode (new behavior)
+            raw_assistant_object: Optional raw content object (e.g. for thought signatures)
         """
         # CRITICAL FIX: If hist_limit is 0 or negative, don't maintain any history
         if hist_limit <= 0:
@@ -122,7 +123,23 @@ class HistoryManager:
         
         # Append new entries
         history.append({"role": "user", "content": user_content})
-        history.append({"role": "assistant", "content": assistant_content})
+        
+        assistant_msg = {"role": "assistant", "content": assistant_content}
+        if raw_assistant_object is not None:
+            try:
+                # Attempt to serialize raw object for thought signatures
+                if hasattr(raw_assistant_object, 'to_dict'):
+                    assistant_msg['_raw_content_object'] = raw_assistant_object.to_dict()
+                elif isinstance(raw_assistant_object, (dict, list, str, int, float, bool)):
+                    assistant_msg['_raw_content_object'] = raw_assistant_object
+                else:
+                    # Try best effort serialization or skipping
+                    # For complex objects that are not JSON serializable, we skip to avoid breaking history
+                    pass
+            except Exception:
+                pass
+                
+        history.append(assistant_msg)
         
         self.save_history(history)
         return history

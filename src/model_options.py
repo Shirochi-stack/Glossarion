@@ -18,6 +18,7 @@ def get_model_options() -> List[str]:
         # Google Gemini Models
         "gemini-2.0-flash","gemini-2.0-flash-lite",
         "gemini-2.5-flash","gemini-2.5-flash-lite", "gemini-2.5-pro", "gemini-pro", "gemini-pro-vision",
+        "gemini-3-pro-preview",
         
         # Anthropic Claude Models
         "claude-opus-4-20250514", "claude-sonnet-4-20250514",

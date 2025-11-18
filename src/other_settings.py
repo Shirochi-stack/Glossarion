@@ -542,6 +542,14 @@ def toggle_thinking_budget(self):
             color = "white" if enabled else "#808080"
             self.thinking_tokens_label.setStyleSheet(f"color: {color};")
             
+        if hasattr(self, 'thinking_level_combo'):
+            self.thinking_level_combo.setEnabled(enabled)
+            
+        if hasattr(self, 'thinking_level_label'):
+            self.thinking_level_label.setEnabled(enabled)
+            color = "white" if enabled else "#808080"
+            self.thinking_level_label.setStyleSheet(f"color: {color};")
+            
         # Description label
         if hasattr(self, 'gemini_desc_label'):
             self.gemini_desc_label.setEnabled(enabled)
@@ -1325,6 +1333,39 @@ def _create_response_handling_section(self, parent):
     thinking_h.addWidget(self.thinking_budget_entry)
     self.thinking_tokens_label = QLabel("tokens")
     thinking_h.addWidget(self.thinking_tokens_label)
+    
+    thinking_h.addSpacing(20)
+    self.thinking_level_label = QLabel("Level (Gemini 3):")
+    thinking_h.addWidget(self.thinking_level_label)
+    self.thinking_level_combo = QComboBox()
+    self.thinking_level_combo.addItems(["low", "high"])
+    self.thinking_level_combo.setFixedWidth(80)
+    self.thinking_level_combo.setStyleSheet("""
+        QComboBox::down-arrow {
+            image: none;
+            width: 12px;
+            height: 12px;
+            border: none;
+        }
+    """)
+    self._add_combobox_arrow(self.thinking_level_combo)
+    self._disable_combobox_mousewheel(self.thinking_level_combo)
+    try:
+        level_val = self.thinking_level_var
+        idx = self.thinking_level_combo.findText(level_val)
+        if idx >= 0:
+            self.thinking_level_combo.setCurrentIndex(idx)
+    except Exception:
+        pass
+    def _on_level_changed(text):
+        try:
+            self.thinking_level_var = text
+            os.environ["GEMINI_THINKING_LEVEL"] = text
+        except Exception:
+            pass
+    self.thinking_level_combo.currentTextChanged.connect(_on_level_changed)
+    thinking_h.addWidget(self.thinking_level_combo)
+    
     thinking_h.addStretch()
     section_v.addWidget(thinking_row)
     

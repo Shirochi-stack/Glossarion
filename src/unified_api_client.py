@@ -462,6 +462,7 @@ class UnifiedResponse:
     usage: Optional[Dict[str, int]] = None
     raw_response: Optional[Any] = None
     error_details: Optional[Dict[str, Any]] = None
+    raw_content_object: Optional[Any] = None  # For Gemini thought signatures
     
     @property
     def is_truncated(self) -> bool:
@@ -3574,6 +3575,13 @@ class UnifiedClient:
         """Backwards-compatible public API; now delegates to unified _send_core."""
         return self._send_core(messages, temperature, max_tokens, max_completion_tokens, context, image_data=None)
 
+    def get_last_response_object(self) -> Optional[UnifiedResponse]:
+        """Get the full UnifiedResponse object from the last API call in this thread"""
+        try:
+            return getattr(self._get_thread_local_client(), 'last_unified_response', None)
+        except Exception:
+            return None
+
     def _send_internal(self, messages, temperature=None, max_tokens=None, 
                        max_completion_tokens=None, context=None, retry_reason=None,
                        request_id=None, image_data=None) -> Tuple[str, Optional[str]]:
@@ -3987,6 +3995,14 @@ class UnifiedClient:
                 
                 # Return the response with accurate finish_reason
                 # This is CRITICAL for retry mechanisms to work
+                
+                # Store full response object in thread local storage for retrieval by callers
+                # who need more than just text (e.g. for thought signatures)
+                try:
+                    self._get_thread_local_client().last_unified_response = response
+                except Exception:
+                    pass
+                
                 return extracted_content, finish_reason
                 
             except UnifiedClientError as e:
@@ -8236,6 +8252,13 @@ class UnifiedClient:
                 
         return params
     
+    def _is_gemini_3_model(self) -> bool:
+        """Check if the current model is a Gemini 3.0 series model"""
+        if not self.model:
+            return False
+        model_lower = self.model.lower()
+        return "gemini-3" in model_lower
+
     def _supports_thinking(self) -> bool:
         """Check if the current Gemini model supports thinking parameter"""
         if not self.model:
@@ -8243,6 +8266,10 @@ class UnifiedClient:
         
         model_lower = self.model.lower()
         
+        # Check for Gemini 3.0 series (supports thinking level)
+        if self._is_gemini_3_model():
+            return True
+            
         # According to Google documentation, thinking is supported on:
         # 1. All Gemini 2.5 series models (Pro, Flash, Flash-Lite)
         # 2. Gemini 2.0 Flash Thinking Experimental model
@@ -8352,7 +8379,10 @@ class UnifiedClient:
                 print(f"Failed to save Gemini safety config: {e}")
 
     def _send_gemini(self, messages, temperature, max_tokens, response_name, image_base64=None) -> UnifiedResponse:
-        """Send request to Gemini API with support for both text and multi-image messages"""
+        """Send request to Gemini API with support for both text and multi-image messages
+        
+        Supports 'thought signatures' for Gemini 3.0 by checking for '_raw_content_object' in messages.
+        """
         response = None
         
         # Check if we should use OpenAI-compatible endpoint
@@ -8379,10 +8409,14 @@ class UnifiedClient:
         disable_safety = disable_safety_env in ("1", "true", "True", "TRUE")
         
         # Get thinking budget from environment
-        thinking_budget = int(os.getenv("THINKING_BUDGET", "-1"))  
+        thinking_budget = int(os.getenv("THINKING_BUDGET", "-1"))
+        
+        # Get thinking level for Gemini 3 (low/high)
+        thinking_level = os.getenv("GEMINI_THINKING_LEVEL", "high").lower()
         
         # Check if this model supports thinking
         supports_thinking = self._supports_thinking()
+        is_gemini_3 = self._is_gemini_3_model()
         
         # Configure safety settings
         safety_settings = None
@@ -8450,7 +8484,9 @@ class UnifiedClient:
             
             thinking_status = ""
             if supports_thinking:
-                if thinking_budget == 0:
+                if is_gemini_3:
+                    thinking_status = f" (thinking level: {thinking_level})"
+                elif thinking_budget == 0:
                     thinking_status = " (thinking disabled)"
                 elif thinking_budget == -1:
                     thinking_status = " (dynamic thinking)"
@@ -8474,7 +8510,8 @@ class UnifiedClient:
             "temperature": temperature,
             "max_output_tokens": max_tokens,
             "thinking_supported": supports_thinking,
-            "thinking_budget": thinking_budget if supports_thinking else None,
+            "thinking_budget": thinking_budget if supports_thinking and not is_gemini_3 else None,
+            "thinking_level": thinking_level if supports_thinking and is_gemini_3 else None,
             "timestamp": datetime.now().isoformat(),
         }
 
@@ -8591,9 +8628,44 @@ class UnifiedClient:
                 else:
                     # Native Gemini API call
                     # Prepare content based on whether we have images
+                    contents = []
+                    has_raw_objects = any(msg.get('_raw_content_object') for msg in messages)
+                    
                     if has_images:
                         # Handle image content
                         contents = self._prepare_gemini_image_content(messages, image_base64)
+                    elif has_raw_objects:
+                        # Handle raw objects (thought signatures)
+                        # We need to construct contents list respecting the raw objects
+                        for msg in messages:
+                            role = msg['role']
+                            content = msg['content']
+                            raw_obj = msg.get('_raw_content_object')
+                            
+                            if raw_obj:
+                                # If we have a raw object, use it directly
+                                # Ensure role is mapped correctly (assistant -> model)
+                                # Note: We trust the raw_obj is already a compatible dict or Content object
+                                # The Google GenAI SDK handles conversion from dicts usually.
+                                if role == 'assistant':
+                                    # If it's a model response, we wrap it in the structure Gemini expects for history?
+                                    # Or if it's already a Content object, we just append it?
+                                    # The documentation says "Return the entire response with all parts back to the model"
+                                    # content=raw_obj should work if raw_obj is a Content object.
+                                    contents.append(raw_obj) 
+                                else:
+                                    # Should not happen for user messages usually, unless we store user raw objects too
+                                    # Just fallback to text for user
+                                    contents.append({'role': 'user', 'parts': [{'text': content}]})
+                            else:
+                                # Standard text message
+                                if role == 'system':
+                                    # System prompt
+                                    contents.append({'role': 'user', 'parts': [{'text': f"INSTRUCTIONS: {content}"}]})
+                                elif role == 'user':
+                                    contents.append({'role': 'user', 'parts': [{'text': content}]})
+                                elif role == 'assistant':
+                                    contents.append({'role': 'model', 'parts': [{'text': content}]})
                     else:
                         # text-only: use formatted prompt
                         formatted_prompt = self._format_prompt(messages, style='gemini')
@@ -8601,9 +8673,17 @@ class UnifiedClient:
                     # Only add thinking_config if the model supports it
                     if supports_thinking:
                         # Create thinking config separately
-                        thinking_config = types.ThinkingConfig(
-                            thinking_budget=thinking_budget
-                        )
+                        if is_gemini_3:
+                            # Gemini 3.0 uses thinking_level
+                            thinking_config = types.ThinkingConfig(
+                                include_thoughts=False, # Summaries not needed if we capture raw response? But doc says summaries are synthesized.
+                                thinking_level=thinking_level
+                            )
+                        else:
+                            # Gemini 2.5 uses thinking_budget
+                            thinking_config = types.ThinkingConfig(
+                                thinking_budget=thinking_budget
+                            )
                         
                         # Create generation config with thinking_config as a parameter
                         generation_config = types.GenerateContentConfig(
@@ -8702,8 +8782,9 @@ class UnifiedClient:
                             else:
                                 print(f"   ✅ Thinking successfully disabled (0 thinking tokens)")
                     
-                    # Extract text from the Gemini response - FIXED LOGIC HERE
+                        # Extract text from the Gemini response - FIXED LOGIC HERE
                     text_content = ""
+                    raw_content_obj = None
                     
                     # Try the simple .text property first (most common)
                     if hasattr(response, 'text'):
@@ -8715,21 +8796,28 @@ class UnifiedClient:
                             print(f"   ⚠️ Could not access response.text: {e}")
                     
                     # If that didn't work or returned empty, try extracting from candidates
-                    if not text_content:
+                    if not text_content or True: # Always check candidates to get raw_content_obj
                         # CRITICAL FIX: Check if candidates exists AND is not None before iterating
                         if hasattr(response, 'candidates') and response.candidates is not None:
                             print(f"   🔍 Extracting from candidates...")
                             try:
                                 for candidate in response.candidates:
-                                    if hasattr(candidate, 'content') and candidate.content:
+                                    if hasattr(candidate, 'content'):
+                                        # Capture the content object for thought signatures
+                                        raw_content_obj = candidate.content
+                                        
                                         if hasattr(candidate.content, 'parts') and candidate.content.parts:
-                                            for part in candidate.content.parts:
-                                                if hasattr(part, 'text') and part.text:
-                                                    text_content += part.text
+                                            # If we already got text from .text, we don't need to rebuild it, 
+                                            # but iterating ensures we validate structure.
+                                            if not text_content:
+                                                for part in candidate.content.parts:
+                                                    if hasattr(part, 'text') and part.text:
+                                                        text_content += part.text
                                         elif hasattr(candidate.content, 'text') and candidate.content.text:
-                                            text_content += candidate.content.text
+                                            if not text_content:
+                                                text_content += candidate.content.text
                                 
-                                if text_content:
+                                if text_content and not response.text: # Only print if we didn't get it from .text
                                     print(f"   ✅ Extracted {len(text_content)} chars from candidates")
                             except TypeError as e:
                                 print(f"   ⚠️ Error iterating candidates: {e}")
@@ -8802,6 +8890,7 @@ class UnifiedClient:
                         finish_reason=finish_reason,
                         usage=usage_dict,
                         raw_response=response,
+                        raw_content_object=raw_content_obj, # Pass the raw content object for thought signatures
                         error_details=error_details if error_details else None
                     )
                 # ========== END OF API CALL SECTION ==========
