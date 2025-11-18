@@ -8630,6 +8630,7 @@ Important rules:
                 # Gemini/GPT Thinking
                 ('enable_gemini_thinking', ['enable_gemini_thinking_var'], False, bool),
                 ('thinking_budget', ['thinking_budget_var'], 0, lambda v: int(v) if str(v).lstrip('-').isdigit() else 0),
+                ('thinking_level', ['thinking_level_var'], 'high', str),
                 ('enable_gpt_thinking', ['enable_gpt_thinking_var'], False, bool),
                 ('gpt_reasoning_tokens', ['gpt_reasoning_tokens_var'], 0, lambda v: int(v) if str(v).lstrip('-').isdigit() else 0),
                 ('gpt_effort', ['gpt_effort_var'], 'auto', str),
@@ -9465,6 +9466,7 @@ Important rules:
                 # Thinking features
                 ('ENABLE_GEMINI_THINKING', '1' if getattr(self, 'enable_gemini_thinking_var', True) else '0'),
                 ('THINKING_BUDGET', str(getattr(self, 'thinking_budget_var', '-1')) if getattr(self, 'enable_gemini_thinking_var', True) else '0'),
+                ('GEMINI_THINKING_LEVEL', getattr(self, 'thinking_level_var', 'high')),
                 ('ENABLE_GPT_THINKING', '1' if getattr(self, 'enable_gpt_thinking_var', True) else '0'),
                 ('GPT_REASONING_TOKENS', str(getattr(self, 'gpt_reasoning_tokens_var', '2000')) if getattr(self, 'enable_gpt_thinking_var', True) else ''),
                 ('GPT_EFFORT', getattr(self, 'gpt_effort_var', 'medium')),
