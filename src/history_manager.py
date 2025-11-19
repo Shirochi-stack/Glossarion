@@ -64,15 +64,29 @@ class HistoryManager:
                         return []
         return []
     
+    def _make_json_serializable(self, obj):
+        """Recursively convert bytes to base64 string for JSON serialization"""
+        if isinstance(obj, bytes):
+            import base64
+            return {'_type': 'bytes', 'data': base64.b64encode(obj).decode('ascii')}
+        elif isinstance(obj, dict):
+            return {k: self._make_json_serializable(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self._make_json_serializable(v) for v in obj]
+        return obj
+
     def save_history(self, history):
         """Save history atomically with file locking"""
         with self.lock:
             with self._file_lock(self.hist_path):
+                # Ensure everything is serializable
+                safe_history = self._make_json_serializable(history)
+                
                 # Write to temporary file first
                 temp_fd, temp_path = tempfile.mkstemp(dir=self.payloads_dir, text=True)
                 try:
                     with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
-                        json.dump(history, f, ensure_ascii=False, indent=2)
+                        json.dump(safe_history, f, ensure_ascii=False, indent=2)
                     
                     # Atomically replace the old file
                     shutil.move(temp_path, self.hist_path)
