@@ -8695,7 +8695,7 @@ Important rules:
                 ('rolling_summary_max_tokens', ['rolling_summary_max_tokens_var'], 8192, lambda v: safe_int(v, 8192)),
 
                 # QA/Scanning
-                ('qa_auto_search_output', ['qa_auto_search_output_var'], False, bool),
+                ('qa_auto_search_output', ['qa_auto_search_output_checkbox', 'qa_auto_search_output_var'], True, bool),
                 ('disable_zero_detection', ['disable_zero_detection_var'], False, bool),
                 ('disable_gemini_safety', ['disable_gemini_safety_var'], False, bool),
                 

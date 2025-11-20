@@ -115,6 +115,38 @@ class QAScannerMixin:
         """)
         return checkbox
     
+    def _create_styled_radio_button(self, text):
+        """Create a radio button with consistent styling"""
+        from PySide6.QtWidgets import QRadioButton
+        
+        radio = QRadioButton(text)
+        radio.setStyleSheet("""
+            QRadioButton { 
+                color: white;
+                font-family: Arial;
+                font-size: 10pt;
+            }
+            QRadioButton::indicator {
+                width: 13px;
+                height: 13px;
+                border: 2px solid #0d6efd;
+                border-radius: 7px;
+                background-color: transparent;
+            }
+            QRadioButton::indicator:checked {
+                background-color: #0d6efd;
+                border: 2px solid #0d6efd;
+            }
+            QRadioButton::indicator:hover {
+                border: 2px solid #0b5ed7;
+            }
+            QRadioButton::indicator:checked:hover {
+                background-color: #0b5ed7;
+                border: 2px solid #0b5ed7;
+            }
+        """)
+        return radio
+    
     def run_qa_scan(self, mode_override=None, non_interactive=False, preselected_files=None):
         """Run QA scan with mode selection and settings"""
         # Removed loading screen - initialize directly for smoother experience
@@ -507,7 +539,25 @@ class QAScannerMixin:
             # Auto-search checkbox
             if not hasattr(self, 'qa_auto_search_output_checkbox'):
                 self.qa_auto_search_output_checkbox = self._create_styled_checkbox("Auto-search output")
-                self.qa_auto_search_output_checkbox.setChecked(self.config.get('qa_auto_search_output', True))
+                # Define the save handler
+                def save_auto_search_state(checked):
+                    self.config['qa_auto_search_output'] = checked
+                    self.save_config(show_message=False)
+                self.qa_auto_search_save_handler = save_auto_search_state
+            
+            # Always update checkbox state from current config
+            # Block signals temporarily to prevent triggering save during programmatic update
+            self.qa_auto_search_output_checkbox.blockSignals(True)
+            self.qa_auto_search_output_checkbox.setChecked(self.config.get('qa_auto_search_output', True))
+            self.qa_auto_search_output_checkbox.blockSignals(False)
+            
+            # Connect or reconnect the signal handler
+            try:
+                self.qa_auto_search_output_checkbox.toggled.disconnect()
+            except:
+                pass  # No handler was connected
+            self.qa_auto_search_output_checkbox.toggled.connect(self.qa_auto_search_save_handler)
+            
             button_layout.addWidget(self.qa_auto_search_output_checkbox)
             button_layout.addSpacing(10)
             
@@ -1154,21 +1204,15 @@ class QAScannerMixin:
                     qa_settings['check_word_count_ratio'] = False
                     self.append_log("ℹ️ Proceeding without word count analysis.")
                     epub_files_to_scan = []
-        # Persist latest auto-search preference
-        try:
-            self.config['qa_auto_search_output'] = bool(self.qa_auto_search_output_checkbox.isChecked())
-            self.save_config(show_message=False)
-        except Exception:
-            pass
-        
         # Try to auto-detect output folders based on EPUB files
         folders_to_scan = []
+        # Get auto-search preference from checkbox if it exists, otherwise from config
         auto_search_enabled = self.config.get('qa_auto_search_output', True)
-        try:
-            if hasattr(self, 'qa_auto_search_output_checkbox'):
+        if hasattr(self, 'qa_auto_search_output_checkbox'):
+            try:
                 auto_search_enabled = bool(self.qa_auto_search_output_checkbox.isChecked())
-        except Exception:
-            pass
+            except Exception:
+                pass
         
         # Debug output for scanning phase removed
         
@@ -2127,7 +2171,7 @@ class QAScannerMixin:
         # Create radio buttons for format options
         format_radio_buttons = []
         for idx, (text, value) in enumerate(format_options):
-            rb = QRadioButton(text)
+            rb = self._create_styled_radio_button(text)
             if value == current_format_value:
                 rb.setChecked(True)
             format_layout.addWidget(rb)
