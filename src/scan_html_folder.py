@@ -4601,6 +4601,16 @@ def check_html_structure_issues(file_path, log=print):
             (r'<(p|div|span|a|img|h[1-6])\s*[^>\s]+[^>]*$', 'incomplete_tag_at_line_end'),
         ]
         
+        # Check for orphaned closing brackets (e.g., p> without <p)
+        # Only check for common HTML tags to avoid false positives
+        common_html_tags = ['p', 'div', 'span', 'a', 'img', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+                           'ul', 'ol', 'li', 'table', 'tr', 'td', 'th', 'form', 'input', 'button',
+                           'nav', 'header', 'footer', 'section', 'article', 'aside', 'main']
+        orphaned_pattern = r'(?:^|\s)(' + '|'.join(common_html_tags) + r')>(?!\w)'
+        orphaned_matches = re.findall(orphaned_pattern, content, re.IGNORECASE | re.MULTILINE)
+        if orphaned_matches:
+            malformed_patterns.append((orphaned_pattern, 'orphaned_closing_bracket'))
+        
         malformed_tags_found = []
         for pattern, issue_type in malformed_patterns:
             matches = re.findall(pattern, content, re.MULTILINE | re.IGNORECASE)
@@ -4608,7 +4618,10 @@ def check_html_structure_issues(file_path, log=print):
                 for match in matches[:3]:  # Show first 3 examples
                     # Find the actual malformed tag in context
                     tag_name = match if isinstance(match, str) else match[0] if isinstance(match, tuple) else str(match)
-                    malformed_tags_found.append(f"<{tag_name} ({issue_type})")
+                    if issue_type == 'orphaned_closing_bracket':
+                        malformed_tags_found.append(f"{tag_name}> ({issue_type})")
+                    else:
+                        malformed_tags_found.append(f"<{tag_name} ({issue_type})")
         
         if malformed_tags_found:
             issues.append('malformed_html')
