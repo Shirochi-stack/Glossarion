@@ -5956,12 +5956,42 @@ class UnifiedClient:
                 except Exception:
                     pass
                 
-                # Write the payload (keep original messages with base64)
+                # Clean messages for payload - only include thought_signature in _raw_content_object
+                cleaned_messages = []
+                for msg in messages:
+                    cleaned_msg = msg.copy()
+                    if '_raw_content_object' in cleaned_msg and cleaned_msg['_raw_content_object']:
+                        raw_obj = cleaned_msg['_raw_content_object']
+                        # Extract only the thought signature if it exists
+                        thought_sig = None
+                        if isinstance(raw_obj, dict):
+                            # Look for thought_signature in parts array
+                            if 'parts' in raw_obj and isinstance(raw_obj['parts'], list):
+                                for part in raw_obj['parts']:
+                                    if isinstance(part, dict) and 'thought_signature' in part:
+                                        thought_sig = part['thought_signature']
+                                        break
+                            # Or directly in the raw_obj
+                            elif 'thought_signature' in raw_obj:
+                                thought_sig = raw_obj['thought_signature']
+                        
+                        # Replace _raw_content_object with just the thought signature
+                        if thought_sig:
+                            cleaned_msg['_raw_content_object'] = {
+                                'thought_signature': thought_sig
+                            }
+                        else:
+                            # No thought signature found, remove the field entirely
+                            del cleaned_msg['_raw_content_object']
+                    
+                    cleaned_messages.append(cleaned_msg)
+                
+                # Write the payload (with cleaned messages)
                 with open(filepath, 'w', encoding='utf-8') as f:
                     json.dump({
                         'model': getattr(self, 'model', None),
                         'client_type': getattr(self, 'client_type', None),
-                        'messages': messages,
+                        'messages': cleaned_messages,
                         'timestamp': datetime.now().isoformat(),
                         'debug': debug_info,
                         'request_params': request_params,
@@ -8643,38 +8673,54 @@ class UnifiedClient:
                             raw_obj = msg.get('_raw_content_object')
                             
                             if raw_obj and role == 'assistant':
-                                # For assistant messages with raw objects, extract thought_signature
-                                parts_to_send = [{'text': content}]  # Start with the text content
+                                # For assistant messages with raw objects, use the original content format
+                                # The raw_obj should be the original candidate.content from Gemini
                                 
-                                # Check if raw_obj contains thought signature
-                                thought_sig = None
-                                if isinstance(raw_obj, dict):
-                                    # Look for thought_signature in parts array
+                                # Check if this is the original Google SDK Content object
+                                if hasattr(raw_obj, 'parts'):
+                                    # This is the original Google SDK object, use it directly
+                                    print(f"   🧠 Using original Google SDK Content object for thought signature")
+                                    contents.append(raw_obj)  # Use the original content object directly
+                                elif isinstance(raw_obj, dict):
+                                    # This is a serialized version, we need to reconstruct the proper format
+                                    parts_to_send = []
+                                    
+                                    # Always include the text content first
+                                    parts_to_send.append({'text': content})
+                                    
+                                    # Look for thought_signature and add it as a Part
+                                    thought_sig = None
                                     if 'parts' in raw_obj and isinstance(raw_obj['parts'], list):
                                         for part in raw_obj['parts']:
                                             if isinstance(part, dict) and 'thought_signature' in part:
                                                 thought_sig = part['thought_signature']
                                                 break
-                                    # Or directly in the raw_obj
                                     elif 'thought_signature' in raw_obj:
                                         thought_sig = raw_obj['thought_signature']
-                                
-                                # If we found a thought signature, add it to parts
-                                if thought_sig:
-                                    # Deserialize bytes if needed
-                                    if isinstance(thought_sig, dict) and thought_sig.get('_type') == 'bytes':
-                                        # This is a serialized bytes object, decode it
-                                        import base64
-                                        thought_sig = base64.b64decode(thought_sig['data'])
-                                        print(f"   🧠 Decoded thought signature from base64 (size: {len(thought_sig)} bytes)")
                                     
-                                    parts_to_send.append({'thought_signature': thought_sig})
-                                    print(f"   🧠 Including thought signature in request (type: {type(thought_sig).__name__})")
-                                
-                                contents.append({
-                                    'role': 'model',
-                                    'parts': parts_to_send
-                                })
+                                    if thought_sig:
+                                        # Deserialize bytes if needed
+                                        if isinstance(thought_sig, dict) and thought_sig.get('_type') == 'bytes':
+                                            # This is a serialized bytes object, decode it
+                                            import base64
+                                            thought_sig = base64.b64decode(thought_sig['data'])
+                                            print(f"   🧠 Decoded thought signature from base64 (size: {len(thought_sig)} bytes)")
+                                        
+                                        # Add the thought signature as a dict
+                                        parts_to_send.append({'thought_signature': thought_sig})
+                                        print(f"   🧠 Including thought signature in request (type: {type(thought_sig).__name__})")
+                                    
+                                    # Create the contents entry with the parts
+                                    contents.append({
+                                        'role': 'model',
+                                        'parts': parts_to_send
+                                    })
+                                else:
+                                    # Fallback: just send the text without thought signature
+                                    contents.append({
+                                        'role': 'model',
+                                        'parts': [{'text': content}]
+                                    })
                             else:
                                 # Standard text message without raw objects
                                 if role == 'system':
