@@ -27,6 +27,7 @@ src/**
 !src/*.bat
 !src/*.vbs
 !src/*.png
+!src/*.manifest
 # Explicitly include application icon in src
 !src/Halgakos.ico
 

@@ -6967,9 +6967,64 @@ class MangaTranslator:
 
                 if not memory_content_parts:
                     return []
-
-                # Present history as an assistant message so the model uses it as context
-                return [{"role": "assistant", "content": memory_content_parts}]
+                
+                # Check if using Gemini 3 model that needs natural conversation format
+                is_gemini_3 = False
+                if hasattr(self.client, 'model'):
+                    model_name = str(self.client.model).lower()
+                    if 'gemini-3' in model_name or 'gemini-exp-' in model_name:
+                        is_gemini_3 = True
+                
+                if is_gemini_3:
+                    # For Gemini 3, return natural conversation history with thought signatures
+                    natural_msgs = []
+                    i = 0
+                    while i < len(trimmed):
+                        entry = trimmed[i]
+                        if not isinstance(entry, dict):
+                            i += 1
+                            continue
+                        
+                        role = entry.get("role", "user")
+                        raw_content = entry.get("content")
+                        
+                        # Skip user messages if not including source
+                        if role == "user" and not include_source:
+                            i += 1
+                            continue
+                        
+                        # Extract text content
+                        if isinstance(raw_content, dict):
+                            if raw_content.get("type") == "manga_exchange":
+                                if role == 'user':
+                                    text_content = raw_content.get("text", "")
+                                else:
+                                    text_content = raw_content.get("translated_text", "")
+                            elif raw_content.get("type") == "manga_page":
+                                if role == 'user':
+                                    texts = raw_content.get("texts", [])
+                                    text_content = "\n".join(str(t) for t in texts if t)
+                                else:
+                                    translations = raw_content.get("translations", [])
+                                    text_content = "\n".join(str(t) for t in translations if t)
+                            else:
+                                text_content = str(raw_content)
+                        else:
+                            text_content = str(raw_content) if raw_content else ""
+                        
+                        if text_content.strip():
+                            msg = {"role": role, "content": text_content}
+                            # Preserve thought signatures if present
+                            if "_raw_content_object" in entry:
+                                msg["_raw_content_object"] = entry["_raw_content_object"]
+                            natural_msgs.append(msg)
+                        
+                        i += 1
+                    
+                    return natural_msgs
+                else:
+                    # For other models, use memory blocks as assistant message
+                    return [{"role": "assistant", "content": memory_content_parts}]
 
             except Exception as e:
                 self._log(f"⚠️ Error loading history context: {str(e)}", "warning")

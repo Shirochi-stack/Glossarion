@@ -86,7 +86,9 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
             start_time = time.time()
             result = client.send(messages, temperature=temperature, max_tokens=max_tokens, context='glossary')
             elapsed = time.time() - start_time
-            result_queue.put((result, elapsed))
+            # Get the response object from THIS thread's context
+            response_obj = client.get_last_response_object()
+            result_queue.put((result, elapsed, response_obj))
         except Exception as e:
             result_queue.put(e)
     
@@ -105,7 +107,14 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
             if isinstance(result, Exception):
                 raise result
             if isinstance(result, tuple):
-                api_result, api_time = result
+                # Check if we have the new format with response object
+                if len(result) == 3:
+                    api_result, api_time, response_obj = result
+                else:
+                    # Old format without response object
+                    api_result, api_time = result
+                    response_obj = None
+                
                 if chunk_timeout and api_time > chunk_timeout:
                     if hasattr(client, '_in_cleanup'):
                         client._in_cleanup = True
@@ -113,25 +122,23 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                         client.cancel_current_operation()
                     raise UnifiedClientError(f"API call took {api_time:.1f}s (timeout: {chunk_timeout}s)")
                 
-                # Extract finish_reason and raw_obj from api_result if available
-                finish_reason = 'stop'  # Default
+                # client.send() returns (str, Optional[str]) tuple
+                # Extract the content and finish_reason from the tuple
+                if isinstance(api_result, tuple):
+                    content, finish_reason = api_result
+                else:
+                    # Single string result
+                    content = api_result
+                    finish_reason = 'stop'
+                
+                # Extract thought signature from the response object captured in the API thread
                 raw_obj = None
+                if response_obj and hasattr(response_obj, 'raw_content_object'):
+                    raw_obj = response_obj.raw_content_object
+                    if raw_obj:
+                        print("🧠 Captured thought signature for glossary extraction")
                 
-                if hasattr(api_result, 'finish_reason'):
-                    finish_reason = api_result.finish_reason
-                if hasattr(api_result, 'raw_content_object'):
-                    raw_obj = api_result.raw_content_object
-                
-                return api_result, finish_reason, raw_obj
-            
-            # Non-tuple result (shouldn't happen but handle it)
-            finish_reason = 'stop'
-            raw_obj = None
-            if hasattr(result, 'finish_reason'):
-                finish_reason = result.finish_reason
-            if hasattr(result, 'raw_content_object'):
-                raw_obj = result.raw_content_object
-            return result, finish_reason, raw_obj
+                return content, finish_reason or 'stop', raw_obj
         except queue.Empty:
             if stop_check_fn():
                 # More aggressive cancellation
@@ -709,72 +716,164 @@ def extract_chapters_from_epub(epub_path: str) -> List[str]:
     return chapters
 
 def trim_context_history(history: List[Dict], limit: int, rolling_window: bool = False) -> List[Dict]:
-    """Convert stored glossary context into a memory block assistant message.
-
-    This mirrors the main translation pipeline semantics more closely:
-    - History is stored as a list of {"user": ..., "assistant": ...} entries.
-    - We respect the INCLUDE_SOURCE_IN_HISTORY environment variable to decide
-      whether previous *source* text (user side) is reused as memory.
-    - When context is used, it is wrapped in clearly marked [MEMORY] blocks
-      inside a single assistant message, just like the main translator.
-    - We support either reset or rolling window mode based on limit/rolling_window.
+    """Convert stored glossary context into messages for API context.
+    
+    IMPORTANT: For glossary extraction, we should NOT include user messages (source text)
+    in the conversation history as that would confuse the model. We only want to provide
+    previously extracted glossary entries as context.
     """
-    # Count current exchanges
-    current_exchanges = len(history)
+    # Count current exchanges (each user+assistant pair is one exchange)
+    current_exchanges = len([m for m in history if m.get('role') == 'user'])
 
     # Handle based on mode
     if limit > 0 and current_exchanges >= limit:
         if rolling_window:
             # Rolling window: keep the most recent exchanges
             print(f"🔄 Rolling glossary context window: keeping last {limit} chapters")
-            history = history[-(limit - 1):] if limit > 1 else []
+            # Each exchange is 2 messages (user + assistant)
+            messages_to_keep = (limit - 1) * 2 if limit > 1 else 0
+            history = history[-messages_to_keep:] if messages_to_keep > 0 else []
         else:
             # Reset mode (original behavior)
             print(f"🔄 Reset glossary context after {limit} chapters")
             return []  # Return empty to reset context
 
-    # Decide whether to include previous *source* text in memory
+    # Check if we're using Gemini 3 with thought signatures
+    model = os.getenv("MODEL", "gemini-2.0-flash").lower()
+    is_gemini_3 = "gemini-3" in model or "gemini-exp-1206" in model
+    
+    # Check if including source is enabled (generally not recommended for glossary)
     include_source = os.getenv("INCLUDE_SOURCE_IN_HISTORY", "0") == "1"
-
-    memory_blocks: List[str] = []
-
-    for entry in history:
-        if not isinstance(entry, dict):
-            continue
-
-        user_text = (entry.get("user") or "").strip()
-        assistant_text = (entry.get("assistant") or "").strip()
-
-        # Optionally include previous source text as a MEMORY block
-        if include_source and user_text:
-            prefix = (
-                "[MEMORY - PREVIOUS SOURCE TEXT]\n"
-                "This is prior source content provided for context only.\n"
-                "Do NOT translate or repeat this text directly in your response.\n\n"
-            )
-            footer = "\n\n[END MEMORY BLOCK]\n"
-            memory_blocks.append(prefix + user_text + footer)
-
-        # Always include previously extracted glossary entries as MEMORY
-        if assistant_text:
-            prefix = (
-                "[MEMORY - PREVIOUSLY EXTRACTED GLOSSARY]\n"
-                "These are previously extracted glossary entries provided for context only.\n"
-                "Do NOT repeat or re-output these entries verbatim in your response.\n\n"
-            )
-            footer = "\n\n[END MEMORY BLOCK]\n"
-            memory_blocks.append(prefix + assistant_text + footer)
-
-    if not memory_blocks:
-        return []
-
-    combined_memory = "\n".join(memory_blocks)
-    return [{"role": "assistant", "content": combined_memory}]
+    
+    if is_gemini_3:
+        # For Gemini 3, we need natural conversation but ONLY assistant messages as memory
+        # We do NOT want to send previous user prompts as that would confuse the model
+        memory_blocks: List[str] = []
+        
+        i = 0
+        while i < len(history):
+            # Get user and assistant messages
+            user_msg = history[i] if i < len(history) and history[i].get('role') == 'user' else None
+            assistant_msg = history[i+1] if i+1 < len(history) and history[i+1].get('role') == 'assistant' else None
+            
+            if user_msg and assistant_msg:
+                user_text = (user_msg.get("content") or "").strip()
+                assistant_text = (assistant_msg.get("content") or "").strip()
+                
+                # Optionally include previous source text as part of memory
+                if include_source and user_text:
+                    memory_blocks.append(
+                        "[MEMORY - PREVIOUS SOURCE TEXT]\n"
+                        "This is prior source content provided for context only.\n"
+                        "Do NOT extract from this text directly in your response.\n\n"
+                        + user_text + "\n\n[END MEMORY BLOCK]\n"
+                    )
+                
+                # Always include previously extracted glossary entries
+                if assistant_text:
+                    memory_blocks.append(
+                        "[MEMORY - PREVIOUSLY EXTRACTED GLOSSARY]\n"
+                        "These are previously extracted glossary entries provided for context only.\n"
+                        "Build upon these but do NOT repeat these entries verbatim in your response.\n\n"
+                        + assistant_text + "\n\n[END MEMORY BLOCK]\n"
+                    )
+            
+            i += 2  # Move to next exchange
+        
+        if not memory_blocks:
+            return []
+        
+        # For Gemini 3, return as a single assistant message with memory blocks
+        # This avoids sending user messages which would confuse the model
+        combined_memory = "\n".join(memory_blocks)
+        
+        # Check if we have thought signatures to preserve
+        thought_sig_msg = {"role": "assistant", "content": combined_memory}
+        
+        # Find the most recent assistant message with thought signature
+        for msg in reversed(history):
+            if msg.get('role') == 'assistant' and '_raw_content_object' in msg:
+                thought_sig_msg['_raw_content_object'] = msg['_raw_content_object']
+                break
+        
+        return [thought_sig_msg]
+    
+    else:
+        # For other models, use memory blocks (legacy behavior)
+        memory_blocks: List[str] = []
+        
+        i = 0
+        while i < len(history):
+            # Get user and assistant messages
+            user_msg = history[i] if i < len(history) and history[i].get('role') == 'user' else None
+            assistant_msg = history[i+1] if i+1 < len(history) and history[i+1].get('role') == 'assistant' else None
+            
+            if user_msg and assistant_msg:
+                user_text = (user_msg.get("content") or "").strip()
+                assistant_text = (assistant_msg.get("content") or "").strip()
+                
+                # Optionally include previous source text as a MEMORY block
+                if include_source and user_text:
+                    prefix = (
+                        "[MEMORY - PREVIOUS SOURCE TEXT]\n"
+                        "This is prior source content provided for context only.\n"
+                        "Do NOT extract from this text directly in your response.\n\n"
+                    )
+                    footer = "\n\n[END MEMORY BLOCK]\n"
+                    memory_blocks.append(prefix + user_text + footer)
+                
+                # Always include previously extracted glossary entries as MEMORY
+                if assistant_text:
+                    prefix = (
+                        "[MEMORY - PREVIOUSLY EXTRACTED GLOSSARY]\n"
+                        "These are previously extracted glossary entries provided for context only.\n"
+                        "Build upon these but do NOT repeat these entries verbatim in your response.\n\n"
+                    )
+                    footer = "\n\n[END MEMORY BLOCK]\n"
+                    memory_blocks.append(prefix + assistant_text + footer)
+            
+            i += 2  # Move to next exchange
+        
+        if not memory_blocks:
+            return []
+        
+        # Return as assistant message with memory blocks
+        combined_memory = "\n".join(memory_blocks)
+        return [{"role": "assistant", "content": combined_memory}]
 
 def load_progress() -> Dict:
     if os.path.exists(PROGRESS_FILE):
-        with open(PROGRESS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
+        try:
+            with open(PROGRESS_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                # Validate the structure
+                if not isinstance(data, dict):
+                    print(f"[Warning] Progress file has invalid structure, resetting...")
+                    return {"completed": [], "glossary": [], "context_history": []}
+                # Ensure all required keys exist
+                if "completed" not in data:
+                    data["completed"] = []
+                if "glossary" not in data:
+                    data["glossary"] = []
+                if "context_history" not in data:
+                    data["context_history"] = []
+                return data
+        except json.JSONDecodeError as e:
+            print(f"[Warning] Progress file is corrupted (JSON error at line {e.lineno}, column {e.colno}): {e.msg}")
+            print(f"   -> Creating backup and starting fresh...")
+            # Try to backup the corrupted file
+            try:
+                import shutil
+                import time
+                backup_name = f"{PROGRESS_FILE}.corrupted.{int(time.time())}"
+                shutil.copy2(PROGRESS_FILE, backup_name)
+                print(f"   -> Corrupted file backed up to: {backup_name}")
+            except:
+                pass
+            return {"completed": [], "glossary": [], "context_history": []}
+        except Exception as e:
+            print(f"[Warning] Error loading progress file: {e}")
+            return {"completed": [], "glossary": [], "context_history": []}
     return {"completed": [], "glossary": [], "context_history": []}
 
 def parse_api_response(response_text: str) -> List[Dict]:
@@ -2255,10 +2354,25 @@ def main(log_callback=None, stop_callback=None):
                         {"role": "user", "content": user_prompt}
                     ]
                 else:
-                    # Use context with trim_context_history handling the mode
-                    msgs = [{"role": "system", "content": system_prompt}] \
-                         + trim_context_history(history, ctx_limit, rolling_window) \
-                         + [{"role": "user", "content": user_prompt}]
+                    # Get context history (may be natural conversation or memory blocks)
+                    context_msgs = trim_context_history(history, ctx_limit, rolling_window)
+                    
+                    # Check if we're using Gemini 3 (natural conversation format)
+                    model = os.getenv("MODEL", "gemini-2.0-flash").lower()
+                    is_gemini_3 = "gemini-3" in model or "gemini-exp-1206" in model
+                    
+                    if is_gemini_3:
+                        # For Gemini 3, context_msgs is the natural conversation history
+                        # Build: system + history + current user prompt
+                        msgs = [{"role": "system", "content": system_prompt}] \
+                             + context_msgs \
+                             + [{"role": "user", "content": user_prompt}]
+                    else:
+                        # For other models, context_msgs is memory blocks (assistant messages)
+                        # Build: system + memory + current user prompt  
+                        msgs = [{"role": "system", "content": system_prompt}] \
+                             + context_msgs \
+                             + [{"role": "user", "content": user_prompt}]
                 
                 # Compute total and assistant/memory tokens for this chapter
                 total_tokens = 0
@@ -2340,9 +2454,25 @@ def main(log_callback=None, stop_callback=None):
                                 {"role": "user", "content": chunk_user_prompt}
                             ]
                         else:
-                            chunk_msgs = [{"role": "system", "content": chunk_system_prompt}] \
-                                       + trim_context_history(history, ctx_limit, rolling_window) \
-                                       + [{"role": "user", "content": chunk_user_prompt}]
+                            # Get context history (may be natural conversation or memory blocks)
+                            context_msgs = trim_context_history(history, ctx_limit, rolling_window)
+                            
+                            # Check if we're using Gemini 3 (natural conversation format)
+                            model = os.getenv("MODEL", "gemini-2.0-flash").lower()
+                            is_gemini_3 = "gemini-3" in model or "gemini-exp-1206" in model
+                            
+                            if is_gemini_3:
+                                # For Gemini 3, context_msgs is the natural conversation history
+                                # Build: system + history + current user prompt
+                                chunk_msgs = [{"role": "system", "content": chunk_system_prompt}] \
+                                           + context_msgs \
+                                           + [{"role": "user", "content": chunk_user_prompt}]
+                            else:
+                                # For other models, context_msgs is memory blocks (assistant messages)
+                                # Build: system + memory + current user prompt
+                                chunk_msgs = [{"role": "system", "content": chunk_system_prompt}] \
+                                           + context_msgs \
+                                           + [{"role": "user", "content": chunk_user_prompt}]
 
                         # API call for chunk
                         try:
@@ -2430,7 +2560,62 @@ def main(log_callback=None, stop_callback=None):
                             
                             # Add chunk to history if contextual
                             if contextual_enabled:
-                                history.append({"user": chunk_user_prompt, "assistant": chunk_resp})
+                                history.append({"role": "user", "content": chunk_user_prompt})
+                                
+                                # Add assistant response with thought signature if available
+                                assistant_entry = {"role": "assistant", "content": chunk_resp}
+                                if chunk_raw_obj:
+                                    # Serialize the raw object immediately to prevent bytes issues later
+                                    import base64
+                                    
+                                    def serialize_obj(obj):
+                                        """Recursively serialize an object, converting bytes to base64"""
+                                        if isinstance(obj, bytes):
+                                            return {'_type': 'bytes', 'data': base64.b64encode(obj).decode('utf-8')}
+                                        elif isinstance(obj, dict):
+                                            result = {}
+                                            for key, value in obj.items():
+                                                result[key] = serialize_obj(value)
+                                            return result
+                                        elif isinstance(obj, list):
+                                            return [serialize_obj(item) for item in obj]
+                                        elif isinstance(obj, (str, int, float, bool, type(None))):
+                                            return obj
+                                        elif hasattr(obj, '__dict__'):
+                                            # For objects with __dict__, try to extract what we can
+                                            result = {}
+                                            if hasattr(obj, 'parts'):
+                                                parts = []
+                                                try:
+                                                    for part in obj.parts:
+                                                        part_dict = {}
+                                                        # Only check known attributes
+                                                        for attr in ['text', 'thought', 'thought_signature', 'inline_data']:
+                                                            if hasattr(part, attr):
+                                                                try:
+                                                                    value = getattr(part, attr)
+                                                                    if value is not None:
+                                                                        part_dict[attr] = serialize_obj(value)
+                                                                except:
+                                                                    pass
+                                                        if part_dict:
+                                                            parts.append(part_dict)
+                                                except:
+                                                    pass
+                                                if parts:
+                                                    result['parts'] = parts
+                                            if hasattr(obj, 'role'):
+                                                try:
+                                                    result['role'] = getattr(obj, 'role', None)
+                                                except:
+                                                    pass
+                                            return result if result else str(obj)
+                                        else:
+                                            return str(obj)
+                                    
+                                    assistant_entry["_raw_content_object"] = serialize_obj(chunk_raw_obj)
+                                    print("🧠 Saved thought signature to glossary history")
+                                history.append(assistant_entry)
 
                         except Exception as e:
                             print(f"[Warning] Error processing chunk {chunk_idx} data: {e}")
@@ -2446,6 +2631,8 @@ def main(log_callback=None, stop_callback=None):
                     # Use the collected data from all chunks
                     data = chapter_glossary_data
                     resp = ""  # Combined response not needed for progress tracking
+                    # Set raw_obj to None for chunked processing (history was already saved per chunk)
+                    raw_obj = None
                     print(f"✅ Chapter {idx+1} processed in {len(chunks)} chunks, total entries: {len(data)}")
                     
                 else:
@@ -2571,19 +2758,74 @@ def main(log_callback=None, stop_callback=None):
                 completed.append(idx)
 
                 # Only add to history if contextual is enabled
-                if contextual_enabled and 'resp' in locals() and resp:
-                    entry = {"user": user_prompt, "assistant": resp}
-                    # Add thought signatures if available
-                    if 'raw_obj' in locals() and raw_obj:
-                        try:
-                            if hasattr(raw_obj, 'to_dict'):
-                                entry["_raw_content_object"] = raw_obj.to_dict()
-                            elif isinstance(raw_obj, (dict, list)):
-                                entry["_raw_content_object"] = raw_obj
-                        except Exception:
-                            pass
+                if contextual_enabled:
+                    # Check if we processed in chunks or single
+                    was_chunked = 'chunks' in locals() and isinstance(chunks, list) and len(chunks) > 0
+                    
+                    if was_chunked:
+                        # Already added to history during chunk processing
+                        pass
+                    elif 'resp' in locals() and resp:
+                        # Single processing - add to history
+                        history.append({"role": "user", "content": user_prompt})
+                        
+                        # Add assistant message with thought signature
+                        assistant_entry = {"role": "assistant", "content": resp}
+                        
+                        # Add thought signatures if available
+                        if 'raw_obj' in locals() and raw_obj:
+                            # Serialize the raw object immediately to prevent bytes issues later
+                            import base64
                             
-                    history.append(entry)
+                            def serialize_obj(obj):
+                                """Recursively serialize an object, converting bytes to base64"""
+                                if isinstance(obj, bytes):
+                                    return {'_type': 'bytes', 'data': base64.b64encode(obj).decode('utf-8')}
+                                elif isinstance(obj, dict):
+                                    result = {}
+                                    for key, value in obj.items():
+                                        result[key] = serialize_obj(value)
+                                    return result
+                                elif isinstance(obj, list):
+                                    return [serialize_obj(item) for item in obj]
+                                elif isinstance(obj, (str, int, float, bool, type(None))):
+                                    return obj
+                                elif hasattr(obj, '__dict__'):
+                                    # For objects with __dict__, try to extract what we can
+                                    result = {}
+                                    if hasattr(obj, 'parts'):
+                                        parts = []
+                                        try:
+                                            for part in obj.parts:
+                                                part_dict = {}
+                                                # Only check known attributes
+                                                for attr in ['text', 'thought', 'thought_signature', 'inline_data']:
+                                                    if hasattr(part, attr):
+                                                        try:
+                                                            value = getattr(part, attr)
+                                                            if value is not None:
+                                                                part_dict[attr] = serialize_obj(value)
+                                                        except:
+                                                            pass
+                                                if part_dict:
+                                                    parts.append(part_dict)
+                                        except:
+                                            pass
+                                        if parts:
+                                            result['parts'] = parts
+                                    if hasattr(obj, 'role'):
+                                        try:
+                                            result['role'] = getattr(obj, 'role', None)
+                                        except:
+                                            pass
+                                    return result if result else str(obj)
+                                else:
+                                    return str(obj)
+                            
+                            assistant_entry["_raw_content_object"] = serialize_obj(raw_obj)
+                            print("🧠 Captured thought signature for glossary history")
+                                
+                        history.append(assistant_entry)
                     
                     # Reset history when limit reached without rolling window
                     if not rolling_window and len(history) >= ctx_limit and ctx_limit > 0:
@@ -2656,13 +2898,179 @@ def save_progress(completed: List[int], glossary: List[Dict], context_history: L
     
     # Acquire lock to prevent concurrent writes
     with _progress_lock:
+        # Make context_history JSON serializable
+        serializable_history = []
+        for msg in context_history:
+            serializable_msg = msg.copy()
+            
+            # Handle _raw_content_object if present
+            if '_raw_content_object' in serializable_msg:
+                raw_obj = serializable_msg['_raw_content_object']
+                
+                # Convert to a serializable format
+                if raw_obj is not None:
+                    try:
+                        # If it's already a dict, we need to check for bytes inside it
+                        if isinstance(raw_obj, dict):
+                            import base64
+                            
+                            def serialize_dict(obj):
+                                """Recursively serialize a dict, converting bytes to base64"""
+                                if isinstance(obj, dict):
+                                    result = {}
+                                    for key, value in obj.items():
+                                        if isinstance(value, bytes):
+                                            result[key] = {'_type': 'bytes', 'data': base64.b64encode(value).decode('utf-8')}
+                                        elif isinstance(value, dict):
+                                            result[key] = serialize_dict(value)
+                                        elif isinstance(value, list):
+                                            result[key] = serialize_list(value)
+                                        elif isinstance(value, (str, int, float, bool, type(None))):
+                                            result[key] = value
+                                        else:
+                                            # Try to convert to string for unknown types
+                                            result[key] = str(value)
+                                    return result
+                                return obj
+                            
+                            def serialize_list(lst):
+                                """Recursively serialize a list, converting bytes to base64"""
+                                result = []
+                                for item in lst:
+                                    if isinstance(item, bytes):
+                                        result.append({'_type': 'bytes', 'data': base64.b64encode(item).decode('utf-8')})
+                                    elif isinstance(item, dict):
+                                        result.append(serialize_dict(item))
+                                    elif isinstance(item, list):
+                                        result.append(serialize_list(item))
+                                    elif isinstance(item, (str, int, float, bool, type(None))):
+                                        result.append(item)
+                                    else:
+                                        result.append(str(item))
+                                return result
+                            
+                            serializable_msg['_raw_content_object'] = serialize_dict(raw_obj)
+                        # If it has to_dict method, use it
+                        elif hasattr(raw_obj, 'to_dict'):
+                            serializable_msg['_raw_content_object'] = raw_obj.to_dict()
+                        # If it has model_dump method (Pydantic), use it
+                        elif hasattr(raw_obj, 'model_dump'):
+                            serializable_msg['_raw_content_object'] = raw_obj.model_dump()
+                        # If it has __dict__, extract it
+                        elif hasattr(raw_obj, '__dict__'):
+                            # For Google SDK objects, extract the parts
+                            import base64
+                            obj_dict = {}
+                            if hasattr(raw_obj, 'parts'):
+                                parts = []
+                                try:
+                                    for part in raw_obj.parts:
+                                        part_dict = {}
+                                        # Only check specific known attributes to avoid non-serializable ones
+                                        known_attrs = ['text', 'thought', 'thought_signature', 'inline_data', 'function_call', 'function_response']
+                                        for attr in known_attrs:
+                                            if hasattr(part, attr):
+                                                try:
+                                                    value = getattr(part, attr, None)
+                                                    if value is not None:
+                                                        # Handle bytes specially (for thought_signature)
+                                                        if isinstance(value, bytes):
+                                                            part_dict[attr] = {'_type': 'bytes', 'data': base64.b64encode(value).decode('utf-8')}
+                                                        elif isinstance(value, (str, int, float, bool, type(None))):
+                                                            part_dict[attr] = value
+                                                        elif isinstance(value, (list, dict)):
+                                                            # Try to serialize complex types
+                                                            try:
+                                                                import json
+                                                                json.dumps(value)  # Test if serializable
+                                                                part_dict[attr] = value
+                                                            except:
+                                                                pass  # Skip non-serializable
+                                                except Exception as attr_err:
+                                                    # Skip attributes that throw errors when accessed
+                                                    pass
+                                        if part_dict:
+                                            parts.append(part_dict)
+                                except Exception as parts_err:
+                                    print(f"[Warning] Error iterating parts: {parts_err}")
+                                    # Fall back to string representation
+                                    serializable_msg['_raw_content_object'] = str(raw_obj)
+                                    continue
+                                
+                                if parts:
+                                    obj_dict['parts'] = parts
+                            
+                            if hasattr(raw_obj, 'role'):
+                                try:
+                                    obj_dict['role'] = getattr(raw_obj, 'role', None)
+                                except:
+                                    pass
+                            
+                            if obj_dict:
+                                serializable_msg['_raw_content_object'] = obj_dict
+                            else:
+                                # No usable data extracted, convert to string
+                                serializable_msg['_raw_content_object'] = str(raw_obj)
+                        # As a last resort, convert to string
+                        else:
+                            serializable_msg['_raw_content_object'] = str(raw_obj)
+                    except Exception as e:
+                        print(f"[Warning] Could not serialize raw_content_object: {e}")
+                        # Remove it if we can't serialize it
+                        del serializable_msg['_raw_content_object']
+            
+            serializable_history.append(serializable_msg)
+        
         progress_data = {
             "completed": completed,
             "glossary": glossary,
-            "context_history": context_history
+            "context_history": serializable_history
         }
         
         try:
+            # First test if data is serializable
+            import json
+            try:
+                test_json = json.dumps(progress_data, ensure_ascii=False)
+            except (TypeError, ValueError) as json_err:
+                # If serialization fails, try to identify the problematic part
+                print(f"[Warning] JSON serialization error: {json_err}")
+                
+                # Check which part is causing the issue
+                try:
+                    json.dumps({"completed": completed})
+                except:
+                    print("   -> Problem in 'completed' data")
+                
+                try:
+                    json.dumps({"glossary": glossary})
+                except:
+                    print("   -> Problem in 'glossary' data")
+                
+                try:
+                    json.dumps({"context_history": serializable_history})
+                except Exception as hist_err:
+                    print(f"   -> Problem in 'context_history' data: {hist_err}")
+                    # Try to identify which message is problematic
+                    for i, msg in enumerate(serializable_history):
+                        try:
+                            json.dumps(msg)
+                        except Exception as msg_err:
+                            print(f"      -> Message {i} not serializable: {msg_err}")
+                            if '_raw_content_object' in msg:
+                                print(f"         Raw object type: {type(msg['_raw_content_object'])}")
+                
+                # Try saving without the problematic raw content objects
+                print("   -> Attempting to save without raw content objects...")
+                clean_history = []
+                for msg in serializable_history:
+                    clean_msg = msg.copy()
+                    if '_raw_content_object' in clean_msg:
+                        del clean_msg['_raw_content_object']
+                    clean_history.append(clean_msg)
+                
+                progress_data['context_history'] = clean_history
+            
             # Use atomic write with proper temp file handling
             progress_dir = os.path.dirname(PROGRESS_FILE) or '.'
             with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=progress_dir, delete=False, suffix='.tmp') as temp_f:
