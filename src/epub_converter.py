@@ -535,7 +535,93 @@ class XHTMLConverter:
                 
                 return tag_content
             
-            html_content = re.sub(r'<[^>]*?=""[^>]*?>', fix_broken_attributes_only, html_content)
+            # Fix <p"Text... -> <p>"Text... and orphaned < inside <p>
+            def _fix_malformed_p_tags(text: str) -> str:
+                # Part 1: Fix <p"Text... -> <p>"Text...
+                # This handles the specific case where the opening p tag is malformed as <p"
+                text = re.sub(r'<p"([^>]*?</p>)', r'<p>"\1', text, flags=re.IGNORECASE | re.DOTALL)
+                
+                # Part 2: Fix orphaned < inside <p> tags (e.g. <p><Yeah...)
+                def _process_p_content(m):
+                    open_tag = m.group(1)
+                    content = m.group(2)
+                    close_tag = m.group(3)
+                    
+                    new_content = []
+                    last_pos = 0
+                    
+                    # Iterate through all < characters in the content
+                    # We use a manual loop to handle logic correctly
+                    i = 0
+                    while i < len(content):
+                        if content[i] == '<':
+                            # Found a <. Check if it's a valid tag or orphaned/text
+                            # Append everything before this <
+                            new_content.append(content[last_pos:i])
+                            
+                            # Check for valid tag structure
+                            # 1. Must have a closing >
+                            next_gt = content.find('>', i)
+                            
+                            should_escape = False
+                            if next_gt == -1:
+                                # No closing >, definitely orphaned
+                                should_escape = True
+                            else:
+                                # Has closing >. Check interior.
+                                inner_text = content[i+1:next_gt]
+                                
+                                # If inner text contains <, then the first < is likely text 
+                                # (e.g. "x < y and y < z") unless it's nested tags which is rare inside simple P
+                                # But simpler check: valid tag names start with alpha or /alpha
+                                # and generally don't contain spaces immediately unless attributes
+                                
+                                # Check if it looks like a tag: <tagname...> or </tagname...>
+                                # Strip whitespace to handle <br >
+                                inner_stripped = inner_text.strip()
+                                tag_match = re.match(r'^/?([a-zA-Z0-9]+)', inner_stripped)
+                                
+                                if not tag_match:
+                                    # < 3 or < . or < ? (though <? is processing instruction)
+                                    should_escape = True
+                                else:
+                                    # It has a tag-like name.
+                                    # Check against known HTML tags if we want to be strict, 
+                                    # but user said "if it's anything else, then it's a whole sentence"
+                                    # The case <Yeah... matches [a-zA-Z]+ but had NO >. We handled that above.
+                                    
+                                    # What if we have <Yeah >? 
+                                    # User's example was <Yeah... (no >). 
+                                    # If we have <Yeah >, it is technically a tag "Yeah".
+                                    # But let's assume if it's not a standard HTML tag, it might be text?
+                                    # The user didn't explicitly ask to fix <Text>, only orphaned ones.
+                                    # So we stick to the "orphaned" logic (missing >) OR "obviously not a tag" logic.
+                                    
+                                    # For the purpose of this fix, the "missing >" check handles the user's <Yeah example.
+                                    # The <I haven't example also has "missing >".
+                                    
+                                    # One edge case: <p>Text <br> Text</p>
+                                    # <br> has > and matches [a-zA-Z]. Kept.
+                                    pass
+
+                            if should_escape:
+                                new_content.append('&lt;')
+                                last_pos = i + 1
+                            else:
+                                # It's a tag (or looks enough like one), keep the <
+                                new_content.append('<')
+                                last_pos = i + 1
+                        
+                        i += 1
+                        
+                    new_content.append(content[last_pos:])
+                    return f"{open_tag}{''.join(new_content)}{close_tag}"
+
+                return re.sub(r'(<p[^>]*>)(.*?)(</p>)', _process_p_content, text, flags=re.IGNORECASE | re.DOTALL)
+
+            html_content = _fix_malformed_p_tags(html_content)
+
+            html_content = re.sub(r'<[^>]*?=\"\"[^>]*?>', fix_broken_attributes_only, html_content)
 
             # Sanitize attributes that contain a colon (:) but are NOT valid namespaces.
             # Example: <status effects:="" high="" temperature="" unconscious=""></status>
