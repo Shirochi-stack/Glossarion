@@ -6877,7 +6877,7 @@ Important rules:
                }
            """)
            self.run_button.clicked.connect(self.run_translation_thread)
-           self.run_button.setEnabled(translation_main and not any_process_running)
+           self.run_button.setEnabled(bool(translation_main and not any_process_running))
            # Stop spinning animation gracefully with deceleration
            if hasattr(self, 'icon_spin_animation') and hasattr(self, 'run_button_icon') and hasattr(self, 'icon_stop_animation'):
                if self.icon_spin_animation.state() == QPropertyAnimation.Running:
@@ -6948,7 +6948,7 @@ Important rules:
                    }
                """)
                self.glossary_button.clicked.connect(self.run_glossary_extraction_thread)
-               self.glossary_button.setEnabled(glossary_main and not any_process_running)
+               self.glossary_button.setEnabled(bool(glossary_main and not any_process_running))
                # Stop spinning animation gracefully for glossary icon
                if hasattr(self, 'glossary_icon_spin_animation') and hasattr(self, 'glossary_button_icon') and hasattr(self, 'glossary_icon_stop_animation'):
                    if self.glossary_icon_spin_animation.state() == QPropertyAnimation.Running:
@@ -6981,7 +6981,7 @@ Important rules:
                self.epub_button.setText("EPUB Converter")
                self.epub_button.setStyleSheet("background-color: #17a2b8; color: white; padding: 6px;")  # info blue
                self.epub_button.clicked.connect(self.epub_converter)
-               self.epub_button.setEnabled(fallback_compile_epub and not any_process_running)
+               self.epub_button.setEnabled(bool(fallback_compile_epub and not any_process_running))
        
        # QA button
        if hasattr(self, 'qa_button'):
@@ -7024,7 +7024,7 @@ Important rules:
                    }
                """)
                self.qa_button.clicked.connect(self.run_qa_scan)
-               self.qa_button.setEnabled(scan_html_folder and not any_process_running)
+               self.qa_button.setEnabled(bool(scan_html_folder and not any_process_running))
                # Stop spinning animation gracefully for QA icon
                if hasattr(self, 'qa_icon_spin_animation') and hasattr(self, 'qa_button_icon') and hasattr(self, 'qa_icon_stop_animation'):
                    if self.qa_icon_spin_animation.state() == QPropertyAnimation.Running:

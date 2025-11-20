@@ -793,7 +793,16 @@ def trim_context_history(history: List[Dict], limit: int, rolling_window: bool =
         # Find the most recent assistant message with thought signature
         for msg in reversed(history):
             if msg.get('role') == 'assistant' and '_raw_content_object' in msg:
-                thought_sig_msg['_raw_content_object'] = msg['_raw_content_object']
+                raw_obj = msg['_raw_content_object']
+                # Ensure the raw object is in the format expected by unified_api_client
+                # It should have 'parts' with 'thought_signature' field
+                if isinstance(raw_obj, dict):
+                    # Already serialized, just copy it
+                    thought_sig_msg['_raw_content_object'] = raw_obj
+                    print(f"   📌 Preserving thought signature for context (serialized)")
+                else:
+                    # Shouldn't happen now that we serialize immediately, but handle it
+                    thought_sig_msg['_raw_content_object'] = raw_obj
                 break
         
         return [thought_sig_msg]
@@ -2595,7 +2604,13 @@ def main(log_callback=None, stop_callback=None):
                                                                 try:
                                                                     value = getattr(part, attr)
                                                                     if value is not None:
-                                                                        part_dict[attr] = serialize_obj(value)
+                                                                        # Special handling for thought_signature to ensure it's accessible
+                                                                        if attr == 'thought_signature' and isinstance(value, bytes):
+                                                                            # Store it in a way unified_api_client expects
+                                                                            part_dict[attr] = {'_type': 'bytes', 'data': base64.b64encode(value).decode('utf-8')}
+                                                                            print(f"   🧠 Serialized thought signature: {len(value)} bytes")
+                                                                        else:
+                                                                            part_dict[attr] = serialize_obj(value)
                                                                 except:
                                                                     pass
                                                         if part_dict:
@@ -2804,7 +2819,13 @@ def main(log_callback=None, stop_callback=None):
                                                         try:
                                                             value = getattr(part, attr)
                                                             if value is not None:
-                                                                part_dict[attr] = serialize_obj(value)
+                                                                # Special handling for thought_signature to ensure it's accessible
+                                                                if attr == 'thought_signature' and isinstance(value, bytes):
+                                                                    # Store it in a way unified_api_client expects
+                                                                    part_dict[attr] = {'_type': 'bytes', 'data': base64.b64encode(value).decode('utf-8')}
+                                                                    print(f"   🧠 Serialized thought signature: {len(value)} bytes")
+                                                                else:
+                                                                    part_dict[attr] = serialize_obj(value)
                                                         except:
                                                             pass
                                                 if part_dict:
