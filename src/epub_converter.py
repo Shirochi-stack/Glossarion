@@ -541,6 +541,11 @@ class XHTMLConverter:
                 # This handles the specific case where the opening p tag is malformed as <p"
                 text = re.sub(r'<p"([^>]*?</p>)', r'<p>"\1', text, flags=re.IGNORECASE | re.DOTALL)
                 
+                # Part 1.5: Fix p>Text... -> <p>Text...
+                # Handles cases where the opening bracket is missing for the p tag
+                # Only matches if it starts a line or follows a closing tag, to be safe
+                text = re.sub(r'(^|>)\s*p>([^<]*?</p>)', r'\1<p>\2', text, flags=re.IGNORECASE | re.DOTALL)
+
                 # Part 2: Fix orphaned < inside <p> tags (e.g. <p><Yeah...)
                 def _process_p_content(m):
                     open_tag = m.group(1)
