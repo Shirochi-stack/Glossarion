@@ -7204,9 +7204,10 @@ class MangaTranslator:
             
             start_time = time.time()
             api_time = 0  # Initialize to avoid NameError
+            raw_obj = None  # Initialize outside try block for history usage
             
             try:
-                response = send_with_interrupt(
+                response, finish_reason, raw_obj = send_with_interrupt(
                     messages=messages,
                     client=self.client,
                     temperature=self.temperature,
@@ -7214,12 +7215,9 @@ class MangaTranslator:
                     stop_check_fn=self._check_stop
                 )
                 
-                # Capture raw response object for thought signatures
-                raw_obj = None
-                if hasattr(self.client, 'get_last_response_object'):
-                    resp_obj = self.client.get_last_response_object()
-                    if resp_obj and hasattr(resp_obj, 'raw_content_object'):
-                        raw_obj = resp_obj.raw_content_object
+                # Check if we captured thought signatures
+                if raw_obj:
+                    self._log("🧠 Captured thought signature for history", "debug")
                 
                 api_time = time.time() - start_time
                 self._log(f"{prefix} ✅ API responded in {api_time:.2f} seconds")
@@ -7490,7 +7488,7 @@ class MangaTranslator:
                             hist_limit=self.translation_history_limit,
                             reset_on_limit=not self.rolling_history_enabled,
                             rolling_window=self.rolling_history_enabled,
-                            raw_assistant_object=raw_obj if 'raw_obj' in locals() else None
+                            raw_assistant_object=raw_obj  # Now properly scoped from outside try block
                         )
                         
                         # Check if we're about to hit the limit
@@ -7771,20 +7769,13 @@ class MangaTranslator:
             api_time = 0  # Initialize to avoid NameError
             
             try:
-                response = send_with_interrupt(
+                response, finish_reason, raw_obj = send_with_interrupt(
                     messages=messages,
                     client=self.client,
                     temperature=self.temperature,
                     max_tokens=self.max_tokens,
                     stop_check_fn=self._check_stop
                 )
-                
-                # Capture raw response object for thought signatures
-                raw_obj = None
-                if hasattr(self.client, 'get_last_response_object'):
-                    resp_obj = self.client.get_last_response_object()
-                    if resp_obj and hasattr(resp_obj, 'raw_content_object'):
-                        raw_obj = resp_obj.raw_content_object
                         
                 api_time = time.time() - start_time
 

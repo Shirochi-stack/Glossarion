@@ -1642,7 +1642,7 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
             }, f, indent=2, ensure_ascii=False)
         
         # Use send_with_interrupt for API call
-        raw = send_with_interrupt(
+        raw, finish_reason, raw_obj = send_with_interrupt(
             messages=msgs,
             client=client, 
             temperature=temp,
@@ -2328,7 +2328,7 @@ def main(log_callback=None, stop_callback=None):
 
                         # API call for chunk
                         try:
-                            chunk_raw = send_with_interrupt(
+                            chunk_raw, chunk_finish_reason, chunk_raw_obj = send_with_interrupt(
                                 messages=chunk_msgs,
                                 client=client,
                                 temperature=temp,
@@ -2440,7 +2440,7 @@ def main(log_callback=None, stop_callback=None):
                     raw_obj = None
                     try:
                         # Use send_with_interrupt for API call
-                        raw = send_with_interrupt(
+                        raw, finish_reason, raw_obj = send_with_interrupt(
                             messages=msgs,
                             client=client,
                             temperature=temp,
@@ -2448,12 +2448,6 @@ def main(log_callback=None, stop_callback=None):
                             stop_check_fn=check_stop,
                             chunk_timeout=chunk_timeout
                         )
-                        
-                        # Capture raw object for thought signatures
-                        if hasattr(client, 'get_last_response_object'):
-                            last_resp = client.get_last_response_object()
-                            if last_resp and hasattr(last_resp, 'raw_content_object'):
-                                raw_obj = last_resp.raw_content_object
                                 
                     except UnifiedClientError as e:
                         if "stopped by user" in str(e).lower():

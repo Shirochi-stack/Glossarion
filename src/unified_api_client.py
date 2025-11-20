@@ -8635,30 +8635,48 @@ class UnifiedClient:
                         # Handle image content
                         contents = self._prepare_gemini_image_content(messages, image_base64)
                     elif has_raw_objects:
-                        # Handle raw objects (thought signatures)
+                        # Handle raw objects (thought signatures) for Gemini 3
                         # We need to construct contents list respecting the raw objects
                         for msg in messages:
                             role = msg['role']
                             content = msg['content']
                             raw_obj = msg.get('_raw_content_object')
                             
-                            if raw_obj:
-                                # If we have a raw object, use it directly
-                                # Ensure role is mapped correctly (assistant -> model)
-                                # Note: We trust the raw_obj is already a compatible dict or Content object
-                                # The Google GenAI SDK handles conversion from dicts usually.
-                                if role == 'assistant':
-                                    # If it's a model response, we wrap it in the structure Gemini expects for history?
-                                    # Or if it's already a Content object, we just append it?
-                                    # The documentation says "Return the entire response with all parts back to the model"
-                                    # content=raw_obj should work if raw_obj is a Content object.
-                                    contents.append(raw_obj) 
-                                else:
-                                    # Should not happen for user messages usually, unless we store user raw objects too
-                                    # Just fallback to text for user
-                                    contents.append({'role': 'user', 'parts': [{'text': content}]})
+                            if raw_obj and role == 'assistant':
+                                # For assistant messages with raw objects, extract thought_signature
+                                parts_to_send = [{'text': content}]  # Start with the text content
+                                
+                                # Check if raw_obj contains thought signature
+                                thought_sig = None
+                                if isinstance(raw_obj, dict):
+                                    # Look for thought_signature in parts array
+                                    if 'parts' in raw_obj and isinstance(raw_obj['parts'], list):
+                                        for part in raw_obj['parts']:
+                                            if isinstance(part, dict) and 'thought_signature' in part:
+                                                thought_sig = part['thought_signature']
+                                                break
+                                    # Or directly in the raw_obj
+                                    elif 'thought_signature' in raw_obj:
+                                        thought_sig = raw_obj['thought_signature']
+                                
+                                # If we found a thought signature, add it to parts
+                                if thought_sig:
+                                    # Deserialize bytes if needed
+                                    if isinstance(thought_sig, dict) and thought_sig.get('_type') == 'bytes':
+                                        # This is a serialized bytes object, decode it
+                                        import base64
+                                        thought_sig = base64.b64decode(thought_sig['data'])
+                                        print(f"   🧠 Decoded thought signature from base64 (size: {len(thought_sig)} bytes)")
+                                    
+                                    parts_to_send.append({'thought_signature': thought_sig})
+                                    print(f"   🧠 Including thought signature in request (type: {type(thought_sig).__name__})")
+                                
+                                contents.append({
+                                    'role': 'model',
+                                    'parts': parts_to_send
+                                })
                             else:
-                                # Standard text message
+                                # Standard text message without raw objects
                                 if role == 'system':
                                     # System prompt
                                     contents.append({'role': 'user', 'parts': [{'text': f"INSTRUCTIONS: {content}"}]})

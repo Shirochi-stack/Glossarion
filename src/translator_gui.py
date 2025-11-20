@@ -4958,7 +4958,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     wrapped_client = ImageClientWrapper(client, image_base64)
                     
                     # Use send_with_interrupt
-                    response = send_with_interrupt(
+                    response, finish_reason_from_send, raw_obj = send_with_interrupt(
                         messages,
                         wrapped_client,
                         temperature,

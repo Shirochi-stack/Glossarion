@@ -2395,7 +2395,7 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                 print(f"📑 Preparing API request (text size: {len(text_sample):,} chars)...")
                 print(f"📑 ⏳ Processing {len(text_sample):,} characters... Please wait, this may take 5-10 minutes")
 
-                response = send_with_interrupt(
+                response, finish_reason, raw_obj = send_with_interrupt(
                     messages=messages,
                     client=client,
                     temperature=temperature,
@@ -3719,7 +3719,7 @@ Provide translations in the same numbered format."""
                 # Use send_with_interrupt for interruptible API call
                 print(f"📑 Sending translation request for batch {batch_num} (interruptible)...")
                 
-                response = send_with_interrupt(
+                response, finish_reason, raw_obj = send_with_interrupt(
                     messages=messages,
                     client=client,
                     temperature=temperature,

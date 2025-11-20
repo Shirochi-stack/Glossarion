@@ -2110,7 +2110,7 @@ class TranslationProcessor:
         
         while True:
             if self.check_stop():
-                return None, None
+                return None, None, None
             
             try:
                 current_max_tokens = self.config.MAX_OUTPUT_TOKENS
@@ -2177,7 +2177,7 @@ class TranslationProcessor:
                     'total_chunks': total_chunks,
                 }
                 
-                result, finish_reason = send_with_interrupt(
+                result, finish_reason, raw_obj = send_with_interrupt(
                     msgs,
                     self.client,
                     current_temp,
@@ -2303,7 +2303,7 @@ class TranslationProcessor:
                 
                 if "stopped by user" in error_msg:
                     print("❌ Translation stopped by user during API call")
-                    return None, None
+                    return None, None, None
                 
                 if "took" in error_msg and "timeout:" in error_msg:
                     if timeout_retry_count < max_timeout_retries:
@@ -2327,7 +2327,7 @@ class TranslationProcessor:
                     for i in range(60):
                         if self.check_stop():
                             print("❌ Translation stopped during rate limit wait")
-                            return None, None
+                            return None, None, None
                         time.sleep(1)
                     continue
                 
@@ -2357,7 +2357,7 @@ class TranslationProcessor:
         if duplicate_retry_count >= max_duplicate_retries:
             print(f"    ⚠️ WARNING: Duplicate content issue persists after {max_duplicate_retries} attempts")
         
-        return result, finish_reason
+        return result, finish_reason, raw_obj
     
     def get_token_budget_str(self):
         """Get token budget as string"""
@@ -2713,7 +2713,7 @@ class BatchTranslationProcessor:
                     'chunk': chunk_idx,
                     'total_chunks': total_chunks,
                 }
-                result, finish_reason = send_with_interrupt(
+                result, finish_reason, raw_obj_from_send = send_with_interrupt(
                     chapter_msgs,
                     self.client,
                     self.config.TEMP,
@@ -2723,12 +2723,10 @@ class BatchTranslationProcessor:
                     chapter_context=chapter_ctx,
                 )
                 
-                # Capture raw response object for thought signatures
-                raw_obj = None
-                if hasattr(self.client, 'get_last_response_object'):
-                    resp_obj = self.client.get_last_response_object()
-                    if resp_obj and hasattr(resp_obj, 'raw_content_object'):
-                        raw_obj = resp_obj.raw_content_object
+                # Use the raw object directly from send_with_interrupt
+                raw_obj = raw_obj_from_send
+                if raw_obj:
+                    print(f"🧠 Captured thought signature for chunk {chunk_idx}/{total_chunks}")
                 
                 print(f"📥 Received Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks} response, finish_reason: {finish_reason}")
                 
@@ -3803,8 +3801,18 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 send_params['context'] = context
             
             result = client.send(**send_params)
+            
+            # Capture raw response object for thought signatures (if available)
+            raw_obj = None
+            if hasattr(client, 'get_last_response_object'):
+                resp_obj = client.get_last_response_object()
+                if resp_obj and hasattr(resp_obj, 'raw_content_object'):
+                    raw_obj = resp_obj.raw_content_object
+                    print("🧠 Captured thought signature for history in send_with_interrupt")
+            
             elapsed = time.time() - start_time
-            result_queue.put((result, elapsed))
+            # Include raw_obj in the result tuple
+            result_queue.put((result, elapsed, raw_obj))
         except Exception as e:
             result_queue.put(e)
     
@@ -3829,7 +3837,21 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 else:
                     raise result
             if isinstance(result, tuple):
-                api_result, api_time = result
+                # Unpack the tuple (now includes raw_obj)
+                if len(result) == 3:
+                    api_result, api_time, raw_obj = result
+                    # Store raw_obj as an attribute for later retrieval
+                    if hasattr(api_result, '__class__'):
+                        # If api_result is a tuple, return a new tuple with raw_obj
+                        if isinstance(api_result, tuple):
+                            return (*api_result, raw_obj)
+                        else:
+                            # Store as attribute for retrieval
+                            api_result._raw_obj = raw_obj
+                else:
+                    # Backward compatibility for old format
+                    api_result, api_time = result
+                    
                 if chunk_timeout and api_time > chunk_timeout:
                     # Set cleanup flag when chunk timeout occurs
                     if hasattr(client, '_in_cleanup'):
@@ -6614,48 +6636,76 @@ def main(log_callback=None, stop_callback=None):
                     trimmed = history[-config.HIST_LIMIT*2:]
                     chunk_context = chunk_context_manager.get_context_messages(limit=2)
 
+                    # Check if using Gemini 3 model that needs thought signatures preserved
+                    is_gemini_3 = False
+                    model_name = getattr(config, 'MODEL', '').lower()
+                    if 'gemini-3' in model_name or 'gemini-exp-' in model_name:
+                        is_gemini_3 = True
+                    
                     # Determine whether to include previous source text (user messages) as memory
                     include_source = os.getenv("INCLUDE_SOURCE_IN_HISTORY", "0") == "1"
-
-                    # Collect memory blocks (source + translation) and emit as a single assistant message
-                    memory_blocks = []
-                    for h in trimmed:
-                        if not isinstance(h, dict):
-                            continue
-                        role = h.get('role', 'user')
-                        content = h.get('content', '')
-                        if not content:
-                            continue
-
-                        # Optionally skip previous source text when disabled
-                        if role == 'user' and not include_source:
-                            continue
-
-                        if role == 'user':
-                            prefix = (
-                                "[MEMORY - PREVIOUS SOURCE TEXT]\\n"
-                                "This is prior source content provided for context only.\\n"
-                                "Do NOT translate or repeat this text directly in your response.\\n\\n"
-                            )
-                        else:
-                            prefix = (
-                                "[MEMORY - PREVIOUS TRANSLATION]\\n"
-                                "This is prior translated content provided for context only.\\n"
-                                "Do NOT repeat or re-output this translation.\\n\\n"
-                            )
-                        footer = "\\n\\n[END MEMORY BLOCK]\n"
-                        memory_blocks.append(prefix + content + footer)
-
-                    if memory_blocks:
-                        combined_memory = "\n".join(memory_blocks)
-                        # Always present history as an assistant message so the model
-                        # treats it as prior context, not a new user instruction.
-                        memory_msgs = [{
-                            'role': 'assistant',
-                            'content': combined_memory
-                        }]
-                    else:
+                    
+                    if is_gemini_3:
+                        # For Gemini 3, preserve raw objects for thought signatures
                         memory_msgs = []
+                        for h in trimmed:
+                            if not isinstance(h, dict):
+                                continue
+                            role = h.get('role', 'user')
+                            content = h.get('content', '')
+                            if not content:
+                                continue
+                            
+                            # Skip user messages if not including source
+                            if role == 'user' and not include_source:
+                                continue
+                            
+                            # Build message preserving raw content object if present
+                            msg = {'role': role, 'content': content}
+                            if '_raw_content_object' in h:
+                                msg['_raw_content_object'] = h['_raw_content_object']
+                            memory_msgs.append(msg)
+                    else:
+                        # Original memory block approach for other models
+                        # Collect memory blocks (source + translation) and emit as a single assistant message
+                        memory_blocks = []
+                        for h in trimmed:
+                            if not isinstance(h, dict):
+                                continue
+                            role = h.get('role', 'user')
+                            content = h.get('content', '')
+                            if not content:
+                                continue
+
+                            # Optionally skip previous source text when disabled
+                            if role == 'user' and not include_source:
+                                continue
+
+                            if role == 'user':
+                                prefix = (
+                                    "[MEMORY - PREVIOUS SOURCE TEXT]\\n"
+                                    "This is prior source content provided for context only.\\n"
+                                    "Do NOT translate or repeat this text directly in your response.\\n\\n"
+                                )
+                            else:
+                                prefix = (
+                                    "[MEMORY - PREVIOUS TRANSLATION]\\n"
+                                    "This is prior translated content provided for context only.\\n"
+                                    "Do NOT repeat or re-output this translation.\\n\\n"
+                                )
+                            footer = "\\n\\n[END MEMORY BLOCK]\n"
+                            memory_blocks.append(prefix + content + footer)
+
+                        if memory_blocks:
+                            combined_memory = "\n".join(memory_blocks)
+                            # Always present history as an assistant message so the model
+                            # treats it as prior context, not a new user instruction.
+                            memory_msgs = [{
+                                'role': 'assistant',
+                                'content': combined_memory
+                            }]
+                        else:
+                            memory_msgs = []
                 else:
                     history = []  # Set empty history when not contextual
                     trimmed = []
@@ -6699,7 +6749,7 @@ def main(log_callback=None, stop_callback=None):
                 c['__progress'] = progress_manager.prog
                 c['history_manager'] = history_manager
                 
-                result, finish_reason = translation_processor.translate_with_retry(
+                result, finish_reason, raw_obj = translation_processor.translate_with_retry(
                     msgs, chunk_html, c, chunk_idx, total_chunks
                 )
                 
@@ -6743,7 +6793,7 @@ def main(log_callback=None, stop_callback=None):
                                     config.MAX_OUTPUT_TOKENS = config.MAX_RETRY_TOKENS
                                     
                                     # Retry the translation
-                                    result_retry, finish_reason_retry = translation_processor.translate_with_retry(
+                                    result_retry, finish_reason_retry, raw_obj_retry = translation_processor.translate_with_retry(
                                         msgs, chunk_html, c, chunk_idx, total_chunks
                                     )
                                     
@@ -6754,6 +6804,7 @@ def main(log_callback=None, stop_callback=None):
                                         print(f"    ✅ Retry succeeded: {len(result):,} → {len(result_retry):,} chars")
                                         result = result_retry
                                         finish_reason = finish_reason_retry
+                                        raw_obj = raw_obj_retry
                                     else:
                                         print(f"    ⚠️ Retry did not improve output, using original")
 
@@ -6800,12 +6851,17 @@ def main(log_callback=None, stop_callback=None):
                 )
 
 
+                # Check if we captured thought signatures
+                if raw_obj:
+                    print("🧠 Captured thought signature for history")
+                
                 history = history_manager.append_to_history(
                     user_prompt, 
                     result, 
                     config.HIST_LIMIT if config.CONTEXTUAL else 0,
                     reset_on_limit=True,
-                    rolling_window=config.TRANSLATION_HISTORY_ROLLING
+                    rolling_window=config.TRANSLATION_HISTORY_ROLLING,
+                    raw_assistant_object=raw_obj
                 )
 
                 if chunk_idx < total_chunks:
