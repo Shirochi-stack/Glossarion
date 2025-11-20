@@ -1232,7 +1232,7 @@ class QAScannerMixin:
                 self.append_log("📁 Falling back to manual folder selection...")
                 
                 selected_folder = QFileDialog.getExistingDirectory(
-                    self.parent,
+                    self,
                     "Auto-search failed - Select Output Folder to Scan"
                 )
                 if not selected_folder:
@@ -1284,7 +1284,7 @@ class QAScannerMixin:
             
             # Simply select one folder - clean and simple
             selected_folder = QFileDialog.getExistingDirectory(
-                self.parent,
+                self,
                 "Select Folder with HTML Files"
             )
             if not selected_folder:
