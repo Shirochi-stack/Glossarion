@@ -112,8 +112,26 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     if hasattr(client, 'cancel_current_operation'):
                         client.cancel_current_operation()
                     raise UnifiedClientError(f"API call took {api_time:.1f}s (timeout: {chunk_timeout}s)")
-                return api_result
-            return result
+                
+                # Extract finish_reason and raw_obj from api_result if available
+                finish_reason = 'stop'  # Default
+                raw_obj = None
+                
+                if hasattr(api_result, 'finish_reason'):
+                    finish_reason = api_result.finish_reason
+                if hasattr(api_result, 'raw_content_object'):
+                    raw_obj = api_result.raw_content_object
+                
+                return api_result, finish_reason, raw_obj
+            
+            # Non-tuple result (shouldn't happen but handle it)
+            finish_reason = 'stop'
+            raw_obj = None
+            if hasattr(result, 'finish_reason'):
+                finish_reason = result.finish_reason
+            if hasattr(result, 'raw_content_object'):
+                raw_obj = result.raw_content_object
+            return result, finish_reason, raw_obj
         except queue.Empty:
             if stop_check_fn():
                 # More aggressive cancellation
