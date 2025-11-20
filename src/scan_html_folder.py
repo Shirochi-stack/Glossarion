@@ -4585,13 +4585,37 @@ def check_html_structure_issues(file_path, log=print):
         except Exception as e:
             log(f"   Warning: Could not parse HTML structure: {e}")
         
-        # Check 4: Unclosed HTML tags - Check common tags with simple logic
+        # Check 4: Malformed and incomplete HTML tags
         import re
         
         content_lower = content.lower()
         
-        # Tags to check: structural + commonly unclosed tags
-        # Use simple regex: <tag followed by space or >
+        # First check for incomplete/malformed opening tags (like <p without closing >)
+        # Look for < followed by tag name but missing the closing >
+        malformed_patterns = [
+            # Match <tag followed by anything that's not > and then encountering text/quote
+            (r'<([a-zA-Z]+)(?![^>]*>)[^>]*["\w]', 'incomplete_opening_tag'),
+            # Match tags like <p" or <div' where quote comes right after tag name
+            (r'<([a-zA-Z]+)["\']', 'malformed_tag_with_quote'),
+            # Match < followed by tag name and then immediately text without >
+            (r'<(p|div|span|a|img|h[1-6])\s*[^>\s]+[^>]*$', 'incomplete_tag_at_line_end'),
+        ]
+        
+        malformed_tags_found = []
+        for pattern, issue_type in malformed_patterns:
+            matches = re.findall(pattern, content, re.MULTILINE | re.IGNORECASE)
+            if matches:
+                for match in matches[:3]:  # Show first 3 examples
+                    # Find the actual malformed tag in context
+                    tag_name = match if isinstance(match, str) else match[0] if isinstance(match, tuple) else str(match)
+                    malformed_tags_found.append(f"<{tag_name} ({issue_type})")
+        
+        if malformed_tags_found:
+            issues.append('malformed_html')
+            log(f"   Found malformed HTML tags: {', '.join(malformed_tags_found[:3])}" + 
+                (" ..." if len(malformed_tags_found) > 3 else ""))
+        
+        # Check for unclosed HTML tags - Check common tags with simple logic
         tags_to_check = ['html', 'body', 'head', 'p', 'div', 'span']
         problematic_tags = []
         
@@ -4615,9 +4639,13 @@ def check_html_structure_issues(file_path, log=print):
                 (" ..." if len(problematic_tags) > 3 else ""))
         
         # Check 5: Basic HTML structure validation - only check for consistency, not completeness
-        # Note: Variables like html_open_exists are already defined in Check 4
+        # Define all structure check variables
+        html_open_exists = bool(re.search(r'<html[^>]*>', content_lower))
+        html_close_exists = bool(re.search(r'</html>', content_lower))
         head_open_exists = bool(re.search(r'<head[^>]*>', content_lower))
         head_close_exists = bool(re.search(r'</head>', content_lower))
+        body_open_exists = bool(re.search(r'<body[^>]*>', content_lower))
+        body_close_exists = bool(re.search(r'</body>', content_lower))
         
         missing_structure = []
         
