@@ -1528,7 +1528,7 @@ Rules:
         if not hasattr(self, 'glossary_max_sentences_entry'):
             self.glossary_max_sentences_entry = QLineEdit()
             self.glossary_max_sentences_entry.setFixedWidth(80)
-        self.glossary_max_sentences_entry.setText(str(self.config.get('glossary_max_sentences', 200)))
+        self.glossary_max_sentences_entry.setText(str(self.config.get('glossary_max_sentences', 300)))
         
         # Helper: compact label+field pair in one cell
         def _pair(label_text, field_widget, label_width=180):
@@ -1765,7 +1765,7 @@ Rules:
                 self.glossary_context_window_entry.setText("2")
                 self.glossary_max_text_size_entry.setText("0")
                 self.glossary_chapter_split_threshold_entry.setText("0")
-                self.glossary_max_sentences_entry.setText("200")
+                self.glossary_max_sentences_entry.setText("300")
                 self.glossary_target_language_combo.setCurrentText("English")
                 
                 # Reset filter mode to 'all'

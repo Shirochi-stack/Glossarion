@@ -823,8 +823,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.glossary_max_titles_var = str(self.config.get('glossary_max_titles', 30))
         self.context_window_size_var = str(self.config.get('context_window_size', 5))
         self.glossary_max_text_size_var = str(self.config.get('glossary_max_text_size', 50000))
-        self.glossary_chapter_split_threshold_var = self.config.get('glossary_chapter_split_threshold', '8192')
-        self.glossary_max_sentences_var = str(self.config.get('glossary_max_sentences', 200))
+        self.glossary_chapter_split_threshold_var = self.config.get('glossary_chapter_split_threshold', '0')
+        self.glossary_max_sentences_var = str(self.config.get('glossary_max_sentences', 300))
         self.glossary_filter_mode_var = self.config.get('glossary_filter_mode', 'all')
 
         
@@ -5415,7 +5415,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # Whether to include previous source text as memory context
             'INCLUDE_SOURCE_IN_HISTORY': "1" if getattr(self, 'include_source_in_history_var', False) else "0",
             'APPEND_GLOSSARY': "1" if self.append_glossary_var else "0",
-            'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt,
+            'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt if hasattr(self, 'append_glossary_prompt') and self.append_glossary_prompt else '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n',
             'EMERGENCY_PARAGRAPH_RESTORE': "1" if self.emergency_restore_var else "0",
             'REINFORCEMENT_FREQUENCY': str(self.reinforcement_freq_var),
             'BREAK_SPLIT_COUNT': str(self.break_split_count_var) if hasattr(self, 'break_split_count_var') and self.break_split_count_var else '',
@@ -5434,7 +5434,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GLOSSARY_SKIP_FREQUENCY_CHECK': "1" if self.config.get('glossary_skip_frequency_check', False) else "0",
             'ENABLE_AUTO_GLOSSARY': "1" if self.enable_auto_glossary_var else "0",
             'AUTO_GLOSSARY_PROMPT': self.unified_auto_glossary_prompt if hasattr(self, 'unified_auto_glossary_prompt') else '',
-            'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt if hasattr(self, 'append_glossary_prompt') else '',
+            'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt if hasattr(self, 'append_glossary_prompt') and self.append_glossary_prompt else '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n',
             'GLOSSARY_TRANSLATION_PROMPT': self.glossary_translation_prompt if hasattr(self, 'glossary_translation_prompt') else '',
             'GLOSSARY_FORMAT_INSTRUCTIONS': self.glossary_format_instructions if hasattr(self, 'glossary_format_instructions') else '',
             'GLOSSARY_USE_LEGACY_CSV': '1' if self.use_legacy_csv_var else '0',
