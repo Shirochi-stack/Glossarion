@@ -824,7 +824,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.context_window_size_var = str(self.config.get('context_window_size', 5))
         self.glossary_max_text_size_var = str(self.config.get('glossary_max_text_size', 50000))
         self.glossary_chapter_split_threshold_var = self.config.get('glossary_chapter_split_threshold', '0')
-        self.glossary_max_sentences_var = str(self.config.get('glossary_max_sentences', 300))
+        self.glossary_max_sentences_var = str(self.config.get('glossary_max_sentences', 200))
         self.glossary_filter_mode_var = self.config.get('glossary_filter_mode', 'all')
 
         
