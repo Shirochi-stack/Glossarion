@@ -1823,10 +1823,10 @@ Recent translations to summarize:
             ('translation_history_rolling_var', 'translation_history_rolling', False),
             ('glossary_history_rolling_var', 'glossary_history_rolling', False),
             ('translate_book_title_var', 'translate_book_title', True),
-            ('enable_auto_glossary_var', 'enable_auto_glossary', False),
-            ('append_glossary_var', 'append_glossary', False),
-            ('include_gender_context_var', 'include_gender_context', False),
-            ('include_description_var', 'include_description', False),
+            ('enable_auto_glossary_var', 'enable_auto_glossary', True),
+            ('append_glossary_var', 'append_glossary', True),
+            ('include_gender_context_var', 'include_gender_context', True),
+            ('include_description_var', 'include_description', True),
             ('retry_truncated_var', 'retry_truncated', False),
             ('retry_duplicate_var', 'retry_duplicate_bodies', False),
             ('preserve_original_text_var', 'preserve_original_text_on_failure', False),
@@ -1854,7 +1854,7 @@ Recent translations to summarize:
             ('save_cleaned_images_var', 'save_cleaned_images', False),
             ('advanced_watermark_removal_var', 'advanced_watermark_removal', False),
             ('enable_decimal_chapters_var', 'enable_decimal_chapters', True),
-            ('disable_gemini_safety_var', 'disable_gemini_safety', False),
+            ('disable_gemini_safety_var', 'disable_gemini_safety', True),
             ('single_api_image_chunks_var', 'single_api_image_chunks', False),
 
         ]
