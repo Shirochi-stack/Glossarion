@@ -7082,7 +7082,11 @@ class MangaTranslator:
             # Add contextual translations if enabled
             if self.contextual_enabled and self.history_manager:
                 # Get history from HistoryManager as a [MEMORY] assistant block
-                history_context = self._get_translation_history_context()
+                # Microsecond lock to prevent race conditions when reading history
+                import time
+                time.sleep(0.000001)
+                with self.history_manager.lock:
+                    history_context = self._get_translation_history_context()
                 
                 if history_context:
                     self._log(
@@ -7507,55 +7511,59 @@ class MangaTranslator:
             # Store in history if HistoryManager is available
             if self.history_manager and self.contextual_enabled:
                 # Thread-safe history update (prevents race conditions if used in batch mode)
+                # Microsecond lock to prevent race conditions when appending to history
+                import time
+                time.sleep(0.000001)
                 with self._contextual_lock:
-                    try:
-                        # Build structured payload so we can reconstruct image context later
-                        user_payload: Any = text
-                        assistant_payload: Any = translated
+                    with self.history_manager.lock:
+                        try:
+                            # Build structured payload so we can reconstruct image context later
+                            user_payload: Any = text
+                            assistant_payload: Any = translated
 
-                        if image_path and self.visual_context_enabled:
-                            bbox = None
-                            try:
-                                if region and hasattr(region, "bounding_box") and region.bounding_box:
-                                    bbox = [int(v) for v in region.bounding_box]
-                            except Exception:
+                            if image_path and self.visual_context_enabled:
                                 bbox = None
+                                try:
+                                    if region and hasattr(region, "bounding_box") and region.bounding_box:
+                                        bbox = [int(v) for v in region.bounding_box]
+                                except Exception:
+                                    bbox = None
 
-                            user_payload = {
-                                "type": "manga_exchange",
-                                "version": 1,
-                                "text": text,
-                                "image_path": image_path,
-                                "region_bbox": bbox,
-                            }
-                            assistant_payload = {
-                                "type": "manga_exchange",
-                                "version": 1,
-                                "translated_text": translated,
-                                "image_path": image_path,
-                                "region_bbox": bbox,
-                            }
+                                user_payload = {
+                                    "type": "manga_exchange",
+                                    "version": 1,
+                                    "text": text,
+                                    "image_path": image_path,
+                                    "region_bbox": bbox,
+                                }
+                                assistant_payload = {
+                                    "type": "manga_exchange",
+                                    "version": 1,
+                                    "translated_text": translated,
+                                    "image_path": image_path,
+                                    "region_bbox": bbox,
+                                }
 
-                        # Append to history with proper limit handling
-                        self.history_manager.append_to_history(
-                            user_content=user_payload,
-                            assistant_content=assistant_payload,
-                            hist_limit=self.translation_history_limit,
-                            reset_on_limit=not self.rolling_history_enabled,
-                            rolling_window=self.rolling_history_enabled,
-                            raw_assistant_object=raw_obj  # Now properly scoped from outside try block
-                        )
-                        
-                        # Check if we're about to hit the limit
-                        if self.history_manager.will_reset_on_next_append(
-                            self.translation_history_limit, 
-                            self.rolling_history_enabled,
-                        ):
-                            mode = "roll over" if self.rolling_history_enabled else "reset"
-                            self._log(f"📚 History will {mode} on next translation (at limit: {self.translation_history_limit})")
-                        
-                    except Exception as e:
-                        self._log(f"⚠️ Failed to save to history: {str(e)}", "warning")
+                            # Append to history with proper limit handling
+                            self.history_manager.append_to_history(
+                                user_content=user_payload,
+                                assistant_content=assistant_payload,
+                                hist_limit=self.translation_history_limit,
+                                reset_on_limit=not self.rolling_history_enabled,
+                                rolling_window=self.rolling_history_enabled,
+                                raw_assistant_object=raw_obj  # Now properly scoped from outside try block
+                            )
+                            
+                            # Check if we're about to hit the limit
+                            if self.history_manager.will_reset_on_next_append(
+                                self.translation_history_limit, 
+                                self.rolling_history_enabled,
+                            ):
+                                mode = "roll over" if self.rolling_history_enabled else "reset"
+                                self._log(f"📚 History will {mode} on next translation (at limit: {self.translation_history_limit})")
+                            
+                        except Exception as e:
+                            self._log(f"⚠️ Failed to save to history: {str(e)}", "warning")
             
             # Also store in legacy context for compatibility
             self.translation_context.append({
@@ -7631,7 +7639,11 @@ class MangaTranslator:
             
             # Add contextual translations if enabled
             if self.contextual_enabled and self.history_manager:
-                history_context = self._get_translation_history_context()
+                # Microsecond lock to prevent race conditions when reading history
+                import time
+                time.sleep(0.000001)
+                with self.history_manager.lock:
+                    history_context = self._get_translation_history_context()
                 if history_context:
                     self._log(
                         f"🔗 Adding contextual memory from previous translations "
@@ -8391,37 +8403,41 @@ class MangaTranslator:
             # Save history if enabled
             if self.history_manager and self.contextual_enabled and all_originals:
                 try:
-                    combined_original = "\n".join(all_originals)
-                    combined_translation = "\n".join(all_translations)
-                    
-                    # Build structured payload so we can reconstruct page-level image context
-                    user_payload: Any = combined_original
-                    assistant_payload: Any = combined_translation
+                    # Microsecond lock to prevent race conditions when appending to history
+                    import time
+                    time.sleep(0.000001)
+                    with self.history_manager.lock:
+                        combined_original = "\n".join(all_originals)
+                        combined_translation = "\n".join(all_translations)
+                        
+                        # Build structured payload so we can reconstruct page-level image context
+                        user_payload: Any = combined_original
+                        assistant_payload: Any = combined_translation
 
-                    if image_path and self.visual_context_enabled:
-                        user_payload = {
-                            "type": "manga_page",
-                            "version": 1,
-                            "texts": all_originals,
-                            "image_path": image_path,
-                        }
-                        assistant_payload = {
-                            "type": "manga_page",
-                            "version": 1,
-                            "translations": all_translations,
-                            "image_path": image_path,
-                        }
-                    
-                    self.history_manager.append_to_history(
-                        user_content=user_payload,
-                        assistant_content=assistant_payload,
-                        hist_limit=self.translation_history_limit,
-                        reset_on_limit=not self.rolling_history_enabled,
-                        rolling_window=self.rolling_history_enabled,
-                        raw_assistant_object=raw_obj if 'raw_obj' in locals() else None
-                    )
-                    
-                    self._log(f"📚 Saved {len(all_originals)} translations as 1 combined history entry", "success")
+                        if image_path and self.visual_context_enabled:
+                            user_payload = {
+                                "type": "manga_page",
+                                "version": 1,
+                                "texts": all_originals,
+                                "image_path": image_path,
+                            }
+                            assistant_payload = {
+                                "type": "manga_page",
+                                "version": 1,
+                                "translations": all_translations,
+                                "image_path": image_path,
+                            }
+                        
+                        self.history_manager.append_to_history(
+                            user_content=user_payload,
+                            assistant_content=assistant_payload,
+                            hist_limit=self.translation_history_limit,
+                            reset_on_limit=not self.rolling_history_enabled,
+                            rolling_window=self.rolling_history_enabled,
+                            raw_assistant_object=raw_obj if 'raw_obj' in locals() else None
+                        )
+                        
+                        self._log(f"📚 Saved {len(all_originals)} translations as 1 combined history entry", "success")
                 except Exception as e:
                     self._log(f"⚠️ Failed to save page to history: {str(e)}", "warning")
             

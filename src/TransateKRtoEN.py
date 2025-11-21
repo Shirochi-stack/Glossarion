@@ -2620,7 +2620,10 @@ class BatchTranslationProcessor:
                     and getattr(self.config, 'HIST_LIMIT', 0) > 0
                 ):
                     try:
-                        history = self.history_manager.load_history()
+                        # Thread-safe history access with microsecond delay to prevent race conditions
+                        with self.history_manager.lock:
+                            time.sleep(0.000001)  # 1 microsecond delay
+                            history = self.history_manager.load_history()
                         hist_limit = getattr(self.config, 'HIST_LIMIT', 0)
                         trimmed = history[-hist_limit * 2:]
                         include_source = os.getenv("INCLUDE_SOURCE_IN_HISTORY", "0") == "1"
@@ -5990,12 +5993,17 @@ def main(log_callback=None, stop_callback=None):
                     print(f"📊 Overall Progress: {processed}/{total_to_process} ({progress_percent:.1f}%)")
                 
                 # After all futures in this batch complete, append their history entries
+                # Thread-safe history updates with microsecond delays between appends
                 if config.CONTEXTUAL and getattr(config, 'HIST_LIMIT', 0) > 0:
                     hist_limit = getattr(config, 'HIST_LIMIT', 0)
-                    for idx, chapter in current_batch:
+                    # Sort by chapter index to maintain order
+                    sorted_chapters = sorted([(idx, chapter) for idx, chapter in current_batch], key=lambda x: x[0])
+                    for idx, chapter in sorted_chapters:
                         if idx in batch_history_map:
                             user_content, assistant_content, raw_obj = batch_history_map[idx]
                             try:
+                                # Add microsecond delay between history appends to prevent race conditions
+                                time.sleep(0.000001)  # 1 microsecond delay
                                 history_manager.append_to_history(
                                     user_content,
                                     assistant_content,
@@ -6632,7 +6640,10 @@ def main(log_callback=None, stop_callback=None):
                     user_prompt = chunk_html
                 
                 if config.CONTEXTUAL:
-                    history = history_manager.load_history()
+                    # Thread-safe history access with microsecond delay
+                    with history_manager.lock:
+                        time.sleep(0.000001)  # 1 microsecond delay to prevent race conditions
+                        history = history_manager.load_history()
                     trimmed = history[-config.HIST_LIMIT*2:]
                     chunk_context = chunk_context_manager.get_context_messages(limit=2)
 
@@ -6855,6 +6866,8 @@ def main(log_callback=None, stop_callback=None):
                 if raw_obj:
                     print("🧠 Captured thought signature for history")
                 
+                # Add microsecond delay before history append to prevent race conditions
+                time.sleep(0.000001)  # 1 microsecond delay
                 history = history_manager.append_to_history(
                     user_prompt, 
                     result, 
@@ -6898,6 +6911,8 @@ def main(log_callback=None, stop_callback=None):
                 user_summary, assistant_summary = chunk_context_manager.get_summary_for_history()
                 
                 if user_summary and assistant_summary:
+                    # Add microsecond delay before summary append
+                    time.sleep(0.000001)  # 1 microsecond delay
                     history_manager.append_to_history(
                         user_summary,
                         assistant_summary,

@@ -191,6 +191,7 @@ _stop_requested = False
 _glossary_json_lock = threading.Lock()
 _glossary_csv_lock = threading.Lock()
 _progress_lock = threading.Lock()
+_history_lock = threading.Lock()  # For thread-safe history access in batch mode
 
 def set_stop_flag(value):
     """Set the global stop flag"""
@@ -1633,11 +1634,14 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
                     {"role": "user", "content": user_prompt}
                 ]
             else:
-                msgs = (
-                    [{"role": "system", "content": system_prompt}]
-                    + trim_context_history(history, ctx_limit, rolling_window)
-                    + [{"role": "user", "content": user_prompt}]
-                )
+                # Microsecond lock to prevent race conditions when reading history
+                time.sleep(0.000001)
+                with _history_lock:
+                    msgs = (
+                        [{"role": "system", "content": system_prompt}]
+                        + trim_context_history(history, ctx_limit, rolling_window)
+                        + [{"role": "user", "content": user_prompt}]
+                    )
 
             # Approximate combined prompt tokens for this chapter
             try:
@@ -2140,9 +2144,12 @@ def main(log_callback=None, stop_callback=None):
                             {"role": "user", "content": user_prompt}
                         ]
                     else:
-                        msgs = [{"role": "system", "content": system_prompt}] \
-                             + trim_context_history(history, ctx_limit, rolling_window) \
-                             + [{"role": "user", "content": user_prompt}]
+                        # Microsecond lock to prevent race conditions when reading history
+                        time.sleep(0.000001)
+                        with _history_lock:
+                            msgs = [{"role": "system", "content": system_prompt}] \
+                                 + trim_context_history(history, ctx_limit, rolling_window) \
+                                 + [{"role": "user", "content": user_prompt}]
                     
                     # Submit to thread pool
                     future = executor.submit(
@@ -2212,7 +2219,10 @@ def main(log_callback=None, stop_callback=None):
                         # Add to history if contextual is enabled
                         if contextual_enabled and resp and chap:
                             system_prompt, user_prompt = build_prompt(chap)
-                            history.append({"user": user_prompt, "assistant": resp})
+                            # Microsecond lock to prevent race conditions when appending to history
+                            time.sleep(0.000001)
+                            with _history_lock:
+                                history.append({"user": user_prompt, "assistant": resp})
                         
                     except Exception as e:
                         if "stopped by user" in str(e).lower():
@@ -2364,7 +2374,10 @@ def main(log_callback=None, stop_callback=None):
                     ]
                 else:
                     # Get context history (may be natural conversation or memory blocks)
-                    context_msgs = trim_context_history(history, ctx_limit, rolling_window)
+                    # Microsecond lock to prevent race conditions when reading history
+                    time.sleep(0.000001)
+                    with _history_lock:
+                        context_msgs = trim_context_history(history, ctx_limit, rolling_window)
                     
                     # Check if we're using Gemini 3 (natural conversation format)
                     model = os.getenv("MODEL", "gemini-2.0-flash").lower()
@@ -2464,7 +2477,10 @@ def main(log_callback=None, stop_callback=None):
                             ]
                         else:
                             # Get context history (may be natural conversation or memory blocks)
-                            context_msgs = trim_context_history(history, ctx_limit, rolling_window)
+                            # Microsecond lock to prevent race conditions when reading history
+                            time.sleep(0.000001)
+                            with _history_lock:
+                                context_msgs = trim_context_history(history, ctx_limit, rolling_window)
                             
                             # Check if we're using Gemini 3 (natural conversation format)
                             model = os.getenv("MODEL", "gemini-2.0-flash").lower()
@@ -2569,10 +2585,13 @@ def main(log_callback=None, stop_callback=None):
                             
                             # Add chunk to history if contextual
                             if contextual_enabled:
-                                history.append({"role": "user", "content": chunk_user_prompt})
-                                
-                                # Add assistant response with thought signature if available
-                                assistant_entry = {"role": "assistant", "content": chunk_resp}
+                                # Microsecond lock to prevent race conditions when appending to history
+                                time.sleep(0.000001)
+                                with _history_lock:
+                                    history.append({"role": "user", "content": chunk_user_prompt})
+                                    
+                                    # Add assistant response with thought signature if available
+                                    assistant_entry = {"role": "assistant", "content": chunk_resp}
                                 if chunk_raw_obj:
                                     # Serialize the raw object immediately to prevent bytes issues later
                                     import base64
@@ -2630,7 +2649,7 @@ def main(log_callback=None, stop_callback=None):
                                     
                                     assistant_entry["_raw_content_object"] = serialize_obj(chunk_raw_obj)
                                     print("🧠 Saved thought signature to glossary history")
-                                history.append(assistant_entry)
+                                    history.append(assistant_entry)
 
                         except Exception as e:
                             print(f"[Warning] Error processing chunk {chunk_idx} data: {e}")
@@ -2782,10 +2801,13 @@ def main(log_callback=None, stop_callback=None):
                         pass
                     elif 'resp' in locals() and resp:
                         # Single processing - add to history
-                        history.append({"role": "user", "content": user_prompt})
-                        
-                        # Add assistant message with thought signature
-                        assistant_entry = {"role": "assistant", "content": resp}
+                        # Microsecond lock to prevent race conditions when appending to history
+                        time.sleep(0.000001)
+                        with _history_lock:
+                            history.append({"role": "user", "content": user_prompt})
+                            
+                            # Add assistant message with thought signature
+                            assistant_entry = {"role": "assistant", "content": resp}
                         
                         # Add thought signatures if available
                         if 'raw_obj' in locals() and raw_obj:
@@ -2845,8 +2867,8 @@ def main(log_callback=None, stop_callback=None):
                             
                             assistant_entry["_raw_content_object"] = serialize_obj(raw_obj)
                             print("🧠 Captured thought signature for glossary history")
-                                
-                        history.append(assistant_entry)
+                                    
+                            history.append(assistant_entry)
                     
                     # Reset history when limit reached without rolling window
                     if not rolling_window and len(history) >= ctx_limit and ctx_limit > 0:
