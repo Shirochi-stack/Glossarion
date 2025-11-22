@@ -473,7 +473,7 @@ class RetranslationMixin:
                     stripped_base_name = base_name[:-4]  # Remove .htm suffix
 
                 # Look for translated file matching base name, with or without 'response_' and with allowed extensions
-                allowed_exts = ('.html', '.xhtml', '.htm')
+                allowed_exts = ('.html', '.xhtml', '.htm', '.png', '.jpg', '.jpeg', '.webp', '.gif')
                 for file in os.listdir(output_dir):
                     f_low = file.lower()
                     if f_low.endswith(allowed_exts):
@@ -2414,16 +2414,23 @@ class RetranslationMixin:
         
         # Also scan directory for any HTML files not in progress
         # Only include translated image files (response_*.html pattern)
+        # Also include generated image files (.png, .jpg, etc.)
         try:
             for file in os.listdir(output_dir):
                 file_path = os.path.join(output_dir, file)
-                # Only include files matching response_NNN_*.html pattern
+                # Include HTML files matching response_NNN_*.html pattern
                 if (os.path.isfile(file_path) and 
                     file.endswith('.html') and 
                     file not in html_files and
                     re.match(r'response_\d+_', file)):
                     html_files.append(file)
                     print(f"Found untracked HTML file: {file}")
+                # Also include generated image files (not in images/ subdirectory)
+                elif (os.path.isfile(file_path) and 
+                      file.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif')) and
+                      file not in html_files):
+                    html_files.append(file)  # Add to html_files for now, will be handled separately
+                    print(f"Found generated image file: {file}")
         except Exception as e:
             print(f"Error scanning directory: {e}")
         
