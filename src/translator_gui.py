@@ -4912,10 +4912,42 @@ If you see multiple p-b cookies, use the one with the longest value."""
             temperature = float(self.trans_temp.text()) if hasattr(self, 'trans_temp') else 0.3
             max_tokens = self.max_output_tokens
             
-            # Build messages for vision API
-            messages = [
-                {"role": "system", "content": system_prompt}
-            ]
+            # Initialize history manager for contextual translation if enabled
+            history_manager = None
+            # Check both checkbox state (runtime) and config variable (initial)
+            contextual_enabled = self.contextual_checkbox.isChecked() if hasattr(self, 'contextual_checkbox') else self.contextual_var
+            if contextual_enabled:
+                try:
+                    from history_manager import HistoryManager
+                    history_manager = HistoryManager(output_dir)
+                    
+                    # Add previous context to messages if available
+                    history_limit = int(self.trans_history.text()) if hasattr(self, 'trans_history') else 3
+                    context_messages = history_manager.load_history()
+                    
+                    # Limit to the most recent exchanges
+                    if context_messages:
+                        # Each exchange is 2 messages (user + assistant)
+                        messages_to_keep = history_limit * 2
+                        context_messages = context_messages[-messages_to_keep:] if len(context_messages) > messages_to_keep else context_messages
+                    
+                    # Build messages with history
+                    messages = [{"role": "system", "content": system_prompt}]
+                    messages.extend(context_messages)
+                    
+                    if context_messages:
+                        num_exchanges = len(context_messages) // 2
+                        self.append_log(f"📚 Using {num_exchanges} previous image(s) for context")
+                except Exception as e:
+                    self.append_log(f"⚠️ Failed to initialize history manager: {e}")
+                    import traceback
+                    self.append_log(traceback.format_exc())
+                    messages = [{"role": "system", "content": system_prompt}]
+            else:
+                # Build messages for vision API without history
+                messages = [
+                    {"role": "system", "content": system_prompt}
+                ]
             
             self.append_log(f"🌐 Sending image to vision API...")
             self.append_log(f"   System prompt length: {len(system_prompt)} chars")
@@ -4969,6 +5001,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     self.append_log("⚠️ send_with_interrupt not available, using direct call")
                     send_with_interrupt = None
                 
+                # Initialize raw_obj to None for both paths
+                raw_obj = None
+                
                 # Call the vision API with interrupt support
                 if send_with_interrupt:
                     # For image calls, we need a wrapper since send_with_interrupt expects client.send()
@@ -5006,6 +5041,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         max_tokens=max_tokens,
                         response_name=image_name
                     )
+                    # Try to get raw_obj from response if available
+                    if hasattr(response, 'raw_content_object'):
+                        raw_obj = response.raw_content_object
                 
                 # Check if stopped after API call
                 if self.stop_requested:
@@ -5080,6 +5118,46 @@ If you see multiple p-b cookies, use the one with the longest value."""
                                 
                                 # Update progress as completed (no HTML file needed)
                                 self.image_progress_manager.update(image_path, content_hash, output_file=generated_image_path, status="completed")
+                                
+                                # Save to history manager if contextual translation is enabled
+                                if history_manager:
+                                    try:
+                                        # Use raw_obj from send_with_interrupt or response.raw_content_object
+                                        thought_signature = raw_obj if raw_obj else None
+                                        
+                                        # Use microsecond lock for thread safety
+                                        import threading
+                                        if not hasattr(self, '_history_lock'):
+                                            self._history_lock = threading.Lock()
+                                        
+                                        with self._history_lock:
+                                            # For generated images, save only the assistant message with image
+                                            # No user message needed - just the generated image as context
+                                            history_limit = int(self.trans_history.text()) if hasattr(self, 'trans_history') else 3
+                                            # Check both checkbox state (runtime) and config variable (initial)
+                                            rolling_history = self.rolling_checkbox.isChecked() if hasattr(self, 'rolling_checkbox') else self.translation_history_rolling_var
+                                            
+                                            # Store structured payload for image exchange
+                                            assistant_payload = {
+                                                "type": "image_exchange",
+                                                "version": 1,
+                                                "image_path": generated_image_path,
+                                                "image_name": os.path.basename(generated_image_path)
+                                            }
+                                            
+                                            history_manager.append_to_history(
+                                                user_content="",  # Empty - no need to send source image name to API
+                                                assistant_content=assistant_payload,
+                                                hist_limit=history_limit,
+                                                reset_on_limit=not rolling_history,
+                                                rolling_window=rolling_history,
+                                                raw_assistant_object=thought_signature
+                                            )
+                                        self.append_log(f"📚 Saved to translation history with image context")
+                                    except Exception as e:
+                                        self.append_log(f"⚠️ Failed to save to history: {e}")
+                                        import traceback
+                                        self.append_log(traceback.format_exc())
                                 
                                 # Skip HTML generation for generated images
                                 self.append_log(f"💾 Image saved to: {generated_image_path}")
