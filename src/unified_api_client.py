@@ -8296,6 +8296,10 @@ class UnifiedClient:
         
         model_lower = self.model.lower()
         
+        # Image generation models don't support thinking parameters
+        if 'image' in model_lower:
+            return False
+        
         # Check for Gemini 3.0 series (supports thinking level)
         if self._is_gemini_3_model():
             return True
@@ -8443,6 +8447,17 @@ class UnifiedClient:
         
         # Get thinking level for Gemini 3 (low/high)
         thinking_level = os.getenv("GEMINI_THINKING_LEVEL", "high").lower()
+        
+        # Check if image output mode is enabled
+        enable_image_output = os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
+        # Force enable for gemini-3-pro-image-preview model
+        model_lower = self.model.lower() if self.model else ""
+        if "gemini-3-pro-image-preview" in model_lower:
+            enable_image_output = True
+            if not self._is_stop_requested():
+                print("🎨 Image output mode enabled for gemini-3-pro-image-preview")
+        elif enable_image_output and not self._is_stop_requested():
+            print(f"🎨 Image output mode enabled for {self.model}")
         
         # Check if this model supports thinking
         supports_thinking = self._supports_thinking()
@@ -8760,6 +8775,27 @@ class UnifiedClient:
                             **generation_config_params
                         )
                     
+                    # Add image output config if enabled
+                    if enable_image_output:
+                        # Configure response modalities for image output
+                        generation_config.response_modalities = ['IMAGE', 'TEXT']
+                        
+                        # Get resolution from environment variable
+                        image_resolution = os.getenv("IMAGE_OUTPUT_RESOLUTION", "1K")
+                        # Validate resolution (must be 1K, 2K, or 4K)
+                        if image_resolution not in ["1K", "2K", "4K"]:
+                            image_resolution = "1K"  # Fallback to default
+                        
+                        # Create image config
+                        image_config = types.ImageConfig(
+                            aspect_ratio="16:9",  # Default aspect ratio
+                            image_size=image_resolution
+                        )
+                        generation_config.image_config = image_config
+                        
+                        if not self._is_stop_requested():
+                            print(f"   🖼️ Image config: aspect_ratio=16:9, resolution={image_resolution}")
+                    
                     # Add safety settings to config if they exist
                     if safety_settings:
                         generation_config.safety_settings = safety_settings
@@ -8849,6 +8885,7 @@ class UnifiedClient:
                         # Extract text from the Gemini response - FIXED LOGIC HERE
                     text_content = ""
                     raw_content_obj = None
+                    image_data = None  # Store extracted image data
                     
                     # Try the simple .text property first (most common)
                     if hasattr(response, 'text'):
@@ -8860,7 +8897,7 @@ class UnifiedClient:
                             print(f"   ⚠️ Could not access response.text: {e}")
                     
                     # If that didn't work or returned empty, try extracting from candidates
-                    if not text_content or True: # Always check candidates to get raw_content_obj
+                    if not text_content or True: # Always check candidates to get raw_content_obj and images
                         # CRITICAL FIX: Check if candidates exists AND is not None before iterating
                         if hasattr(response, 'candidates') and response.candidates is not None:
                             print(f"   🔍 Extracting from candidates...")
@@ -8873,10 +8910,17 @@ class UnifiedClient:
                                         if hasattr(candidate.content, 'parts') and candidate.content.parts:
                                             # If we already got text from .text, we don't need to rebuild it, 
                                             # but iterating ensures we validate structure.
-                                            if not text_content:
-                                                for part in candidate.content.parts:
-                                                    if hasattr(part, 'text') and part.text:
+                                            for part in candidate.content.parts:
+                                                # Extract text
+                                                if hasattr(part, 'text') and part.text:
+                                                    if not text_content:
                                                         text_content += part.text
+                                                # Extract image data if present
+                                                elif hasattr(part, 'inline_data') and part.inline_data:
+                                                    if hasattr(part.inline_data, 'data'):
+                                                        image_data = part.inline_data.data
+                                                        mime_type = getattr(part.inline_data, 'mime_type', 'image/png')
+                                                        print(f"   🖼️ Extracted image from response (mime_type: {mime_type})")
                                         elif hasattr(candidate.content, 'text') and candidate.content.text:
                                             if not text_content:
                                                 text_content += candidate.content.text
@@ -8889,9 +8933,37 @@ class UnifiedClient:
                         else:
                             print(f"   ⚠️ No candidates found in response or candidates is None")
                     
+                    # Save image if present
+                    if image_data and enable_image_output:
+                        try:
+                            # Get output directory
+                            output_dir = getattr(self, 'output_dir', None) or '.'
+                            images_dir = os.path.join(output_dir, 'generated_images')
+                            os.makedirs(images_dir, exist_ok=True)
+                            
+                            # Generate filename with timestamp
+                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            # Use response_name if available, otherwise use timestamp
+                            filename = f"gemini_image_{response_name or timestamp}.png"
+                            filepath = os.path.join(images_dir, filename)
+                            
+                            # Write image data to file
+                            with open(filepath, 'wb') as f:
+                                f.write(image_data)
+                            
+                            print(f"   💾 Saved generated image to: {filepath}")
+                            
+                            # Optionally include image path in text content
+                            if text_content:
+                                text_content += f"\n\n[Image saved to: {filepath}]"
+                            else:
+                                text_content = f"[Image saved to: {filepath}]"
+                        except Exception as e:
+                            print(f"   ⚠️ Failed to save generated image: {e}")
+                    
                     # Log if we still have no content
-                    if not text_content:
-                        print(f"   ⚠️ Warning: No text content extracted from Gemini response")
+                    if not text_content and not image_data:
+                        print(f"   ⚠️ Warning: No text or image content extracted from Gemini response")
                         print(f"   🔍 Response attributes: {list(response.__dict__.keys()) if hasattr(response, '__dict__') else 'No __dict__'}")
                     
                     # Build usage metadata dict for logging and payloads
@@ -8989,6 +9061,26 @@ class UnifiedClient:
                         error_type="rate_limit",
                         http_status=429
                     )
+                
+                # Check if thinking is not supported for this model
+                if "thinking" in error_str and "not supported" in error_str:
+                    print(f"   ⚠️ Model doesn't support thinking - disabling for this request")
+                    # Disable thinking for this attempt and retry
+                    supports_thinking = False
+                    if attempt < attempts - 1:
+                        attempt += 1
+                        time.sleep(1)  # Short delay before retry
+                        continue
+                
+                # Check if aspect ratio/image output is not supported for this model
+                if ("aspect ratio" in error_str or "image_config" in error_str or "response_modalities" in error_str) and "not" in error_str and ("enabled" in error_str or "supported" in error_str):
+                    print(f"   ⚠️ Model doesn't support image output mode - disabling for this request")
+                    # Disable image output for this attempt and retry
+                    enable_image_output = False
+                    if attempt < attempts - 1:
+                        attempt += 1
+                        time.sleep(1)  # Short delay before retry
+                        continue
                 
                 # For other errors, we might want to retry
                 if attempt < attempts - 1:

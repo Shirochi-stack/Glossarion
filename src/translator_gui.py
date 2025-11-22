@@ -1886,6 +1886,7 @@ Recent translations to summarize:
             ('webnovel_min_height_var', 'webnovel_min_height', '1000'),
             ('max_images_per_chapter_var', 'max_images_per_chapter', '1'),
             ('image_chunk_height_var', 'image_chunk_height', '1500'),
+            ('image_output_resolution_var', 'image_output_resolution', '1K'),
             ('chunk_timeout_var', 'chunk_timeout', '900'),
             ('batch_size_var', 'batch_size', '3'),
             ('chapter_number_offset_var', 'chapter_number_offset', '0'),
@@ -4191,6 +4192,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['IGNORE_HEADER'] = '1' if self.config.get('ignore_header', False) else '0'
                 os.environ['IGNORE_TITLE'] = '1' if self.config.get('ignore_title', False) else '0'
                 os.environ['USE_SORTED_FALLBACK'] = '1' if self.config.get('use_sorted_fallback', False) else '0'
+                # Update temperature and max output tokens from GUI's current values
+                os.environ['TRANSLATION_TEMPERATURE'] = str(self.trans_temp.text())
+                os.environ['MAX_OUTPUT_TOKENS'] = str(self.max_output_tokens)
                 
                 # Call the direct function
                 self.append_log("🚀 Starting translation...")
@@ -4880,8 +4884,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     del os.environ['DEFER_GLOSSARY_APPEND']
             
             # Get temperature and max tokens from GUI
-            temperature = float(self.temperature_entry.text()) if hasattr(self, 'temperature_entry') else 0.3
-            max_tokens = int(self.max_output_tokens_var) if hasattr(self, 'max_output_tokens_var') else 8192
+            temperature = float(self.trans_temp.text()) if hasattr(self, 'trans_temp') else 0.3
+            max_tokens = self.max_output_tokens
             
             # Build messages for vision API
             messages = [
@@ -5384,13 +5388,17 @@ If you see multiple p-b cookies, use the one with the longest value."""
         except Exception:
             pass
 
+        # CRITICAL: Use current GUI value for max_output_tokens, not the initial value
+        # This ensures user changes via the button are reflected in image translation
+        current_max_tokens = self.max_output_tokens
+        
         return {
             'EPUB_PATH': epub_path,
             'MODEL': self.model_var,
             'CONTEXTUAL': '1' if self.contextual_var else '0',
             'SEND_INTERVAL_SECONDS': str(self.delay_entry.text()),
             'THREAD_SUBMISSION_DELAY_SECONDS': self.thread_delay_entry.text().strip() or '0.5',
-            'MAX_OUTPUT_TOKENS': str(self.max_output_tokens),
+            'MAX_OUTPUT_TOKENS': str(current_max_tokens),
             'API_KEY': api_key,
             'OPENAI_API_KEY': api_key,
             'OPENAI_OR_Gemini_API_KEY': api_key,
@@ -8621,6 +8629,7 @@ Important rules:
                 ('save_cleaned_images', ['save_cleaned_images_var'], False, bool),
                 ('advanced_watermark_removal', ['advanced_watermark_removal_var'], False, bool),
                 ('enable_image_output_mode', ['enable_image_output_mode_var'], False, bool),
+                ('image_output_resolution', ['image_output_resolution_var'], '1K', str),
                 ('compression_factor', ['compression_factor_var'], 1.1, float),
                 ('image_chunk_overlap', ['image_chunk_overlap_var'], 1.0, lambda v: safe_float(v, 1.0)),
 
@@ -9434,6 +9443,7 @@ Important rules:
                 ('WEBNOVEL_MIN_HEIGHT', str(getattr(self, 'webnovel_min_height_var', '1000'))),
                 ('MAX_IMAGES_PER_CHAPTER', str(getattr(self, 'max_images_per_chapter_var', '1'))),
                 ('IMAGE_CHUNK_HEIGHT', str(getattr(self, 'image_chunk_height_var', '1500'))),
+                ('MAX_OUTPUT_TOKENS', str(getattr(self, 'max_output_tokens', 32768))),
                 ('HIDE_IMAGE_TRANSLATION_LABEL', '1' if getattr(self, 'hide_image_translation_label_var', True) else '0'),
                 ('DISABLE_EPUB_GALLERY', '1' if getattr(self, 'disable_epub_gallery_var', False) else '0'),
                 ('DISABLE_AUTOMATIC_COVER_CREATION', '1' if getattr(self, 'disable_automatic_cover_creation_var', False) else '0'),
@@ -9449,6 +9459,7 @@ Important rules:
                 ('ENABLE_WATERMARK_REMOVAL', '1' if getattr(self, 'enable_watermark_removal_var', True) else '0'),
                 ('SAVE_CLEANED_IMAGES', '1' if getattr(self, 'save_cleaned_images_var', False) else '0'),
                 ('ENABLE_IMAGE_OUTPUT_MODE', '1' if getattr(self, 'enable_image_output_mode_var', False) else '0'),
+                ('IMAGE_OUTPUT_RESOLUTION', str(getattr(self, 'image_output_resolution_var', '1K'))),
 
                 # Prompts
                 ('TRANSLATION_CHUNK_PROMPT', str(getattr(self, 'translation_chunk_prompt', ''))),

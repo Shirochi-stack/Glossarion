@@ -132,6 +132,10 @@ class ImageTranslator:
         self.image_max_tokens = int(os.getenv("MAX_OUTPUT_TOKENS", "8192"))
         self.chunk_height = int(os.getenv("IMAGE_CHUNK_HEIGHT", "2000"))
         
+        # DEBUG: Log the actual max tokens being used for image translation
+        print(f"🔍 ImageTranslator initialized with max_output_tokens: {self.image_max_tokens}")
+        print(f"🔍 Environment MAX_OUTPUT_TOKENS: {os.getenv('MAX_OUTPUT_TOKENS', 'NOT SET')}")
+        
         # Add context tracking for image chunks
         self.contextual_enabled = os.getenv("CONTEXTUAL", "1") == "1"
         self.history_manager = history_manager

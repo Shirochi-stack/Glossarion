@@ -4458,8 +4458,56 @@ def _create_image_translation_section(self, parent):
     
     image_output_desc = QLabel("Request image output from vision models (e.g. gemini-3-pro-image-preview)")
     image_output_desc.setStyleSheet("color: gray; font-size: 10pt;")
-    image_output_desc.setContentsMargins(20, 0, 0, 10)
+    image_output_desc.setContentsMargins(20, 0, 0, 5)
     left_v.addWidget(image_output_desc)
+    
+    # Image Output Resolution dropdown
+    resolution_w = QWidget()
+    resolution_h = QHBoxLayout(resolution_w)
+    resolution_h.setContentsMargins(20, 0, 0, 0)
+    resolution_h.setSpacing(8)
+    resolution_h.addWidget(QLabel("Output Resolution:"))
+    
+    resolution_combo = QComboBox()
+    resolution_combo.addItems(["1K", "2K", "4K"])
+    resolution_combo.setFixedWidth(80)
+    resolution_combo.setStyleSheet("""
+        QComboBox::down-arrow {
+            image: none;
+            width: 12px;
+            height: 12px;
+            border: none;
+        }
+    """)
+    self._add_combobox_arrow(resolution_combo)
+    self._disable_combobox_mousewheel(resolution_combo)
+    
+    # Initialize variable if not exists
+    if not hasattr(self, 'image_output_resolution_var'):
+        self.image_output_resolution_var = self.config.get('image_output_resolution', '1K')
+    
+    try:
+        idx = resolution_combo.findText(self.image_output_resolution_var)
+        if idx >= 0:
+            resolution_combo.setCurrentIndex(idx)
+    except Exception:
+        pass
+    
+    def _on_resolution_changed(text):
+        try:
+            self.image_output_resolution_var = text
+        except Exception:
+            pass
+    resolution_combo.currentTextChanged.connect(_on_resolution_changed)
+    resolution_h.addWidget(resolution_combo)
+    resolution_h.addStretch()
+    
+    left_v.addWidget(resolution_w)
+    
+    resolution_desc = QLabel("Higher resolution = better quality but slower generation")
+    resolution_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    resolution_desc.setContentsMargins(40, 0, 0, 10)
+    left_v.addWidget(resolution_desc)
     
     left_v.addSpacing(10)
     
