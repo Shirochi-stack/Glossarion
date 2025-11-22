@@ -8786,15 +8786,26 @@ class UnifiedClient:
                         if image_resolution not in ["1K", "2K", "4K"]:
                             image_resolution = "1K"  # Fallback to default
                         
-                        # Create image config
-                        image_config = types.ImageConfig(
-                            aspect_ratio="16:9",  # Default aspect ratio
-                            image_size=image_resolution
-                        )
-                        generation_config.image_config = image_config
+                        # Get aspect ratio from environment variable (optional)
+                        aspect_ratio = os.getenv("IMAGE_OUTPUT_ASPECT_RATIO", "auto")
                         
-                        if not self._is_stop_requested():
-                            print(f"   🖼️ Image config: aspect_ratio=16:9, resolution={image_resolution}")
+                        # Create image config - only include aspect_ratio if explicitly set
+                        if aspect_ratio != "auto":
+                            image_config = types.ImageConfig(
+                                aspect_ratio=aspect_ratio,
+                                image_size=image_resolution
+                            )
+                            if not self._is_stop_requested():
+                                print(f"   🖼️ Image config: aspect_ratio={aspect_ratio}, resolution={image_resolution}")
+                        else:
+                            # Don't specify aspect ratio - let Gemini auto-detect
+                            image_config = types.ImageConfig(
+                                image_size=image_resolution
+                            )
+                            if not self._is_stop_requested():
+                                print(f"   🖼️ Image config: aspect_ratio=auto, resolution={image_resolution}")
+                        
+                        generation_config.image_config = image_config
                     
                     # Add safety settings to config if they exist
                     if safety_settings:

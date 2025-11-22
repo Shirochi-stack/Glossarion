@@ -5036,6 +5036,27 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 if response_content:
                     self.append_log(f"✅ Received translation from API")
                     
+                    # Check if image output mode generated an image
+                    generated_image_path = None
+                    if "[Image saved to:" in response_content:
+                        # Extract the image path from the response
+                        import re
+                        match = re.search(r'\[Image saved to: (.+?)\]', response_content)
+                        if match:
+                            generated_image_path = match.group(1)
+                            if os.path.exists(generated_image_path):
+                                # Copy generated image to output directory
+                                generated_image_name = f"{base_name}_generated.png"
+                                generated_output_path = os.path.join(output_dir, generated_image_name)
+                                shutil.copy2(generated_image_path, generated_output_path)
+                                self.append_log(f"🖼️ Copied generated image to: {generated_output_path}")
+                                
+                                # Update response content to reference the copied image
+                                response_content = response_content.replace(
+                                    f"[Image saved to: {generated_image_path}]",
+                                    f"<img src='{generated_image_name}' alt='Generated image' style='max-width: 100%;'/>"
+                                )
+                    
                     # We already have output_dir defined at the top
                     # Copy original image to the output directory if not using combined output
                     if not combined_output_dir and not os.path.exists(os.path.join(output_dir, image_name)):
