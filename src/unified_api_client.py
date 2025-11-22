@@ -4898,8 +4898,16 @@ class UnifiedClient:
                   temperature: Optional[float] = None, 
                   max_tokens: Optional[int] = None,
                   max_completion_tokens: Optional[int] = None,
-                  context: str = 'image_translation') -> Tuple[str, str]:
+                  context: str = 'image_translation',
+                  response_name: Optional[str] = None) -> Tuple[str, str]:
         """Backwards-compatible public API; now delegates to unified _send_core."""
+        # Store response_name in thread-local storage so _get_file_names can use it
+        if response_name:
+            try:
+                tls = self._get_thread_local_client()
+                tls.custom_response_name = response_name
+            except Exception:
+                pass
         return self._send_core(messages, temperature, max_tokens, max_completion_tokens, context, image_data=image_data)
 
     def _send_image_internal(self, messages: List[Dict[str, Any]], image_data: Any,
@@ -5823,6 +5831,19 @@ class UnifiedClient:
         
         IMPORTANT: File naming must support duplicate detection across chapters
         """
+        # Check if a custom response name was provided
+        try:
+            tls = self._get_thread_local_client()
+            if hasattr(tls, 'custom_response_name') and tls.custom_response_name:
+                custom_name = tls.custom_response_name
+                # Clear it after use
+                tls.custom_response_name = None
+                # Generate payload name based on response name
+                payload_name = f"{os.path.splitext(custom_name)[0]}_payload.json"
+                return payload_name, custom_name
+        except Exception:
+            pass
+        
         if context == 'glossary':
             payload_name = f"glossary_payload_{self.conversation_message_count}.json"
             response_name = f"glossary_response_{self.conversation_message_count}.txt"
@@ -8947,16 +8968,26 @@ class UnifiedClient:
                     # Save image if present
                     if image_data and enable_image_output:
                         try:
-                            # Get output directory
+                            # Get output directory - save directly to output folder
                             output_dir = getattr(self, 'output_dir', None) or '.'
-                            images_dir = os.path.join(output_dir, 'generated_images')
-                            os.makedirs(images_dir, exist_ok=True)
+                            os.makedirs(output_dir, exist_ok=True)
                             
-                            # Generate filename with timestamp
-                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                            # Use response_name if available, otherwise use timestamp
-                            filename = f"gemini_image_{response_name or timestamp}.png"
-                            filepath = os.path.join(images_dir, filename)
+                            # Use response_name as filename (no prefix)
+                            # Extract clean filename from response_name if it contains path separators
+                            if response_name:
+                                clean_name = os.path.basename(response_name)
+                                # Remove file extension if present
+                                clean_name = os.path.splitext(clean_name)[0]
+                                # Remove hash and counter suffix if present (e.g., _865a1e39_imgA0)
+                                import re
+                                clean_name = re.sub(r'_[a-f0-9]{8}_img[A-Z0-9]+$', '', clean_name)
+                                filename = f"{clean_name}.png"
+                            else:
+                                # Fallback to timestamp if no response_name
+                                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                filename = f"{timestamp}.png"
+                            
+                            filepath = os.path.join(output_dir, filename)
                             
                             # Write image data to file
                             with open(filepath, 'wb') as f:
@@ -8964,11 +8995,8 @@ class UnifiedClient:
                             
                             print(f"   💾 Saved generated image to: {filepath}")
                             
-                            # Optionally include image path in text content
-                            if text_content:
-                                text_content += f"\n\n[Image saved to: {filepath}]"
-                            else:
-                                text_content = f"[Image saved to: {filepath}]"
+                            # Include image path marker in text content for GUI to detect
+                            text_content = f"[GENERATED_IMAGE:{filepath}]"
                         except Exception as e:
                             print(f"   ⚠️ Failed to save generated image: {e}")
                     

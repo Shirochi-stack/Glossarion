@@ -615,7 +615,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 32768
         self.proc = self.glossary_proc = None
-        __version__ = "6.4.2"
+        __version__ = "6.4.3"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -1978,7 +1978,7 @@ Recent translations to summarize:
             # Set the initial active profile for autosave
             self._active_profile_for_autosave = self.profile_var
         
-        self.append_log("🚀 Glossarion v6.4.2 - Ready to use!")
+        self.append_log("🚀 Glossarion v6.4.3 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Restore last selected input files if available
@@ -4406,6 +4406,31 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     self.append_log(f"   ❌ Failed: {failed} files")
                 self.append_log(f"   📁 Total: {total_files} files")
                 
+                # Create CBZ if we have generated images
+                if hasattr(self, 'generated_images') and self.generated_images:
+                    self.append_log(f"\n📦 Creating CBZ archive with {len(self.generated_images)} generated images...")
+                    try:
+                        import zipfile
+                        # Get output directory from first image path
+                        output_dir = os.path.dirname(self.generated_images[0])
+                        cbz_path = os.path.join(output_dir, f"{os.path.basename(output_dir)}.cbz")
+                        
+                        # Create CBZ (which is just a ZIP file)
+                        with zipfile.ZipFile(cbz_path, 'w', zipfile.ZIP_DEFLATED) as cbz:
+                            for img_path in sorted(self.generated_images):
+                                # Add image with just the filename (no path)
+                                cbz.write(img_path, os.path.basename(img_path))
+                        
+                        self.append_log(f"✅ CBZ created: {cbz_path}")
+                        self.append_log(f"   📁 Contains {len(self.generated_images)} images")
+                        
+                        # Clear the list for next batch
+                        self.generated_images = []
+                    except Exception as e:
+                        self.append_log(f"❌ Failed to create CBZ: {e}")
+                        import traceback
+                        self.append_log(traceback.format_exc())
+                
                 if combined_image_output_dir and successful > 0:
                     self.append_log(f"\n💡 Tip: You can now compile the HTML files in '{combined_image_output_dir}' into an EPUB")
                     
@@ -4710,8 +4735,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 'gpt-4-vision-preview',
                 'gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-exp',
                 'gemini-2.5-pro', 'gemini-2.5-flash',
-                'llama-3.2-11b-vision', 'llama-3.2-90b-vision',
-                'eh/gemini-2.5-flash', 'eh/gemini-1.5-flash', 'eh/gpt-4o'  # ElectronHub variants
+                'llama-3.2-11b-vision', 'llama-3.2-90b-vision', 'gemini-3-pro-image-preview ',
+                'eh/gemini-2.5-flash', 'eh/gemini-1.5-flash', 'eh/gpt-4o' # ElectronHub variants
             ]
             
             model_lower = model.lower()
@@ -4949,18 +4974,19 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     # For image calls, we need a wrapper since send_with_interrupt expects client.send()
                     # Create a temporary wrapper client that handles image calls
                     class ImageClientWrapper:
-                        def __init__(self, real_client, image_data):
+                        def __init__(self, real_client, image_data, response_name):
                             self.real_client = real_client
                             self.image_data = image_data
+                            self.response_name = response_name
                         
                         def send(self, messages, temperature, max_tokens):
-                            return self.real_client.send_image(messages, self.image_data, temperature=temperature, max_tokens=max_tokens)
+                            return self.real_client.send_image(messages, self.image_data, temperature=temperature, max_tokens=max_tokens, response_name=self.response_name if hasattr(self, 'response_name') else None)
                         
                         def __getattr__(self, name):
                             return getattr(self.real_client, name)
                     
-                    # Create wrapped client
-                    wrapped_client = ImageClientWrapper(client, image_base64)
+                    # Create wrapped client with source filename
+                    wrapped_client = ImageClientWrapper(client, image_base64, image_name)
                     
                     # Use send_with_interrupt
                     response, finish_reason_from_send, raw_obj = send_with_interrupt(
@@ -4977,7 +5003,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         messages,
                         image_base64,
                         temperature=temperature,
-                        max_tokens=max_tokens
+                        max_tokens=max_tokens,
+                        response_name=image_name
                     )
                 
                 # Check if stopped after API call
@@ -5036,26 +5063,28 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 if response_content:
                     self.append_log(f"✅ Received translation from API")
                     
-                    # Check if image output mode generated an image
-                    generated_image_path = None
-                    if "[Image saved to:" in response_content:
-                        # Extract the image path from the response
+                    # Check if this is a generated image response
+                    if response_content.startswith("[GENERATED_IMAGE:"):
+                        # Extract the image path
                         import re
-                        match = re.search(r'\[Image saved to: (.+?)\]', response_content)
+                        match = re.search(r'\[GENERATED_IMAGE:(.+?)\]', response_content)
                         if match:
                             generated_image_path = match.group(1)
                             if os.path.exists(generated_image_path):
-                                # Copy generated image to output directory
-                                generated_image_name = f"{base_name}_generated.png"
-                                generated_output_path = os.path.join(output_dir, generated_image_name)
-                                shutil.copy2(generated_image_path, generated_output_path)
-                                self.append_log(f"🖼️ Copied generated image to: {generated_output_path}")
+                                self.append_log(f"✅ Generated image saved: {os.path.basename(generated_image_path)}")
                                 
-                                # Update response content to reference the copied image
-                                response_content = response_content.replace(
-                                    f"[Image saved to: {generated_image_path}]",
-                                    f"<img src='{generated_image_name}' alt='Generated image' style='max-width: 100%;'/>"
-                                )
+                                # Track this image for CBZ compilation
+                                if not hasattr(self, 'generated_images'):
+                                    self.generated_images = []
+                                self.generated_images.append(generated_image_path)
+                                
+                                # Update progress as completed (no HTML file needed)
+                                self.image_progress_manager.update(image_path, content_hash, output_file=generated_image_path, status="completed")
+                                
+                                # Skip HTML generation for generated images
+                                self.append_log(f"💾 Image saved to: {generated_image_path}")
+                                self.append_log(f"📁 Output directory: {output_dir}")
+                                return True
                     
                     # We already have output_dir defined at the top
                     # Copy original image to the output directory if not using combined output
@@ -9743,7 +9772,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v6.4.2...")
+    print("🚀 Starting Glossarion v6.4.3...")
     
     # Initialize splash screen
     splash_manager = None
