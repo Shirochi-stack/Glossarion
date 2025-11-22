@@ -1856,6 +1856,7 @@ Recent translations to summarize:
             ('enable_decimal_chapters_var', 'enable_decimal_chapters', True),
             ('disable_gemini_safety_var', 'disable_gemini_safety', True),
             ('single_api_image_chunks_var', 'single_api_image_chunks', False),
+            ('enable_image_output_mode_var', 'enable_image_output_mode', False),
 
         ]
         
@@ -8619,6 +8620,7 @@ Important rules:
                 ('enable_watermark_removal', ['enable_watermark_removal_var'], False, bool),
                 ('save_cleaned_images', ['save_cleaned_images_var'], False, bool),
                 ('advanced_watermark_removal', ['advanced_watermark_removal_var'], False, bool),
+                ('enable_image_output_mode', ['enable_image_output_mode_var'], False, bool),
                 ('compression_factor', ['compression_factor_var'], 1.1, float),
                 ('image_chunk_overlap', ['image_chunk_overlap_var'], 1.0, lambda v: safe_float(v, 1.0)),
 
@@ -9446,6 +9448,7 @@ Important rules:
                 # Watermark/image toggles
                 ('ENABLE_WATERMARK_REMOVAL', '1' if getattr(self, 'enable_watermark_removal_var', True) else '0'),
                 ('SAVE_CLEANED_IMAGES', '1' if getattr(self, 'save_cleaned_images_var', False) else '0'),
+                ('ENABLE_IMAGE_OUTPUT_MODE', '1' if getattr(self, 'enable_image_output_mode_var', False) else '0'),
 
                 # Prompts
                 ('TRANSLATION_CHUNK_PROMPT', str(getattr(self, 'translation_chunk_prompt', ''))),

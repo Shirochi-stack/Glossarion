@@ -4442,6 +4442,25 @@ def _create_image_translation_section(self, parent):
     hide_desc.setContentsMargins(20, 0, 0, 10)
     left_v.addWidget(hide_desc)
     
+    # Enable Image Output Mode
+    image_output_cb = self._create_styled_checkbox("Enable Image Output Mode")
+    try:
+        image_output_cb.setChecked(bool(self.enable_image_output_mode_var))
+    except Exception:
+        pass
+    def _on_image_output_toggle(checked):
+        try:
+            self.enable_image_output_mode_var = bool(checked)
+        except Exception:
+            pass
+    image_output_cb.toggled.connect(_on_image_output_toggle)
+    left_v.addWidget(image_output_cb)
+    
+    image_output_desc = QLabel("Request image output from vision models (e.g. gemini-3-pro-image-preview)")
+    image_output_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    image_output_desc.setContentsMargins(20, 0, 0, 10)
+    left_v.addWidget(image_output_desc)
+    
     left_v.addSpacing(10)
     
     # Watermark Removal
