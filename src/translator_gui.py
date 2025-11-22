@@ -4735,7 +4735,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 'gpt-4-vision-preview',
                 'gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-exp',
                 'gemini-2.5-pro', 'gemini-2.5-flash',
-                'llama-3.2-11b-vision', 'llama-3.2-90b-vision', 'gemini-3-pro-image-preview ',
+                'llama-3.2-11b-vision', 'llama-3.2-90b-vision', 'gemini-3-pro-image-preview',
                 'eh/gemini-2.5-flash', 'eh/gemini-1.5-flash', 'eh/gpt-4o' # ElectronHub variants
             ]
             
