@@ -1836,9 +1836,16 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
         # Save request payload before API call
         payload_file = os.path.join(thread_dir, f"chapter_{idx+1}_request.json")
         with open(payload_file, 'w', encoding='utf-8') as f:
+            # Clean messages to remove non-serializable objects before saving
+            clean_msgs = []
+            for msg in msgs:
+                clean_msg = {'role': msg.get('role'), 'content': msg.get('content')}
+                # Don't include _raw_content_object in payload as it's not JSON serializable
+                clean_msgs.append(clean_msg)
+            
             json.dump({
                 'chapter': idx + 1,
-                'messages': msgs,
+                'messages': clean_msgs,
                 'temperature': temp,
                 'max_tokens': mtoks,
                 'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
@@ -2322,58 +2329,44 @@ def main(log_callback=None, stop_callback=None):
                                 # Add user message to history
                                 history.append({"role": "user", "content": user_content})
                                 
-                                # Create assistant entry with thought signature
+                                # Add to history in the EXACT same format as TransateKRtoEN
+                                history.append({"role": "user", "content": user_content})
+                                
+                                # Create assistant entry
                                 assistant_entry = {"role": "assistant", "content": assistant_content}
                                 
-                                # Serialize raw_obj if present
+                                # Serialize raw_obj before storing (Google SDK objects are not JSON serializable)
                                 if raw_obj:
-                                    import base64
+                                    # The save_progress function expects already-serialized data
+                                    # So we need to extract the parts from the Google SDK Content object
+                                    serialized_obj = None
+                                    if hasattr(raw_obj, 'parts'):
+                                        parts_list = []
+                                        try:
+                                            for part in raw_obj.parts:
+                                                part_dict = {}
+                                                if hasattr(part, 'text'):
+                                                    part_dict['text'] = part.text
+                                                # Check for thought-related attributes
+                                                for attr in ['thought', 'thought_signature']:
+                                                    if hasattr(part, attr):
+                                                        value = getattr(part, attr, None)
+                                                        if value is not None:
+                                                            if isinstance(value, bytes):
+                                                                import base64
+                                                                part_dict[attr] = {'_type': 'bytes', 'data': base64.b64encode(value).decode('utf-8')}
+                                                            else:
+                                                                part_dict[attr] = value
+                                                if part_dict:
+                                                    parts_list.append(part_dict)
+                                            if parts_list:
+                                                serialized_obj = {'parts': parts_list}
+                                        except Exception as e:
+                                            print(f"   ⚠️ Failed to serialize raw_obj: {e}")
                                     
-                                    def serialize_obj(obj):
-                                        """Serialize raw content object for storage"""
-                                        if obj is None:
-                                            return None
-                                        elif isinstance(obj, dict):
-                                            return obj
-                                        elif hasattr(obj, '__dict__'):
-                                            # For objects with __dict__, extract what we can
-                                            result_dict = {}
-                                            if hasattr(obj, 'parts'):
-                                                parts = []
-                                                try:
-                                                    for part in obj.parts:
-                                                        part_dict = {}
-                                                        # Only check known attributes
-                                                        for attr in ['text', 'thought', 'thought_signature', 'inline_data']:
-                                                            if hasattr(part, attr):
-                                                                try:
-                                                                    value = getattr(part, attr)
-                                                                    if value is not None:
-                                                                        # Special handling for thought_signature
-                                                                        if attr == 'thought_signature' and isinstance(value, bytes):
-                                                                            part_dict[attr] = {'_type': 'bytes', 'data': base64.b64encode(value).decode('utf-8')}
-                                                                            print(f"   🧠 Serialized thought signature for chapter {idx+1}: {len(value)} bytes")
-                                                                        else:
-                                                                            part_dict[attr] = serialize_obj(value)
-                                                                except:
-                                                                    pass
-                                                        if part_dict:
-                                                            parts.append(part_dict)
-                                                except:
-                                                    pass
-                                                if parts:
-                                                    result_dict['parts'] = parts
-                                            if hasattr(obj, 'role'):
-                                                try:
-                                                    result_dict['role'] = getattr(obj, 'role', None)
-                                                except:
-                                                    pass
-                                            return result_dict if result_dict else str(obj)
-                                        else:
-                                            return str(obj)
-                                    
-                                    assistant_entry["_raw_content_object"] = serialize_obj(raw_obj)
-                                    print(f"🧠 Added thought signature for chapter {idx+1} to history")
+                                    if serialized_obj:
+                                        assistant_entry["_raw_content_object"] = serialized_obj
+                                        print(f"🧠 Serialized and stored thought signature for chapter {idx+1}")
                                 
                                 history.append(assistant_entry)
                         except Exception as e:
