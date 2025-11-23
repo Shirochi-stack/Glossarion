@@ -4354,6 +4354,26 @@ def on_extraction_method_change(self):
             # Fallback for any errors during transition
             pass
             
+def _enforce_image_output_dependency(self):
+    """Enforce that image output mode is disabled when image translation is off,
+    unless using the special gemini-3-pro-image-preview model."""
+    try:
+        # Check model exception
+        model = str(getattr(self, 'model_var', '')).lower() 
+        allow_without_translation = 'gemini-3-pro-image-preview' in model
+        
+        # Check if image translation is enabled
+        image_translation_on = bool(getattr(self, 'enable_image_translation_var', False))
+        
+        # Determine if image output should be allowed
+        allowed = image_translation_on or allow_without_translation
+        
+        if not allowed:
+            # Force disable image output mode silently
+            self.enable_image_output_mode_var = False
+    except Exception:
+        pass
+
 def _create_image_translation_section(self, parent):
     """Create image translation section (PySide6)"""
     from PySide6.QtWidgets import QGroupBox, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QWidget, QLineEdit, QGridLayout
@@ -4385,6 +4405,9 @@ def _create_image_translation_section(self, parent):
         try:
             self.enable_image_translation_var = bool(checked)
             self.toggle_image_translation_section()
+            # Enforce image output dependency when image translation changes
+            if hasattr(self, '_enforce_image_output_dependency'):
+                self._enforce_image_output_dependency()
         except Exception:
             pass
     enable_cb.toggled.connect(_on_enable_image_toggle)

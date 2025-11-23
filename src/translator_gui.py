@@ -1783,6 +1783,28 @@ Recent translations to summarize:
 {translations}
         """
     
+    def _get_allowed_image_output_mode(self):
+        """Check if image output mode should be enabled based on dependencies.
+        Returns '1' if allowed and enabled, '0' otherwise.
+        Rule: Requires image translation ON, unless using gemini-3-pro-image-preview model."""
+        try:
+            # Check if user wants it enabled
+            if not getattr(self, 'enable_image_output_mode_var', False):
+                return '0'
+            
+            # Check model exception
+            model = str(getattr(self, 'model_var', '')).lower()
+            if 'gemini-3-pro-image-preview' in model:
+                return '1'  # Special model allows it without image translation
+            
+            # Otherwise requires image translation to be enabled
+            if getattr(self, 'enable_image_translation_var', False):
+                return '1'
+            
+            return '0'  # Not allowed
+        except Exception:
+            return '0'
+    
     def _init_variables(self):
         """Initialize all configuration variables"""
         # Load saved prompts
@@ -2298,6 +2320,10 @@ Recent translations to summarize:
         # Check for POE model
         if hasattr(self, '_check_poe_model'):
             self._check_poe_model()
+        
+        # Enforce image output dependency when model changes
+        if hasattr(self, '_enforce_image_output_dependency'):
+            self._enforce_image_output_dependency()
     
     # Also add this to bind manual typing events to the combobox
     def setup_model_combobox_bindings(self):
@@ -8756,7 +8782,8 @@ Important rules:
                 ('enable_watermark_removal', ['enable_watermark_removal_var'], False, bool),
                 ('save_cleaned_images', ['save_cleaned_images_var'], False, bool),
                 ('advanced_watermark_removal', ['advanced_watermark_removal_var'], False, bool),
-                ('enable_image_output_mode', ['enable_image_output_mode_var'], False, bool),
+                # Image output mode: use helper to enforce dependency
+                ('enable_image_output_mode', [], False, lambda _: self._get_allowed_image_output_mode() == '1'),
                 ('image_output_resolution', ['image_output_resolution_var'], '1K', str),
                 ('compression_factor', ['compression_factor_var'], 1.1, float),
                 ('image_chunk_overlap', ['image_chunk_overlap_var'], 1.0, lambda v: safe_float(v, 1.0)),
@@ -9586,7 +9613,7 @@ Important rules:
                 # Watermark/image toggles
                 ('ENABLE_WATERMARK_REMOVAL', '1' if getattr(self, 'enable_watermark_removal_var', True) else '0'),
                 ('SAVE_CLEANED_IMAGES', '1' if getattr(self, 'save_cleaned_images_var', False) else '0'),
-                ('ENABLE_IMAGE_OUTPUT_MODE', '1' if getattr(self, 'enable_image_output_mode_var', False) else '0'),
+                ('ENABLE_IMAGE_OUTPUT_MODE', self._get_allowed_image_output_mode()),
                 ('IMAGE_OUTPUT_RESOLUTION', str(getattr(self, 'image_output_resolution_var', '1K'))),
 
                 # Prompts
