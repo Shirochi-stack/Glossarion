@@ -4028,6 +4028,11 @@ def process_html_file_batch(args):
                 for issue in html_issues:
                     if issue == 'missing_html_structure':
                         issues.append("missing_html_tag")
+                    elif issue == 'missing_header_tags':
+                        # Check if this check is enabled
+                        check_missing_header = qa_settings.get('check_missing_header_tags', True)
+                        if check_missing_header:
+                            issues.append("missing_header_tags")
                     elif issue == 'insufficient_paragraph_tags':
                         issues.append("insufficient_paragraph_tags")
                     elif issue == 'unwrapped_text_content':
@@ -4196,6 +4201,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'report_format': 'detailed',
             'auto_save_report': True,
             'check_missing_html_tag': True,
+            'check_missing_header_tags': True,
             'check_paragraph_structure': True,
             'check_invalid_nesting': False,
             'paragraph_threshold': 0.3,
@@ -4227,6 +4233,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     log(f"   ✓ Repetition check: {'ENABLED' if qa_settings.get('check_repetition', True) else 'DISABLED'}")
     log(f"   ✓ Translation artifacts check: {'ENABLED' if qa_settings.get('check_translation_artifacts', False) else 'DISABLED'}")
     log(f"   ✓ Missing HTML tag check: {'ENABLED' if qa_settings.get('check_missing_html_tag', False) else 'DISABLED'}")
+    log(f"   ✓ Missing header tags check: {'ENABLED' if qa_settings.get('check_missing_header_tags', True) else 'DISABLED'}")
     log(f"   ✓ Paragraph structure check: {'ENABLED' if qa_settings.get('check_paragraph_structure', True) else 'DISABLED'}")    
     log(f"   ✓ Invalid nesting check: {'ENABLED' if qa_settings.get('check_invalid_nesting', False) else 'DISABLED'}") 
     log(f"   ✓ Word count ratio check: {'ENABLED' if qa_settings.get('check_word_count_ratio', False) else 'DISABLED'}") 
@@ -4659,6 +4666,17 @@ def check_html_structure_issues(file_path, log=print):
         head_close_exists = bool(re.search(r'</head>', content_lower))
         body_open_exists = bool(re.search(r'<body[^>]*>', content_lower))
         body_close_exists = bool(re.search(r'</body>', content_lower))
+        
+        # Check for missing heading tags (h1-h6)
+        has_heading_tag = False
+        for heading_level in range(1, 7):  # h1 through h6
+            if re.search(rf'<h{heading_level}[^>]*>', content_lower):
+                has_heading_tag = True
+                break
+        
+        if not has_heading_tag:
+            issues.append('missing_header_tags')
+            log(f"   HTML file is missing heading tags (h1-h6)")
         
         missing_structure = []
         

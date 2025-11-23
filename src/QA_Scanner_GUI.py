@@ -196,6 +196,7 @@ class QAScannerMixin:
             'report_format': 'detailed',
             'auto_save_report': True,
             'check_missing_html_tag': True,
+            'check_missing_header_tags': True,
             'check_invalid_nesting': False,
             'check_word_count_ratio': False,
             'check_multiple_headers': True,
@@ -2064,6 +2065,11 @@ class QAScannerMixin:
         html_tag_layout.addStretch()
         additional_layout.addWidget(html_tag_widget)
 
+        # Missing header tags check
+        check_missing_header_tags_checkbox = self._create_styled_checkbox("Flag HTML files with no heading tags (h1-h6)")
+        check_missing_header_tags_checkbox.setChecked(qa_settings.get('check_missing_header_tags', True))
+        additional_layout.addWidget(check_missing_header_tags_checkbox)
+
         # Invalid nesting check (separate toggle)
         check_invalid_nesting_checkbox = self._create_styled_checkbox("Check for invalid tag nesting")
         check_invalid_nesting_checkbox.setChecked(qa_settings.get('check_invalid_nesting', False))
@@ -2473,6 +2479,7 @@ class QAScannerMixin:
                     'check_multiple_headers': (check_multiple_headers_checkbox, lambda x: x.isChecked()),
                     'warn_name_mismatch': (warn_mismatch_checkbox, lambda x: x.isChecked()),
                     'check_missing_html_tag': (check_missing_html_tag_checkbox, lambda x: x.isChecked()),
+                    'check_missing_header_tags': (check_missing_header_tags_checkbox, lambda x: x.isChecked()),
                     'check_paragraph_structure': (check_paragraph_structure_checkbox, lambda x: x.isChecked()),
                     'check_invalid_nesting': (check_invalid_nesting_checkbox, lambda x: x.isChecked()),
                 }
@@ -2731,6 +2738,7 @@ class QAScannerMixin:
                 check_multiple_headers_checkbox.setChecked(True)
                 warn_mismatch_checkbox.setChecked(False)
                 check_missing_html_tag_checkbox.setChecked(True)
+                check_missing_header_tags_checkbox.setChecked(True)
                 check_paragraph_structure_checkbox.setChecked(True)
                 check_invalid_nesting_checkbox.setChecked(False)
                 paragraph_threshold_spinbox.setValue(30)  # 30% default
