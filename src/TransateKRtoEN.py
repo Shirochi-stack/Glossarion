@@ -6671,9 +6671,27 @@ def main(log_callback=None, stop_callback=None):
                                 continue
                             
                             # Build message preserving raw content object if present
-                            msg = {'role': role, 'content': content}
+                            # When we have _raw_content_object with parts, don't include content field
+                            # to avoid duplication (the text is already in the parts)
                             if '_raw_content_object' in h:
-                                msg['_raw_content_object'] = h['_raw_content_object']
+                                # Check if raw object has parts (which would contain the text)
+                                raw_obj = h['_raw_content_object']
+                                has_parts = False
+                                if isinstance(raw_obj, dict) and 'parts' in raw_obj:
+                                    has_parts = True
+                                elif hasattr(raw_obj, 'parts'):
+                                    has_parts = True
+                                
+                                if has_parts and role == 'assistant':
+                                    # For assistant messages with parts in raw object, omit content field
+                                    # The text is already in the parts
+                                    msg = {'role': role, '_raw_content_object': raw_obj}
+                                else:
+                                    # Include both content and raw object (for user messages or when no parts)
+                                    msg = {'role': role, 'content': content, '_raw_content_object': raw_obj}
+                            else:
+                                # No raw object, just include content normally
+                                msg = {'role': role, 'content': content}
                             memory_msgs.append(msg)
                     else:
                         # Original memory block approach for other models

@@ -8749,12 +8749,13 @@ class UnifiedClient:
                         # We need to construct contents list respecting the raw objects
                         for msg in messages:
                             role = msg['role']
-                            content = msg['content']
+                            content = msg.get('content', '')  # Content might be omitted when we have raw_obj
                             raw_obj = msg.get('_raw_content_object')
                             
                             if raw_obj and role == 'assistant':
                                 # For assistant messages with raw objects, use the original content format
                                 # The raw_obj should be the original candidate.content from Gemini
+                                # NOTE: We don't need 'content' field since it's already in parts[0].text
                                 
                                 # Check if this is the original Google SDK Content object
                                 if hasattr(raw_obj, 'parts'):
@@ -8763,6 +8764,8 @@ class UnifiedClient:
                                     contents.append(raw_obj)  # Use the original content object directly
                                 elif isinstance(raw_obj, dict):
                                     # This is a serialized version, we need to reconstruct proper Part objects
+                                    # IMPORTANT: The 'content' field in the message is redundant when we have parts
+                                    # We should only use the text from parts to avoid duplication
                                     from google.genai import types
                                     parts_to_send = []
                                     
@@ -8774,9 +8777,14 @@ class UnifiedClient:
                                                 # Create kwargs for Part construction
                                                 part_kwargs = {}
                                                 
-                                                # Add text if present
+                                                # Add text if present (use from parts, NOT from content field)
+                                                # If there's no text in the part but we have content, use that as fallback
                                                 if 'text' in part_data:
                                                     part_kwargs['text'] = part_data['text']
+                                                elif not any('text' in p for p in raw_obj['parts'] if isinstance(p, dict)):
+                                                    # No text in any part, use content as fallback for first part only
+                                                    if part_data == raw_obj['parts'][0]:
+                                                        part_kwargs['text'] = content
                                                 
                                                 # Add thought flag if present  
                                                 if 'thought' in part_data:
@@ -8845,7 +8853,12 @@ class UnifiedClient:
                     else:
                         # text-only: use formatted prompt
                         formatted_prompt = self._format_prompt(messages, style='gemini')
-                        contents = formatted_prompt
+                        # CRITICAL: Ensure contents is a list, not a string!
+                        if isinstance(formatted_prompt, str):
+                            # If _format_prompt returned a string, wrap it in proper message format
+                            contents = [{'role': 'user', 'parts': [{'text': formatted_prompt}]}]
+                        else:
+                            contents = formatted_prompt
                     # Only add thinking_config if the model supports it
                     if supports_thinking:
                         # Create thinking config separately
