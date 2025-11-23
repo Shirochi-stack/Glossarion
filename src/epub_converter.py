@@ -1163,8 +1163,72 @@ class EPUBCompiler:
                     translations_file = os.path.join(self.output_dir, "translated_headers.txt")
                     
                     if os.path.exists(translations_file):
-                        self.log("📁 Found existing translated_headers.txt - skipping standalone translation")
-                        standalone_success = True
+                        self.log("📁 Found existing translated_headers.txt - applying existing translations...")
+                        self.log(f"  Translation file: {translations_file}")
+                        self.log(f"  HTML directory: {self.html_dir}")
+                        
+                        try:
+                            # Import the functions from standalone module
+                            from translate_headers_standalone import (
+                                load_translations_from_file, 
+                                apply_existing_translations,
+                                extract_source_chapters_with_opf_mapping,
+                                match_output_to_source_chapters
+                            )
+                            self.log("✅ Successfully imported standalone module functions")
+                            
+                            # Load existing translations
+                            self.log("🔍 Loading translations from file...")
+                            chapters_info, translated_headers = load_translations_from_file(translations_file, self.log)
+                            
+                            if translated_headers:
+                                self.log(f"📋 Loaded {len(translated_headers)} existing translations:")
+                                # Show first 3 translations for debugging
+                                for num in list(translated_headers.keys())[:3]:
+                                    self.log(f"    Chapter {num}: {translated_headers[num]}")
+                                
+                                # Get the source EPUB path
+                                source_epub_path = os.getenv('EPUB_PATH')
+                                self.log(f"  Source EPUB path: {source_epub_path}")
+                                
+                                if source_epub_path and os.path.exists(source_epub_path):
+                                    self.log(f"🔄 Applying translations to HTML files in: {self.html_dir}")
+                                    
+                                    # Apply translations using the standalone module's function
+                                    result = apply_existing_translations(
+                                        epub_path=source_epub_path,
+                                        output_dir=self.html_dir,
+                                        translations_file=translations_file,
+                                        update_html=True,  # Make sure to update the HTML files
+                                        log_callback=self.log
+                                    )
+                                    
+                                    if result:
+                                        self.log(f"✅ Successfully applied translations to {len(result)} files:")
+                                        # Show first 3 updated files
+                                        for filename in list(result.keys())[:3]:
+                                            self.log(f"    {filename}: {result[filename]}")
+                                    else:
+                                        self.log("⚠️ No files were updated with translations (result was empty)")
+                                else:
+                                    self.log(f"⚠️ Source EPUB not found or doesn't exist: {source_epub_path}")
+                                    self.log("  Cannot apply translations without source EPUB for mapping")
+                            else:
+                                self.log("⚠️ No translations were loaded from file (empty result)")
+                            
+                            standalone_success = True
+                        except ImportError as e:
+                            self.log(f"⚠️ Failed to import standalone module: {e}")
+                            self.log("  Make sure translate_headers_standalone.py is in the same directory")
+                            import traceback
+                            self.log(traceback.format_exc())
+                            standalone_success = False
+                        except Exception as e:
+                            self.log(f"⚠️ Failed to apply existing translations: {e}")
+                            self.log(f"  Exception type: {type(e).__name__}")
+                            import traceback
+                            self.log(traceback.format_exc())
+                            standalone_success = False
                     else:
                         # Get the source EPUB path from environment
                         source_epub_path = os.getenv('EPUB_PATH')
@@ -1221,9 +1285,40 @@ class EPUBCompiler:
                 translations_file = os.path.join(self.output_dir, "translated_headers.txt")
                 
                 if os.path.exists(translations_file):
-                    # File exists - skip translation entirely
-                    self.log("📁 Found existing translated_headers.txt - skipping header translation")
-                    # No need to parse or do anything else
+                    # File exists - load and apply existing translations
+                    self.log("📁 Found existing translated_headers.txt - applying existing translations...")
+                    
+                    try:
+                        # Import the functions from standalone module
+                        from translate_headers_standalone import load_translations_from_file
+                        
+                        # Load existing translations
+                        _, translated_headers = load_translations_from_file(translations_file, self.log)
+                        
+                        if translated_headers:
+                            self.log(f"📋 Loaded {len(translated_headers)} existing translations")
+                            
+                            # Apply translations to HTML files using the same method
+                            if hasattr(self, 'update_html_headers') and self.update_html_headers:
+                                self.header_translator._update_html_headers_exact(
+                                    self.html_dir, 
+                                    translated_headers, 
+                                    current_titles
+                                )
+                                self.log("✅ Applied existing translations to HTML files")
+                            
+                            # Update toc.ncx if it exists
+                            toc_path = os.path.join(self.output_dir, 'toc.ncx')
+                            if os.path.exists(toc_path):
+                                from translate_headers_standalone import update_toc_ncx
+                                update_toc_ncx(toc_path, translated_headers, current_titles, self.log)
+                        else:
+                            self.log("⚠️ No translations found in existing file")
+                    
+                    except Exception as e:
+                        self.log(f"⚠️ Failed to apply existing translations: {e}")
+                        import traceback
+                        self.log(traceback.format_exc())
                 else:
                     # No existing file - proceed with translation
                     self.log("🌐 Batch translating chapter headers...")
