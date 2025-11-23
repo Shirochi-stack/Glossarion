@@ -5977,33 +5977,59 @@ class UnifiedClient:
                 except Exception:
                     pass
                 
-                # Clean messages for payload - only include thought_signature in _raw_content_object
+                # Clean messages for payload - preserve thought signatures properly
                 cleaned_messages = []
                 for msg in messages:
                     cleaned_msg = msg.copy()
                     if '_raw_content_object' in cleaned_msg and cleaned_msg['_raw_content_object']:
                         raw_obj = cleaned_msg['_raw_content_object']
-                        # Extract only the thought signature if it exists
-                        thought_sig = None
-                        if isinstance(raw_obj, dict):
-                            # Look for thought_signature in parts array
-                            if 'parts' in raw_obj and isinstance(raw_obj['parts'], list):
-                                for part in raw_obj['parts']:
-                                    if isinstance(part, dict) and 'thought_signature' in part:
-                                        thought_sig = part['thought_signature']
-                                        break
-                            # Or directly in the raw_obj
-                            elif 'thought_signature' in raw_obj:
-                                thought_sig = raw_obj['thought_signature']
                         
-                        # Replace _raw_content_object with just the thought signature
-                        if thought_sig:
-                            cleaned_msg['_raw_content_object'] = {
-                                'thought_signature': thought_sig
-                            }
+                        # Preserve the entire structure for Gemini 3 models with thought signatures
+                        if isinstance(raw_obj, dict) and 'parts' in raw_obj:
+                            # This is already serialized, keep it as-is for the payload
+                            # It contains the thought signatures we need
+                            pass  # Keep _raw_content_object as it is
+                        elif hasattr(raw_obj, 'parts'):
+                            # This is a Google SDK object, need to serialize it
+                            import base64
+                            serialized_obj = {'parts': []}
+                            try:
+                                for part in raw_obj.parts:
+                                    part_dict = {}
+                                    if hasattr(part, 'text') and part.text:
+                                        part_dict['text'] = part.text
+                                    if hasattr(part, 'thought') and part.thought is not None:
+                                        part_dict['thought'] = part.thought
+                                    if hasattr(part, 'thought_signature') and part.thought_signature:
+                                        # Serialize bytes as base64
+                                        part_dict['thought_signature'] = {
+                                            '_type': 'bytes',
+                                            'data': base64.b64encode(part.thought_signature).decode('utf-8')
+                                        }
+                                    if part_dict:
+                                        serialized_obj['parts'].append(part_dict)
+                                if hasattr(raw_obj, 'role'):
+                                    serialized_obj['role'] = raw_obj.role
+                                cleaned_msg['_raw_content_object'] = serialized_obj
+                            except Exception as e:
+                                # If serialization fails, remove the field
+                                print(f"Warning: Could not serialize raw_content_object for payload: {e}")
+                                del cleaned_msg['_raw_content_object']
                         else:
-                            # No thought signature found, remove the field entirely
-                            del cleaned_msg['_raw_content_object']
+                            # For other types, keep minimal info
+                            thought_sig = None
+                            if isinstance(raw_obj, dict):
+                                # Look for thought_signature directly
+                                if 'thought_signature' in raw_obj:
+                                    thought_sig = raw_obj['thought_signature']
+                            
+                            if thought_sig:
+                                cleaned_msg['_raw_content_object'] = {
+                                    'thought_signature': thought_sig
+                                }
+                            else:
+                                # No useful data to save
+                                del cleaned_msg['_raw_content_object']
                     
                     cleaned_messages.append(cleaned_msg)
                 
@@ -8736,39 +8762,71 @@ class UnifiedClient:
                                     print(f"   🧠 Using original Google SDK Content object for thought signature")
                                     contents.append(raw_obj)  # Use the original content object directly
                                 elif isinstance(raw_obj, dict):
-                                    # This is a serialized version, we need to reconstruct the proper format
+                                    # This is a serialized version, we need to reconstruct proper Part objects
+                                    from google.genai import types
                                     parts_to_send = []
                                     
-                                    # Always include the text content first
-                                    parts_to_send.append({'text': content})
-                                    
-                                    # Look for thought_signature and add it as a Part
-                                    thought_sig = None
+                                    # Check if raw_obj has 'parts' array (properly serialized format)
                                     if 'parts' in raw_obj and isinstance(raw_obj['parts'], list):
-                                        for part in raw_obj['parts']:
-                                            if isinstance(part, dict) and 'thought_signature' in part:
-                                                thought_sig = part['thought_signature']
-                                                break
-                                    elif 'thought_signature' in raw_obj:
-                                        thought_sig = raw_obj['thought_signature']
-                                    
-                                    if thought_sig:
-                                        # Deserialize bytes if needed
-                                        if isinstance(thought_sig, dict) and thought_sig.get('_type') == 'bytes':
-                                            # This is a serialized bytes object, decode it
-                                            import base64
-                                            thought_sig = base64.b64decode(thought_sig['data'])
-                                            print(f"   🧠 Decoded thought signature from base64 (size: {len(thought_sig)} bytes)")
+                                        # Reconstruct Part objects from the serialized format
+                                        for part_data in raw_obj['parts']:
+                                            if isinstance(part_data, dict):
+                                                # Create kwargs for Part construction
+                                                part_kwargs = {}
+                                                
+                                                # Add text if present
+                                                if 'text' in part_data:
+                                                    part_kwargs['text'] = part_data['text']
+                                                
+                                                # Add thought flag if present  
+                                                if 'thought' in part_data:
+                                                    part_kwargs['thought'] = part_data['thought']
+                                                
+                                                # Handle thought_signature - CRITICAL for Gemini 3
+                                                if 'thought_signature' in part_data:
+                                                    thought_sig = part_data['thought_signature']
+                                                    # Deserialize bytes if needed
+                                                    if isinstance(thought_sig, dict) and thought_sig.get('_type') == 'bytes':
+                                                        import base64
+                                                        thought_sig_bytes = base64.b64decode(thought_sig['data'])
+                                                        part_kwargs['thought_signature'] = thought_sig_bytes
+                                                        print(f"   🧠 Decoded thought signature from base64 (size: {len(thought_sig_bytes)} bytes)")
+                                                    else:
+                                                        part_kwargs['thought_signature'] = thought_sig
+                                                
+                                                # Create actual Part object
+                                                if part_kwargs:
+                                                    try:
+                                                        # Create a Part object with the fields
+                                                        part_obj = types.Part(**part_kwargs)
+                                                        parts_to_send.append(part_obj)
+                                                        if 'thought_signature' in part_kwargs:
+                                                            print(f"   ✅ Created Part object WITH thought signature")
+                                                    except Exception as e:
+                                                        print(f"   ❌ Failed to create Part object: {e}")
+                                                        # Fallback to dict if Part creation fails
+                                                        parts_to_send.append(part_kwargs)
                                         
-                                        # Add the thought signature as a dict
-                                        parts_to_send.append({'thought_signature': thought_sig})
-                                        print(f"   🧠 Including thought signature in request (type: {type(thought_sig).__name__})")
-                                    
-                                    # Create the contents entry with the parts
-                                    contents.append({
-                                        'role': 'model',
-                                        'parts': parts_to_send
-                                    })
+                                        if parts_to_send:
+                                            print(f"   🧠 Created {len(parts_to_send)} Part objects for Gemini 3")
+                                            # Create Content object with the Part objects
+                                            try:
+                                                content_obj = types.Content(role='model', parts=parts_to_send)
+                                                contents.append(content_obj)
+                                                print(f"   ✅ Created Content object with Part objects containing thought signatures")
+                                            except Exception as e:
+                                                print(f"   ❌ Failed to create Content object: {e}")
+                                                # Fallback to dict format
+                                                contents.append({
+                                                    'role': 'model',
+                                                    'parts': [{'text': p.text if hasattr(p, 'text') else p.get('text', '')} for p in parts_to_send]
+                                                })
+                                    else:
+                                        # Fallback: just include the text content
+                                        contents.append({
+                                            'role': 'model',
+                                            'parts': [{'text': content}]
+                                        })
                                 else:
                                     # Fallback: just send the text without thought signature
                                     contents.append({
@@ -8858,6 +8916,22 @@ class UnifiedClient:
                         if not hasattr(self, 'gemini_client') or self.gemini_client is None:
                             print("⚠️ Gemini client is None. This typically happens when stop was requested.")
                             raise UnifiedClientError("Gemini client not initialized - operation may have been cancelled", error_type="cancelled")
+                        
+                        # DEBUG: Log what we're actually sending
+                        print(f"   📤 Sending {len(contents)} content objects to Gemini API")
+                        for i, content in enumerate(contents):
+                            if isinstance(content, dict):
+                                print(f"      Content {i}: dict with role={content.get('role')}, parts={len(content.get('parts', []))} parts")
+                            elif hasattr(content, 'role'):
+                                num_parts = len(content.parts) if hasattr(content, 'parts') else 0
+                                print(f"      Content {i}: {type(content).__name__} with role={content.role}, parts={num_parts}")
+                                # Check if any parts have thought_signature
+                                if hasattr(content, 'parts'):
+                                    for j, part in enumerate(content.parts):
+                                        if hasattr(part, 'thought_signature') and part.thought_signature:
+                                            print(f"         ✅ Part {j} HAS thought_signature ({len(part.thought_signature)} bytes)")
+                            else:
+                                print(f"      Content {i}: {type(content)}")
                         
                         response = self.gemini_client.models.generate_content(
                             model=self.model,
