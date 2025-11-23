@@ -2952,62 +2952,11 @@ def main(log_callback=None, stop_callback=None):
                         
                         # Add thought signatures if available
                         if 'raw_obj' in locals() and raw_obj:
-                            # Serialize the raw object immediately to prevent bytes issues later
-                            import base64
-                            
-                            def serialize_obj(obj):
-                                """Recursively serialize an object, converting bytes to base64"""
-                                if isinstance(obj, bytes):
-                                    return {'_type': 'bytes', 'data': base64.b64encode(obj).decode('utf-8')}
-                                elif isinstance(obj, dict):
-                                    result = {}
-                                    for key, value in obj.items():
-                                        result[key] = serialize_obj(value)
-                                    return result
-                                elif isinstance(obj, list):
-                                    return [serialize_obj(item) for item in obj]
-                                elif isinstance(obj, (str, int, float, bool, type(None))):
-                                    return obj
-                                elif hasattr(obj, '__dict__'):
-                                    # For objects with __dict__, try to extract what we can
-                                    result = {}
-                                    if hasattr(obj, 'parts'):
-                                        parts = []
-                                        try:
-                                            for part in obj.parts:
-                                                part_dict = {}
-                                                # Only check known attributes
-                                                for attr in ['text', 'thought', 'thought_signature', 'inline_data']:
-                                                    if hasattr(part, attr):
-                                                        try:
-                                                            value = getattr(part, attr)
-                                                            if value is not None:
-                                                                # Special handling for thought_signature to ensure it's accessible
-                                                                if attr == 'thought_signature' and isinstance(value, bytes):
-                                                                    # Store it in a way unified_api_client expects
-                                                                    part_dict[attr] = {'_type': 'bytes', 'data': base64.b64encode(value).decode('utf-8')}
-                                                                    print(f"   🧠 Serialized thought signature: {len(value)} bytes")
-                                                                else:
-                                                                    part_dict[attr] = serialize_obj(value)
-                                                        except:
-                                                            pass
-                                                if part_dict:
-                                                    parts.append(part_dict)
-                                        except:
-                                            pass
-                                        if parts:
-                                            result['parts'] = parts
-                                    if hasattr(obj, 'role'):
-                                        try:
-                                            result['role'] = getattr(obj, 'role', None)
-                                        except:
-                                            pass
-                                    return result if result else str(obj)
-                                else:
-                                    return str(obj)
-                            
-                            assistant_entry["_raw_content_object"] = serialize_obj(raw_obj)
-                            print("🧠 Captured thought signature for glossary history")
+                            # According to Google docs: "The `content` object automatically attaches 
+                            # the required thought_signature behind the scenes"
+                            # So we should store the raw_obj directly as it's the candidate.content object
+                            assistant_entry["_raw_content_object"] = raw_obj
+                            print("📌 Preserving thought signature for context (stored raw Content object)")
                                     
                             history.append(assistant_entry)
                     

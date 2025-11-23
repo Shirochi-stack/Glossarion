@@ -6833,30 +6833,22 @@ class UnifiedClient:
                 if not result_text:
                     raise UnifiedClientError("All Vertex AI Gemini attempts failed to produce content")
                 
-                # Extract thought signature from Vertex AI response if present
+                # Store the actual Vertex AI content object for thought signatures
+                # Just like regular Gemini API does - the thinking is embedded in the text
                 raw_content_obj = None
                 if response and hasattr(response, 'candidates') and response.candidates:
                     for candidate in response.candidates:
-                        if candidate.content and hasattr(candidate.content, 'parts'):
-                            parts_data = []
-                            for part in candidate.content.parts:
-                                part_dict = {}
-                                # Check for text
-                                if hasattr(part, 'text'):
-                                    part_dict['text'] = part.text
-                                # Check for thought signature (might be in different attributes)
-                                if hasattr(part, 'thought'):
-                                    part_dict['thought'] = part.thought
-                                if hasattr(part, 'thought_signature'):
-                                    part_dict['thought_signature'] = part.thought_signature
-                                if part_dict:
-                                    parts_data.append(part_dict)
-                            if parts_data:
-                                raw_content_obj = {'parts': parts_data}
-                                # Check if any part has thought signature
-                                has_thought = any('thought' in p or 'thought_signature' in p for p in parts_data)
-                                if has_thought:
-                                    print("🧠 Captured thought signature from Vertex AI Gemini")
+                        if candidate.content:
+                            # Store the actual content object, not a custom dictionary
+                            # This preserves the full response including any embedded thinking
+                            raw_content_obj = candidate.content
+                            # Check if the text contains thinking tags
+                            if hasattr(candidate.content, 'parts'):
+                                for part in candidate.content.parts:
+                                    if hasattr(part, 'text') and part.text:
+                                        if '<thinking>' in part.text or '<thought>' in part.text:
+                                            print("🧠 Found thinking tags in Vertex AI Gemini response")
+                            break  # Just use the first candidate
                 
                 return UnifiedResponse(
                     content=result_text,
@@ -8801,8 +8793,9 @@ class UnifiedClient:
                         # Create thinking config separately
                         if is_gemini_3:
                             # Gemini 3.0 uses thinking_level
+                            # Set include_thoughts=True to preserve thought signatures (per Google docs)
                             thinking_config = types.ThinkingConfig(
-                                include_thoughts=False, # Summaries not needed if we capture raw response? But doc says summaries are synthesized.
+                                include_thoughts=True,  # REQUIRED for thought signature preservation
                                 thinking_level=thinking_level
                             )
                         else:
