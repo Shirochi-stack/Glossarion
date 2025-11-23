@@ -1911,7 +1911,7 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
             'data': valid_data,
             'resp': resp,
             'chap': chap,  # Include the chapter text in the result
-            'raw_obj': raw_obj if 'raw_obj' in locals() else None,  # Include raw object for history
+            'raw_obj': raw_obj,  # Include raw object for history (from send_with_interrupt)
             'error': None
         }
             
@@ -2238,6 +2238,9 @@ def main(log_callback=None, stop_callback=None):
                     if idx % 5 == 0:
                         time.sleep(0.001)
                 
+                # Collect batch results for history update (same as TransateKRtoEN)
+                batch_history_map = {}  # Will store (idx, user_prompt, resp, raw_obj) for each successful chapter
+                
                 # Process results AS THEY COMPLETE, not all at once
                 for future in as_completed(futures):
                     if check_stop():
@@ -2258,6 +2261,7 @@ def main(log_callback=None, stop_callback=None):
                         data = result.get('data', [])
                         resp = result.get('resp', '')
                         error = result.get('error')
+                        raw_obj = result.get('raw_obj')
                         
                         if error:
                             print(f"[Chapter {idx+1}] Error: {error}")
@@ -2284,19 +2288,16 @@ def main(log_callback=None, stop_callback=None):
                         
                         completed.append(idx)
                         
+                        # Store history entry for this chapter (will be added after batch completes)
+                        if contextual_enabled and resp and chap:
+                            system_prompt, user_prompt = build_prompt(chap)
+                            batch_history_map[idx] = (user_prompt, resp, raw_obj)
+                        
                         # Save progress after each chapter completes (crash-safe with atomic writes)
                         save_progress(completed, glossary, history)
                         # Also save glossary files for incremental updates
                         save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                         save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
-                        
-                        # Add to history if contextual is enabled
-                        if contextual_enabled and resp and chap:
-                            system_prompt, user_prompt = build_prompt(chap)
-                            # Microsecond lock to prevent race conditions when appending to history
-                            time.sleep(0.000001)
-                            with _history_lock:
-                                history.append({"user": user_prompt, "assistant": resp})
                         
                     except Exception as e:
                         if "stopped by user" in str(e).lower():
@@ -2304,6 +2305,79 @@ def main(log_callback=None, stop_callback=None):
                         else:
                             print(f"Error processing chapter {idx+1}: {e}")
                         completed.append(idx)
+            
+            # After all futures in this batch complete, append history entries in order
+            # This matches TransateKRtoEN batch mode behavior
+            if contextual_enabled and batch_history_map:
+                print(f"\n📝 Updating context history for batch {batch_num+1}...")
+                # Sort by chapter index to maintain order
+                sorted_chapters = sorted(current_batch, key=lambda x: x[0])
+                for idx, chap in sorted_chapters:
+                    if idx in batch_history_map:
+                        user_content, assistant_content, raw_obj = batch_history_map[idx]
+                        try:
+                            # Microsecond delay between history appends to prevent race conditions
+                            time.sleep(0.000001)
+                            with _history_lock:
+                                # Add user message to history
+                                history.append({"role": "user", "content": user_content})
+                                
+                                # Create assistant entry with thought signature
+                                assistant_entry = {"role": "assistant", "content": assistant_content}
+                                
+                                # Serialize raw_obj if present
+                                if raw_obj:
+                                    import base64
+                                    
+                                    def serialize_obj(obj):
+                                        """Serialize raw content object for storage"""
+                                        if obj is None:
+                                            return None
+                                        elif isinstance(obj, dict):
+                                            return obj
+                                        elif hasattr(obj, '__dict__'):
+                                            # For objects with __dict__, extract what we can
+                                            result_dict = {}
+                                            if hasattr(obj, 'parts'):
+                                                parts = []
+                                                try:
+                                                    for part in obj.parts:
+                                                        part_dict = {}
+                                                        # Only check known attributes
+                                                        for attr in ['text', 'thought', 'thought_signature', 'inline_data']:
+                                                            if hasattr(part, attr):
+                                                                try:
+                                                                    value = getattr(part, attr)
+                                                                    if value is not None:
+                                                                        # Special handling for thought_signature
+                                                                        if attr == 'thought_signature' and isinstance(value, bytes):
+                                                                            part_dict[attr] = {'_type': 'bytes', 'data': base64.b64encode(value).decode('utf-8')}
+                                                                            print(f"   🧠 Serialized thought signature for chapter {idx+1}: {len(value)} bytes")
+                                                                        else:
+                                                                            part_dict[attr] = serialize_obj(value)
+                                                                except:
+                                                                    pass
+                                                        if part_dict:
+                                                            parts.append(part_dict)
+                                                except:
+                                                    pass
+                                                if parts:
+                                                    result_dict['parts'] = parts
+                                            if hasattr(obj, 'role'):
+                                                try:
+                                                    result_dict['role'] = getattr(obj, 'role', None)
+                                                except:
+                                                    pass
+                                            return result_dict if result_dict else str(obj)
+                                        else:
+                                            return str(obj)
+                                    
+                                    assistant_entry["_raw_content_object"] = serialize_obj(raw_obj)
+                                    print(f"🧠 Added thought signature for chapter {idx+1} to history")
+                                
+                                history.append(assistant_entry)
+                        except Exception as e:
+                            print(f"⚠️ Failed to append Chapter {idx+1} to glossary history: {e}")
             
             batch_elapsed = time.time() - batch_start_time
             print(f"[BATCH] Batch {batch_num+1} completed in {batch_elapsed:.1f}s total")
