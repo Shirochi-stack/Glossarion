@@ -5984,22 +5984,42 @@ class UnifiedClient:
                     if '_raw_content_object' in cleaned_msg and cleaned_msg['_raw_content_object']:
                         raw_obj = cleaned_msg['_raw_content_object']
                         
-                        # Preserve the entire structure for Gemini 3 models with thought signatures
+                        # Preserve the structure for Gemini 3 models with thought signatures
+                        # BUT filter out reasoning parts (thought: true)
                         if isinstance(raw_obj, dict) and 'parts' in raw_obj:
-                            # This is already serialized, keep it as-is for the payload
-                            # It contains the thought signatures we need
-                            pass  # Keep _raw_content_object as it is
+                            # Filter out reasoning parts before saving
+                            filtered_parts = []
+                            for part in raw_obj.get('parts', []):
+                                if isinstance(part, dict) and part.get('thought', False) == True:
+                                    # Skip reasoning parts - don't save them
+                                    continue
+                                filtered_parts.append(part)
+                            
+                            if filtered_parts:
+                                # Save the filtered version
+                                cleaned_msg['_raw_content_object'] = {'parts': filtered_parts}
+                                if 'role' in raw_obj:
+                                    cleaned_msg['_raw_content_object']['role'] = raw_obj['role']
+                            else:
+                                # All parts were reasoning, don't save raw object
+                                pass
                         elif hasattr(raw_obj, 'parts'):
                             # This is a Google SDK object, need to serialize it
+                            # IMPORTANT: Filter out reasoning parts (thought: true) when saving
                             import base64
                             serialized_obj = {'parts': []}
                             try:
                                 for part in raw_obj.parts:
+                                    # Skip reasoning parts when saving to payload
+                                    if hasattr(part, 'thought') and part.thought == True:
+                                        continue  # Don't save reasoning parts
+                                    
                                     part_dict = {}
                                     if hasattr(part, 'text') and part.text:
                                         part_dict['text'] = part.text
-                                    if hasattr(part, 'thought') and part.thought is not None:
-                                        part_dict['thought'] = part.thought
+                                    # Don't save thought field since we're filtering them out
+                                    # if hasattr(part, 'thought') and part.thought is not None:
+                                    #     part_dict['thought'] = part.thought
                                     if hasattr(part, 'thought_signature') and part.thought_signature:
                                         # Serialize bytes as base64
                                         part_dict['thought_signature'] = {
@@ -6008,9 +6028,13 @@ class UnifiedClient:
                                         }
                                     if part_dict:
                                         serialized_obj['parts'].append(part_dict)
-                                if hasattr(raw_obj, 'role'):
-                                    serialized_obj['role'] = raw_obj.role
-                                cleaned_msg['_raw_content_object'] = serialized_obj
+                                if serialized_obj['parts']:  # Only save if there are parts after filtering
+                                    if hasattr(raw_obj, 'role'):
+                                        serialized_obj['role'] = raw_obj.role
+                                    cleaned_msg['_raw_content_object'] = serialized_obj
+                                else:
+                                    # All parts were reasoning, don't save raw object
+                                    pass
                             except Exception as e:
                                 # If serialization fails, remove the field
                                 print(f"Warning: Could not serialize raw_content_object for payload: {e}")
@@ -8757,11 +8781,41 @@ class UnifiedClient:
                                 # The raw_obj should be the original candidate.content from Gemini
                                 # NOTE: We don't need 'content' field since it's already in parts[0].text
                                 
+                                # Debug: Log the type of raw_obj
+                                print(f"   🔍 Processing raw_obj of type: {type(raw_obj)}")
+                                if isinstance(raw_obj, dict) and 'parts' in raw_obj:
+                                    print(f"      Dict with {len(raw_obj.get('parts', []))} parts")
+                                    for i, part in enumerate(raw_obj.get('parts', [])):
+                                        if isinstance(part, dict):
+                                            print(f"         Part {i}: thought={part.get('thought', False)}, has_text={'text' in part}, has_signature={'thought_signature' in part}")
+                                
                                 # Check if this is the original Google SDK Content object
                                 if hasattr(raw_obj, 'parts'):
-                                    # This is the original Google SDK object, use it directly
-                                    print(f"   🧠 Using original Google SDK Content object for thought signature")
-                                    contents.append(raw_obj)  # Use the original content object directly
+                                    # This is the original Google SDK object
+                                    # We need to filter out reasoning parts even from SDK objects
+                                    from google.genai import types
+                                    filtered_parts = []
+                                    for part in raw_obj.parts:
+                                        # Check if this part is a reasoning part
+                                        if hasattr(part, 'thought') and part.thought == True:
+                                            print(f"   🚫 Filtering out SDK reasoning part to avoid confusion")
+                                            continue
+                                        filtered_parts.append(part)
+                                    
+                                    if filtered_parts:
+                                        # Create new Content object with filtered parts
+                                        try:
+                                            filtered_content = types.Content(role=raw_obj.role if hasattr(raw_obj, 'role') else 'model', parts=filtered_parts)
+                                            print(f"   🧠 Using filtered Google SDK Content object (kept {len(filtered_parts)} parts, filtered out {len(raw_obj.parts) - len(filtered_parts)} reasoning parts)")
+                                            contents.append(filtered_content)
+                                        except Exception as e:
+                                            print(f"   ❌ Failed to create filtered Content object: {e}")
+                                            contents.append(raw_obj)  # Fallback to original
+                                    else:
+                                        print(f"   ⚠️ All parts were reasoning parts in SDK object, skipping")
+                                        # Need to add something for the message
+                                        if content:
+                                            contents.append({'role': 'model', 'parts': [{'text': content}]})
                                 elif isinstance(raw_obj, dict):
                                     # This is a serialized version, we need to reconstruct proper Part objects
                                     # IMPORTANT: The 'content' field in the message is redundant when we have parts
@@ -8772,8 +8826,15 @@ class UnifiedClient:
                                     # Check if raw_obj has 'parts' array (properly serialized format)
                                     if 'parts' in raw_obj and isinstance(raw_obj['parts'], list):
                                         # Reconstruct Part objects from the serialized format
+                                        # IMPORTANT: Filter out reasoning parts (thought: true) to avoid sending internal reasoning back
                                         for part_data in raw_obj['parts']:
                                             if isinstance(part_data, dict):
+                                                # Skip parts that are marked as thoughts (internal reasoning)
+                                                # These should not be sent back to the API as they can confuse the model
+                                                if part_data.get('thought', False) == True:
+                                                    print(f"   🚫 Skipping reasoning part (thought: true) to avoid confusion")
+                                                    continue
+                                                
                                                 # Create kwargs for Part construction
                                                 part_kwargs = {}
                                                 
@@ -8781,14 +8842,13 @@ class UnifiedClient:
                                                 # If there's no text in the part but we have content, use that as fallback
                                                 if 'text' in part_data:
                                                     part_kwargs['text'] = part_data['text']
-                                                elif not any('text' in p for p in raw_obj['parts'] if isinstance(p, dict)):
-                                                    # No text in any part, use content as fallback for first part only
+                                                elif not any('text' in p for p in raw_obj['parts'] if isinstance(p, dict) and not p.get('thought', False)):
+                                                    # No text in any non-thought part, use content as fallback for first part only
                                                     if part_data == raw_obj['parts'][0]:
                                                         part_kwargs['text'] = content
                                                 
-                                                # Add thought flag if present  
-                                                if 'thought' in part_data:
-                                                    part_kwargs['thought'] = part_data['thought']
+                                                # NOTE: We don't include the 'thought' flag in the Part object
+                                                # since we're filtering out thought parts entirely
                                                 
                                                 # Handle thought_signature - CRITICAL for Gemini 3
                                                 if 'thought_signature' in part_data:
@@ -8829,8 +8889,17 @@ class UnifiedClient:
                                                     'role': 'model',
                                                     'parts': [{'text': p.text if hasattr(p, 'text') else p.get('text', '')} for p in parts_to_send]
                                                 })
+                                        else:
+                                            # All parts were filtered out (they were all reasoning parts)
+                                            # Use the message content as fallback
+                                            print(f"   ⚠️ All parts were reasoning parts, using message content as fallback")
+                                            if content:
+                                                contents.append({
+                                                    'role': 'model',
+                                                    'parts': [{'text': content}]
+                                                })
                                     else:
-                                        # Fallback: just include the text content
+                                        # No parts array found - fallback: just include the text content
                                         contents.append({
                                             'role': 'model',
                                             'parts': [{'text': content}]
