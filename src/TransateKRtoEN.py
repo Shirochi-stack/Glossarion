@@ -6640,10 +6640,9 @@ def main(log_callback=None, stop_callback=None):
                     user_prompt = chunk_html
                 
                 if config.CONTEXTUAL:
-                    # Thread-safe history access with microsecond delay
-                    with history_manager.lock:
-                        time.sleep(0.000001)  # 1 microsecond delay to prevent race conditions
-                        history = history_manager.load_history()
+                    # The load_history() method already handles its own locking internally
+                    # Don't acquire the lock here to avoid deadlock
+                    history = history_manager.load_history()
                     trimmed = history[-config.HIST_LIMIT*2:]
                     chunk_context = chunk_context_manager.get_context_messages(limit=2)
 
