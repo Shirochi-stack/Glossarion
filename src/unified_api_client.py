@@ -6833,10 +6833,36 @@ class UnifiedClient:
                 if not result_text:
                     raise UnifiedClientError("All Vertex AI Gemini attempts failed to produce content")
                 
+                # Extract thought signature from Vertex AI response if present
+                raw_content_obj = None
+                if response and hasattr(response, 'candidates') and response.candidates:
+                    for candidate in response.candidates:
+                        if candidate.content and hasattr(candidate.content, 'parts'):
+                            parts_data = []
+                            for part in candidate.content.parts:
+                                part_dict = {}
+                                # Check for text
+                                if hasattr(part, 'text'):
+                                    part_dict['text'] = part.text
+                                # Check for thought signature (might be in different attributes)
+                                if hasattr(part, 'thought'):
+                                    part_dict['thought'] = part.thought
+                                if hasattr(part, 'thought_signature'):
+                                    part_dict['thought_signature'] = part.thought_signature
+                                if part_dict:
+                                    parts_data.append(part_dict)
+                            if parts_data:
+                                raw_content_obj = {'parts': parts_data}
+                                # Check if any part has thought signature
+                                has_thought = any('thought' in p or 'thought_signature' in p for p in parts_data)
+                                if has_thought:
+                                    print("🧠 Captured thought signature from Vertex AI Gemini")
+                
                 return UnifiedResponse(
                     content=result_text,
                     finish_reason='stop',
-                    raw_response=response 
+                    raw_response=response,
+                    raw_content_object=raw_content_obj  # Include raw content object for thought signatures
                 )
                 
         except UnifiedClientError:

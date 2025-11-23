@@ -86,9 +86,18 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
             start_time = time.time()
             result = client.send(messages, temperature=temperature, max_tokens=max_tokens, context='glossary')
             elapsed = time.time() - start_time
-            # Get the response object from THIS thread's context
-            response_obj = client.get_last_response_object()
-            result_queue.put((result, elapsed, response_obj))
+            
+            # Capture raw response object for thought signatures (if available)
+            raw_obj = None
+            if hasattr(client, 'get_last_response_object'):
+                resp_obj = client.get_last_response_object()
+                if resp_obj and hasattr(resp_obj, 'raw_content_object'):
+                    raw_obj = resp_obj.raw_content_object
+                    if raw_obj:
+                        print("🧠 Captured thought signature for glossary extraction")
+            
+            # Include raw_obj in the result tuple
+            result_queue.put((result, elapsed, raw_obj))
         except Exception as e:
             result_queue.put(e)
     
@@ -109,11 +118,11 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
             if isinstance(result, tuple):
                 # Check if we have the new format with response object
                 if len(result) == 3:
-                    api_result, api_time, response_obj = result
+                    api_result, api_time, raw_obj = result
                 else:
                     # Old format without response object
                     api_result, api_time = result
-                    response_obj = None
+                    raw_obj = None
                 
                 if chunk_timeout and api_time > chunk_timeout:
                     if hasattr(client, '_in_cleanup'):
@@ -131,13 +140,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     content = api_result
                     finish_reason = 'stop'
                 
-                # Extract thought signature from the response object captured in the API thread
-                raw_obj = None
-                if response_obj and hasattr(response_obj, 'raw_content_object'):
-                    raw_obj = response_obj.raw_content_object
-                    if raw_obj:
-                        print("🧠 Captured thought signature for glossary extraction")
-                
+                # raw_obj was already captured in the API thread and included in result
                 return content, finish_reason or 'stop', raw_obj
         except queue.Empty:
             if stop_check_fn():
@@ -1709,11 +1712,61 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
                         if user_content:
                             # Add to history for next chapters in batch
                             history.append({"role": "user", "content": user_content})
-                            history.append({"role": "assistant", "content": result['resp']})
+                            assistant_entry = {"role": "assistant", "content": result['resp']}
                             
-                            # Also store any raw content object if present
+                            # Serialize raw content object if present (same as sequential mode)
                             if 'raw_obj' in result and result['raw_obj']:
-                                history[-1]['_raw_content_object'] = result['raw_obj']
+                                raw_obj = result['raw_obj']
+                                import base64
+                                
+                                def serialize_obj(obj):
+                                    """Serialize raw content object for storage"""
+                                    if obj is None:
+                                        return None
+                                    elif isinstance(obj, dict):
+                                        return obj
+                                    elif hasattr(obj, '__dict__'):
+                                        # For objects with __dict__, extract what we can
+                                        result = {}
+                                        if hasattr(obj, 'parts'):
+                                            parts = []
+                                            try:
+                                                for part in obj.parts:
+                                                    part_dict = {}
+                                                    # Only check known attributes
+                                                    for attr in ['text', 'thought', 'thought_signature', 'inline_data']:
+                                                        if hasattr(part, attr):
+                                                            try:
+                                                                value = getattr(part, attr)
+                                                                if value is not None:
+                                                                    # Special handling for thought_signature to ensure it's accessible
+                                                                    if attr == 'thought_signature' and isinstance(value, bytes):
+                                                                        # Store it in a way unified_api_client expects
+                                                                        part_dict[attr] = {'_type': 'bytes', 'data': base64.b64encode(value).decode('utf-8')}
+                                                                        print(f"   🧠 Serialized thought signature: {len(value)} bytes")
+                                                                    else:
+                                                                        part_dict[attr] = serialize_obj(value)
+                                                            except:
+                                                                pass
+                                                    if part_dict:
+                                                        parts.append(part_dict)
+                                            except:
+                                                pass
+                                            if parts:
+                                                result['parts'] = parts
+                                        if hasattr(obj, 'role'):
+                                            try:
+                                                result['role'] = getattr(obj, 'role', None)
+                                            except:
+                                                pass
+                                        return result if result else str(obj)
+                                    else:
+                                        return str(obj)
+                                
+                                assistant_entry["_raw_content_object"] = serialize_obj(raw_obj)
+                                print("🧠 Captured thought signature for glossary history (batch mode)")
+                            
+                            history.append(assistant_entry)
                 
                 results.append(result)
             except Exception as e:
