@@ -323,29 +323,54 @@ def load_translations_from_file(translations_file: str, log_callback=None) -> Tu
     
     try:
         with open(translations_file, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
+            content = f.read()
         
-        # Parse the file format
-        # Format: Chapter X: "Source Title" -> "Translated Title"
-        for line in lines:
-            line = line.strip()
-            if not line or line.startswith('Translation Summary') or line.startswith('Total chapters') or line.startswith('Successfully') or line.startswith('Failed'):
+        # Parse the actual file format used by BatchHeaderTranslator._save_translations_to_file
+        # Format:
+        # Chapter X:
+        #   Original:   [title]
+        #   Translated: [title]
+        # ----------------------------------------
+        
+        import re
+        
+        # Split by chapter blocks
+        chapter_blocks = re.split(r'-{3,}', content)
+        
+        for block in chapter_blocks:
+            if not block.strip():
                 continue
             
-            # Parse chapter number and titles
-            import re
-            match = re.match(r'Chapter (\d+): "([^"]+)" -> "([^"]+)"', line)
-            if match:
-                chapter_num = int(match.group(1))
-                source_title = match.group(2)
-                translated_title = match.group(3)
-                source_headers[chapter_num] = source_title
-                translated_headers[chapter_num] = translated_title
+            # Parse chapter number
+            chapter_match = re.search(r'Chapter (\d+):', block)
+            if not chapter_match:
+                continue
+            
+            chapter_num = int(chapter_match.group(1))
+            
+            # Parse original title
+            original_match = re.search(r'Original:\s*(.+?)(?:\n|$)', block)
+            if original_match:
+                source_headers[chapter_num] = original_match.group(1).strip()
+            
+            # Parse translated title
+            translated_match = re.search(r'Translated:\s*(.+?)(?:\n|$)', block)
+            if translated_match:
+                translated_headers[chapter_num] = translated_match.group(1).strip()
         
         log(f"📋 Loaded {len(translated_headers)} translations from file")
         
+        # Log first few for debugging
+        if translated_headers:
+            for num in list(sorted(translated_headers.keys()))[:3]:
+                log(f"  Chapter {num}: {translated_headers[num]}")
+            if len(translated_headers) > 3:
+                log(f"  ... and {len(translated_headers) - 3} more")
+        
     except Exception as e:
         log(f"⚠️ Error loading translations: {e}")
+        import traceback
+        log(traceback.format_exc())
     
     return source_headers, translated_headers
 
