@@ -6610,7 +6610,7 @@ class UnifiedClient:
             
             else:
                 # For Gemini models on Vertex AI, we need to use Vertex AI SDK
-                location = os.getenv('VERTEX_AI_LOCATION', 'us-east5')
+                location = os.getenv('VERTEX_AI_LOCATION', 'global')
                 
                 # Check stop flag before Gemini call
                 if is_stop_requested():

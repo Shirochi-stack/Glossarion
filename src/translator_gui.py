@@ -6689,7 +6689,8 @@ Important rules:
                             with open(google_creds, 'r') as f:
                                 creds_data = json.load(f)
                                 env_updates['GOOGLE_CLOUD_PROJECT'] = creds_data.get('project_id', '')
-                                env_updates['VERTEX_AI_LOCATION'] = 'us-central1'
+                                # Use the user's configured location, not hardcoded us-central1
+                                env_updates['VERTEX_AI_LOCATION'] = self.vertex_location_var if hasattr(self, 'vertex_location_var') else 'global'
                         except:
                             pass
                 

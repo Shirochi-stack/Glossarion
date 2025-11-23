@@ -1675,7 +1675,7 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
                 process_single_chapter_api_call,
                 idx, chap, msgs, client, temp, mtoks, check_stop, chunk_timeout
             )
-            futures[future] = (idx, chap)
+            futures[future] = (idx, chap, msgs)  # Store messages for history update
         
         # Process results with better cancellation
         for future in as_completed(futures):  # Removed timeout - let futures complete
@@ -1689,12 +1689,32 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
                 executor.shutdown(wait=False)
                 break
                 
-            idx, chap = futures[future]
+            idx, chap, msgs = futures[future]  # Get messages too
             try:
                 result = future.result(timeout=0.5)  # Short timeout on result retrieval
                 # Ensure chap is added to result here if not already present
                 if 'chap' not in result:
                     result['chap'] = chap
+                    
+                # Update history if contextual is enabled and we got a valid response
+                if contextual_enabled and 'resp' in result and result['resp']:
+                    with _history_lock:
+                        # Find the user message content from the messages
+                        user_content = None
+                        for msg in msgs:
+                            if msg.get('role') == 'user':
+                                user_content = msg.get('content', '')
+                                break
+                        
+                        if user_content:
+                            # Add to history for next chapters in batch
+                            history.append({"role": "user", "content": user_content})
+                            history.append({"role": "assistant", "content": result['resp']})
+                            
+                            # Also store any raw content object if present
+                            if 'raw_obj' in result and result['raw_obj']:
+                                history[-1]['_raw_content_object'] = result['raw_obj']
+                
                 results.append(result)
             except Exception as e:
                 if "stopped by user" in str(e).lower():
@@ -1838,6 +1858,7 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
             'data': valid_data,
             'resp': resp,
             'chap': chap,  # Include the chapter text in the result
+            'raw_obj': raw_obj if 'raw_obj' in locals() else None,  # Include raw object for history
             'error': None
         }
             
