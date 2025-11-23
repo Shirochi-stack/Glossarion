@@ -791,21 +791,35 @@ def trim_context_history(history: List[Dict], limit: int, rolling_window: bool =
         # This avoids sending user messages which would confuse the model
         combined_memory = "\n".join(memory_blocks)
         
-        # Check if we have thought signatures to preserve
+        # For glossary extraction, always include content field with memory blocks
+        # If there's a raw object with thought signatures, keep it but remove text from parts
         thought_sig_msg = {"role": "assistant", "content": combined_memory}
         
         # Find the most recent assistant message with thought signature
         for msg in reversed(history):
             if msg.get('role') == 'assistant' and '_raw_content_object' in msg:
                 raw_obj = msg['_raw_content_object']
-                # Ensure the raw object is in the format expected by unified_api_client
-                # It should have 'parts' with 'thought_signature' field
-                if isinstance(raw_obj, dict):
-                    # Already serialized, just copy it
-                    thought_sig_msg['_raw_content_object'] = raw_obj
-                    print(f"   📌 Preserving thought signature for context (serialized)")
+                
+                # For glossary, we keep thought signatures but remove text from parts
+                # to avoid duplication with the content field
+                if isinstance(raw_obj, dict) and 'parts' in raw_obj:
+                    # Filter parts to keep only thought signatures, not text
+                    filtered_parts = []
+                    for part in raw_obj.get('parts', []):
+                        if isinstance(part, dict) and 'thought_signature' in part:
+                            # Keep the thought signature with thought=true flag, exclude text
+                            filtered_part = {"thought_signature": part['thought_signature']}
+                            if 'thought' in part:
+                                filtered_part['thought'] = part['thought']
+                            filtered_parts.append(filtered_part)
+                    
+                    if filtered_parts:
+                        thought_sig_msg['_raw_content_object'] = {
+                            'parts': filtered_parts,
+                            'role': raw_obj.get('role', 'model')
+                        }
                 else:
-                    # Shouldn't happen now that we serialize immediately, but handle it
+                    # Keep raw object as-is if no parts structure
                     thought_sig_msg['_raw_content_object'] = raw_obj
                 break
         

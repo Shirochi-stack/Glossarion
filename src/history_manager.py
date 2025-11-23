@@ -141,17 +141,17 @@ class HistoryManager:
         assistant_msg = {"role": "assistant", "content": assistant_content}
         if raw_assistant_object is not None:
             try:
-                print(f"🔍 [HistoryManager] Attempting to save thought signature (Type: {type(raw_assistant_object)})")
+                # print(f"🔍 [HistoryManager] Attempting to save thought signature (Type: {type(raw_assistant_object)})")
                 # Attempt to serialize raw object for thought signatures
                 if hasattr(raw_assistant_object, 'to_dict'):
-                    print("   -> Using .to_dict()")
+                    # print("   -> Using .to_dict()")
                     assistant_msg['_raw_content_object'] = raw_assistant_object.to_dict()
                 elif hasattr(raw_assistant_object, 'model_dump'):
-                    print("   -> Using .model_dump() (Pydantic/New SDK)")
+                    # print("   -> Using .model_dump() (Pydantic/New SDK)")
                     assistant_msg['_raw_content_object'] = raw_assistant_object.model_dump()
                 elif hasattr(raw_assistant_object, '__dict__'):
                     # Try to extract from __dict__ for Google SDK objects
-                    print("   -> Trying __dict__ serialization (Google SDK)")
+                    # print("   -> Trying __dict__ serialization (Google SDK)")
                     obj_dict = {}
                     for key, value in raw_assistant_object.__dict__.items():
                         if not key.startswith('_'):  # Skip private attributes
@@ -172,20 +172,21 @@ class HistoryManager:
                             elif hasattr(value, '__str__'):
                                 obj_dict[key] = str(value)
                     if obj_dict:
-                        print(f"   -> Successfully extracted {len(obj_dict)} fields from Google SDK object")
+                        # print(f"   -> Successfully extracted {len(obj_dict)} fields from Google SDK object")
                         assistant_msg['_raw_content_object'] = obj_dict
                     else:
-                        print("   -> No serializable fields found in __dict__")
+                        # print("   -> No serializable fields found in __dict__")
+                        pass
                 elif isinstance(raw_assistant_object, (dict, list, str, int, float, bool)):
-                    print("   -> Object is already primitive")
+                    # print("   -> Object is already primitive")
                     assistant_msg['_raw_content_object'] = raw_assistant_object
                 else:
                     # Try to convert to string representation as last resort
-                    print(f"   -> Attempting str() conversion as last resort")
+                    # print(f"   -> Attempting str() conversion as last resort")
                     str_repr = str(raw_assistant_object)
                     if str_repr and str_repr != str(type(raw_assistant_object)):
                         assistant_msg['_raw_content_object'] = {"_type": "string_repr", "value": str_repr}
-                        print("   -> Saved as string representation")
+                        # print("   -> Saved as string representation")
                     else:
                         print(f"   ⚠️ [HistoryManager] Object has no known serialization method. Type: {type(raw_assistant_object).__module__}.{type(raw_assistant_object).__name__}")
                         # For complex objects that are not JSON serializable, we skip to avoid breaking history

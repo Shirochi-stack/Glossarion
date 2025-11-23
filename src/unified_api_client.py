@@ -8781,13 +8781,13 @@ class UnifiedClient:
                                 # The raw_obj should be the original candidate.content from Gemini
                                 # NOTE: We don't need 'content' field since it's already in parts[0].text
                                 
-                                # Debug: Log the type of raw_obj
-                                print(f"   🔍 Processing raw_obj of type: {type(raw_obj)}")
-                                if isinstance(raw_obj, dict) and 'parts' in raw_obj:
-                                    print(f"      Dict with {len(raw_obj.get('parts', []))} parts")
-                                    for i, part in enumerate(raw_obj.get('parts', [])):
-                                        if isinstance(part, dict):
-                                            print(f"         Part {i}: thought={part.get('thought', False)}, has_text={'text' in part}, has_signature={'thought_signature' in part}")
+                                # Debug: Log the type of raw_obj (commented out)
+                                # print(f"   🔍 Processing raw_obj of type: {type(raw_obj)}")
+                                # if isinstance(raw_obj, dict) and 'parts' in raw_obj:
+                                #     print(f"      Dict with {len(raw_obj.get('parts', []))} parts")
+                                #     for i, part in enumerate(raw_obj.get('parts', [])):
+                                #         if isinstance(part, dict):
+                                #             print(f"         Part {i}: thought={part.get('thought', False)}, has_text={'text' in part}, has_signature={'thought_signature' in part}")
                                 
                                 # Check if this is the original Google SDK Content object
                                 if hasattr(raw_obj, 'parts'):
@@ -8798,7 +8798,7 @@ class UnifiedClient:
                                     for part in raw_obj.parts:
                                         # Check if this part is a reasoning part
                                         if hasattr(part, 'thought') and part.thought == True:
-                                            print(f"   🚫 Filtering out SDK reasoning part to avoid confusion")
+                                            # print(f"   🚫 Filtering out SDK reasoning part to avoid confusion")
                                             continue
                                         filtered_parts.append(part)
                                     
@@ -8806,7 +8806,7 @@ class UnifiedClient:
                                         # Create new Content object with filtered parts
                                         try:
                                             filtered_content = types.Content(role=raw_obj.role if hasattr(raw_obj, 'role') else 'model', parts=filtered_parts)
-                                            print(f"   🧠 Using filtered Google SDK Content object (kept {len(filtered_parts)} parts, filtered out {len(raw_obj.parts) - len(filtered_parts)} reasoning parts)")
+                                            # print(f"   🧠 Using filtered Google SDK Content object (kept {len(filtered_parts)} parts, filtered out {len(raw_obj.parts) - len(filtered_parts)} reasoning parts)")
                                             contents.append(filtered_content)
                                         except Exception as e:
                                             print(f"   ❌ Failed to create filtered Content object: {e}")
@@ -8832,7 +8832,7 @@ class UnifiedClient:
                                                 # Skip parts that are marked as thoughts (internal reasoning)
                                                 # These should not be sent back to the API as they can confuse the model
                                                 if part_data.get('thought', False) == True:
-                                                    print(f"   🚫 Skipping reasoning part (thought: true) to avoid confusion")
+                                                    # print(f"   🚫 Skipping reasoning part (thought: true) to avoid confusion")
                                                     continue
                                                 
                                                 # Create kwargs for Part construction
@@ -8858,7 +8858,7 @@ class UnifiedClient:
                                                         import base64
                                                         thought_sig_bytes = base64.b64decode(thought_sig['data'])
                                                         part_kwargs['thought_signature'] = thought_sig_bytes
-                                                        print(f"   🧠 Decoded thought signature from base64 (size: {len(thought_sig_bytes)} bytes)")
+                                                        # print(f"   🧠 Decoded thought signature from base64 (size: {len(thought_sig_bytes)} bytes)")
                                                     else:
                                                         part_kwargs['thought_signature'] = thought_sig
                                                 
@@ -8869,19 +8869,20 @@ class UnifiedClient:
                                                         part_obj = types.Part(**part_kwargs)
                                                         parts_to_send.append(part_obj)
                                                         if 'thought_signature' in part_kwargs:
-                                                            print(f"   ✅ Created Part object WITH thought signature")
+                                                            # print(f"   ✅ Created Part object WITH thought signature")
+                                                            pass
                                                     except Exception as e:
                                                         print(f"   ❌ Failed to create Part object: {e}")
                                                         # Fallback to dict if Part creation fails
                                                         parts_to_send.append(part_kwargs)
                                         
                                         if parts_to_send:
-                                            print(f"   🧠 Created {len(parts_to_send)} Part objects for Gemini 3")
+                                            # print(f"   🧠 Created {len(parts_to_send)} Part objects for Gemini 3")
                                             # Create Content object with the Part objects
                                             try:
                                                 content_obj = types.Content(role='model', parts=parts_to_send)
                                                 contents.append(content_obj)
-                                                print(f"   ✅ Created Content object with Part objects containing thought signatures")
+                                                # print(f"   ✅ Created Content object with Part objects containing thought signatures")
                                             except Exception as e:
                                                 print(f"   ❌ Failed to create Content object: {e}")
                                                 # Fallback to dict format
@@ -8999,21 +9000,21 @@ class UnifiedClient:
                             print("⚠️ Gemini client is None. This typically happens when stop was requested.")
                             raise UnifiedClientError("Gemini client not initialized - operation may have been cancelled", error_type="cancelled")
                         
-                        # DEBUG: Log what we're actually sending
-                        print(f"   📤 Sending {len(contents)} content objects to Gemini API")
-                        for i, content in enumerate(contents):
-                            if isinstance(content, dict):
-                                print(f"      Content {i}: dict with role={content.get('role')}, parts={len(content.get('parts', []))} parts")
-                            elif hasattr(content, 'role'):
-                                num_parts = len(content.parts) if hasattr(content, 'parts') else 0
-                                print(f"      Content {i}: {type(content).__name__} with role={content.role}, parts={num_parts}")
-                                # Check if any parts have thought_signature
-                                if hasattr(content, 'parts'):
-                                    for j, part in enumerate(content.parts):
-                                        if hasattr(part, 'thought_signature') and part.thought_signature:
-                                            print(f"         ✅ Part {j} HAS thought_signature ({len(part.thought_signature)} bytes)")
-                            else:
-                                print(f"      Content {i}: {type(content)}")
+                        # DEBUG: Log what we're actually sending (commented out)
+                        # print(f"   📤 Sending {len(contents)} content objects to Gemini API")
+                        # for i, content in enumerate(contents):
+                        #     if isinstance(content, dict):
+                        #         print(f"      Content {i}: dict with role={content.get('role')}, parts={len(content.get('parts', []))} parts")
+                        #     elif hasattr(content, 'role'):
+                        #         num_parts = len(content.parts) if hasattr(content, 'parts') else 0
+                        #         print(f"      Content {i}: {type(content).__name__} with role={content.role}, parts={num_parts}")
+                        #         # Check if any parts have thought_signature
+                        #         if hasattr(content, 'parts'):
+                        #             for j, part in enumerate(content.parts):
+                        #                 if hasattr(part, 'thought_signature') and part.thought_signature:
+                        #                     print(f"         ✅ Part {j} HAS thought_signature ({len(part.thought_signature)} bytes)")
+                        #     else:
+                        #         print(f"      Content {i}: {type(content)}")
                         
                         response = self.gemini_client.models.generate_content(
                             model=self.model,

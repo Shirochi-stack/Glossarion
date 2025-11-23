@@ -6881,7 +6881,8 @@ def main(log_callback=None, stop_callback=None):
 
                 # Check if we captured thought signatures
                 if raw_obj:
-                    print("🧠 Captured thought signature for history")
+                    # print("🧠 Captured thought signature for history")
+                    pass
                 
                 # Add microsecond delay before history append to prevent race conditions
                 time.sleep(0.000001)  # 1 microsecond delay
