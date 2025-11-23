@@ -1983,7 +1983,7 @@ class BatchHeaderTranslator:
                     with open(html_path, 'r', encoding='utf-8') as rf:
                         original = rf.read()
                     import re as _re
-                    new_content, n = _re.subn(r'(\<body\b[^>]*\>)', r"\1" + header_html, original, count=1, flags=_re.IGNORECASE)
+                    new_content, n = _re.subn(r'(\<body\b[^>]*\>)', lambda m: m.group(1) + header_html, original, count=1, flags=_re.IGNORECASE)
                     if n == 0:
                         # Fallback: prepend at the very beginning if <body> not found
                         new_content = header_html + "\n" + original
@@ -2009,7 +2009,10 @@ class BatchHeaderTranslator:
                     # Replace exact text inside first h1/h2/h3/p/div/span if it equals current_title
                     for tag in ['h1', 'h2', 'h3', 'p', 'div', 'span']:
                         pattern = rf'(<{tag}[^>]*>)\s*{_re.escape(current_title)}\s*(</{tag}>)'
-                        content2, n = _re.subn(pattern, r'\1' + new_title + r'\2', content, count=1, flags=_re.IGNORECASE)
+                        # Use a lambda function to avoid backreference issues
+                        def replacement_func(match):
+                            return match.group(1) + new_title + match.group(2)
+                        content2, n = _re.subn(pattern, replacement_func, content, count=1, flags=_re.IGNORECASE)
                         if n > 0:
                             updated = True
                             content = content2
@@ -2096,7 +2099,7 @@ class BatchHeaderTranslator:
                     with open(html_path, 'r', encoding='utf-8') as rf:
                         original = rf.read()
                     import re as _re
-                    new_content, n = _re.subn(r'(\<body\b[^>]*\>)', r"\1" + header_html, original, count=1, flags=_re.IGNORECASE)
+                    new_content, n = _re.subn(r'(\<body\b[^>]*\>)', lambda m: m.group(1) + header_html, original, count=1, flags=_re.IGNORECASE)
                     if n == 0:
                         # Fallback: prepend at the top if <body> not found
                         new_content = header_html + "\n" + original
@@ -2112,23 +2115,26 @@ class BatchHeaderTranslator:
                         original = rf.read()
                     content = original
                     # Replace title text (first <title>)
-                    content2, n = _re.subn(r'(<title[^>]*>)[\s\S]*?(</title>)', r'\1' + new_title + r'\2', content, count=1, flags=_re.IGNORECASE)
+                    # Use lambda to avoid backreference issues when new_title starts with digits
+                    content2, n = _re.subn(r'(<title[^>]*>)[\s\S]*?(</title>)', lambda m: m.group(1) + new_title + m.group(2), content, count=1, flags=_re.IGNORECASE)
                     if n > 0:
                         updated = True
                         content = content2
                     # Replace first h1/h2/h3
                     for tag in ['h1', 'h2', 'h3']:
-                        content2, n = _re.subn(rf'(<{tag}[^>]*>)[\s\S]*?(</{tag}>)', r'\1' + new_title + r'\2', content, count=1, flags=_re.IGNORECASE)
+                        content2, n = _re.subn(rf'(<{tag}[^>]*>)[\s\S]*?(</{tag}>)', lambda m: m.group(1) + new_title + m.group(2), content, count=1, flags=_re.IGNORECASE)
                         if n > 0:
                             updated = True
                             content = content2
                             break
                     # Update or add meta og:title (set content=...)
                     # Replace existing
-                    content2, n = _re.subn(r'(<meta\b[^>]*property=["\']og:title["\'][^>]*content=["\'])[^"\']*(["\'][^>]*>)', r'\1' + new_title + r'\2', content, count=1, flags=_re.IGNORECASE)
+                    content2, n = _re.subn(r'(<meta\b[^>]*property=["\']og:title["\'][^>]*content=["\'])[^"\']*(["\'][^>]*>)', lambda m: m.group(1) + new_title + m.group(2), content, count=1, flags=_re.IGNORECASE)
                     if n == 0:
                         # Try to add if missing: insert after <head>
-                        content2, n2 = _re.subn(r'(<head\b[^>]*>)', r"\1\n<meta property=\"og:title\" content=\"" + new_title + "\"/>", content, count=1, flags=_re.IGNORECASE)
+                        # Escape new_title for use in HTML attribute
+                        escaped_title = new_title.replace('"', '&quot;').replace('\\', '\\\\')
+                        content2, n2 = _re.subn(r'(<head\b[^>]*>)', lambda m: m.group(1) + f'\n<meta property="og:title" content="{escaped_title}"/>', content, count=1, flags=_re.IGNORECASE)
                         if n2 > 0:
                             updated = True
                             content = content2
