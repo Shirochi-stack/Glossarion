@@ -2995,56 +2995,42 @@ def save_progress(completed: List[int], glossary: List[Dict], context_history: L
                 # Convert to a serializable format
                 if raw_obj is not None:
                     try:
-                        # If it's already a dict, we need to check for bytes inside it
-                        if isinstance(raw_obj, dict):
-                            import base64
-                            
-                            def serialize_dict(obj):
-                                """Recursively serialize a dict, converting bytes to base64"""
-                                if isinstance(obj, dict):
-                                    result = {}
-                                    for key, value in obj.items():
-                                        if isinstance(value, bytes):
-                                            result[key] = {'_type': 'bytes', 'data': base64.b64encode(value).decode('utf-8')}
-                                        elif isinstance(value, dict):
-                                            result[key] = serialize_dict(value)
-                                        elif isinstance(value, list):
-                                            result[key] = serialize_list(value)
-                                        elif isinstance(value, (str, int, float, bool, type(None))):
-                                            result[key] = value
-                                        else:
-                                            # Try to convert to string for unknown types
-                                            result[key] = str(value)
-                                    return result
-                                return obj
-                            
-                            def serialize_list(lst):
-                                """Recursively serialize a list, converting bytes to base64"""
-                                result = []
-                                for item in lst:
-                                    if isinstance(item, bytes):
-                                        result.append({'_type': 'bytes', 'data': base64.b64encode(item).decode('utf-8')})
-                                    elif isinstance(item, dict):
-                                        result.append(serialize_dict(item))
-                                    elif isinstance(item, list):
-                                        result.append(serialize_list(item))
-                                    elif isinstance(item, (str, int, float, bool, type(None))):
-                                        result.append(item)
-                                    else:
-                                        result.append(str(item))
+                        import base64
+                        
+                        def deep_serialize(obj):
+                            """Recursively serialize any object, converting bytes to base64"""
+                            if isinstance(obj, bytes):
+                                return {'_type': 'bytes', 'data': base64.b64encode(obj).decode('utf-8')}
+                            elif isinstance(obj, dict):
+                                result = {}
+                                for key, value in obj.items():
+                                    result[key] = deep_serialize(value)
                                 return result
-                            
-                            serializable_msg['_raw_content_object'] = serialize_dict(raw_obj)
-                        # If it has to_dict method, use it
+                            elif isinstance(obj, list):
+                                return [deep_serialize(item) for item in obj]
+                            elif isinstance(obj, tuple):
+                                return [deep_serialize(item) for item in obj]
+                            elif isinstance(obj, (str, int, float, bool, type(None))):
+                                return obj
+                            elif hasattr(obj, '__dict__'):
+                                # For objects with __dict__, try to extract what we can
+                                return deep_serialize(obj.__dict__)
+                            else:
+                                # Last resort - convert to string
+                                return str(obj)
+                        
+                        # Always use deep_serialize to handle any bytes in the object
+                        if isinstance(raw_obj, dict):
+                            serializable_msg['_raw_content_object'] = deep_serialize(raw_obj)
+                        # If it has to_dict method, use it and then serialize
                         elif hasattr(raw_obj, 'to_dict'):
-                            serializable_msg['_raw_content_object'] = raw_obj.to_dict()
-                        # If it has model_dump method (Pydantic), use it
+                            serializable_msg['_raw_content_object'] = deep_serialize(raw_obj.to_dict())
+                        # If it has model_dump method (Pydantic), use it and then serialize
                         elif hasattr(raw_obj, 'model_dump'):
-                            serializable_msg['_raw_content_object'] = raw_obj.model_dump()
+                            serializable_msg['_raw_content_object'] = deep_serialize(raw_obj.model_dump())
                         # If it has __dict__, extract it
                         elif hasattr(raw_obj, '__dict__'):
                             # For Google SDK objects, extract the parts
-                            import base64
                             obj_dict = {}
                             if hasattr(raw_obj, 'parts'):
                                 parts = []
@@ -3058,19 +3044,8 @@ def save_progress(completed: List[int], glossary: List[Dict], context_history: L
                                                 try:
                                                     value = getattr(part, attr, None)
                                                     if value is not None:
-                                                        # Handle bytes specially (for thought_signature)
-                                                        if isinstance(value, bytes):
-                                                            part_dict[attr] = {'_type': 'bytes', 'data': base64.b64encode(value).decode('utf-8')}
-                                                        elif isinstance(value, (str, int, float, bool, type(None))):
-                                                            part_dict[attr] = value
-                                                        elif isinstance(value, (list, dict)):
-                                                            # Try to serialize complex types
-                                                            try:
-                                                                import json
-                                                                json.dumps(value)  # Test if serializable
-                                                                part_dict[attr] = value
-                                                            except:
-                                                                pass  # Skip non-serializable
+                                                        # Use deep_serialize for all values
+                                                        part_dict[attr] = deep_serialize(value)
                                                 except Exception as attr_err:
                                                     # Skip attributes that throw errors when accessed
                                                     pass
@@ -3078,8 +3053,8 @@ def save_progress(completed: List[int], glossary: List[Dict], context_history: L
                                             parts.append(part_dict)
                                 except Exception as parts_err:
                                     print(f"[Warning] Error iterating parts: {parts_err}")
-                                    # Fall back to string representation
-                                    serializable_msg['_raw_content_object'] = str(raw_obj)
+                                    # Fall back to deep serialization of the whole object
+                                    serializable_msg['_raw_content_object'] = deep_serialize(raw_obj)
                                     continue
                                 
                                 if parts:
@@ -3092,13 +3067,14 @@ def save_progress(completed: List[int], glossary: List[Dict], context_history: L
                                     pass
                             
                             if obj_dict:
-                                serializable_msg['_raw_content_object'] = obj_dict
+                                # Apply deep_serialize to ensure no bytes remain
+                                serializable_msg['_raw_content_object'] = deep_serialize(obj_dict)
                             else:
-                                # No usable data extracted, convert to string
-                                serializable_msg['_raw_content_object'] = str(raw_obj)
-                        # As a last resort, convert to string
+                                # No usable data extracted, use deep_serialize
+                                serializable_msg['_raw_content_object'] = deep_serialize(raw_obj)
+                        # As a last resort, use deep_serialize
                         else:
-                            serializable_msg['_raw_content_object'] = str(raw_obj)
+                            serializable_msg['_raw_content_object'] = deep_serialize(raw_obj)
                     except Exception as e:
                         print(f"[Warning] Could not serialize raw_content_object: {e}")
                         # Remove it if we can't serialize it
