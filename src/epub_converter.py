@@ -1208,6 +1208,15 @@ class EPUBCompiler:
                                         # Show first 3 updated files
                                         for filename in list(result.keys())[:3]:
                                             self.log(f"    {filename}: {result[filename]}")
+                                        
+                                        # CRITICAL: Update chapter_titles_info so TOC uses translated titles now
+                                        updated_for_toc = 0
+                                        for chap_num, (orig_title, conf, fname) in list(chapter_titles_info.items()):
+                                            base = os.path.basename(fname)
+                                            if base in result:
+                                                chapter_titles_info[chap_num] = (result[base], max(conf, 0.95), 'existing_translation')
+                                                updated_for_toc += 1
+                                        self.log(f"📝 Updated TOC titles from existing translations: {updated_for_toc} entries")
                                     else:
                                         self.log("⚠️ No files were updated with translations (result was empty)")
                                 else:
@@ -1306,6 +1315,22 @@ class EPUBCompiler:
                                     current_titles
                                 )
                                 self.log("✅ Applied existing translations to HTML files")
+                                
+                                # CRITICAL: Update chapter_titles_info so TOC gets translated titles on this run
+                                updated_for_toc = 0
+                                # Build filename -> translated mapping from current_titles' indices
+                                file_to_trans = {}
+                                for num, info in current_titles.items():
+                                    if num in translated_headers:
+                                        base = os.path.basename(info.get('filename', ''))
+                                        if base:
+                                            file_to_trans[base] = translated_headers[num]
+                                for chap_num, (orig_title, conf, fname) in list(chapter_titles_info.items()):
+                                    base = os.path.basename(fname)
+                                    if base in file_to_trans:
+                                        chapter_titles_info[chap_num] = (file_to_trans[base], max(conf, 0.95), 'existing_translation')
+                                        updated_for_toc += 1
+                                self.log(f"📝 Updated TOC titles from existing translations (fallback path): {updated_for_toc} entries")
                             
                             # Update toc.ncx if it exists
                             toc_path = os.path.join(self.output_dir, 'toc.ncx')
