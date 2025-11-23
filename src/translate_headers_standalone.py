@@ -301,6 +301,218 @@ def match_output_to_source_chapters(
     return matches
 
 
+def load_translations_from_file(translations_file: str, log_callback=None) -> Tuple[Dict[int, str], Dict[int, str]]:
+    """
+    Load translations from the translated_headers.txt file
+    
+    Args:
+        translations_file: Path to translated_headers.txt
+        log_callback: Optional callback for logging
+        
+    Returns:
+        Tuple of (source_headers, translated_headers) where both are dicts mapping chapter numbers to titles
+    """
+    def log(message):
+        if log_callback:
+            log_callback(message)
+        else:
+            print(message)
+    
+    source_headers = {}
+    translated_headers = {}
+    
+    try:
+        with open(translations_file, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        
+        # Parse the file format
+        # Format: Chapter X: "Source Title" -> "Translated Title"
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith('Translation Summary') or line.startswith('Total chapters') or line.startswith('Successfully') or line.startswith('Failed'):
+                continue
+            
+            # Parse chapter number and titles
+            import re
+            match = re.match(r'Chapter (\d+): "([^"]+)" -> "([^"]+)"', line)
+            if match:
+                chapter_num = int(match.group(1))
+                source_title = match.group(2)
+                translated_title = match.group(3)
+                source_headers[chapter_num] = source_title
+                translated_headers[chapter_num] = translated_title
+        
+        log(f"📋 Loaded {len(translated_headers)} translations from file")
+        
+    except Exception as e:
+        log(f"⚠️ Error loading translations: {e}")
+    
+    return source_headers, translated_headers
+
+
+def apply_existing_translations(
+    epub_path: str,
+    output_dir: str,
+    translations_file: str,
+    update_html: bool = True,
+    log_callback=None
+) -> Dict[str, str]:
+    """
+    Apply existing translations from translated_headers.txt to HTML files and toc.ncx
+    
+    This uses the same OPF-based matching as the full translation process,
+    but reads translations from the existing file instead of calling the API.
+    
+    Args:
+        epub_path: Path to source EPUB file
+        output_dir: Directory containing HTML files and toc.ncx
+        translations_file: Path to translated_headers.txt
+        update_html: Whether to update HTML files and toc.ncx
+        log_callback: Optional callback for logging
+        
+    Returns:
+        Dict mapping output filename to translated title
+    """
+    def log(message):
+        if log_callback:
+            log_callback(message)
+        else:
+            print(message)
+    
+    # Step 1: Load existing translations from file
+    log("📖 Loading existing translations...")
+    source_headers, translated_headers = load_translations_from_file(translations_file, log_callback)
+    
+    if not translated_headers:
+        log("⚠️ No translations found in file")
+        return {}
+    
+    # Step 2: Extract source chapters with OPF mapping to match against loaded translations
+    log("📚 Extracting source chapter information from EPUB...")
+    source_mapping, spine_order = extract_source_chapters_with_opf_mapping(epub_path, log_callback)
+    
+    # Step 3: Match output files to source chapters
+    log("🔗 Matching output files to source chapters...")
+    matches = match_output_to_source_chapters(output_dir, source_mapping, spine_order, log_callback)
+    
+    if not matches:
+        log("⚠️ No matching chapters found")
+        return {}
+    
+    # Step 4: Build current titles map for exact replacement
+    current_titles_map = {}
+    chapter_to_output = {}
+    
+    for idx, (output_file, (source_title, current_title, _)) in enumerate(matches.items(), 1):
+        current_titles_map[idx] = {
+            'title': current_title,
+            'filename': output_file
+        }
+        chapter_to_output[idx] = output_file
+    
+    # Step 5: Apply translations if update_html is enabled
+    result = {}
+    
+    if update_html:
+        log("\n📝 Updating HTML files and toc.ncx with existing translations...")
+        
+        # Import BatchHeaderTranslator for its update methods
+        from metadata_batch_translator import BatchHeaderTranslator
+        
+        # Create a minimal translator instance just for the update methods
+        # We don't need the API client since we're not translating
+        class DummyClient:
+            pass
+        
+        translator = BatchHeaderTranslator(DummyClient(), {})
+        
+        # Use the exact replacement method to update HTML files
+        translator._update_html_headers_exact(output_dir, translated_headers, current_titles_map)
+        
+        # Update toc.ncx if it exists
+        toc_path = os.path.join(output_dir, 'toc.ncx')
+        if os.path.exists(toc_path):
+            log("📖 Updating toc.ncx...")
+            update_toc_ncx(toc_path, translated_headers, current_titles_map, log_callback)
+        
+        # Build result mapping
+        for idx, translated_title in translated_headers.items():
+            if idx in chapter_to_output:
+                result[chapter_to_output[idx]] = translated_title
+    
+    log(f"✅ Applied translations to {len(result)} files")
+    return result
+
+
+def update_toc_ncx(toc_path: str, translated_headers: Dict[int, str], 
+                   current_titles_map: Dict[int, Dict[str, str]], log_callback=None):
+    """
+    Update toc.ncx file with translated chapter titles
+    
+    Args:
+        toc_path: Path to toc.ncx file
+        translated_headers: Dict mapping chapter numbers to translated titles
+        current_titles_map: Dict mapping chapter numbers to current title info
+        log_callback: Optional callback for logging
+    """
+    def log(message):
+        if log_callback:
+            log_callback(message)
+        else:
+            print(message)
+    
+    try:
+        import xml.etree.ElementTree as ET
+        
+        # Parse the toc.ncx file
+        tree = ET.parse(toc_path)
+        root = tree.getroot()
+        
+        # Define namespace
+        ns = {'ncx': 'http://www.daisy.org/z3986/2005/ncx/'}
+        
+        updated_count = 0
+        
+        # Find all navPoint elements
+        for navPoint in root.findall('.//ncx:navPoint', ns):
+            # Get the content src to identify which chapter this is
+            content = navPoint.find('ncx:content', ns)
+            if content is not None:
+                src = content.get('src', '')
+                # Remove any fragment identifier (#...)
+                if '#' in src:
+                    src = src.split('#')[0]
+                
+                # Try to match this with our chapter mappings
+                src_basename = os.path.basename(src)
+                
+                # Find which chapter this corresponds to
+                for chapter_num, info in current_titles_map.items():
+                    if info['filename'] == src_basename:
+                        # Found the matching chapter
+                        if chapter_num in translated_headers:
+                            # Update the navLabel text
+                            navLabel = navPoint.find('ncx:navLabel', ns)
+                            if navLabel is not None:
+                                text_elem = navLabel.find('ncx:text', ns)
+                                if text_elem is not None:
+                                    old_text = text_elem.text
+                                    text_elem.text = translated_headers[chapter_num]
+                                    updated_count += 1
+                                    log(f"  ✓ Updated navPoint: '{old_text}' → '{translated_headers[chapter_num]}'")
+                        break
+        
+        if updated_count > 0:
+            # Save the updated toc.ncx
+            tree.write(toc_path, encoding='utf-8', xml_declaration=True)
+            log(f"✅ Updated {updated_count} entries in toc.ncx")
+        else:
+            log("ℹ️ No updates needed for toc.ncx")
+    
+    except Exception as e:
+        log(f"⚠️ Error updating toc.ncx: {e}")
+
+
 def translate_headers_standalone(
     epub_path: str,
     output_dir: str,
@@ -688,8 +900,31 @@ def run_translate_headers_gui(gui_instance):
             if os.path.exists(translations_file):
                 gui_instance.append_log(f"📁 Found existing translated_headers.txt for: {epub_base}")
                 gui_instance.append_log(f"   File: {translations_file}")
-                gui_instance.append_log(f"⏭️ Skipping translation (already exists)... ({successful + 1}/{total_files} processed)\n")
-                successful += 1
+                gui_instance.append_log(f"   🔄 Will update HTML files using existing translations...")
+                
+                # Use existing translations to update HTML files and toc.ncx
+                try:
+                    result = apply_existing_translations(
+                        epub_path=current_epub,
+                        output_dir=output_dir,
+                        translations_file=translations_file,
+                        update_html=update_html,
+                        log_callback=gui_instance.append_log
+                    )
+                    
+                    if result:
+                        gui_instance.append_log(f"✅ Successfully updated {len(result)} files using existing translations!")
+                        if update_html:
+                            gui_instance.append_log(f"🗂️ HTML files and toc.ncx updated in: {output_dir}")
+                        successful += 1
+                    else:
+                        gui_instance.append_log(f"⚠️ No files were updated for: {epub_base}")
+                        failed += 1
+                    
+                except Exception as e:
+                    gui_instance.append_log(f"❌ Error applying existing translations: {e}")
+                    failed += 1
+                
                 # Force GUI event processing
                 try:
                     from PySide6.QtWidgets import QApplication
