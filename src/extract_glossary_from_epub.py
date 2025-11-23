@@ -1714,57 +1714,24 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
                             history.append({"role": "user", "content": user_content})
                             assistant_entry = {"role": "assistant", "content": result['resp']}
                             
-                            # Serialize raw content object if present (same as sequential mode)
+                            # Add raw content object if present (same as sequential mode)
                             if 'raw_obj' in result and result['raw_obj']:
                                 raw_obj = result['raw_obj']
-                                import base64
+                                # According to Google docs: "The `content` object automatically attaches 
+                                # the required thought_signature behind the scenes"
+                                # The raw_obj is the candidate.content object from Vertex AI
+                                # We store it directly - save_progress will serialize it
+                                assistant_entry["_raw_content_object"] = raw_obj
                                 
-                                def serialize_obj(obj):
-                                    """Serialize raw content object for storage"""
-                                    if obj is None:
-                                        return None
-                                    elif isinstance(obj, dict):
-                                        return obj
-                                    elif hasattr(obj, '__dict__'):
-                                        # For objects with __dict__, extract what we can
-                                        result = {}
-                                        if hasattr(obj, 'parts'):
-                                            parts = []
-                                            try:
-                                                for part in obj.parts:
-                                                    part_dict = {}
-                                                    # Only check known attributes
-                                                    for attr in ['text', 'thought', 'thought_signature', 'inline_data']:
-                                                        if hasattr(part, attr):
-                                                            try:
-                                                                value = getattr(part, attr)
-                                                                if value is not None:
-                                                                    # Special handling for thought_signature to ensure it's accessible
-                                                                    if attr == 'thought_signature' and isinstance(value, bytes):
-                                                                        # Store it in a way unified_api_client expects
-                                                                        part_dict[attr] = {'_type': 'bytes', 'data': base64.b64encode(value).decode('utf-8')}
-                                                                        print(f"   🧠 Serialized thought signature: {len(value)} bytes")
-                                                                    else:
-                                                                        part_dict[attr] = serialize_obj(value)
-                                                            except:
-                                                                pass
-                                                    if part_dict:
-                                                        parts.append(part_dict)
-                                            except:
-                                                pass
-                                            if parts:
-                                                result['parts'] = parts
-                                        if hasattr(obj, 'role'):
-                                            try:
-                                                result['role'] = getattr(obj, 'role', None)
-                                            except:
-                                                pass
-                                        return result if result else str(obj)
-                                    else:
-                                        return str(obj)
-                                
-                                assistant_entry["_raw_content_object"] = serialize_obj(raw_obj)
-                                print("🧠 Captured thought signature for glossary history (batch mode)")
+                                # Check if thinking tags are present in the text
+                                if hasattr(raw_obj, 'parts'):
+                                    for part in raw_obj.parts:
+                                        if hasattr(part, 'text') and part.text:
+                                            if '<thinking>' in part.text:
+                                                print("📌 Preserving thought signature for context (batch mode - contains <thinking> tags)")
+                                                break
+                                else:
+                                    print("📌 Preserving raw content object for context (batch mode)")
                             
                             history.append(assistant_entry)
                 
@@ -2335,38 +2302,23 @@ def main(log_callback=None, stop_callback=None):
                                 # Create assistant entry
                                 assistant_entry = {"role": "assistant", "content": assistant_content}
                                 
-                                # Serialize raw_obj before storing (Google SDK objects are not JSON serializable)
+                                # Add raw_obj directly (same as sequential mode)
                                 if raw_obj:
-                                    # The save_progress function expects already-serialized data
-                                    # So we need to extract the parts from the Google SDK Content object
-                                    serialized_obj = None
-                                    if hasattr(raw_obj, 'parts'):
-                                        parts_list = []
-                                        try:
-                                            for part in raw_obj.parts:
-                                                part_dict = {}
-                                                if hasattr(part, 'text'):
-                                                    part_dict['text'] = part.text
-                                                # Check for thought-related attributes
-                                                for attr in ['thought', 'thought_signature']:
-                                                    if hasattr(part, attr):
-                                                        value = getattr(part, attr, None)
-                                                        if value is not None:
-                                                            if isinstance(value, bytes):
-                                                                import base64
-                                                                part_dict[attr] = {'_type': 'bytes', 'data': base64.b64encode(value).decode('utf-8')}
-                                                            else:
-                                                                part_dict[attr] = value
-                                                if part_dict:
-                                                    parts_list.append(part_dict)
-                                            if parts_list:
-                                                serialized_obj = {'parts': parts_list}
-                                        except Exception as e:
-                                            print(f"   ⚠️ Failed to serialize raw_obj: {e}")
+                                    # According to Google docs: "The `content` object automatically attaches 
+                                    # the required thought_signature behind the scenes"
+                                    # The raw_obj is the candidate.content object from Vertex AI
+                                    # We store it directly - save_progress will serialize it
+                                    assistant_entry["_raw_content_object"] = raw_obj
                                     
-                                    if serialized_obj:
-                                        assistant_entry["_raw_content_object"] = serialized_obj
-                                        print(f"🧠 Serialized and stored thought signature for chapter {idx+1}")
+                                    # Check if thinking tags are present in the text
+                                    if hasattr(raw_obj, 'parts'):
+                                        for part in raw_obj.parts:
+                                            if hasattr(part, 'text') and part.text:
+                                                if '<thinking>' in part.text:
+                                                    print(f"📌 Preserving thought signature for chapter {idx+1} (contains <thinking> tags)")
+                                                    break
+                                    else:
+                                        print(f"📌 Preserving raw content object for chapter {idx+1}")
                                 
                                 history.append(assistant_entry)
                         except Exception as e:
