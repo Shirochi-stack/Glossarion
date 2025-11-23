@@ -6384,7 +6384,7 @@ class UnifiedClient:
                     raise UnifiedClientError("Anthropic SDK not installed. Run: pip install anthropic")
                 
                 # Use the region from environment variable (which comes from GUI)
-                region = os.getenv('VERTEX_AI_LOCATION', 'us-east5')
+                region = os.getenv('VERTEX_AI_LOCATION', 'global')
                 
                 # CHECK STOP FLAG
                 if is_stop_requested():

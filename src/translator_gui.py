@@ -2178,9 +2178,11 @@ Recent translations to summarize:
         self.frame.addWidget(self.gcloud_button, 2, 4)
         
         # Vertex AI Location text entry
-        self.vertex_location_var = self.config.get('vertex_ai_location', 'us-east5')
+        self.vertex_location_var = self.config.get('vertex_ai_location', 'global')
         self.vertex_location_entry = QLineEdit(self.vertex_location_var)
         self.vertex_location_entry.setMinimumWidth(100)
+        # Connect text changes to update the variable
+        self.vertex_location_entry.textChanged.connect(self._on_vertex_location_changed)
         self.frame.addWidget(self.vertex_location_entry, 3, 4)
         
         # Hide by default
@@ -2211,6 +2213,10 @@ Recent translations to summarize:
     def _on_deep_scan_changed(self, state):
         """Handle deep scan checkbox state change"""
         self.deep_scan_var = (state == Qt.Checked)
+    
+    def _on_vertex_location_changed(self, text):
+        """Handle vertex location text changes"""
+        self.vertex_location_var = text.strip()
 
     def select_google_credentials(self):
         """Select Google Cloud credentials JSON file"""
@@ -8768,7 +8774,7 @@ Important rules:
                 ('book_title_prompt', ['book_title_prompt'], '', str),
                 ('translation_chunk_prompt', ['translation_chunk_prompt'], '', str),
                 ('image_chunk_prompt', ['image_chunk_prompt'], '', str),
-                ('vertex_ai_location', ['vertex_location_var'], '', str),
+                ('vertex_ai_location', ['vertex_location_entry', 'vertex_location_var'], 'global', str),
                 ('openai_base_url', ['openai_base_url_var'], '', str),
                 ('groq_base_url', ['groq_base_url_var'], '', str),
                 ('fireworks_base_url', ['fireworks_base_url_var'], '', str),
