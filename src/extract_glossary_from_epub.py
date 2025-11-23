@@ -2316,22 +2316,44 @@ def main(log_callback=None, stop_callback=None):
                                 # Create assistant entry
                                 assistant_entry = {"role": "assistant", "content": assistant_content}
                                 
-                                # Add raw_obj directly (same as sequential mode)
+                                # Add raw_obj but filter text to avoid duplication
                                 if raw_obj:
-                                    # According to Google docs: "The `content` object automatically attaches 
-                                    # the required thought_signature behind the scenes"
-                                    # The raw_obj is the candidate.content object from Vertex AI
-                                    # We store it directly - save_progress will serialize it
-                                    assistant_entry["_raw_content_object"] = raw_obj
-                                    
-                                    # Check if thinking tags are present in the text
-                                    if hasattr(raw_obj, 'parts'):
+                                    # For glossary extraction, filter text but keep thought signatures
+                                    if hasattr(raw_obj, 'parts') and assistant_content:  # If we have parts AND content
+                                        # Filter the parts to remove text duplication
+                                        filtered_obj = {'parts': []}
+                                        has_thinking = False
                                         for part in raw_obj.parts:
-                                            if hasattr(part, 'text') and part.text:
-                                                if '<thinking>' in part.text:
-                                                    print(f"📌 Preserving thought signature for chapter {idx+1} (contains <thinking> tags)")
-                                                    break
+                                            # Check for thinking tags
+                                            if hasattr(part, 'text') and part.text and '<thinking>' in part.text:
+                                                has_thinking = True
+                                            
+                                            part_dict = {}
+                                            # Don't include text since it's already in content field
+                                            # Only keep thought-related metadata
+                                            if hasattr(part, 'thought'):
+                                                part_dict['thought'] = part.thought
+                                            if hasattr(part, 'thought_signature') and part.thought_signature:
+                                                part_dict['thought_signature'] = part.thought_signature
+                                            # Add part if it has any metadata
+                                            if part_dict:
+                                                filtered_obj['parts'].append(part_dict)
+                                            elif not part_dict and not hasattr(part, 'text'):
+                                                # Keep parts that have no text but might have other fields
+                                                filtered_obj['parts'].append({})
+                                        
+                                        # Only save if we have parts with metadata
+                                        if filtered_obj['parts']:
+                                            if hasattr(raw_obj, 'role'):
+                                                filtered_obj['role'] = raw_obj.role
+                                            assistant_entry["_raw_content_object"] = filtered_obj
+                                            if has_thinking:
+                                                print(f"📌 Preserving thought signature for chapter {idx+1} (contains <thinking> tags)")
+                                            else:
+                                                print(f"📌 Preserving thought signature for chapter {idx+1}")
                                     else:
+                                        # No parts or no content - store as-is
+                                        assistant_entry["_raw_content_object"] = raw_obj
                                         print(f"📌 Preserving raw content object for chapter {idx+1}")
                                 
                                 history.append(assistant_entry)
@@ -2918,11 +2940,36 @@ def main(log_callback=None, stop_callback=None):
                         
                         # Add thought signatures if available
                         if 'raw_obj' in locals() and raw_obj:
-                            # According to Google docs: "The `content` object automatically attaches 
-                            # the required thought_signature behind the scenes"
-                            # So we should store the raw_obj directly as it's the candidate.content object
-                            assistant_entry["_raw_content_object"] = raw_obj
-                            print("📌 Preserving thought signature for context (stored raw Content object)")
+                            # For glossary extraction, we need to avoid duplicating the text content
+                            # but preserve thought signatures for both regular Gemini and Vertex AI
+                            if hasattr(raw_obj, 'parts') and resp:  # If we have parts AND content
+                                # Filter the parts to remove text duplication
+                                filtered_obj = {'parts': []}
+                                for part in raw_obj.parts:
+                                    part_dict = {}
+                                    # Don't include text since it's already in content field
+                                    # Only keep thought-related metadata
+                                    if hasattr(part, 'thought'):
+                                        part_dict['thought'] = part.thought
+                                    if hasattr(part, 'thought_signature') and part.thought_signature:
+                                        part_dict['thought_signature'] = part.thought_signature
+                                    # Add part if it has any metadata
+                                    if part_dict:
+                                        filtered_obj['parts'].append(part_dict)
+                                    elif not part_dict and not hasattr(part, 'text'):
+                                        # Keep parts that have no text but might have other fields
+                                        filtered_obj['parts'].append({})
+                                
+                                # Only save if we have parts with metadata
+                                if filtered_obj['parts']:
+                                    if hasattr(raw_obj, 'role'):
+                                        filtered_obj['role'] = raw_obj.role
+                                    assistant_entry["_raw_content_object"] = filtered_obj
+                                    print("📌 Preserving thought signature for context (filtered to avoid duplication)")
+                            else:
+                                # No parts or no content - store as-is
+                                assistant_entry["_raw_content_object"] = raw_obj
+                                print("📌 Preserving raw content object")
                                     
                             history.append(assistant_entry)
                     
@@ -3051,8 +3098,14 @@ def save_progress(completed: List[int], glossary: List[Dict], context_history: L
                                 try:
                                     for part in raw_obj.parts:
                                         part_dict = {}
-                                        # Only check specific known attributes to avoid non-serializable ones
-                                        known_attrs = ['text', 'thought', 'thought_signature', 'inline_data', 'function_call', 'function_response']
+                                        # For glossary extraction, we want to avoid duplicating text content
+                                        # but preserve thought signatures
+                                        known_attrs = ['thought', 'thought_signature', 'inline_data', 'function_call', 'function_response']
+                                        # Only include 'text' if this is NOT a glossary extraction context
+                                        # (glossary text is already in the 'content' field)
+                                        if msg.get('role') != 'assistant' or not msg.get('content', '').strip():
+                                            known_attrs.insert(0, 'text')  # Include text if not assistant or no content
+                                        
                                         for attr in known_attrs:
                                             if hasattr(part, attr):
                                                 try:
