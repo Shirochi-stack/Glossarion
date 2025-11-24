@@ -92,8 +92,8 @@ class HistoryManager:
                 try:
                     for part in obj.parts:
                         part_dict = {}
-                        # Check for common attributes
-                        for attr in ['text', 'thought', 'thought_signature', 'inline_data', 'function_call', 'function_response']:
+                        # Check for common attributes (excluding 'text' to avoid duplication)
+                        for attr in ['thought', 'thought_signature', 'inline_data', 'function_call', 'function_response']:
                             if hasattr(part, attr):
                                 value = getattr(part, attr, None)
                                 if value is not None:

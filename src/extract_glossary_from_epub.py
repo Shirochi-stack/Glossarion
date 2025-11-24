@@ -743,100 +743,81 @@ def trim_context_history(history: List[Dict], limit: int, rolling_window: bool =
             print(f"🔄 Reset glossary context after {limit} chapters")
             return []  # Return empty to reset context
 
-    # Check if we're using Gemini 3 with thought signatures
+    # Check if we're using a model with thought signature support
+    # This includes Gemini 3, experimental models, and Vertex AI models
     model = os.getenv("MODEL", "gemini-2.0-flash").lower()
-    is_gemini_3 = "gemini-3" in model or "gemini-exp-1206" in model
+    api_type = os.getenv("API_TYPE", "gemini").lower()
+    
+    # Check for models that support thought signatures
+    is_thought_signature_model = (
+        "gemini-3" in model or 
+        "gemini-exp-1206" in model or
+        "gemini-2.0-flash-thinking" in model or
+        (api_type == "vertex" and "thinking" in model)  # Vertex AI thinking models
+    )
     
     # Check if including source is enabled (generally not recommended for glossary)
     include_source = os.getenv("INCLUDE_SOURCE_IN_HISTORY", "0") == "1"
     
-    if is_gemini_3:
-        # For Gemini 3, we need natural conversation but ONLY assistant messages as memory
-        # We do NOT want to send previous user prompts as that would confuse the model
-        memory_blocks: List[str] = []
+    if is_thought_signature_model:
+        # For models with thought signature support (Gemini 3, Vertex AI thinking models, etc.),
+        # we return the actual assistant messages with their preserved _raw_content_object fields
+        # containing thought signatures. We skip user messages to avoid confusing the model with source text
         
-        i = 0
-        while i < len(history):
-            # Get user and assistant messages
-            user_msg = history[i] if i < len(history) and history[i].get('role') == 'user' else None
-            assistant_msg = history[i+1] if i+1 < len(history) and history[i+1].get('role') == 'assistant' else None
-            
-            if user_msg and assistant_msg:
-                user_text = (user_msg.get("content") or "").strip()
-                assistant_text = (assistant_msg.get("content") or "").strip()
+        result_messages = []
+        
+        # Process history to extract only assistant messages with their thought signatures
+        for msg in history:
+            if msg.get('role') == 'assistant':
+                # Create a copy of the message to preserve it
+                assistant_msg = {"role": "assistant", "content": msg.get("content", "")}
                 
-                # Optionally include previous source text as part of memory
-                if include_source and user_text:
-                    memory_blocks.append(
-                        "[MEMORY - PREVIOUS SOURCE TEXT]\n"
-                        "This is prior source content provided for context only.\n"
-                        "Do NOT extract from this text directly in your response.\n\n"
-                        + user_text + "\n\n[END MEMORY BLOCK]\n"
-                    )
-                
-                # Always include previously extracted glossary entries
-                if assistant_text:
-                    memory_blocks.append(
-                        "[MEMORY - PREVIOUSLY EXTRACTED GLOSSARY]\n"
-                        "These are previously extracted glossary entries provided for context only.\n"
-                        "Build upon these but do NOT repeat these entries verbatim in your response.\n\n"
-                        + assistant_text + "\n\n[END MEMORY BLOCK]\n"
-                    )
-            
-            i += 2  # Move to next exchange
-        
-        if not memory_blocks:
-            return []
-        
-        # For Gemini 3, return as a single assistant message with memory blocks
-        # This avoids sending user messages which would confuse the model
-        combined_memory = "\n".join(memory_blocks)
-        
-        # For glossary extraction, always include content field with memory blocks
-        # If there's a raw object with thought signatures, keep it but remove text from parts
-        thought_sig_msg = {"role": "assistant", "content": combined_memory}
-        
-        # Find the most recent assistant message with thought signature
-        for msg in reversed(history):
-            if msg.get('role') == 'assistant' and '_raw_content_object' in msg:
-                raw_obj = msg['_raw_content_object']
-                
-                # For glossary, we keep thought signatures but remove text from parts
-                # to avoid duplication with the content field
-                # EXCEPT for Vertex AI where thinking is embedded in text
-                if isinstance(raw_obj, dict) and 'parts' in raw_obj:
-                    # Check if this is a Vertex AI response
-                    is_vertex = raw_obj.get('_from_vertex', False)
-                    # Filter parts to remove text (avoid duplication) but keep thought signatures
-                    filtered_parts = []
-                    for part in raw_obj.get('parts', []):
-                        if isinstance(part, dict):
-                            filtered_part = {}
-                            # For Vertex AI, keep text field since thinking is embedded in it
-                            # For others, exclude text to avoid duplication
-                            if is_vertex and 'text' in part:
-                                filtered_part['text'] = part['text']
-                            # Keep thought-related fields
-                            if 'thought' in part:
-                                filtered_part['thought'] = part['thought']
-                            if 'thought_signature' in part:
-                                filtered_part['thought_signature'] = part['thought_signature']
-                            # Only append if we have some fields
-                            if filtered_part:
-                                filtered_parts.append(filtered_part)
+                # Preserve the raw content object with thought signatures if present
+                if '_raw_content_object' in msg:
+                    raw_obj = msg['_raw_content_object']
                     
-                    if filtered_parts:
-                        thought_sig_msg['_raw_content_object'] = {
-                            'parts': filtered_parts,
-                            'role': raw_obj.get('role', 'model'),
-                            '_from_vertex': is_vertex  # Preserve the flag
-                        }
-                else:
-                    # Keep raw object as-is if no parts structure
-                    thought_sig_msg['_raw_content_object'] = raw_obj
-                break
+                    # For glossary, we keep thought signatures but may filter text from parts
+                    # to avoid duplication with the content field
+                    if isinstance(raw_obj, dict) and 'parts' in raw_obj:
+                        # Check if this is a Vertex AI response
+                        is_vertex = raw_obj.get('_from_vertex', False)
+                        
+                        # For non-Vertex responses, filter out text field to avoid duplication
+                        # For Vertex AI, keep text since thinking is embedded in it
+                        if not is_vertex:
+                            filtered_parts = []
+                            for part in raw_obj.get('parts', []):
+                                if isinstance(part, dict):
+                                    filtered_part = {}
+                                    # Keep thought-related fields only
+                                    if 'thought' in part:
+                                        filtered_part['thought'] = part['thought']
+                                    if 'thought_signature' in part:
+                                        filtered_part['thought_signature'] = part['thought_signature']
+                                    # Only append if we have some fields
+                                    if filtered_part:
+                                        filtered_parts.append(filtered_part)
+                            
+                            # Only add _raw_content_object if we have thought signatures
+                            if filtered_parts:
+                                assistant_msg['_raw_content_object'] = {
+                                    'parts': filtered_parts,
+                                    'role': raw_obj.get('role', 'model'),
+                                    '_from_vertex': False
+                                }
+                        else:
+                            # For Vertex AI, keep the raw object as-is (with text)
+                            assistant_msg['_raw_content_object'] = raw_obj
+                    else:
+                        # Keep raw object as-is if no parts structure
+                        assistant_msg['_raw_content_object'] = raw_obj
+                
+                result_messages.append(assistant_msg)
         
-        return [thought_sig_msg]
+        if result_messages:
+            print(f"📌 Including {len(result_messages)} assistant message(s) with thought signatures from context")
+        
+        return result_messages
     
     else:
         # For other models, use memory blocks (legacy behavior)
