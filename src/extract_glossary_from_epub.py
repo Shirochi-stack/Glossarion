@@ -803,15 +803,20 @@ def trim_context_history(history: List[Dict], limit: int, rolling_window: bool =
                 # For glossary, we keep thought signatures but remove text from parts
                 # to avoid duplication with the content field
                 if isinstance(raw_obj, dict) and 'parts' in raw_obj:
-                    # Filter parts to keep only thought signatures, not text
+                    # Filter parts to remove text (avoid duplication) but keep thought signatures
                     filtered_parts = []
                     for part in raw_obj.get('parts', []):
-                        if isinstance(part, dict) and 'thought_signature' in part:
-                            # Keep the thought signature with thought=true flag, exclude text
-                            filtered_part = {"thought_signature": part['thought_signature']}
+                        if isinstance(part, dict):
+                            filtered_part = {}
+                            # Exclude 'text' field to avoid duplication (it's already in content)
+                            # Keep thought-related fields only
                             if 'thought' in part:
                                 filtered_part['thought'] = part['thought']
-                            filtered_parts.append(filtered_part)
+                            if 'thought_signature' in part:
+                                filtered_part['thought_signature'] = part['thought_signature']
+                            # Only append if we have some fields
+                            if filtered_part:
+                                filtered_parts.append(filtered_part)
                     
                     if filtered_parts:
                         thought_sig_msg['_raw_content_object'] = {
@@ -884,6 +889,35 @@ def load_progress() -> Dict:
                     data["glossary"] = []
                 if "context_history" not in data:
                     data["context_history"] = []
+                
+                # Filter text from _raw_content_object in existing history to avoid duplication
+                # This cleans up history that was saved before we added filtering
+                for msg in data.get("context_history", []):
+                    if msg.get('role') == 'assistant' and '_raw_content_object' in msg:
+                        raw_obj = msg['_raw_content_object']
+                        if isinstance(raw_obj, dict) and 'parts' in raw_obj:
+                            # Filter out text field from parts
+                            filtered_parts = []
+                            for part in raw_obj.get('parts', []):
+                                if isinstance(part, dict):
+                                    # Remove text field but keep thought signatures
+                                    filtered_part = {}
+                                    if 'thought' in part:
+                                        filtered_part['thought'] = part['thought']
+                                    if 'thought_signature' in part:
+                                        filtered_part['thought_signature'] = part['thought_signature']
+                                    if filtered_part:
+                                        filtered_parts.append(filtered_part)
+                            
+                            if filtered_parts:
+                                msg['_raw_content_object'] = {
+                                    'parts': filtered_parts,
+                                    'role': raw_obj.get('role', 'model')
+                                }
+                            else:
+                                # No thought signatures, remove the raw object
+                                del msg['_raw_content_object']
+                
                 return data
         except json.JSONDecodeError as e:
             print(f"[Warning] Progress file is corrupted (JSON error at line {e.lineno}, column {e.colno}): {e.msg}")
@@ -2316,44 +2350,22 @@ def main(log_callback=None, stop_callback=None):
                                 # Create assistant entry
                                 assistant_entry = {"role": "assistant", "content": assistant_content}
                                 
-                                # Add raw_obj but filter text to avoid duplication
+                                # Add raw_obj directly (same as sequential mode)
                                 if raw_obj:
-                                    # For glossary extraction, filter text but keep thought signatures
-                                    if hasattr(raw_obj, 'parts') and assistant_content:  # If we have parts AND content
-                                        # Filter the parts to remove text duplication
-                                        filtered_obj = {'parts': []}
-                                        has_thinking = False
+                                    # According to Google docs: "The `content` object automatically attaches 
+                                    # the required thought_signature behind the scenes"
+                                    # The raw_obj is the candidate.content object from Vertex AI
+                                    # We store it directly - save_progress will serialize it
+                                    assistant_entry["_raw_content_object"] = raw_obj
+                                    
+                                    # Check if thinking tags are present in the text
+                                    if hasattr(raw_obj, 'parts'):
                                         for part in raw_obj.parts:
-                                            # Check for thinking tags
-                                            if hasattr(part, 'text') and part.text and '<thinking>' in part.text:
-                                                has_thinking = True
-                                            
-                                            part_dict = {}
-                                            # Don't include text since it's already in content field
-                                            # Only keep thought-related metadata
-                                            if hasattr(part, 'thought'):
-                                                part_dict['thought'] = part.thought
-                                            if hasattr(part, 'thought_signature') and part.thought_signature:
-                                                part_dict['thought_signature'] = part.thought_signature
-                                            # Add part if it has any metadata
-                                            if part_dict:
-                                                filtered_obj['parts'].append(part_dict)
-                                            elif not part_dict and not hasattr(part, 'text'):
-                                                # Keep parts that have no text but might have other fields
-                                                filtered_obj['parts'].append({})
-                                        
-                                        # Only save if we have parts with metadata
-                                        if filtered_obj['parts']:
-                                            if hasattr(raw_obj, 'role'):
-                                                filtered_obj['role'] = raw_obj.role
-                                            assistant_entry["_raw_content_object"] = filtered_obj
-                                            if has_thinking:
-                                                print(f"📌 Preserving thought signature for chapter {idx+1} (contains <thinking> tags)")
-                                            else:
-                                                print(f"📌 Preserving thought signature for chapter {idx+1}")
+                                            if hasattr(part, 'text') and part.text:
+                                                if '<thinking>' in part.text:
+                                                    print(f"📌 Preserving thought signature for chapter {idx+1} (contains <thinking> tags)")
+                                                    break
                                     else:
-                                        # No parts or no content - store as-is
-                                        assistant_entry["_raw_content_object"] = raw_obj
                                         print(f"📌 Preserving raw content object for chapter {idx+1}")
                                 
                                 history.append(assistant_entry)
@@ -2628,10 +2640,40 @@ def main(log_callback=None, stop_callback=None):
                                            + context_msgs \
                                            + [{"role": "user", "content": chunk_user_prompt}]
 
-                        # API call for chunk
+                        # Filter text from _raw_content_object in messages before API call
+                        filtered_chunk_msgs = []
+                        for msg in chunk_msgs:
+                            filtered_msg = msg.copy()
+                            if filtered_msg.get('role') == 'assistant' and '_raw_content_object' in filtered_msg:
+                                raw_obj = filtered_msg['_raw_content_object']
+                                if isinstance(raw_obj, dict) and 'parts' in raw_obj:
+                                    # Filter out text field from parts
+                                    filtered_parts = []
+                                    for part in raw_obj.get('parts', []):
+                                        if isinstance(part, dict):
+                                            # Remove text field but keep thought signatures
+                                            filtered_part = {}
+                                            if 'thought' in part:
+                                                filtered_part['thought'] = part['thought']
+                                            if 'thought_signature' in part:
+                                                filtered_part['thought_signature'] = part['thought_signature']
+                                            if filtered_part:
+                                                filtered_parts.append(filtered_part)
+                                    
+                                    if filtered_parts:
+                                        filtered_msg['_raw_content_object'] = {
+                                            'parts': filtered_parts,
+                                            'role': raw_obj.get('role', 'model')
+                                        }
+                                    else:
+                                        # No thought signatures, remove the raw object
+                                        del filtered_msg['_raw_content_object']
+                            filtered_chunk_msgs.append(filtered_msg)
+                        
+                        # API call for chunk with FILTERED messages
                         try:
                             chunk_raw, chunk_finish_reason, chunk_raw_obj = send_with_interrupt(
-                                messages=chunk_msgs,
+                                messages=filtered_chunk_msgs,  # Use filtered messages
                                 client=client,
                                 temperature=temp,
                                 max_tokens=mtoks,
@@ -2805,11 +2847,42 @@ def main(log_callback=None, stop_callback=None):
                         print(f"❌ Glossary extraction stopped before API call for chapter {idx+1}")
                         return
                 
+                    # Filter text from _raw_content_object in messages before API call
+                    # This ensures the payload doesn't have duplicate text
+                    filtered_msgs = []
+                    for msg in msgs:
+                        filtered_msg = msg.copy()
+                        if filtered_msg.get('role') == 'assistant' and '_raw_content_object' in filtered_msg:
+                            raw_obj = filtered_msg['_raw_content_object']
+                            if isinstance(raw_obj, dict) and 'parts' in raw_obj:
+                                # Filter out text field from parts
+                                filtered_parts = []
+                                for part in raw_obj.get('parts', []):
+                                    if isinstance(part, dict):
+                                        # Remove text field but keep thought signatures
+                                        filtered_part = {}
+                                        if 'thought' in part:
+                                            filtered_part['thought'] = part['thought']
+                                        if 'thought_signature' in part:
+                                            filtered_part['thought_signature'] = part['thought_signature']
+                                        if filtered_part:
+                                            filtered_parts.append(filtered_part)
+                                
+                                if filtered_parts:
+                                    filtered_msg['_raw_content_object'] = {
+                                        'parts': filtered_parts,
+                                        'role': raw_obj.get('role', 'model')
+                                    }
+                                else:
+                                    # No thought signatures, remove the raw object
+                                    del filtered_msg['_raw_content_object']
+                        filtered_msgs.append(filtered_msg)
+                    
                     raw_obj = None
                     try:
-                        # Use send_with_interrupt for API call
+                        # Use send_with_interrupt for API call with FILTERED messages
                         raw, finish_reason, raw_obj = send_with_interrupt(
-                            messages=msgs,
+                            messages=filtered_msgs,  # Use filtered messages
                             client=client,
                             temperature=temp,
                             max_tokens=mtoks,
@@ -2940,36 +3013,11 @@ def main(log_callback=None, stop_callback=None):
                         
                         # Add thought signatures if available
                         if 'raw_obj' in locals() and raw_obj:
-                            # For glossary extraction, we need to avoid duplicating the text content
-                            # but preserve thought signatures for both regular Gemini and Vertex AI
-                            if hasattr(raw_obj, 'parts') and resp:  # If we have parts AND content
-                                # Filter the parts to remove text duplication
-                                filtered_obj = {'parts': []}
-                                for part in raw_obj.parts:
-                                    part_dict = {}
-                                    # Don't include text since it's already in content field
-                                    # Only keep thought-related metadata
-                                    if hasattr(part, 'thought'):
-                                        part_dict['thought'] = part.thought
-                                    if hasattr(part, 'thought_signature') and part.thought_signature:
-                                        part_dict['thought_signature'] = part.thought_signature
-                                    # Add part if it has any metadata
-                                    if part_dict:
-                                        filtered_obj['parts'].append(part_dict)
-                                    elif not part_dict and not hasattr(part, 'text'):
-                                        # Keep parts that have no text but might have other fields
-                                        filtered_obj['parts'].append({})
-                                
-                                # Only save if we have parts with metadata
-                                if filtered_obj['parts']:
-                                    if hasattr(raw_obj, 'role'):
-                                        filtered_obj['role'] = raw_obj.role
-                                    assistant_entry["_raw_content_object"] = filtered_obj
-                                    print("📌 Preserving thought signature for context (filtered to avoid duplication)")
-                            else:
-                                # No parts or no content - store as-is
-                                assistant_entry["_raw_content_object"] = raw_obj
-                                print("📌 Preserving raw content object")
+                            # According to Google docs: "The `content` object automatically attaches 
+                            # the required thought_signature behind the scenes"
+                            # So we should store the raw_obj directly as it's the candidate.content object
+                            assistant_entry["_raw_content_object"] = raw_obj
+                            print("📌 Preserving thought signature for context (stored raw Content object)")
                                     
                             history.append(assistant_entry)
                     
@@ -3098,13 +3146,15 @@ def save_progress(completed: List[int], glossary: List[Dict], context_history: L
                                 try:
                                     for part in raw_obj.parts:
                                         part_dict = {}
-                                        # For glossary extraction, we want to avoid duplicating text content
-                                        # but preserve thought signatures
-                                        known_attrs = ['thought', 'thought_signature', 'inline_data', 'function_call', 'function_response']
-                                        # Only include 'text' if this is NOT a glossary extraction context
-                                        # (glossary text is already in the 'content' field)
-                                        if msg.get('role') != 'assistant' or not msg.get('content', '').strip():
-                                            known_attrs.insert(0, 'text')  # Include text if not assistant or no content
+                                        # For glossary extraction, exclude 'text' to avoid duplication with content field
+                                        # Check if this is a glossary context (assistant message with content)
+                                        is_glossary = msg.get('role') == 'assistant' and msg.get('content')
+                                        if is_glossary:
+                                            # Exclude text field for glossary to avoid duplication
+                                            known_attrs = ['thought', 'thought_signature', 'inline_data', 'function_call', 'function_response']
+                                        else:
+                                            # Include all fields for other contexts
+                                            known_attrs = ['text', 'thought', 'thought_signature', 'inline_data', 'function_call', 'function_response']
                                         
                                         for attr in known_attrs:
                                             if hasattr(part, attr):
