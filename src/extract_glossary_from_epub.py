@@ -802,14 +802,20 @@ def trim_context_history(history: List[Dict], limit: int, rolling_window: bool =
                 
                 # For glossary, we keep thought signatures but remove text from parts
                 # to avoid duplication with the content field
+                # EXCEPT for Vertex AI where thinking is embedded in text
                 if isinstance(raw_obj, dict) and 'parts' in raw_obj:
+                    # Check if this is a Vertex AI response
+                    is_vertex = raw_obj.get('_from_vertex', False)
                     # Filter parts to remove text (avoid duplication) but keep thought signatures
                     filtered_parts = []
                     for part in raw_obj.get('parts', []):
                         if isinstance(part, dict):
                             filtered_part = {}
-                            # Exclude 'text' field to avoid duplication (it's already in content)
-                            # Keep thought-related fields only
+                            # For Vertex AI, keep text field since thinking is embedded in it
+                            # For others, exclude text to avoid duplication
+                            if is_vertex and 'text' in part:
+                                filtered_part['text'] = part['text']
+                            # Keep thought-related fields
                             if 'thought' in part:
                                 filtered_part['thought'] = part['thought']
                             if 'thought_signature' in part:
@@ -821,7 +827,8 @@ def trim_context_history(history: List[Dict], limit: int, rolling_window: bool =
                     if filtered_parts:
                         thought_sig_msg['_raw_content_object'] = {
                             'parts': filtered_parts,
-                            'role': raw_obj.get('role', 'model')
+                            'role': raw_obj.get('role', 'model'),
+                            '_from_vertex': is_vertex  # Preserve the flag
                         }
                 else:
                     # Keep raw object as-is if no parts structure
@@ -892,16 +899,22 @@ def load_progress() -> Dict:
                 
                 # Filter text from _raw_content_object in existing history to avoid duplication
                 # This cleans up history that was saved before we added filtering
+                # EXCEPT for Vertex AI where thinking is embedded in text
                 for msg in data.get("context_history", []):
                     if msg.get('role') == 'assistant' and '_raw_content_object' in msg:
                         raw_obj = msg['_raw_content_object']
                         if isinstance(raw_obj, dict) and 'parts' in raw_obj:
-                            # Filter out text field from parts
+                            # Check if this is a Vertex AI response
+                            is_vertex = raw_obj.get('_from_vertex', False)
+                            # Filter out text field from parts (except for Vertex)
                             filtered_parts = []
                             for part in raw_obj.get('parts', []):
                                 if isinstance(part, dict):
-                                    # Remove text field but keep thought signatures
                                     filtered_part = {}
+                                    # For Vertex AI, keep text field
+                                    if is_vertex and 'text' in part:
+                                        filtered_part['text'] = part['text']
+                                    # Keep thought signatures
                                     if 'thought' in part:
                                         filtered_part['thought'] = part['thought']
                                     if 'thought_signature' in part:
@@ -912,7 +925,8 @@ def load_progress() -> Dict:
                             if filtered_parts:
                                 msg['_raw_content_object'] = {
                                     'parts': filtered_parts,
-                                    'role': raw_obj.get('role', 'model')
+                                    'role': raw_obj.get('role', 'model'),
+                                    '_from_vertex': is_vertex  # Preserve the flag
                                 }
                             else:
                                 # No thought signatures, remove the raw object
