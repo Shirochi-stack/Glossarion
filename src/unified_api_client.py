@@ -6015,17 +6015,19 @@ class UnifiedClient:
                                         continue  # Don't save reasoning parts
                                     
                                     part_dict = {}
+                                    # CRITICAL: Save each field in the Part separately
+                                    # Google's response has text and thought_signature in SEPARATE Parts
+                                    # We must preserve this structure
                                     if hasattr(part, 'text') and part.text:
                                         part_dict['text'] = part.text
-                                    # Don't save thought field since we're filtering them out
-                                    # if hasattr(part, 'thought') and part.thought is not None:
-                                    #     part_dict['thought'] = part.thought
                                     if hasattr(part, 'thought_signature') and part.thought_signature:
                                         # Serialize bytes as base64
                                         part_dict['thought_signature'] = {
                                             '_type': 'bytes',
                                             'data': base64.b64encode(part.thought_signature).decode('utf-8')
                                         }
+                                    # Save the part_dict even if it only has one field
+                                    # This preserves the separate Part structure from Google's response
                                     if part_dict:
                                         serialized_obj['parts'].append(part_dict)
                                 if serialized_obj['parts']:  # Only save if there are parts after filtering
@@ -8934,23 +8936,26 @@ class UnifiedClient:
                                                 
                                                 # Add text if present (use from parts, NOT from content field)
                                                 # Text goes in a SEPARATE Part from thought_signature
-                                                text_to_use = None
                                                 if 'text' in part_data and part_data['text']:
-                                                    text_to_use = part_data['text']
-                                                elif not any('text' in p and p['text'] for p in raw_obj['parts'] if isinstance(p, dict) and not p.get('thought', False)):
-                                                    # No text in any non-thought part, use content as fallback
-                                                    if part_data == raw_obj['parts'][0]:
-                                                        text_to_use = content
-                                                
-                                                if text_to_use:
                                                     try:
-                                                        text_part = types.Part(text=text_to_use)
+                                                        text_part = types.Part(text=part_data['text'])
                                                         parts_to_send.append(text_part)
-                                                        # print(f"   📝 Added Part with text ({len(text_to_use)} chars)")
+                                                        # print(f"   📝 Added Part with text from part_data ({len(part_data['text'])} chars)")
                                                     except Exception as e:
                                                         print(f"   ❌ Failed to create Part with text: {e}")
                                         
                                         if parts_to_send:
+                                            # Check if we have any text Part - if not, add content as fallback
+                                            has_text_part = any(hasattr(p, 'text') and p.text for p in parts_to_send)
+                                            if not has_text_part and content:
+                                                # Add content as text Part
+                                                try:
+                                                    text_part = types.Part(text=content)
+                                                    parts_to_send.append(text_part)
+                                                    print(f"   📝 Added content as text Part (no text in parts)")
+                                                except Exception as e:
+                                                    print(f"   ❌ Failed to create text Part from content: {e}")
+                                            
                                             # print(f"   🧠 Created {len(parts_to_send)} Part objects for Gemini 3")
                                             # Create Content object with the Part objects
                                             try:

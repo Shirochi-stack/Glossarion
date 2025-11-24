@@ -2652,11 +2652,12 @@ def main(log_callback=None, stop_callback=None):
                                 elif hasattr(raw_obj, 'parts'):
                                     has_raw_parts = True
                             
-                            # For assistant messages with raw parts, OMIT content field to avoid duplication
-                            # This follows the pattern from TranslateKRtoEN.py
+                            # For assistant messages with raw parts, include BOTH content and _raw_content_object
+                            # The content field is needed as fallback when parts don't have text
                             if msg.get('role') == 'assistant' and has_raw_parts:
-                                # Only include role and _raw_content_object, NOT content
+                                # Include role, content, AND _raw_content_object
                                 filtered_msg['role'] = msg['role']
+                                filtered_msg['content'] = msg.get('content', '')
                                 filtered_msg['_raw_content_object'] = msg['_raw_content_object']
                             else:
                                 # For other messages, copy everything as-is
@@ -2855,11 +2856,12 @@ def main(log_callback=None, stop_callback=None):
                             elif hasattr(raw_obj, 'parts'):
                                 has_raw_parts = True
                         
-                        # For assistant messages with raw parts, OMIT content field to avoid duplication
-                        # This follows the pattern from TranslateKRtoEN.py
+                        # For assistant messages with raw parts, include BOTH content and _raw_content_object
+                        # The content field is needed as fallback when parts don't have text
                         if msg.get('role') == 'assistant' and has_raw_parts:
-                            # Only include role and _raw_content_object, NOT content
+                            # Include role, content, AND _raw_content_object
                             filtered_msg['role'] = msg['role']
+                            filtered_msg['content'] = msg.get('content', '')
                             filtered_msg['_raw_content_object'] = msg['_raw_content_object']
                         else:
                             # For other messages, copy everything as-is
