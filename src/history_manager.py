@@ -9,9 +9,9 @@ from contextlib import contextmanager
 class HistoryManager:
     """Thread-safe history management with file locking"""
     
-    def __init__(self, payloads_dir):
+    def __init__(self, payloads_dir, history_filename="translation_history.json"):
         self.payloads_dir = payloads_dir
-        self.hist_path = os.path.join(payloads_dir, "translation_history.json")
+        self.hist_path = os.path.join(payloads_dir, history_filename)
         self.lock = Lock()
         self._file_locks = {}
     
@@ -65,7 +65,7 @@ class HistoryManager:
         return []
     
     def _make_json_serializable(self, obj):
-        """Recursively convert bytes to base64 string for JSON serialization"""
+        """Recursively convert objects to JSON-serializable format"""
         if isinstance(obj, bytes):
             import base64
             return {'_type': 'bytes', 'data': base64.b64encode(obj).decode('ascii')}
@@ -73,7 +73,69 @@ class HistoryManager:
             return {k: self._make_json_serializable(v) for k, v in obj.items()}
         elif isinstance(obj, list):
             return [self._make_json_serializable(v) for v in obj]
-        return obj
+        elif isinstance(obj, (str, int, float, bool, type(None))):
+            # Primitive types are already serializable
+            return obj
+        elif hasattr(obj, 'to_dict'):
+            # Objects with to_dict method (common in SDKs)
+            return self._make_json_serializable(obj.to_dict())
+        elif hasattr(obj, 'model_dump'):
+            # Pydantic models
+            return self._make_json_serializable(obj.model_dump())
+        elif hasattr(obj, '__dict__'):
+            # Google SDK Content objects and similar - extract parts
+            result = {}
+            
+            # Special handling for Google SDK Content objects
+            if hasattr(obj, 'parts'):
+                parts = []
+                try:
+                    for part in obj.parts:
+                        part_dict = {}
+                        # Check for common attributes
+                        for attr in ['text', 'thought', 'thought_signature', 'inline_data', 'function_call', 'function_response']:
+                            if hasattr(part, attr):
+                                value = getattr(part, attr, None)
+                                if value is not None:
+                                    part_dict[attr] = self._make_json_serializable(value)
+                        if part_dict:
+                            parts.append(part_dict)
+                    if parts:
+                        result['parts'] = parts
+                except Exception:
+                    # If we can't iterate parts, skip
+                    pass
+            
+            # Try to extract other attributes
+            if hasattr(obj, 'role'):
+                try:
+                    result['role'] = getattr(obj, 'role', None)
+                except:
+                    pass
+            
+            # Mark as from_vertex if it is
+            if obj.__class__.__name__ == 'Content':
+                result['_from_vertex'] = True
+            
+            if result:
+                return result
+            
+            # Fallback: try to serialize __dict__ items
+            try:
+                obj_dict = {}
+                for key, value in obj.__dict__.items():
+                    if not key.startswith('_'):
+                        obj_dict[key] = self._make_json_serializable(value)
+                if obj_dict:
+                    return obj_dict
+            except:
+                pass
+            
+            # Last resort: convert to string
+            return str(obj)
+        else:
+            # For any other type, convert to string
+            return str(obj)
 
     def save_history(self, history):
         """Save history atomically with file locking"""

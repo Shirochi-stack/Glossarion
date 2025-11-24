@@ -236,6 +236,7 @@ def count_tokens(text: str) -> int:
 from ebooklib import epub
 from bs4 import BeautifulSoup
 from unified_api_client import UnifiedClient
+from history_manager import HistoryManager
 from typing import List, Dict
 import re
 
@@ -888,14 +889,12 @@ def load_progress() -> Dict:
                 # Validate the structure
                 if not isinstance(data, dict):
                     print(f"[Warning] Progress file has invalid structure, resetting...")
-                    return {"completed": [], "glossary": [], "context_history": []}
+                    return {"completed": [], "glossary": []}
                 # Ensure all required keys exist
                 if "completed" not in data:
                     data["completed"] = []
                 if "glossary" not in data:
                     data["glossary"] = []
-                if "context_history" not in data:
-                    data["context_history"] = []
                 
                 # Filter text from _raw_content_object in existing history to avoid duplication
                 # This cleans up history that was saved before we added filtering
@@ -1782,7 +1781,6 @@ def process_chapter_batch(chapters_batch: List[Tuple[int, str]],
                                 # According to Google docs: "The `content` object automatically attaches 
                                 # the required thought_signature behind the scenes"
                                 # The raw_obj is the candidate.content object from Vertex AI
-                                # We store it directly - save_progress will serialize it
                                 assistant_entry["_raw_content_object"] = raw_obj
                                 
                                 # Check if thinking tags are present in the text
@@ -2160,12 +2158,17 @@ def main(log_callback=None, stop_callback=None):
     prog = load_progress()
     completed = prog['completed']
     glossary = prog['glossary']
-    history = prog['context_history']
-    total_chapters = len(chapters)
     
     # Get both settings
     contextual_enabled = os.getenv('CONTEXTUAL', '1') == '1'
     rolling_window = os.getenv('GLOSSARY_HISTORY_ROLLING', '0') == '1'
+    
+    # Initialize HistoryManager for context history (separate from progress file)
+    # Use source file-based naming like other glossary files
+    history_filename = f"{file_base}_glossary_history.json"
+    history_manager = HistoryManager(glossary_dir, history_filename)
+    history = history_manager.load_history() if contextual_enabled else []
+    total_chapters = len(chapters)
     
     # Count chapters that will be processed with range filter
     chapters_to_process = []
@@ -2209,7 +2212,7 @@ def main(log_callback=None, stop_callback=None):
                         x.get('raw_name', '').lower()
                     ))
                     
-                    save_progress(completed, glossary, history)
+                    save_progress(completed, glossary)
                     save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                     save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                     print(f"✅ Saved {len(glossary)} deduplicated entries before exit")
@@ -2330,7 +2333,7 @@ def main(log_callback=None, stop_callback=None):
                             batch_history_map[idx] = (user_prompt, resp, raw_obj)
                         
                         # Save progress after each chapter completes (crash-safe with atomic writes)
-                        save_progress(completed, glossary, history)
+                        save_progress(completed, glossary)
                         # Also save glossary files for incremental updates
                         save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                         save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
@@ -2444,7 +2447,7 @@ def main(log_callback=None, stop_callback=None):
                         x.get('raw_name', '').lower()
                     ))
                     
-                    save_progress(completed, glossary, history)
+                    save_progress(completed, glossary)
                     save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                     save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                     print(f"✅ Saved {len(glossary)} deduplicated entries before exit")
@@ -2478,7 +2481,7 @@ def main(log_callback=None, stop_callback=None):
                             x.get('raw_name', '').lower()
                         ))
                         
-                        save_progress(completed, glossary, history)
+                        save_progress(completed, glossary)
                         save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                         save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                         print(f"✅ Saved {len(glossary)} deduplicated entries before exit")
@@ -2654,34 +2657,30 @@ def main(log_callback=None, stop_callback=None):
                                            + context_msgs \
                                            + [{"role": "user", "content": chunk_user_prompt}]
 
-                        # Filter text from _raw_content_object in messages before API call
+                        # Build messages following the translation pattern for _raw_content_object handling
                         filtered_chunk_msgs = []
                         for msg in chunk_msgs:
-                            filtered_msg = msg.copy()
-                            if filtered_msg.get('role') == 'assistant' and '_raw_content_object' in filtered_msg:
-                                raw_obj = filtered_msg['_raw_content_object']
+                            filtered_msg = {}
+                            
+                            # Check if this message has _raw_content_object with parts
+                            has_raw_parts = False
+                            if '_raw_content_object' in msg:
+                                raw_obj = msg['_raw_content_object']
                                 if isinstance(raw_obj, dict) and 'parts' in raw_obj:
-                                    # Filter out text field from parts
-                                    filtered_parts = []
-                                    for part in raw_obj.get('parts', []):
-                                        if isinstance(part, dict):
-                                            # Remove text field but keep thought signatures
-                                            filtered_part = {}
-                                            if 'thought' in part:
-                                                filtered_part['thought'] = part['thought']
-                                            if 'thought_signature' in part:
-                                                filtered_part['thought_signature'] = part['thought_signature']
-                                            if filtered_part:
-                                                filtered_parts.append(filtered_part)
-                                    
-                                    if filtered_parts:
-                                        filtered_msg['_raw_content_object'] = {
-                                            'parts': filtered_parts,
-                                            'role': raw_obj.get('role', 'model')
-                                        }
-                                    else:
-                                        # No thought signatures, remove the raw object
-                                        del filtered_msg['_raw_content_object']
+                                    has_raw_parts = True
+                                elif hasattr(raw_obj, 'parts'):
+                                    has_raw_parts = True
+                            
+                            # For assistant messages with raw parts, OMIT content field to avoid duplication
+                            # This follows the pattern from TranslateKRtoEN.py
+                            if msg.get('role') == 'assistant' and has_raw_parts:
+                                # Only include role and _raw_content_object, NOT content
+                                filtered_msg['role'] = msg['role']
+                                filtered_msg['_raw_content_object'] = msg['_raw_content_object']
+                            else:
+                                # For other messages, copy everything as-is
+                                filtered_msg = msg.copy()
+                            
                             filtered_chunk_msgs.append(filtered_msg)
                         
                         # API call for chunk with FILTERED messages
@@ -2861,35 +2860,30 @@ def main(log_callback=None, stop_callback=None):
                         print(f"❌ Glossary extraction stopped before API call for chapter {idx+1}")
                         return
                 
-                    # Filter text from _raw_content_object in messages before API call
-                    # This ensures the payload doesn't have duplicate text
+                    # Build messages following the translation pattern for _raw_content_object handling
                     filtered_msgs = []
                     for msg in msgs:
-                        filtered_msg = msg.copy()
-                        if filtered_msg.get('role') == 'assistant' and '_raw_content_object' in filtered_msg:
-                            raw_obj = filtered_msg['_raw_content_object']
+                        filtered_msg = {}
+                        
+                        # Check if this message has _raw_content_object with parts
+                        has_raw_parts = False
+                        if '_raw_content_object' in msg:
+                            raw_obj = msg['_raw_content_object']
                             if isinstance(raw_obj, dict) and 'parts' in raw_obj:
-                                # Filter out text field from parts
-                                filtered_parts = []
-                                for part in raw_obj.get('parts', []):
-                                    if isinstance(part, dict):
-                                        # Remove text field but keep thought signatures
-                                        filtered_part = {}
-                                        if 'thought' in part:
-                                            filtered_part['thought'] = part['thought']
-                                        if 'thought_signature' in part:
-                                            filtered_part['thought_signature'] = part['thought_signature']
-                                        if filtered_part:
-                                            filtered_parts.append(filtered_part)
-                                
-                                if filtered_parts:
-                                    filtered_msg['_raw_content_object'] = {
-                                        'parts': filtered_parts,
-                                        'role': raw_obj.get('role', 'model')
-                                    }
-                                else:
-                                    # No thought signatures, remove the raw object
-                                    del filtered_msg['_raw_content_object']
+                                has_raw_parts = True
+                            elif hasattr(raw_obj, 'parts'):
+                                has_raw_parts = True
+                        
+                        # For assistant messages with raw parts, OMIT content field to avoid duplication
+                        # This follows the pattern from TranslateKRtoEN.py
+                        if msg.get('role') == 'assistant' and has_raw_parts:
+                            # Only include role and _raw_content_object, NOT content
+                            filtered_msg['role'] = msg['role']
+                            filtered_msg['_raw_content_object'] = msg['_raw_content_object']
+                        else:
+                            # For other messages, copy everything as-is
+                            filtered_msg = msg.copy()
+                        
                         filtered_msgs.append(filtered_msg)
                     
                     raw_obj = None
@@ -3034,14 +3028,17 @@ def main(log_callback=None, stop_callback=None):
                             print("📌 Preserving thought signature for context (stored raw Content object)")
                                     
                             history.append(assistant_entry)
+                        
+                        # Save history using HistoryManager after adding entry
+                        history_manager.save_history(history)
                     
                     # Reset history when limit reached without rolling window
                     if not rolling_window and len(history) >= ctx_limit and ctx_limit > 0:
                         print(f"🔄 Resetting glossary context (reached {ctx_limit} chapter limit)")
                         history = []
-                        prog['context_history'] = []
+                        history_manager.save_history(history)  # Save empty history
 
-                save_progress(completed, glossary, history)
+                save_progress(completed, glossary)
                 save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                 save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                 
@@ -3100,172 +3097,19 @@ def main(log_callback=None, stop_callback=None):
     except Exception as e:
         print(f"[Warning] Could not save CSV format: {e}")
 
-def save_progress(completed: List[int], glossary: List[Dict], context_history: List[Dict]):
-    """Save progress to JSON file"""
+def save_progress(completed: List[int], glossary: List[Dict]):
+    """Save progress to JSON file (history is now managed separately)"""
     global _progress_lock
     
     # Acquire lock to prevent concurrent writes
     with _progress_lock:
-        # Make context_history JSON serializable
-        serializable_history = []
-        for msg in context_history:
-            serializable_msg = msg.copy()
-            
-            # Handle _raw_content_object if present
-            if '_raw_content_object' in serializable_msg:
-                raw_obj = serializable_msg['_raw_content_object']
-                
-                # Convert to a serializable format
-                if raw_obj is not None:
-                    try:
-                        import base64
-                        
-                        def deep_serialize(obj):
-                            """Recursively serialize any object, converting bytes to base64"""
-                            if isinstance(obj, bytes):
-                                return {'_type': 'bytes', 'data': base64.b64encode(obj).decode('utf-8')}
-                            elif isinstance(obj, dict):
-                                result = {}
-                                for key, value in obj.items():
-                                    result[key] = deep_serialize(value)
-                                return result
-                            elif isinstance(obj, list):
-                                return [deep_serialize(item) for item in obj]
-                            elif isinstance(obj, tuple):
-                                return [deep_serialize(item) for item in obj]
-                            elif isinstance(obj, (str, int, float, bool, type(None))):
-                                return obj
-                            elif hasattr(obj, '__dict__'):
-                                # For objects with __dict__, try to extract what we can
-                                return deep_serialize(obj.__dict__)
-                            else:
-                                # Last resort - convert to string
-                                return str(obj)
-                        
-                        # Always use deep_serialize to handle any bytes in the object
-                        if isinstance(raw_obj, dict):
-                            serializable_msg['_raw_content_object'] = deep_serialize(raw_obj)
-                        # If it has to_dict method, use it and then serialize
-                        elif hasattr(raw_obj, 'to_dict'):
-                            serializable_msg['_raw_content_object'] = deep_serialize(raw_obj.to_dict())
-                        # If it has model_dump method (Pydantic), use it and then serialize
-                        elif hasattr(raw_obj, 'model_dump'):
-                            serializable_msg['_raw_content_object'] = deep_serialize(raw_obj.model_dump())
-                        # If it has __dict__, extract it
-                        elif hasattr(raw_obj, '__dict__'):
-                            # For Google SDK objects, extract the parts
-                            obj_dict = {}
-                            if hasattr(raw_obj, 'parts'):
-                                parts = []
-                                try:
-                                    for part in raw_obj.parts:
-                                        part_dict = {}
-                                        # For glossary extraction, exclude 'text' to avoid duplication with content field
-                                        # EXCEPT for Vertex AI where thinking is embedded in text
-                                        # Check if this is a Vertex AI response (marked with _from_vertex)
-                                        is_vertex_ai = isinstance(raw_obj, dict) and raw_obj.get('_from_vertex', False)
-                                        is_glossary = msg.get('role') == 'assistant' and msg.get('content')
-                                        
-                                        if is_glossary and not is_vertex_ai:
-                                            # Non-Vertex: Exclude text field for glossary to avoid duplication
-                                            known_attrs = ['thought', 'thought_signature', 'inline_data', 'function_call', 'function_response']
-                                        else:
-                                            # Vertex AI or non-glossary: Include all fields
-                                            known_attrs = ['text', 'thought', 'thought_signature', 'inline_data', 'function_call', 'function_response']
-                                        
-                                        for attr in known_attrs:
-                                            if hasattr(part, attr):
-                                                try:
-                                                    value = getattr(part, attr, None)
-                                                    if value is not None:
-                                                        # Use deep_serialize for all values
-                                                        part_dict[attr] = deep_serialize(value)
-                                                except Exception as attr_err:
-                                                    # Skip attributes that throw errors when accessed
-                                                    pass
-                                        if part_dict:
-                                            parts.append(part_dict)
-                                except Exception as parts_err:
-                                    print(f"[Warning] Error iterating parts: {parts_err}")
-                                    # Fall back to deep serialization of the whole object
-                                    serializable_msg['_raw_content_object'] = deep_serialize(raw_obj)
-                                    continue
-                                
-                                if parts:
-                                    obj_dict['parts'] = parts
-                            
-                            if hasattr(raw_obj, 'role'):
-                                try:
-                                    obj_dict['role'] = getattr(raw_obj, 'role', None)
-                                except:
-                                    pass
-                            
-                            if obj_dict:
-                                # Apply deep_serialize to ensure no bytes remain
-                                serializable_msg['_raw_content_object'] = deep_serialize(obj_dict)
-                            else:
-                                # No usable data extracted, use deep_serialize
-                                serializable_msg['_raw_content_object'] = deep_serialize(raw_obj)
-                        # As a last resort, use deep_serialize
-                        else:
-                            serializable_msg['_raw_content_object'] = deep_serialize(raw_obj)
-                    except Exception as e:
-                        print(f"[Warning] Could not serialize raw_content_object: {e}")
-                        # Remove it if we can't serialize it
-                        del serializable_msg['_raw_content_object']
-            
-            serializable_history.append(serializable_msg)
-        
         progress_data = {
             "completed": completed,
-            "glossary": glossary,
-            "context_history": serializable_history
+            "glossary": glossary
+            # History is now managed separately by HistoryManager
         }
         
         try:
-            # First test if data is serializable
-            import json
-            try:
-                test_json = json.dumps(progress_data, ensure_ascii=False)
-            except (TypeError, ValueError) as json_err:
-                # If serialization fails, try to identify the problematic part
-                print(f"[Warning] JSON serialization error: {json_err}")
-                
-                # Check which part is causing the issue
-                try:
-                    json.dumps({"completed": completed})
-                except:
-                    print("   -> Problem in 'completed' data")
-                
-                try:
-                    json.dumps({"glossary": glossary})
-                except:
-                    print("   -> Problem in 'glossary' data")
-                
-                try:
-                    json.dumps({"context_history": serializable_history})
-                except Exception as hist_err:
-                    print(f"   -> Problem in 'context_history' data: {hist_err}")
-                    # Try to identify which message is problematic
-                    for i, msg in enumerate(serializable_history):
-                        try:
-                            json.dumps(msg)
-                        except Exception as msg_err:
-                            print(f"      -> Message {i} not serializable: {msg_err}")
-                            if '_raw_content_object' in msg:
-                                print(f"         Raw object type: {type(msg['_raw_content_object'])}")
-                
-                # Try saving without the problematic raw content objects
-                print("   -> Attempting to save without raw content objects...")
-                clean_history = []
-                for msg in serializable_history:
-                    clean_msg = msg.copy()
-                    if '_raw_content_object' in clean_msg:
-                        del clean_msg['_raw_content_object']
-                    clean_history.append(clean_msg)
-                
-                progress_data['context_history'] = clean_history
-            
             # Use atomic write with proper temp file handling
             progress_dir = os.path.dirname(PROGRESS_FILE) or '.'
             with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=progress_dir, delete=False, suffix='.tmp') as temp_f:
@@ -3289,12 +3133,6 @@ def save_progress(completed: List[int], glossary: List[Dict], context_history: L
             
         except Exception as e:
             print(f"[Warning] Failed to save progress: {e}")
-            # Try direct write as fallback
-            try:
-                with open(PROGRESS_FILE, 'w', encoding='utf-8') as f:
-                    json.dump(progress_data, f, ensure_ascii=False, indent=2)
-            except Exception as e2:
-                print(f"[Error] Could not save progress: {e2}")
-            
+
 if __name__=='__main__':
     main()
