@@ -3147,13 +3147,16 @@ def save_progress(completed: List[int], glossary: List[Dict], context_history: L
                                     for part in raw_obj.parts:
                                         part_dict = {}
                                         # For glossary extraction, exclude 'text' to avoid duplication with content field
-                                        # Check if this is a glossary context (assistant message with content)
+                                        # EXCEPT for Vertex AI where thinking is embedded in text
+                                        # Check if this is a Vertex AI response (marked with _from_vertex)
+                                        is_vertex_ai = isinstance(raw_obj, dict) and raw_obj.get('_from_vertex', False)
                                         is_glossary = msg.get('role') == 'assistant' and msg.get('content')
-                                        if is_glossary:
-                                            # Exclude text field for glossary to avoid duplication
+                                        
+                                        if is_glossary and not is_vertex_ai:
+                                            # Non-Vertex: Exclude text field for glossary to avoid duplication
                                             known_attrs = ['thought', 'thought_signature', 'inline_data', 'function_call', 'function_response']
                                         else:
-                                            # Include all fields for other contexts
+                                            # Vertex AI or non-glossary: Include all fields
                                             known_attrs = ['text', 'thought', 'thought_signature', 'inline_data', 'function_call', 'function_response']
                                         
                                         for attr in known_attrs:

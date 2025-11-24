@@ -6883,21 +6883,44 @@ class UnifiedClient:
                 if not result_text:
                     raise UnifiedClientError("All Vertex AI Gemini attempts failed to produce content")
                 
-                # Store the actual Vertex AI content object for thought signatures
-                # Just like regular Gemini API does - the thinking is embedded in the text
+                # Store the Vertex AI content object for thought signatures
+                # For Vertex AI, we need to convert to a serializable format
                 raw_content_obj = None
                 if response and hasattr(response, 'candidates') and response.candidates:
                     for candidate in response.candidates:
                         if candidate.content:
-                            # Store the actual content object, not a custom dictionary
-                            # This preserves the full response including any embedded thinking
-                            raw_content_obj = candidate.content
-                            # Check if the text contains thinking tags
+                            # Convert Vertex AI content to serializable format
+                            # This preserves thought signatures while making it JSON-serializable
+                            parts = []
                             if hasattr(candidate.content, 'parts'):
                                 for part in candidate.content.parts:
+                                    part_dict = {}
+                                    # Add text if present
                                     if hasattr(part, 'text') and part.text:
+                                        part_dict['text'] = part.text
                                         if '<thinking>' in part.text or '<thought>' in part.text:
                                             print("🧠 Found thinking tags in Vertex AI Gemini response")
+                                    # Check for thought field
+                                    if hasattr(part, 'thought') and part.thought is not None:
+                                        part_dict['thought'] = part.thought
+                                    # Check for thought_signature
+                                    if hasattr(part, 'thought_signature') and part.thought_signature:
+                                        import base64
+                                        # Serialize thought signature
+                                        part_dict['thought_signature'] = {
+                                            '_type': 'bytes',
+                                            'data': base64.b64encode(part.thought_signature).decode('utf-8')
+                                        }
+                                    if part_dict:
+                                        parts.append(part_dict)
+                            
+                            if parts:
+                                # Create serializable object marked as Vertex AI
+                                raw_content_obj = {
+                                    'parts': parts,
+                                    'role': 'model',
+                                    '_from_vertex': True  # Mark as Vertex AI response
+                                }
                             break  # Just use the first candidate
                 
                 return UnifiedResponse(
