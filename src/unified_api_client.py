@@ -6676,8 +6676,13 @@ class UnifiedClient:
                 # Create model instance
                 vertex_model = GenerativeModel(model_name)
                 
-                # Format messages for Vertex AI Gemini using existing formatter
-                formatted_prompt = self._format_prompt(messages, style='gemini')
+                # Format messages for Vertex AI Gemini
+                # If messages contain _raw_content_object (with thought signatures), use Content objects
+                # Otherwise fall back to string formatting
+                formatted_prompt = self._build_vertex_content_list(messages)
+                
+                # NOTE: No need to re-save payload here - it was already saved before this function
+                # and the serialized thought_signature is already in messages[]['_raw_content_object']
                 
                 # Check if safety settings are disabled via config (from GUI)
                 disable_safety_env = os.getenv("DISABLE_GEMINI_SAFETY", "0")
@@ -6924,6 +6929,68 @@ class UnifiedClient:
                 print(f"Full traceback: {traceback.format_exc()}")
             raise UnifiedClientError(f"Vertex AI Model Garden error: {str(e)[:200]}")  # Limit length
             
+    def _build_vertex_content_list(self, messages):
+        """Build content list for Vertex AI Gemini, preserving thought signatures.
+        
+        According to Google docs: "The `content` object automatically attaches 
+        the required thought_signature behind the scenes"
+        
+        If messages have _raw_content_object (Content objects with thought signatures),
+        we must pass them as-is. Otherwise, build new Content objects from text.
+        
+        IMPORTANT: This function also updates messages in-place to store reconstructed
+        Content objects back in _raw_content_object so they get saved in payloads.
+        """
+        from vertexai.generative_models import Content, Part
+        import base64
+        
+        content_list = []
+        
+        for msg_idx, msg in enumerate(messages):
+            role = msg.get('role', 'user')
+            
+            # For assistant messages with _raw_content_object, reconstruct Content with thought signatures
+            if role == 'assistant' and '_raw_content_object' in msg:
+                raw_obj = msg['_raw_content_object']
+                
+                # If it's already a Content object, use it directly
+                if hasattr(raw_obj, 'parts') and hasattr(raw_obj, 'role'):
+                    # This is the actual Vertex AI Content object - use it as-is
+                    content_list.append(raw_obj)
+                elif isinstance(raw_obj, dict) and 'parts' in raw_obj:
+                    # It's a serialized dict from history
+                    # IMPORTANT: We CANNOT manually reconstruct thought_signature in Part objects
+                    # According to Google docs, thought signatures are attached automatically by the API
+                    # and can only be passed through when using actual Content objects from responses
+                    # The serialized thought_signature will be preserved in _raw_content_object for the payload,
+                    # but we just use the text content for the API call
+                    content_list.append(Content(
+                        role='model',
+                        parts=[Part.from_text(msg.get('content', ''))]
+                    ))
+                    # NOTE: We keep the raw_obj in messages[msg_idx]['_raw_content_object'] as-is
+                    # so the thought_signature appears in the payload file
+                else:
+                    # Unknown format, fall back to creating new Content from text
+                    content_list.append(Content(
+                        role='model',
+                        parts=[Part.from_text(msg.get('content', ''))]
+                    ))
+            # For user messages, always create new Content
+            elif role == 'user':
+                content_list.append(Content(
+                    role='user',
+                    parts=[Part.from_text(msg.get('content', ''))]
+                ))
+            # For system messages, include as user with INSTRUCTIONS prefix
+            elif role == 'system':
+                content_list.append(Content(
+                    role='user',
+                    parts=[Part.from_text(f"INSTRUCTIONS: {msg.get('content', '')}" )]
+                ))
+        
+        return content_list
+    
     def _convert_messages_for_vertex(self, messages):
         """Convert OpenAI-style messages to Vertex AI Model Garden format"""
         converted = []
@@ -8840,20 +8907,9 @@ class UnifiedClient:
                                                     # print(f"   🚫 Skipping reasoning part (thought: true) to avoid confusion")
                                                     continue
                                                 
-                                                # Create kwargs for Part construction
-                                                part_kwargs = {}
-                                                
-                                                # Add text if present (use from parts, NOT from content field)
-                                                # If there's no text in the part but we have content, use that as fallback
-                                                if 'text' in part_data:
-                                                    part_kwargs['text'] = part_data['text']
-                                                elif not any('text' in p for p in raw_obj['parts'] if isinstance(p, dict) and not p.get('thought', False)):
-                                                    # No text in any non-thought part, use content as fallback for first part only
-                                                    if part_data == raw_obj['parts'][0]:
-                                                        part_kwargs['text'] = content
-                                                
-                                                # NOTE: We don't include the 'thought' flag in the Part object
-                                                # since we're filtering out thought parts entirely
+                                                # CRITICAL: thought_signature and text are in SEPARATE Parts!
+                                                # According to Google docs, don't merge a Part containing a signature
+                                                # with one that does not. Create separate Part objects.
                                                 
                                                 # Handle thought_signature - CRITICAL for Gemini 3
                                                 if 'thought_signature' in part_data:
@@ -8862,24 +8918,37 @@ class UnifiedClient:
                                                     if isinstance(thought_sig, dict) and thought_sig.get('_type') == 'bytes':
                                                         import base64
                                                         thought_sig_bytes = base64.b64decode(thought_sig['data'])
-                                                        part_kwargs['thought_signature'] = thought_sig_bytes
-                                                        # print(f"   🧠 Decoded thought signature from base64 (size: {len(thought_sig_bytes)} bytes)")
+                                                        # Create a Part with ONLY thought_signature (no text)
+                                                        try:
+                                                            sig_part = types.Part(thought_signature=thought_sig_bytes)
+                                                            parts_to_send.append(sig_part)
+                                                            # print(f"   🧠 Added Part with thought_signature ({len(thought_sig_bytes)} bytes)")
+                                                        except Exception as e:
+                                                            print(f"   ❌ Failed to create Part with thought_signature: {e}")
                                                     else:
-                                                        part_kwargs['thought_signature'] = thought_sig
+                                                        try:
+                                                            sig_part = types.Part(thought_signature=thought_sig)
+                                                            parts_to_send.append(sig_part)
+                                                        except Exception as e:
+                                                            print(f"   ❌ Failed to create Part with thought_signature: {e}")
                                                 
-                                                # Create actual Part object
-                                                if part_kwargs:
+                                                # Add text if present (use from parts, NOT from content field)
+                                                # Text goes in a SEPARATE Part from thought_signature
+                                                text_to_use = None
+                                                if 'text' in part_data and part_data['text']:
+                                                    text_to_use = part_data['text']
+                                                elif not any('text' in p and p['text'] for p in raw_obj['parts'] if isinstance(p, dict) and not p.get('thought', False)):
+                                                    # No text in any non-thought part, use content as fallback
+                                                    if part_data == raw_obj['parts'][0]:
+                                                        text_to_use = content
+                                                
+                                                if text_to_use:
                                                     try:
-                                                        # Create a Part object with the fields
-                                                        part_obj = types.Part(**part_kwargs)
-                                                        parts_to_send.append(part_obj)
-                                                        if 'thought_signature' in part_kwargs:
-                                                            # print(f"   ✅ Created Part object WITH thought signature")
-                                                            pass
+                                                        text_part = types.Part(text=text_to_use)
+                                                        parts_to_send.append(text_part)
+                                                        # print(f"   📝 Added Part with text ({len(text_to_use)} chars)")
                                                     except Exception as e:
-                                                        print(f"   ❌ Failed to create Part object: {e}")
-                                                        # Fallback to dict if Part creation fails
-                                                        parts_to_send.append(part_kwargs)
+                                                        print(f"   ❌ Failed to create Part with text: {e}")
                                         
                                         if parts_to_send:
                                             # print(f"   🧠 Created {len(parts_to_send)} Part objects for Gemini 3")
