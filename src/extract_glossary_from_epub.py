@@ -2401,7 +2401,7 @@ def main(log_callback=None, stop_callback=None):
                 print(f"📊 Glossary size: {deduplicated_size} unique entries")
                 
                 # Save final deduplicated and sorted glossary
-                save_progress(completed, glossary, history)
+                save_progress(completed, glossary)
                 save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                 save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
             
