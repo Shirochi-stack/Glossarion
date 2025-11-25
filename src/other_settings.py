@@ -4474,6 +4474,8 @@ def _create_image_translation_section(self, parent):
     def _on_image_output_toggle(checked):
         try:
             self.enable_image_output_mode_var = bool(checked)
+            # Save to config
+            self.config['enable_image_output_mode'] = bool(checked)
         except Exception:
             pass
     image_output_cb.toggled.connect(_on_image_output_toggle)

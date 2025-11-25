@@ -6694,6 +6694,16 @@ class UnifiedClient:
                 thinking_budget = int(os.getenv("THINKING_BUDGET", "-1"))
                 enable_thinking = os.getenv("ENABLE_GEMINI_THINKING", "0") == "1"
                 
+                # Check if image output mode is enabled
+                enable_image_output = os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
+                # Force enable for gemini-3-pro-image model (with or without -preview suffix)
+                if "gemini-3-pro-image" in self.model.lower():
+                    enable_image_output = True
+                    if not self._is_stop_requested():
+                        print(f"🎨 Image output mode enabled for {self.model}")
+                elif enable_image_output and not self._is_stop_requested():
+                    print(f"🎨 Image output mode enabled for {model_name}")
+                
                 # Log configuration
                 print(f"\n🔧 Vertex AI Gemini Configuration:")
                 print(f"   Model: {model_name}")
@@ -6738,7 +6748,33 @@ class UnifiedClient:
                 if stop_sequences:
                     generation_config_dict["stop_sequences"] = stop_sequences
                 
-                # Create generation config
+                # Handle image output config separately (not part of GenerationConfig)
+                image_config_dict = None
+                if enable_image_output:
+                    # Configure response modalities for image output
+                    generation_config_dict["response_modalities"] = ['IMAGE', 'TEXT']
+                    
+                    # Get resolution from environment variable
+                    image_resolution = os.getenv("IMAGE_OUTPUT_RESOLUTION", "1K")
+                    # Validate resolution (must be 1K, 2K, or 4K)
+                    if image_resolution not in ["1K", "2K", "4K"]:
+                        image_resolution = "1K"  # Fallback to default
+                    
+                    # Get aspect ratio from environment variable (optional)
+                    aspect_ratio = os.getenv("IMAGE_OUTPUT_ASPECT_RATIO", "auto")
+                    
+                    # Create image config dict - only include aspect_ratio if explicitly set
+                    image_config_dict = {"image_size": image_resolution}
+                    if aspect_ratio != "auto":
+                        image_config_dict["aspect_ratio"] = aspect_ratio
+                        if not self._is_stop_requested():
+                            print(f"   🖼️ Image config: aspect_ratio={aspect_ratio}, resolution={image_resolution}")
+                    else:
+                        # Don't specify aspect ratio - let Gemini auto-detect
+                        if not self._is_stop_requested():
+                            print(f"   🖼️ Image config: aspect_ratio=auto, resolution={image_resolution}")
+                
+                # Create generation config (without image_generation_config)
                 generation_config = GenerationConfig(**generation_config_dict)
                 
                 # Configure safety settings based on GUI toggle
@@ -6843,16 +6879,62 @@ class UnifiedClient:
                                 generation_config=generation_config
                             )
                         
-                        # Extract text from response
+                        # Extract text and image from response
+                        image_data = None  # Store extracted image data
                         if response.candidates:
                             for candidate in response.candidates:
                                 if candidate.content and candidate.content.parts:
                                     for part in candidate.content.parts:
+                                        # Extract text
                                         if hasattr(part, 'text'):
                                             result_text += part.text
+                                        # Extract image data if present
+                                        elif hasattr(part, 'inline_data') and part.inline_data:
+                                            if hasattr(part.inline_data, 'data'):
+                                                image_data = part.inline_data.data
+                                                mime_type = getattr(part.inline_data, 'mime_type', 'image/png')
+                                                print(f"   🖼️ Extracted image from Vertex AI response (mime_type: {mime_type})")
+                        
+                        # Save image if present
+                        if image_data and enable_image_output:
+                            try:
+                                # Get output directory - save directly to output folder
+                                output_dir = getattr(self, 'output_dir', None) or '.'
+                                os.makedirs(output_dir, exist_ok=True)
+                                
+                                # Use response_name as filename (no prefix)
+                                # Extract clean filename from response_name if it contains path separators
+                                if response_name:
+                                    clean_name = os.path.basename(response_name)
+                                    # Remove file extension if present
+                                    clean_name = os.path.splitext(clean_name)[0]
+                                    # Remove hash and counter suffix if present (e.g., _865a1e39_imgA0)
+                                    import re
+                                    clean_name = re.sub(r'_[a-f0-9]{8}_img[A-Z0-9]+$', '', clean_name)
+                                    filename = f"{clean_name}.png"
+                                else:
+                                    # Fallback to timestamp if no response_name
+                                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                    filename = f"{timestamp}.png"
+                                
+                                filepath = os.path.join(output_dir, filename)
+                                
+                                # Write image data to file
+                                with open(filepath, 'wb') as f:
+                                    f.write(image_data)
+                                
+                                print(f"   💾 Saved generated image to: {filepath}")
+                                
+                                # Include image path marker in text content for GUI to detect
+                                result_text = f"[GENERATED_IMAGE:{filepath}]"
+                            except Exception as e:
+                                print(f"   ⚠️ Failed to save generated image: {e}")
                         
                         # Check if we got content
                         if result_text and result_text.strip():
+                            break
+                        elif image_data:
+                            # We got an image but no text - still valid
                             break
                         else:
                             raise Exception("Empty response from Vertex AI")
@@ -8654,12 +8736,12 @@ class UnifiedClient:
         
         # Check if image output mode is enabled
         enable_image_output = os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
-        # Force enable for gemini-3-pro-image-preview model
+        # Force enable for gemini-3-pro-image model (with or without -preview suffix)
         model_lower = self.model.lower() if self.model else ""
-        if "gemini-3-pro-image-preview" in model_lower:
+        if "gemini-3-pro-image" in model_lower:
             enable_image_output = True
             if not self._is_stop_requested():
-                print("🎨 Image output mode enabled for gemini-3-pro-image-preview")
+                print(f"🎨 Image output mode enabled for {self.model}")
         elif enable_image_output and not self._is_stop_requested():
             print(f"🎨 Image output mode enabled for {self.model}")
         
@@ -10068,6 +10150,39 @@ class UnifiedClient:
                         # Together AI handles safety differently - no moderation parameter
                         logger.info(f"🔓 Safety settings note: {provider} doesn't support moderation parameter")
                     
+                    # Check if image output mode is enabled
+                    enable_image_output = os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
+                    # Force enable for gemini-3-pro-image model (with or without -preview suffix)
+                    if "gemini-3-pro-image" in effective_model.lower():
+                        enable_image_output = True
+                        if not self._is_stop_requested():
+                            print(f"🎨 Image output mode enabled for {effective_model}")
+                    elif enable_image_output and not self._is_stop_requested():
+                        print(f"🎨 Image output mode enabled for {effective_model}")
+                    
+                    # Add image output config if enabled (for compatible models)
+                    if enable_image_output:
+                        # Get resolution from environment variable
+                        image_resolution = os.getenv("IMAGE_OUTPUT_RESOLUTION", "1K")
+                        # Validate resolution (must be 1K, 2K, or 4K)
+                        if image_resolution not in ["1K", "2K", "4K"]:
+                            image_resolution = "1K"  # Fallback to default
+                        
+                        # Get aspect ratio from environment variable (optional)
+                        aspect_ratio = os.getenv("IMAGE_OUTPUT_ASPECT_RATIO", "auto")
+                        
+                        # Configure response modalities and image config
+                        extra_body["response_modalities"] = ['IMAGE', 'TEXT']
+                        image_config = {"image_size": image_resolution}
+                        if aspect_ratio != "auto":
+                            image_config["aspect_ratio"] = aspect_ratio
+                            if not self._is_stop_requested():
+                                print(f"   🖼️ Image config: aspect_ratio={aspect_ratio}, resolution={image_resolution}")
+                        else:
+                            if not self._is_stop_requested():
+                                print(f"   🖼️ Image config: aspect_ratio=auto, resolution={image_resolution}")
+                        extra_body["image_generation_config"] = image_config
+                    
                     # Use Idempotency-Key header to avoid unsupported kwarg on some endpoints
                     idem_key = self._get_idempotency_key()
                     extra_headers = {"Idempotency-Key": idem_key}
@@ -10096,6 +10211,7 @@ class UnifiedClient:
                     # Enhanced extraction for Gemini endpoints
                     content = None
                     finish_reason = 'stop'
+                    image_data = None  # Store extracted image data
                     
                     # Extract content with Gemini awareness
                     if hasattr(resp, 'choices') and resp.choices:
@@ -10112,10 +10228,55 @@ class UnifiedClient:
                                     content = "[GEMINI RETURNED NULL MESSAGE]"
                                     finish_reason = 'content_filter'
                             elif hasattr(message, 'content'):
-                                content = message.content or ""
-                                if content is None and is_gemini_endpoint:
-                                    content = "[BLOCKED BY GEMINI SAFETY FILTER]"
-                                    finish_reason = 'content_filter'
+                                # Check if content is a list (multipart response with images)
+                                msg_content = message.content
+                                if isinstance(msg_content, list):
+                                    # Multipart response - extract text and images
+                                    text_parts = []
+                                    for part in msg_content:
+                                        if isinstance(part, dict):
+                                            if part.get('type') == 'text':
+                                                text_parts.append(part.get('text', ''))
+                                            elif part.get('type') == 'image_url':
+                                                # Extract image data
+                                                image_url = part.get('image_url', {})
+                                                if isinstance(image_url, dict):
+                                                    url = image_url.get('url', '')
+                                                elif isinstance(image_url, str):
+                                                    url = image_url
+                                                else:
+                                                    url = ''
+                                                
+                                                if url.startswith('data:'):
+                                                    # Extract base64 data
+                                                    import base64
+                                                    try:
+                                                        image_data = base64.b64decode(url.split(',')[1])
+                                                        print(f"   🖼️ Extracted image from OpenAI-compatible response")
+                                                    except Exception as e:
+                                                        print(f"   ⚠️ Failed to decode image data: {e}")
+                                        elif hasattr(part, 'type'):
+                                            if part.type == 'text':
+                                                text_parts.append(getattr(part, 'text', ''))
+                                            elif part.type == 'image_url':
+                                                # Extract image from object
+                                                image_url = getattr(part, 'image_url', None)
+                                                if image_url:
+                                                    url = getattr(image_url, 'url', '') if hasattr(image_url, 'url') else str(image_url)
+                                                    if url.startswith('data:'):
+                                                        import base64
+                                                        try:
+                                                            image_data = base64.b64decode(url.split(',')[1])
+                                                            print(f"   🖼️ Extracted image from OpenAI-compatible response")
+                                                        except Exception as e:
+                                                            print(f"   ⚠️ Failed to decode image data: {e}")
+                                    content = ''.join(text_parts)
+                                else:
+                                    # Regular text response
+                                    content = msg_content or ""
+                                    if content is None and is_gemini_endpoint:
+                                        content = "[BLOCKED BY GEMINI SAFETY FILTER]"
+                                        finish_reason = 'content_filter'
                             elif hasattr(message, 'text'):
                                 content = message.text
                             elif isinstance(message, str):
@@ -10140,6 +10301,42 @@ class UnifiedClient:
                             'completion_tokens': resp.usage.completion_tokens,
                             'total_tokens': resp.usage.total_tokens
                         }
+                    
+                    # Save image if present
+                    if image_data and enable_image_output:
+                        try:
+                            # Get output directory - save directly to output folder
+                            output_dir = getattr(self, 'output_dir', None) or '.'
+                            os.makedirs(output_dir, exist_ok=True)
+                            
+                            # Use response_name as filename (no prefix)
+                            # Extract clean filename from response_name if it contains path separators
+                            if response_name:
+                                clean_name = os.path.basename(response_name)
+                                # Remove file extension if present
+                                clean_name = os.path.splitext(clean_name)[0]
+                                # Remove hash and counter suffix if present (e.g., _865a1e39_imgA0)
+                                import re
+                                clean_name = re.sub(r'_[a-f0-9]{8}_img[A-Z0-9]+$', '', clean_name)
+                                filename = f"{clean_name}.png"
+                            else:
+                                # Fallback to timestamp if no response_name
+                                from datetime import datetime
+                                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                filename = f"{timestamp}.png"
+                            
+                            filepath = os.path.join(output_dir, filename)
+                            
+                            # Write image data to file
+                            with open(filepath, 'wb') as f:
+                                f.write(image_data)
+                            
+                            print(f"   💾 Saved generated image to: {filepath}")
+                            
+                            # Include image path marker in text content for GUI to detect
+                            content = f"[GENERATED_IMAGE:{filepath}]"
+                        except Exception as e:
+                            print(f"   ⚠️ Failed to save generated image: {e}")
                     
                     # Log OpenRouter provider information from response (SDK path)
                     if provider == 'openrouter':

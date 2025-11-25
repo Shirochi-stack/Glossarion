@@ -8880,8 +8880,8 @@ Important rules:
                 ('enable_watermark_removal', ['enable_watermark_removal_var'], False, bool),
                 ('save_cleaned_images', ['save_cleaned_images_var'], False, bool),
                 ('advanced_watermark_removal', ['advanced_watermark_removal_var'], False, bool),
-                # Image output mode: use helper to enforce dependency
-                ('enable_image_output_mode', [], False, lambda _: self._get_allowed_image_output_mode() == '1'),
+                # Image output mode
+                ('enable_image_output_mode', ['enable_image_output_mode_var'], False, bool),
                 ('image_output_resolution', ['image_output_resolution_var'], '1K', str),
                 ('compression_factor', ['compression_factor_var'], 1.1, float),
                 ('image_chunk_overlap', ['image_chunk_overlap_var'], 1.0, lambda v: safe_float(v, 1.0)),
