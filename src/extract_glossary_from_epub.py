@@ -93,8 +93,8 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 resp_obj = client.get_last_response_object()
                 if resp_obj and hasattr(resp_obj, 'raw_content_object'):
                     raw_obj = resp_obj.raw_content_object
-                    if raw_obj:
-                        print("🧠 Captured thought signature for glossary extraction")
+                    # if raw_obj:
+                    #     print("🧠 Captured thought signature for glossary extraction")
             
             # Include raw_obj in the result tuple
             result_queue.put((result, elapsed, raw_obj))
