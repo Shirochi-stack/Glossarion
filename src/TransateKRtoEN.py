@@ -2726,8 +2726,8 @@ class BatchTranslationProcessor:
                 
                 # Use the raw object directly from send_with_interrupt
                 raw_obj = raw_obj_from_send
-                if raw_obj:
-                    print(f"🧠 Captured thought signature for chunk {chunk_idx}/{total_chunks}")
+                # if raw_obj:
+                #     print(f"🧠 Captured thought signature for chunk {chunk_idx}/{total_chunks}")
                 
                 print(f"📥 Received Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks} response, finish_reason: {finish_reason}")
                 
