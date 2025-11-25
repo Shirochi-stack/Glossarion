@@ -2314,6 +2314,65 @@ Recent translations to summarize:
             self.vertex_location_entry.hide()
             self.gcloud_status_label.setText("")
 
+    def _show_model_info_dialog(self):
+        """Show information dialog about API provider shortcuts"""
+        info_text = """<h3>API Provider Shortcuts</h3>
+        <p>You can use prefixes to access models from different API providers:</p>
+        
+        <h4>OpenRouter (or/)</h4>
+        <p>Access models through OpenRouter API</p>
+        <ul>
+            <li><b>or/google/gemini-2.5-flash</b> - Gemini 2.5 Flash via OpenRouter</li>
+            <li><b>or/openai/gpt-5</b> - GPT-5 via OpenRouter</li>
+            <li><b>or/deepseek/deepseek-chat-v3.1:free</b> - DeepSeek Chat (free tier)</li>
+        </ul>
+        
+        <h4>ElectronHub (eh/)</h4>
+        <p>Access models through ElectronHub API</p>
+        <ul>
+            <li><b>eh/claude-sonnet-4-5-20250929</b> - Claude Sonnet 4.5</li>
+            <li><b>eh/gemini-2.5-flash</b> - Gemini 2.5 Flash</li>
+            <li><b>eh/gpt-5-chat-latest</b> - Latest GPT-5 Chat</li>
+        </ul>
+        
+        <h4>Chute AI (chutes/)</h4>
+        <p>Access models through Chute AI platform</p>
+        <ul>
+            <li><b>chutes/deepseek-ai/DeepSeek-V3.1</b> - DeepSeek V3.1</li>
+            <li><b>chutes/openai/gpt-oss-120b</b> - GPT OSS 120B</li>
+        </ul>
+        
+        <h4>Vertex AI (vertex/ or @)</h4>
+        <p>Access Google Vertex AI models (requires Google Cloud credentials)</p>
+        <ul>
+            <li><b>vertex/gemini-2.5-flash</b> - Gemini via Vertex AI</li>
+            <li><b>vertex/claude-4-sonnet@20250514</b> - Claude via Vertex AI</li>
+            <li><b>claude-3-7-sonnet@20250219</b> - Models with @ use Vertex AI</li>
+        </ul>
+        
+        <h4>POE (poe/)</h4>
+        <p>Access models through Poe platform <span style="color: #d9534f;">(likely not functional)</span></p>
+        <ul>
+            <li><b>poe/gpt-4o</b> - GPT-4o via Poe</li>
+            <li><b>poe/claude-4-opus</b> - Claude 4 Opus via Poe</li>
+            <li><b>poe/gemini-2.5-pro</b> - Gemini 2.5 Pro via Poe</li>
+        </ul>
+        <p style="color: #856404; padding: 8px; font-size: 11px;">
+            <b>⚠️ Note:</b> POE integration may not work properly due to API limitations or changes.
+        </p>
+        
+        <p style="margin-top: 15px;"><i>Note: Each provider may have different pricing, rate limits, and model availability.</i></p>
+        """
+        
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("Model Provider Information")
+        msg_box.setTextFormat(Qt.RichText)
+        msg_box.setText(info_text)
+        msg_box.setIcon(QMessageBox.Information)
+        msg_box.setStandardButtons(QMessageBox.Ok)
+        msg_box.setModal(False)
+        msg_box.show()
+    
     # PySide6 helper method for model text changes
     def _on_model_text_changed(self, text):
         """Handle model combobox text changes"""
@@ -2375,7 +2434,23 @@ Recent translations to summarize:
         """)
         # Add unicode arrow using a label overlay
         self._add_combobox_arrow(self.model_combo)
-        self.frame.addWidget(self.model_combo, 1, 1, 1, 2)  # row, col, rowspan, colspan
+        self.frame.addWidget(self.model_combo, 1, 1, 1, 1)  # row, col, rowspan, colspan
+        
+        # Add info button next to model field with spacing
+        model_info_btn = QPushButton("ℹ️")
+        model_info_btn.setFixedSize(28, 28)
+        model_info_btn.clicked.connect(self._show_model_info_dialog)
+        model_info_btn.setStyleSheet(
+            "QPushButton { "
+            "background-color: transparent; "
+            "border: none; "
+            "font-size: 18px; "
+            "padding: 0px; "
+            "margin-left: 8px; "
+            "}"
+        )
+        model_info_btn.setToolTip("Show API provider information and shortcuts")
+        self.frame.addWidget(model_info_btn, 1, 2, Qt.AlignLeft)
         
         # Track previous text to make autocomplete less aggressive
         self._model_prev_text = default_model
@@ -4747,7 +4822,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
             api_key = self.api_key_entry.text().strip()
             model = self.model_var.strip()
             
-            if not api_key:
+            # Check if model needs API key
+            model_needs_api_key = not (model.lower() in ['google-translate', 'google-translate-free'] or 
+                                      '@' in model or model.startswith('vertex/'))
+            
+            if model_needs_api_key and not api_key:
                 self.append_log("❌ Error: Please enter your API key.")
                 self.image_progress_manager.update(image_path, content_hash, status="error", error="No API key")
                 return False
@@ -5339,6 +5418,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
             api_key = self.api_key_entry.text()
             model = self.model_var
             
+            # Check if model needs API key
+            model_needs_api_key = not (model.lower() in ['google-translate', 'google-translate-free'] or 
+                                      '@' in model or model.startswith('vertex/'))
+            
             # Validate API key and model (same as original)
             if '@' in model or model.startswith('vertex/'):
                 google_creds = self.config.get('google_cloud_credentials')
@@ -5357,7 +5440,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                             self.append_log(f"🔑 Using project ID as API key: {api_key}")
                     except:
                         api_key = 'vertex-ai-project'
-            elif not api_key:
+            elif model_needs_api_key and not api_key:
                 self.append_log("❌ Error: Please enter your API key.")
                 return False
 
@@ -5984,7 +6067,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
             api_key = self.api_key_entry.text().strip()
             model = self.model_var
             
-            if not api_key or not model:
+            # Check if model needs API key
+            model_needs_api_key = not (model.lower() in ['google-translate', 'google-translate-free'] or 
+                                      '@' in model or model.startswith('vertex/'))
+            
+            if (model_needs_api_key and not api_key) or not model:
                 self.append_log("❌ Error: API key and model required")
                 return False
             
@@ -6607,8 +6694,12 @@ Important rules:
                self.append_log("ℹ️ Skipping automatic glossary extraction (not supported by Google Translate / DeepL translation APIs)")
                return {}
             
+            # Check if model needs API key
+            model_needs_api_key = not (model.lower() in ['google-translate', 'google-translate-free'] or 
+                                      '@' in model or model.startswith('vertex/'))
+            
             # Validate Vertex AI credentials if needed
-            elif '@' in model or model.startswith('vertex/'):
+            if '@' in model or model.startswith('vertex/'):
                 google_creds = self.config.get('google_cloud_credentials')
                 if not google_creds or not os.path.exists(google_creds):
                     self.append_log("❌ Error: Google Cloud credentials required for Vertex AI models.")
@@ -6625,7 +6716,7 @@ Important rules:
                             self.append_log(f"🔑 Using project ID as API key: {api_key}")
                     except:
                         api_key = 'vertex-ai-project'
-            elif not api_key:
+            elif model_needs_api_key and not api_key:
                 self.append_log("❌ Error: Please enter your API key.")
                 return False
             
