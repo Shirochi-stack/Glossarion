@@ -8952,7 +8952,7 @@ class UnifiedClient:
                                                 try:
                                                     text_part = types.Part(text=content)
                                                     parts_to_send.append(text_part)
-                                                    print(f"   📝 Added content as text Part (no text in parts)")
+                                                    # print(f"   📝 Added content as text Part (no text in parts)")
                                                 except Exception as e:
                                                     print(f"   ❌ Failed to create text Part from content: {e}")
                                             
