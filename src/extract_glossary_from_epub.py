@@ -3020,13 +3020,19 @@ def main(log_callback=None, stop_callback=None):
                             history.append(assistant_entry)
                         
                         # Save history using HistoryManager after adding entry
-                        history_manager.save_history(history)
+                        # Microsecond lock to prevent race conditions when saving history
+                        time.sleep(0.000001)
+                        with _history_lock:
+                            history_manager.save_history(history)
                     
                     # Reset history when limit reached without rolling window
                     if not rolling_window and len(history) >= ctx_limit and ctx_limit > 0:
                         print(f"🔄 Resetting glossary context (reached {ctx_limit} chapter limit)")
                         history = []
-                        history_manager.save_history(history)  # Save empty history
+                        # Microsecond lock to prevent race conditions when saving history
+                        time.sleep(0.000001)
+                        with _history_lock:
+                            history_manager.save_history(history)  # Save empty history
 
                 save_progress(completed, glossary)
                 save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
