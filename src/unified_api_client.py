@@ -6966,29 +6966,70 @@ class UnifiedClient:
                     # and can only be passed through when using actual Content objects from responses
                     # The serialized thought_signature will be preserved in _raw_content_object for the payload,
                     # but we just use the text content for the API call
+                    assistant_content = msg.get('content', '')
+                    if not assistant_content or not assistant_content.strip():
+                        assistant_content = '.'
                     content_list.append(Content(
                         role='model',
-                        parts=[Part.from_text(msg.get('content', ''))]
+                        parts=[Part.from_text(assistant_content)]
                     ))
                     # NOTE: We keep the raw_obj in messages[msg_idx]['_raw_content_object'] as-is
                     # so the thought_signature appears in the payload file
                 else:
                     # Unknown format, fall back to creating new Content from text
+                    fallback_content = msg.get('content', '')
+                    if not fallback_content or not fallback_content.strip():
+                        fallback_content = '.'
                     content_list.append(Content(
                         role='model',
-                        parts=[Part.from_text(msg.get('content', ''))]
+                        parts=[Part.from_text(fallback_content)]
                     ))
             # For user messages, always create new Content
             elif role == 'user':
-                content_list.append(Content(
-                    role='user',
-                    parts=[Part.from_text(msg.get('content', ''))]
-                ))
-            # For system messages, include as user with INSTRUCTIONS prefix
+                user_content = msg.get('content', '')
+                # Handle empty content by providing a minimal default
+                # Content can be a string or a list (for images)
+                if isinstance(user_content, str):
+                    if not user_content or not user_content.strip():
+                        user_content = '.'
+                    content_list.append(Content(
+                        role='user',
+                        parts=[Part.from_text(user_content)]
+                    ))
+                elif isinstance(user_content, list):
+                    # Content is a list of parts (e.g., with images)
+                    # Extract text from the parts
+                    text_parts = []
+                    for p in user_content:
+                        if isinstance(p, dict):
+                            if p.get('type') == 'text' and 'text' in p:
+                                text_val = p['text']
+                                if isinstance(text_val, str):
+                                    text_parts.append(text_val)
+                    
+                    if text_parts:
+                        user_text = ' '.join(text_parts)
+                    else:
+                        user_text = '.'
+                    content_list.append(Content(
+                        role='user',
+                        parts=[Part.from_text(user_text)]
+                    ))
+                else:
+                    # Unknown type, use minimal default
+                    content_list.append(Content(
+                        role='user',
+                        parts=[Part.from_text('.')]
+                    ))
+            # For system messages, include as user (Gemini handles system context naturally)
             elif role == 'system':
+                system_content = msg.get('content', '')
+                # Handle empty system content
+                if not system_content or not system_content.strip():
+                    system_content = '.'
                 content_list.append(Content(
                     role='user',
-                    parts=[Part.from_text(f"INSTRUCTIONS: {msg.get('content', '')}" )]
+                    parts=[Part.from_text(system_content)]
                 ))
         
         return content_list
