@@ -9229,17 +9229,16 @@ Important rules:
                 else:
                     self.append_log("✅ [SAVE_CONFIG] All environment variables appear to be properly set!")
 
+            # Play system sound for feedback
             if show_message:
-                from PySide6.QtWidgets import QMessageBox
-                from PySide6.QtGui import QIcon
-                msg_box = QMessageBox(QMessageBox.Information, "Saved", "Configuration saved.", QMessageBox.Ok)
                 try:
-                    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "halgakos.ico")
-                    if os.path.exists(icon_path):
-                        msg_box.setWindowIcon(QIcon(icon_path))
-                except Exception: pass
-                msg_box.setModal(False)
-                msg_box.show()
+                    from PySide6.QtMultimedia import QSoundEffect
+                    from PySide6.QtCore import QUrl
+                    # Play Windows default notification sound
+                    import winsound
+                    winsound.MessageBeep(winsound.MB_OK)
+                except Exception:
+                    pass
                 
         except Exception as e:
             if show_message:
