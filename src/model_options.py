@@ -16,8 +16,8 @@ def get_model_options() -> List[str]:
         "o1-preview", "o1-mini", "o3", "o4-mini",
         
         # Google Gemini Models
-        "gemini-2.0-flash","gemini-2.0-flash-lite",
-        "gemini-2.5-flash","gemini-2.5-flash-lite", "gemini-2.5-pro", "gemini-pro", "gemini-pro-vision",
+        "gemini-2.5-flash","gemini-2.5-flash-lite", "gemini-2.5-pro",
+        "gemini-2.0-flash","gemini-2.0-flash-lite", "gemini-pro", "gemini-pro-vision",
         "gemini-3-pro-preview", "gemini-3-pro-image-preview",
         
         # Anthropic Claude Models

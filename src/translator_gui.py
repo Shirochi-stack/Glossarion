@@ -2353,7 +2353,7 @@ Recent translations to summarize:
         self.frame.addWidget(model_label, 1, 0, Qt.AlignLeft)
         
         # Get default model and model list
-        default_model = self.config.get('model', 'gemini-2.0-flash')
+        default_model = self.config.get('model', 'gemini-2.5-flash')
         self.model_var = default_model
         models = get_model_options()
         self._model_all_values = models

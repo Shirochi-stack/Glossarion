@@ -3809,7 +3809,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 resp_obj = client.get_last_response_object()
                 if resp_obj and hasattr(resp_obj, 'raw_content_object'):
                     raw_obj = resp_obj.raw_content_object
-                    print("🧠 Captured thought signature for history in send_with_interrupt")
+                    # print("🧠 Captured thought signature for history in send_with_interrupt")
             
             elapsed = time.time() - start_time
             # Include raw_obj in the result tuple
