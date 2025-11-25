@@ -9238,7 +9238,8 @@ Important rules:
                     if os.path.exists(icon_path):
                         msg_box.setWindowIcon(QIcon(icon_path))
                 except Exception: pass
-                msg_box.exec()
+                msg_box.setModal(False)
+                msg_box.show()
                 
         except Exception as e:
             if show_message:

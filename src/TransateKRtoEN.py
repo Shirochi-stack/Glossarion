@@ -4716,9 +4716,17 @@ def main(log_callback=None, stop_callback=None):
     if check_stop():
         return
 
-    if not config.API_KEY:
+    # Check if model needs API key
+    model_needs_api_key = not (config.MODEL.lower() in ['google-translate', 'google-translate-free'] or 
+                              '@' in config.MODEL or config.MODEL.startswith('vertex/'))
+    
+    if model_needs_api_key and not config.API_KEY:
         print("❌ Error: Set API_KEY, OPENAI_API_KEY, or OPENAI_OR_Gemini_API_KEY in your environment.")
         return
+    
+    # Set dummy API key for models that don't need one
+    if not config.API_KEY:
+        config.API_KEY = 'dummy-key-not-required'
 
     #print(f"[DEBUG] Found API key: {config.API_KEY[:10]}...")
     print(f"[DEBUG] Using model = {config.MODEL}")
