@@ -7080,22 +7080,53 @@ class UnifiedClient:
                     ))
                 elif isinstance(user_content, list):
                     # Content is a list of parts (e.g., with images)
-                    # Extract text from the parts
-                    text_parts = []
+                    # Build parts list that includes both text and images
+                    parts_list = []
                     for p in user_content:
                         if isinstance(p, dict):
                             if p.get('type') == 'text' and 'text' in p:
                                 text_val = p['text']
-                                if isinstance(text_val, str):
-                                    text_parts.append(text_val)
+                                if isinstance(text_val, str) and text_val.strip():
+                                    parts_list.append(Part.from_text(text_val))
+                            elif p.get('type') == 'image_url':
+                                # Handle image parts
+                                image_url = p.get('image_url', {})
+                                if isinstance(image_url, dict):
+                                    url = image_url.get('url', '')
+                                elif isinstance(image_url, str):
+                                    url = image_url
+                                else:
+                                    url = ''
+                                
+                                if url:
+                                    # Extract base64 data from data URL
+                                    if url.startswith('data:'):
+                                        try:
+                                            # Format: data:image/jpeg;base64,<base64_data>
+                                            mime_and_data = url.split(',', 1)
+                                            if len(mime_and_data) == 2:
+                                                base64_data = mime_and_data[1]
+                                                # Determine mime type
+                                                mime_type = 'image/jpeg'  # default
+                                                if 'image/png' in mime_and_data[0]:
+                                                    mime_type = 'image/png'
+                                                elif 'image/webp' in mime_and_data[0]:
+                                                    mime_type = 'image/webp'
+                                                
+                                                # Decode base64 to bytes
+                                                image_bytes = base64.b64decode(base64_data)
+                                                # Create image part
+                                                parts_list.append(Part.from_data(data=image_bytes, mime_type=mime_type))
+                                        except Exception as e:
+                                            print(f"   ⚠️ Failed to decode image for Vertex AI: {e}")
                     
-                    if text_parts:
-                        user_text = ' '.join(text_parts)
-                    else:
-                        user_text = '.'
+                    # If no parts were added, add a default text part
+                    if not parts_list:
+                        parts_list.append(Part.from_text('.'))
+                    
                     content_list.append(Content(
                         role='user',
-                        parts=[Part.from_text(user_text)]
+                        parts=parts_list
                     ))
                 else:
                     # Unknown type, use minimal default
