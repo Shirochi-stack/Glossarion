@@ -2342,9 +2342,6 @@ def main(log_callback=None, stop_callback=None):
                                 # Add user message to history
                                 history.append({"role": "user", "content": user_content})
                                 
-                                # Add to history in the EXACT same format as TransateKRtoEN
-                                history.append({"role": "user", "content": user_content})
-                                
                                 # Create assistant entry
                                 assistant_entry = {"role": "assistant", "content": assistant_content}
                                 
@@ -2369,6 +2366,13 @@ def main(log_callback=None, stop_callback=None):
                                 history.append(assistant_entry)
                         except Exception as e:
                             print(f"⚠️ Failed to append Chapter {idx+1} to glossary history: {e}")
+                
+                # Save history to disk after batch completes
+                try:
+                    history_manager.save_history(history)
+                    print(f"💾 Saved glossary history ({len(history)} messages)")
+                except Exception as e:
+                    print(f"⚠️ Failed to save glossary history: {e}")
             
             batch_elapsed = time.time() - batch_start_time
             print(f"[BATCH] Batch {batch_num+1} completed in {batch_elapsed:.1f}s total")
