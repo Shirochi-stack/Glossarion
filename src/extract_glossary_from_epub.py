@@ -775,12 +775,16 @@ def trim_context_history(history: List[Dict], limit: int, rolling_window: bool =
                 # Preserve the raw content object with thought signatures if present
                 if '_raw_content_object' in msg:
                     raw_obj = msg['_raw_content_object']
+                    print(f"🔍 [DEBUG] raw_obj type={type(raw_obj)}, is_dict={isinstance(raw_obj, dict)}")
+                    if isinstance(raw_obj, dict):
+                        print(f"🔍 [DEBUG] raw_obj keys={list(raw_obj.keys())}")
                     
                     # For glossary, we keep thought signatures but may filter text from parts
                     # to avoid duplication with the content field
                     if isinstance(raw_obj, dict) and 'parts' in raw_obj:
                         # Check if this is a Vertex AI response
                         is_vertex = raw_obj.get('_from_vertex', False)
+                        print(f"🔍 [DEBUG] Message has _from_vertex={is_vertex}, parts count={len(raw_obj.get('parts', []))}")
                         
                         # For non-Vertex responses, filter out text field to avoid duplication
                         # For Vertex AI, keep text since thinking is embedded in it
@@ -2351,6 +2355,15 @@ def main(log_callback=None, stop_callback=None):
                                     # the required thought_signature behind the scenes"
                                     # The raw_obj is the candidate.content object from Vertex AI
                                     # We store it directly - save_progress will serialize it
+                                    
+                                    # CRITICAL FIX: In batch mode, raw_obj may already be serialized to dict
+                                    # Check if this is from Vertex AI and mark it explicitly
+                                    api_type = os.getenv("API_TYPE", "gemini").lower()
+                                    if api_type == "vertex" and isinstance(raw_obj, dict) and 'parts' in raw_obj:
+                                        # Mark as Vertex AI so thought signatures are preserved correctly
+                                        raw_obj['_from_vertex'] = True
+                                        print(f"🔧 [FIX] Marked chapter {idx+1} raw_obj as _from_vertex=True for Vertex AI")
+                                    
                                     assistant_entry["_raw_content_object"] = raw_obj
                                     
                                     # Check if thinking tags are present in the text

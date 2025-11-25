@@ -49,12 +49,11 @@ def get_model_options() -> List[str]:
         "vertex/claude-3-opus@20240229",
         "vertex/claude-4-opus@20250514",
         "vertex/claude-4-sonnet@20250514",
-        "vertex/gemini-1.5-pro",
-        "vertex/gemini-1.5-flash",
         "vertex/gemini-2.0-flash",
         "vertex/gemini-2.5-pro",
         "vertex/gemini-2.5-flash",
         "vertex/gemini-2.5-flash-lite",
+        "vertex/gemini-3-pro-preview",
 
         # Chute AI
         "chutes/openai/gpt-oss-120b",

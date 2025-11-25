@@ -114,8 +114,11 @@ class HistoryManager:
                     pass
             
             # Mark as from_vertex if it is
-            if obj.__class__.__name__ == 'Content':
+            class_name = obj.__class__.__name__
+            # print(f"[DEBUG HistoryManager] Serializing object with class name: {class_name}")
+            if class_name == 'Content':
                 result['_from_vertex'] = True
+                # print(f"[DEBUG HistoryManager] Marked as _from_vertex=True")
             
             if result:
                 return result
