@@ -2620,10 +2620,8 @@ class BatchTranslationProcessor:
                     and getattr(self.config, 'HIST_LIMIT', 0) > 0
                 ):
                     try:
-                        # Thread-safe history access with microsecond delay to prevent race conditions
-                        with self.history_manager.lock:
-                            time.sleep(0.000001)  # 1 microsecond delay
-                            history = self.history_manager.load_history()
+                        # Thread-safe history access - load_history() already has internal locking
+                        history = self.history_manager.load_history()
                         hist_limit = getattr(self.config, 'HIST_LIMIT', 0)
                         trimmed = history[-hist_limit * 2:]
                         include_source = os.getenv("INCLUDE_SOURCE_IN_HISTORY", "0") == "1"
