@@ -2369,8 +2369,11 @@ def main(log_callback=None, stop_callback=None):
                 
                 # Save history to disk after batch completes
                 try:
-                    history_manager.save_history(history)
-                    print(f"💾 Saved glossary history ({len(history)} messages)")
+                    # Microsecond lock to prevent race conditions when saving history
+                    time.sleep(0.000001)
+                    with _history_lock:
+                        history_manager.save_history(history)
+                        print(f"💾 Saved glossary history ({len(history)} messages)")
                 except Exception as e:
                     print(f"⚠️ Failed to save glossary history: {e}")
             
