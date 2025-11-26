@@ -1256,6 +1256,16 @@ class EPUBCompiler:
                             if result:
                                 self.log("✅ Standalone header translation completed successfully")
                                 standalone_success = True
+                                
+                                # CRITICAL: Update chapter_titles_info so TOC uses translated titles
+                                # result is a dict mapping filename -> translated_title
+                                updated_for_toc = 0
+                                for chap_num, (orig_title, conf, fname) in list(chapter_titles_info.items()):
+                                    base = os.path.basename(fname)
+                                    if base in result:
+                                        chapter_titles_info[chap_num] = (result[base], max(conf, 0.95), 'standalone_translation')
+                                        updated_for_toc += 1
+                                self.log(f"📝 Updated TOC titles from standalone translation: {updated_for_toc} entries")
                             else:
                                 self.log("⚠️ Standalone header translation returned no result")
                         else:
