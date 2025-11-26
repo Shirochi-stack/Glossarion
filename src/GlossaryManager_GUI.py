@@ -1425,8 +1425,13 @@ Rules:
         append_prompt_layout.addWidget(self.append_prompt_text)
         
         # Always reload append prompt from config to ensure fresh state
+        # Treat empty string as missing to ensure users get the default
         default_append_prompt = "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n"
-        self.append_glossary_prompt = self.config.get('append_glossary_prompt', default_append_prompt)
+        append_prompt_from_config = self.config.get('append_glossary_prompt', default_append_prompt)
+        if not append_prompt_from_config or not append_prompt_from_config.strip():
+            self.append_glossary_prompt = default_append_prompt
+        else:
+            self.append_glossary_prompt = append_prompt_from_config
         
         self.append_prompt_text.setPlainText(self.append_glossary_prompt)
         

@@ -920,8 +920,13 @@ Prioritize names that appear with honorifics or in important contexts."""
         else:
             self.unified_auto_glossary_prompt = unified_prompt_from_config
         
-        self.append_glossary_prompt = self.config.get('append_glossary_prompt',
-           '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n')
+        # Get append_glossary_prompt from config, but treat empty string as missing
+        default_append_prompt = '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n'
+        append_prompt_from_config = self.config.get('append_glossary_prompt', default_append_prompt)
+        if not append_prompt_from_config or not append_prompt_from_config.strip():
+            self.append_glossary_prompt = default_append_prompt
+        else:
+            self.append_glossary_prompt = append_prompt_from_config
         
         self.glossary_translation_prompt = self.config.get('glossary_translation_prompt', 
             """
