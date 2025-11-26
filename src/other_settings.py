@@ -5985,6 +5985,57 @@ def run_standalone_translate_headers(self):
                     # Import and run the translation GUI
                     from translate_headers_standalone import run_translate_headers_gui
                     run_translate_headers_gui(self)
+                    
+                    # After translation completes, run EPUB converter to rebuild the EPUB
+                    # with the updated HTML files
+                    self.append_log("\n📦 Rebuilding EPUB with translated headers...")
+                    try:
+                        from epub_converter import fallback_compile_epub
+                        
+                        # Find the output directory for the current EPUB
+                        epub_path = self.get_current_epub_path() if hasattr(self, 'get_current_epub_path') else None
+                        if not epub_path and hasattr(self, 'selected_files') and self.selected_files:
+                            # Get first EPUB from selection
+                            epub_files = [f for f in self.selected_files if f.lower().endswith('.epub')]
+                            if epub_files:
+                                epub_path = epub_files[0]
+                        
+                        if epub_path:
+                            epub_base = os.path.splitext(os.path.basename(epub_path))[0]
+                            current_dir = os.getcwd()
+                            script_dir = os.path.dirname(os.path.abspath(__file__))
+                            
+                            # Find output directory (same logic as header translation)
+                            candidates = [
+                                os.path.join(current_dir, epub_base),
+                                os.path.join(script_dir, epub_base),
+                                os.path.join(current_dir, 'src', epub_base),
+                            ]
+                            
+                            output_dir = None
+                            for candidate in candidates:
+                                if os.path.isdir(candidate):
+                                    files = os.listdir(candidate)
+                                    html_files = [f for f in files if f.lower().endswith(('.html', '.xhtml', '.htm'))]
+                                    if html_files:
+                                        output_dir = candidate
+                                        break
+                            
+                            if output_dir:
+                                # Set EPUB_PATH env var for the converter
+                                os.environ['EPUB_PATH'] = epub_path
+                                
+                                self.append_log(f"📂 Output directory: {output_dir}")
+                                fallback_compile_epub(output_dir, log_callback=self.append_log)
+                                self.append_log("✅ EPUB rebuilt successfully with translated headers!")
+                            else:
+                                self.append_log("⚠️ Could not find output directory to rebuild EPUB")
+                        else:
+                            self.append_log("⚠️ No EPUB file selected - skipping EPUB rebuild")
+                    except Exception as epub_error:
+                        self.append_log(f"⚠️ Failed to rebuild EPUB: {epub_error}")
+                        import traceback as tb
+                        self.append_log(tb.format_exc())
                 finally:
                     # Restore original client
                     if original_client is not None:
