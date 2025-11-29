@@ -645,7 +645,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
                 file_ext = os.path.splitext(additional_glossary_path)[1].lower()
                 
                 # Target path in output directory
-                target_path = os.path.join(output_dir, "addition_glossary.csv")
+                target_path = os.path.join(output_dir, "glossary_extension.csv")
                 
                 if file_ext == '.csv':
                     # Copy CSV directly

@@ -3994,7 +3994,7 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None):
             
             # Check for additional glossary file
             glossary_dir = os.path.dirname(actual_glossary_path)
-            additional_glossary_path = os.path.join(glossary_dir, "addition_glossary.csv")
+            additional_glossary_path = os.path.join(glossary_dir, "glossary_extension.csv")
             
             if os.path.exists(additional_glossary_path):
                 try:
@@ -5343,7 +5343,7 @@ def main(log_callback=None, stop_callback=None):
             if os.getenv('ADD_ADDITIONAL_GLOSSARY', '0') == '1':
                 additional_glossary_path = os.getenv('ADDITIONAL_GLOSSARY_PATH', '')
                 if additional_glossary_path and os.path.exists(additional_glossary_path):
-                    additional_target = os.path.join(out, "addition_glossary.csv")
+                    additional_target = os.path.join(out, "glossary_extension.csv")
                     try:
                         shutil.copy(additional_glossary_path, additional_target)
                         print(f"📑 Copied additional glossary: {os.path.basename(additional_glossary_path)}")
@@ -5360,7 +5360,7 @@ def main(log_callback=None, stop_callback=None):
             if os.getenv('ADD_ADDITIONAL_GLOSSARY', '0') == '1':
                 additional_glossary_path = os.getenv('ADDITIONAL_GLOSSARY_PATH', '')
                 if additional_glossary_path and os.path.exists(additional_glossary_path):
-                    additional_target = os.path.join(out, "addition_glossary.csv")
+                    additional_target = os.path.join(out, "glossary_extension.csv")
                     try:
                         shutil.copy(additional_glossary_path, additional_target)
                         print(f"📑 Copied additional glossary: {os.path.basename(additional_glossary_path)}")
@@ -5474,7 +5474,7 @@ def main(log_callback=None, stop_callback=None):
                     if os.getenv('ADD_ADDITIONAL_GLOSSARY', '0') == '1':
                         additional_glossary_path = os.getenv('ADDITIONAL_GLOSSARY_PATH', '')
                         if additional_glossary_path and os.path.exists(additional_glossary_path):
-                            additional_target = os.path.join(out, "addition_glossary.csv")
+                            additional_target = os.path.join(out, "glossary_extension.csv")
                             try:
                                 shutil.copy(additional_glossary_path, additional_target)
                                 print(f"📑 Copied additional glossary: {os.path.basename(additional_glossary_path)}")
@@ -5583,7 +5583,7 @@ def main(log_callback=None, stop_callback=None):
                     print(f"⚠️ Unexpected glossary format: {type(glossary_data)}")
             
             # Check for additional glossary (after all glossary types)
-            additional_glossary = os.path.join(out, "addition_glossary.csv")
+            additional_glossary = os.path.join(out, "glossary_extension.csv")
             if os.path.exists(additional_glossary):
                 try:
                     with open(additional_glossary, 'r', encoding='utf-8') as f:
