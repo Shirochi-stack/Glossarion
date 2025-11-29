@@ -634,12 +634,12 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         # Final sanitize to prevent stray headers and section titles at end
         csv_lines = _sanitize_final_glossary_lines(csv_lines, use_legacy_format)
         
-        # Copy additional glossary file if configured
+        # Copy glossary extension file if configured
         add_additional_glossary = os.getenv('ADD_ADDITIONAL_GLOSSARY', '0') == '1'
         additional_glossary_path = os.getenv('ADDITIONAL_GLOSSARY_PATH', '')
         
         if add_additional_glossary and additional_glossary_path and os.path.exists(additional_glossary_path):
-            print(f"📜 Processing additional glossary: {os.path.basename(additional_glossary_path)}")
+            print(f"📜 Processing glossary extension: {os.path.basename(additional_glossary_path)}")
             try:
                 import shutil
                 file_ext = os.path.splitext(additional_glossary_path)[1].lower()
@@ -650,7 +650,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
                 if file_ext == '.csv':
                     # Copy CSV directly
                     shutil.copy2(additional_glossary_path, target_path)
-                    print(f"📜 Copied additional glossary to {os.path.basename(target_path)}")
+                    print(f"📜 Copied glossary extension to {os.path.basename(target_path)}")
                 
                 elif file_ext in ['.txt', '.json', '.pdf']:
                     # Convert non-CSV formats to CSV
@@ -712,10 +712,10 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
                     if converted_lines:
                         with open(target_path, 'w', encoding='utf-8') as f:
                             f.write('\n'.join(converted_lines))
-                        print(f"📜 Converted and saved additional glossary to {os.path.basename(target_path)}")
+                        print(f"📜 Converted and saved glossary extension to {os.path.basename(target_path)}")
                     
             except Exception as e:
-                print(f"⚠️ Failed to copy additional glossary: {e}")
+                print(f"⚠️ Failed to copy glossary extension: {e}")
                 import traceback
                 traceback.print_exc()
         
