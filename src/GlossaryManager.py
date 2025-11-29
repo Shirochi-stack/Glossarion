@@ -634,81 +634,88 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         # Final sanitize to prevent stray headers and section titles at end
         csv_lines = _sanitize_final_glossary_lines(csv_lines, use_legacy_format)
         
-        # Append additional glossary if configured
+        # Copy additional glossary file if configured
         add_additional_glossary = os.getenv('ADD_ADDITIONAL_GLOSSARY', '0') == '1'
         additional_glossary_path = os.getenv('ADDITIONAL_GLOSSARY_PATH', '')
         
         if add_additional_glossary and additional_glossary_path and os.path.exists(additional_glossary_path):
-            print(f"📜 Appending additional glossary: {os.path.basename(additional_glossary_path)}")
+            print(f"📜 Processing additional glossary: {os.path.basename(additional_glossary_path)}")
             try:
-                # Read additional glossary file
+                import shutil
                 file_ext = os.path.splitext(additional_glossary_path)[1].lower()
-                additional_content = []
+                
+                # Target path in output directory
+                target_path = os.path.join(output_dir, "addition_glossary.csv")
                 
                 if file_ext == '.csv':
-                    with open(additional_glossary_path, 'r', encoding='utf-8') as f:
-                        additional_lines = f.readlines()
-                        # Skip header if present
-                        for line in additional_lines:
-                            if line.strip() and not line.strip().lower().startswith('type,'):
-                                additional_content.append(line.strip())
+                    # Copy CSV directly
+                    shutil.copy2(additional_glossary_path, target_path)
+                    print(f"📜 Copied additional glossary to {os.path.basename(target_path)}")
                 
-                elif file_ext == '.txt':
-                    with open(additional_glossary_path, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                        # Add as plain text (will be appended as-is)
-                        if content.strip():
-                            additional_content.append(f"\n=== ADDITIONAL GLOSSARY ===\n{content.strip()}")
-                
-                elif file_ext == '.json':
-                    import json
-                    with open(additional_glossary_path, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
-                        # Convert JSON to CSV-like format
-                        if isinstance(data, dict):
-                            for key, value in data.items():
-                                if isinstance(value, dict):
-                                    raw = value.get('raw', key)
-                                    translated = value.get('translated', value.get('translation', key))
-                                    entry_type = value.get('type', 'term')
-                                    additional_content.append(f"{entry_type},{raw},{translated}")
-                                else:
-                                    additional_content.append(f"term,{key},{value}")
-                        elif isinstance(data, list):
-                            for entry in data:
-                                if isinstance(entry, dict):
-                                    entry_type = entry.get('type', 'term')
-                                    raw = entry.get('raw_name', entry.get('raw', ''))
-                                    translated = entry.get('translated_name', entry.get('translated', ''))
-                                    if raw and translated:
-                                        additional_content.append(f"{entry_type},{raw},{translated}")
-                
-                elif file_ext == '.pdf':
-                    # Try to extract text from PDF
-                    try:
-                        import PyPDF2
-                        with open(additional_glossary_path, 'rb') as f:
-                            pdf_reader = PyPDF2.PdfReader(f)
-                            pdf_text = []
-                            for page in pdf_reader.pages:
-                                pdf_text.append(page.extract_text())
-                            text_content = '\n'.join(pdf_text)
-                            if text_content.strip():
-                                additional_content.append(f"\n=== ADDITIONAL GLOSSARY (from PDF) ===\n{text_content.strip()}")
-                    except ImportError:
-                        print("⚠️ PyPDF2 not available, cannot read PDF. Install with: pip install PyPDF2")
-                    except Exception as pdf_error:
-                        print(f"⚠️ Could not read PDF: {pdf_error}")
-                
-                if additional_content:
-                    # Add separator and append content
-                    csv_lines.append("")
-                    csv_lines.append("=== ADDITIONAL ENTRIES ===")
-                    csv_lines.extend(additional_content)
-                    print(f"📜 Appended {len(additional_content)} entries from additional glossary")
+                elif file_ext in ['.txt', '.json', '.pdf']:
+                    # Convert non-CSV formats to CSV
+                    converted_lines = []
+                    
+                    if file_ext == '.txt':
+                        with open(additional_glossary_path, 'r', encoding='utf-8') as f:
+                            content = f.read()
+                            # Try to parse as CSV-like format
+                            for line in content.strip().split('\n'):
+                                if line.strip():
+                                    converted_lines.append(line.strip())
+                    
+                    elif file_ext == '.json':
+                        import json
+                        with open(additional_glossary_path, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                            # Add CSV header
+                            converted_lines.append("type,raw_name,translated_name")
+                            # Convert JSON to CSV format
+                            if isinstance(data, dict):
+                                for key, value in data.items():
+                                    if isinstance(value, dict):
+                                        raw = value.get('raw', key)
+                                        translated = value.get('translated', value.get('translation', key))
+                                        entry_type = value.get('type', 'term')
+                                        converted_lines.append(f"{entry_type},{raw},{translated}")
+                                    else:
+                                        converted_lines.append(f"term,{key},{value}")
+                            elif isinstance(data, list):
+                                for entry in data:
+                                    if isinstance(entry, dict):
+                                        entry_type = entry.get('type', 'term')
+                                        raw = entry.get('raw_name', entry.get('raw', ''))
+                                        translated = entry.get('translated_name', entry.get('translated', ''))
+                                        if raw and translated:
+                                            converted_lines.append(f"{entry_type},{raw},{translated}")
+                    
+                    elif file_ext == '.pdf':
+                        # Try to extract text from PDF and save as CSV
+                        try:
+                            import PyPDF2
+                            with open(additional_glossary_path, 'rb') as f:
+                                pdf_reader = PyPDF2.PdfReader(f)
+                                pdf_text = []
+                                for page in pdf_reader.pages:
+                                    pdf_text.append(page.extract_text())
+                                text_content = '\n'.join(pdf_text)
+                                # Try to parse as CSV
+                                for line in text_content.strip().split('\n'):
+                                    if line.strip():
+                                        converted_lines.append(line.strip())
+                        except ImportError:
+                            print("⚠️ PyPDF2 not available, cannot read PDF. Install with: pip install PyPDF2")
+                        except Exception as pdf_error:
+                            print(f"⚠️ Could not read PDF: {pdf_error}")
+                    
+                    # Write converted content to CSV
+                    if converted_lines:
+                        with open(target_path, 'w', encoding='utf-8') as f:
+                            f.write('\n'.join(converted_lines))
+                        print(f"📜 Converted and saved additional glossary to {os.path.basename(target_path)}")
                     
             except Exception as e:
-                print(f"⚠️ Failed to append additional glossary: {e}")
+                print(f"⚠️ Failed to copy additional glossary: {e}")
                 import traceback
                 traceback.print_exc()
         

@@ -3991,6 +3991,35 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None):
             system += f"{custom_prompt}\n{glossary_text}"
             
             print(f"✅ Glossary appended ({len(glossary_text):,} characters)")
+            
+            # Check for additional glossary file
+            glossary_dir = os.path.dirname(actual_glossary_path)
+            additional_glossary_path = os.path.join(glossary_dir, "addition_glossary.csv")
+            
+            if os.path.exists(additional_glossary_path):
+                try:
+                    print(f"✅ Loading additional glossary from: {os.path.basename(additional_glossary_path)}")
+                    with open(additional_glossary_path, "r", encoding="utf-8") as af:
+                        additional_glossary_text = af.read()
+                    
+                    # Apply same compression logic if enabled
+                    if compress_glossary_enabled and source_text:
+                        try:
+                            from glossary_compressor import compress_glossary
+                            original_add_length = len(additional_glossary_text)
+                            additional_glossary_text = compress_glossary(additional_glossary_text, source_text, glossary_format='auto')
+                            compressed_add_length = len(additional_glossary_text)
+                            add_reduction_pct = ((original_add_length - compressed_add_length) / original_add_length * 100) if original_add_length > 0 else 0
+                            print(f"🗃️ Additional glossary compressed: {original_add_length:,} → {compressed_add_length:,} chars ({add_reduction_pct:.1f}% reduction)")
+                        except Exception as e:
+                            print(f"⚠️ Additional glossary compression failed: {e}")
+                    
+                    # Append additional glossary
+                    system += f"\n\n{additional_glossary_text}"
+                    print(f"✅ Additional glossary appended ({len(additional_glossary_text):,} characters)")
+                    
+                except Exception as e:
+                    print(f"⚠️ Failed to load additional glossary: {e}")
                 
         except Exception as e:
             print(f"[ERROR] Could not load glossary: {e}")
@@ -5309,12 +5338,34 @@ def main(log_callback=None, stop_callback=None):
                 print("📑 Using manual glossary from:", config.MANUAL_GLOSSARY)
             else:
                 print("📑 Using existing glossary:", config.MANUAL_GLOSSARY)
+            
+            # Copy additional glossary if configured
+            if os.getenv('ADD_ADDITIONAL_GLOSSARY', '0') == '1':
+                additional_glossary_path = os.getenv('ADDITIONAL_GLOSSARY_PATH', '')
+                if additional_glossary_path and os.path.exists(additional_glossary_path):
+                    additional_target = os.path.join(out, "addition_glossary.csv")
+                    try:
+                        shutil.copy(additional_glossary_path, additional_target)
+                        print(f"📑 Copied additional glossary: {os.path.basename(additional_glossary_path)}")
+                    except Exception as e:
+                        print(f"⚠️ Failed to copy additional glossary: {e}")
         elif os.path.exists(existing_glossary_csv) or os.path.exists(existing_glossary_json):
             print("📑 Existing glossary file detected in source folder - skipping automatic generation")
             if os.path.exists(existing_glossary_csv):
                 print(f"📑 Using existing glossary.csv: {existing_glossary_csv}")
             elif os.path.exists(existing_glossary_json):
                 print(f"📑 Using existing glossary.json: {existing_glossary_json}")
+            
+            # Copy additional glossary if configured
+            if os.getenv('ADD_ADDITIONAL_GLOSSARY', '0') == '1':
+                additional_glossary_path = os.getenv('ADDITIONAL_GLOSSARY_PATH', '')
+                if additional_glossary_path and os.path.exists(additional_glossary_path):
+                    additional_target = os.path.join(out, "addition_glossary.csv")
+                    try:
+                        shutil.copy(additional_glossary_path, additional_target)
+                        print(f"📑 Copied additional glossary: {os.path.basename(additional_glossary_path)}")
+                    except Exception as e:
+                        print(f"⚠️ Failed to copy additional glossary: {e}")
         elif os.getenv("ENABLE_AUTO_GLOSSARY", "0") == "1":
             model = os.getenv("MODEL", "gpt-4")
             if is_traditional_translation_api(model):
@@ -5419,6 +5470,17 @@ def main(log_callback=None, stop_callback=None):
                     
                     print("✅ Automatic glossary generation COMPLETED")
                     
+                    # Copy additional glossary if configured (after auto-glossary generation)
+                    if os.getenv('ADD_ADDITIONAL_GLOSSARY', '0') == '1':
+                        additional_glossary_path = os.getenv('ADDITIONAL_GLOSSARY_PATH', '')
+                        if additional_glossary_path and os.path.exists(additional_glossary_path):
+                            additional_target = os.path.join(out, "addition_glossary.csv")
+                            try:
+                                shutil.copy(additional_glossary_path, additional_target)
+                                print(f"📑 Copied additional glossary: {os.path.basename(additional_glossary_path)}")
+                            except Exception as e:
+                                print(f"⚠️ Failed to copy additional glossary: {e}")
+                    
                     # Handle deferred glossary appending
                     if os.getenv('DEFER_GLOSSARY_APPEND') == '1':
                         print("📑 Processing deferred glossary append to system prompt...")
@@ -5519,6 +5581,20 @@ def main(log_callback=None, stop_callback=None):
                             print(f"   • {original} → {translated}")
                 else:
                     print(f"⚠️ Unexpected glossary format: {type(glossary_data)}")
+            
+            # Check for additional glossary (after all glossary types)
+            additional_glossary = os.path.join(out, "addition_glossary.csv")
+            if os.path.exists(additional_glossary):
+                try:
+                    with open(additional_glossary, 'r', encoding='utf-8') as f:
+                        add_lines = [ln.strip() for ln in f.readlines() if ln.strip()]
+                    add_entry_count = max(0, len(add_lines) - 1) if add_lines and ',' in add_lines[0] else len(add_lines)
+                    print(f"📑 Additional glossary loaded with {add_entry_count} entries")
+                    print("📑 Sample additional glossary lines:")
+                    for ln in add_lines[1:4]:
+                        print(f"   • {ln}")
+                except Exception as e:
+                    print(f"⚠️ Failed to read additional glossary: {e}")
                 
         except Exception as e:
             print(f"⚠️ Failed to inspect glossary file: {e}")
