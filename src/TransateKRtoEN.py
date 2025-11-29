@@ -5344,11 +5344,15 @@ def main(log_callback=None, stop_callback=None):
                 additional_glossary_path = os.getenv('ADDITIONAL_GLOSSARY_PATH', '')
                 if additional_glossary_path and os.path.exists(additional_glossary_path):
                     additional_target = os.path.join(out, "glossary_extension.csv")
-                    try:
-                        shutil.copy(additional_glossary_path, additional_target)
-                        print(f"📑 Copied glossary extension: {os.path.basename(additional_glossary_path)}")
-                    except Exception as e:
-                        print(f"⚠️ Failed to copy glossary extension: {e}")
+                    # Only copy if target doesn't already exist
+                    if not os.path.exists(additional_target):
+                        try:
+                            shutil.copy(additional_glossary_path, additional_target)
+                            print(f"📑 Copied glossary extension: {os.path.basename(additional_glossary_path)}")
+                        except Exception as e:
+                            print(f"⚠️ Failed to copy glossary extension: {e}")
+                    else:
+                        print(f"📑 Using existing glossary extension in output folder")
         elif os.path.exists(existing_glossary_csv) or os.path.exists(existing_glossary_json):
             print("📑 Existing glossary file detected in source folder - skipping automatic generation")
             if os.path.exists(existing_glossary_csv):
@@ -5361,11 +5365,15 @@ def main(log_callback=None, stop_callback=None):
                 additional_glossary_path = os.getenv('ADDITIONAL_GLOSSARY_PATH', '')
                 if additional_glossary_path and os.path.exists(additional_glossary_path):
                     additional_target = os.path.join(out, "glossary_extension.csv")
-                    try:
-                        shutil.copy(additional_glossary_path, additional_target)
-                        print(f"📑 Copied glossary extension: {os.path.basename(additional_glossary_path)}")
-                    except Exception as e:
-                        print(f"⚠️ Failed to copy glossary extension: {e}")
+                    # Only copy if target doesn't already exist
+                    if not os.path.exists(additional_target):
+                        try:
+                            shutil.copy(additional_glossary_path, additional_target)
+                            print(f"📑 Copied glossary extension: {os.path.basename(additional_glossary_path)}")
+                        except Exception as e:
+                            print(f"⚠️ Failed to copy glossary extension: {e}")
+                    else:
+                        print(f"📑 Using existing glossary extension in output folder")
         elif os.getenv("ENABLE_AUTO_GLOSSARY", "0") == "1":
             model = os.getenv("MODEL", "gpt-4")
             if is_traditional_translation_api(model):
@@ -5475,11 +5483,15 @@ def main(log_callback=None, stop_callback=None):
                         additional_glossary_path = os.getenv('ADDITIONAL_GLOSSARY_PATH', '')
                         if additional_glossary_path and os.path.exists(additional_glossary_path):
                             additional_target = os.path.join(out, "glossary_extension.csv")
-                            try:
-                                shutil.copy(additional_glossary_path, additional_target)
-                                print(f"📑 Copied glossary extension: {os.path.basename(additional_glossary_path)}")
-                            except Exception as e:
-                                print(f"⚠️ Failed to copy glossary extension: {e}")
+                            # Only copy if target doesn't already exist
+                            if not os.path.exists(additional_target):
+                                try:
+                                    shutil.copy(additional_glossary_path, additional_target)
+                                    print(f"📑 Copied glossary extension: {os.path.basename(additional_glossary_path)}")
+                                except Exception as e:
+                                    print(f"⚠️ Failed to copy glossary extension: {e}")
+                            else:
+                                print(f"📑 Using existing glossary extension in output folder")
                     
                     # Handle deferred glossary appending
                     if os.getenv('DEFER_GLOSSARY_APPEND') == '1':
