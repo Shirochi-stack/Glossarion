@@ -817,6 +817,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
 
         # Glossary-related variables (existing)
         self.append_glossary_var = self.config.get('append_glossary', False)
+        self.add_additional_glossary_var = self.config.get('add_additional_glossary', False)
         self.glossary_use_smart_filter_var = self.config.get('glossary_use_smart_filter', True)
         self.glossary_min_frequency_var = str(self.config.get('glossary_min_frequency', 2))
         self.glossary_max_names_var = str(self.config.get('glossary_max_names', 50))
@@ -5673,6 +5674,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'INCLUDE_SOURCE_IN_HISTORY': "1" if getattr(self, 'include_source_in_history_var', False) else "0",
             'APPEND_GLOSSARY': "1" if self.append_glossary_var else "0",
             'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt if hasattr(self, 'append_glossary_prompt') and self.append_glossary_prompt else '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n',
+            'ADD_ADDITIONAL_GLOSSARY': "1" if self.config.get('add_additional_glossary', False) else "0",
+            'ADDITIONAL_GLOSSARY_PATH': self.config.get('additional_glossary_path', ''),
             'EMERGENCY_PARAGRAPH_RESTORE': "1" if self.emergency_restore_var else "0",
             'REINFORCEMENT_FREQUENCY': str(self.reinforcement_freq_var),
             'BREAK_SPLIT_COUNT': str(self.break_split_count_var) if hasattr(self, 'break_split_count_var') and self.break_split_count_var else '',
@@ -8910,6 +8913,8 @@ Important rules:
 
                 # Glossary Settings
                 ('append_glossary', ['append_glossary_checkbox', 'append_glossary_var'], False, bool),
+                ('add_additional_glossary', ['add_additional_glossary_checkbox', 'add_additional_glossary_var'], False, bool),
+                ('additional_glossary_path', [('config', 'additional_glossary_path')], '', str),
                 ('compress_glossary_prompt', ['compress_glossary_checkbox', 'compress_glossary_prompt_var'], True, bool),
                 ('include_gender_context', ['include_gender_context_checkbox', 'include_gender_context_var'], False, bool),
                 ('include_description', ['include_description_checkbox', 'include_description_var'], False, bool),
@@ -9161,6 +9166,8 @@ Important rules:
                     ('AUTO_GLOSSARY_PROMPT', self.config.get('unified_auto_glossary_prompt', '')),
                     ('APPEND_GLOSSARY_PROMPT', self.config.get('append_glossary_prompt', '')),
                     ('APPEND_GLOSSARY', '1' if self.config.get('append_glossary') else '0'),
+                    ('ADD_ADDITIONAL_GLOSSARY', '1' if self.config.get('add_additional_glossary') else '0'),
+                    ('ADDITIONAL_GLOSSARY_PATH', self.config.get('additional_glossary_path', '')),
                     ('ENABLE_AUTO_GLOSSARY', '1' if self.config.get('enable_auto_glossary') else '0'),
                     ('GLOSSARY_TRANSLATION_PROMPT', self.config.get('glossary_translation_prompt', '')),
                     ('GLOSSARY_FORMAT_INSTRUCTIONS', self.config.get('glossary_format_instructions', '')),

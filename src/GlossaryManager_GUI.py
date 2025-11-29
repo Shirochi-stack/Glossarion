@@ -482,6 +482,7 @@ class GlossaryManagerMixin:
                 checkbox_to_var_mapping = [
                     ('append_glossary_checkbox', 'append_glossary_var'),
                     ('enable_auto_glossary_checkbox', 'enable_auto_glossary_var'),
+                    ('add_additional_glossary_checkbox', 'add_additional_glossary_var'),
                     ('compress_glossary_checkbox', 'compress_glossary_prompt_var'),
                     ('include_gender_context_checkbox', 'include_gender_context_var'),
                     ('include_description_checkbox', 'include_description_var'),
@@ -1297,6 +1298,97 @@ Rules:
             print(f"❌ Error updating glossary prompts: {e}")
             import traceback
             traceback.print_exc()
+    
+    def _load_additional_glossary(self):
+        """Load an additional glossary file (CSV/TXT/JSON/PDF) to append to auto-generated glossary"""
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        
+        # Open file dialog to select glossary file
+        file_path, _ = QFileDialog.getOpenFileName(
+            None,
+            "Select Additional Glossary File",
+            "",
+            "Glossary Files (*.csv *.txt *.json *.pdf);;CSV Files (*.csv);;Text Files (*.txt);;JSON Files (*.json);;PDF Files (*.pdf);;All Files (*.*)"
+        )
+        
+        if not file_path:
+            return  # User cancelled
+        
+        # Validate file exists
+        if not os.path.exists(file_path):
+            QMessageBox.warning(None, "File Not Found", f"Selected file does not exist:\n{file_path}")
+            return
+        
+        # Load and validate the file content
+        try:
+            file_ext = os.path.splitext(file_path)[1].lower()
+            content_preview = ""
+            
+            if file_ext == '.csv':
+                # Read CSV and validate format
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+                    if lines:
+                        content_preview = f"CSV file with {len(lines)} lines\nFirst line: {lines[0][:100]}"
+            
+            elif file_ext == '.txt':
+                # Read text file
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    content_preview = f"Text file ({len(content)} chars)\nFirst 100 chars: {content[:100]}"
+            
+            elif file_ext == '.json':
+                # Read and validate JSON
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    content_preview = f"JSON file with {len(data)} entries" if isinstance(data, (list, dict)) else "JSON file"
+            
+            elif file_ext == '.pdf':
+                # Just validate PDF exists (parsing will happen during glossary generation)
+                file_size = os.path.getsize(file_path)
+                content_preview = f"PDF file ({file_size} bytes)"
+            
+            else:
+                QMessageBox.warning(None, "Unsupported Format", f"Unsupported file format: {file_ext}\nSupported formats: .csv, .txt, .json, .pdf")
+                return
+            
+            # Save to config
+            self.config['additional_glossary_path'] = file_path
+            self.config['add_additional_glossary'] = True  # Auto-enable the checkbox
+            self.save_config()
+            
+            # Update checkbox if it exists
+            if hasattr(self, 'add_additional_glossary_checkbox'):
+                self.add_additional_glossary_checkbox.setChecked(True)
+            
+            # Update label if it exists
+            if hasattr(self, 'additional_glossary_label'):
+                self.additional_glossary_label.setText(f"(Current: {os.path.basename(file_path)})")
+            
+            # Show success message with icon
+            msg_box = QMessageBox(None)
+            msg_box.setWindowTitle("Additional Glossary Loaded")
+            msg_box.setIcon(QMessageBox.Information)
+            msg_box.setText(f"Successfully loaded additional glossary:\n\n{os.path.basename(file_path)}\n\n{content_preview}\n\nThis will be appended as a footer to the auto-generated glossary.")
+            
+            # Set window icon
+            try:
+                icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+                if os.path.exists(icon_path):
+                    msg_box.setWindowIcon(QIcon(icon_path))
+            except Exception:
+                pass  # If icon fails to load, continue without it
+            
+            msg_box.exec()
+            
+        except Exception as e:
+            QMessageBox.critical(
+                None,
+                "Error Loading File",
+                f"Failed to load additional glossary:\n\n{str(e)}"
+            )
+            import traceback
+            traceback.print_exc()
             
     def _setup_auto_glossary_tab(self, parent):
         """Setup automatic glossary tab with fully configurable prompts"""
@@ -1335,6 +1427,44 @@ Rules:
         # label2.setStyleSheet("color: white; font-size: 10pt; font-style: italic;")
         append_layout.addWidget(label2)
         append_layout.addStretch()
+        
+        # Add additional glossary toggle (below append glossary)
+        additional_glossary_widget = QWidget()
+        additional_glossary_layout = QHBoxLayout(additional_glossary_widget)
+        additional_glossary_layout.setContentsMargins(0, 0, 0, 15)
+        auto_layout.addWidget(additional_glossary_widget)
+        
+        if not hasattr(self, 'add_additional_glossary_checkbox'):
+            self.add_additional_glossary_checkbox = self._create_styled_checkbox("Add Additional Glossary")
+            self.add_additional_glossary_checkbox.setChecked(self.config.get('add_additional_glossary', False))
+        additional_glossary_layout.addWidget(self.add_additional_glossary_checkbox)
+        
+        # Load additional glossary button
+        load_additional_btn = QPushButton("Load Additional Glossary")
+        load_additional_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #5a9fd4;
+                color: white;
+                padding: 5px 15px;
+                border-radius: 3px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #7ab8e8; }
+            QPushButton:pressed { background-color: #4a8fc4; }
+            QPushButton:disabled { background-color: #cccccc; color: #666666; }
+        """)
+        load_additional_btn.clicked.connect(self._load_additional_glossary)
+        additional_glossary_layout.addWidget(load_additional_btn)
+        
+        # Show current additional glossary path if exists
+        additional_glossary_path = self.config.get('additional_glossary_path', '')
+        if additional_glossary_path:
+            label_additional = QLabel(f"(Current: {os.path.basename(additional_glossary_path)})")
+        else:
+            label_additional = QLabel("(Appends custom glossary as footer to generated glossary)")
+        additional_glossary_layout.addWidget(label_additional)
+        self.additional_glossary_label = label_additional  # Store reference to update later
+        additional_glossary_layout.addStretch()
         
         # Compress glossary toggle
         compress_widget = QWidget()
