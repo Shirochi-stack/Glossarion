@@ -4008,6 +4008,51 @@ def _create_processing_options_section(self, parent):
     request_merge_desc.setContentsMargins(20, 0, 0, 5)
     extraction_v.addWidget(request_merge_desc)
     
+    # Split the Merge (split merged output back into individual files by headers)
+    if not hasattr(self, 'split_the_merge_var'):
+        self.split_the_merge_var = self.config.get('split_the_merge', False)
+    
+    split_merge_cb = self._create_styled_checkbox("Split the Merge")
+    try:
+        split_merge_cb.setChecked(bool(self.split_the_merge_var))
+    except Exception:
+        pass
+    
+    # Track widgets that depend on request merging being enabled
+    split_merge_widgets = [split_merge_cb]
+    
+    def _on_split_merge_toggle(checked):
+        try:
+            self.split_the_merge_var = bool(checked)
+        except Exception:
+            pass
+    split_merge_cb.toggled.connect(_on_split_merge_toggle)
+    split_merge_cb.setContentsMargins(20, 2, 0, 0)  # Indented to show it's a sub-option
+    extraction_v.addWidget(split_merge_cb)
+    
+    split_merge_desc = QLabel("Split merged translation output back into separate files based on headers.\nEach chapter gets its own file named after the original content.opf entry.\nOnly works if header count matches merged chapter count.")
+    split_merge_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    split_merge_desc.setContentsMargins(40, 0, 0, 5)
+    extraction_v.addWidget(split_merge_desc)
+    split_merge_widgets.append(split_merge_desc)
+    
+    # Set initial enabled state for split merge (depends on request merging)
+    for widget in split_merge_widgets:
+        widget.setEnabled(bool(self.request_merging_enabled_var))
+    
+    # Update the request merge toggle to also control split merge widgets
+    original_on_request_merge_toggle = _on_request_merge_toggle
+    def _on_request_merge_toggle_with_split(checked):
+        original_on_request_merge_toggle(checked)
+        # Enable/disable split merge option
+        for widget in split_merge_widgets:
+            widget.setEnabled(checked)
+        # If request merging is disabled, also uncheck split merge
+        if not checked:
+            split_merge_cb.setChecked(False)
+    request_merge_cb.toggled.disconnect(_on_request_merge_toggle)
+    request_merge_cb.toggled.connect(_on_request_merge_toggle_with_split)
+    
     section_v.addWidget(extraction_box)
     
     # === REMAINING OPTIONS ===

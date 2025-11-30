@@ -270,6 +270,66 @@ class RequestMerger:
             groups.append(group)
         
         return groups
+    
+    @classmethod
+    def split_by_headers(cls, content, expected_count):
+        """
+        Split merged translation output by headers (h1-h6).
+        
+        Args:
+            content: The translated HTML content
+            expected_count: Expected number of sections (should match merged chapter count)
+            
+        Returns:
+            List of content sections if header count matches expected_count,
+            or None if header count doesn't match (fallback to normal merged behavior)
+        """
+        from bs4 import BeautifulSoup
+        
+        # Parse the HTML
+        soup = BeautifulSoup(content, 'html.parser')
+        
+        # Find all headers (h1-h6)
+        headers = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+        
+        if len(headers) != expected_count:
+            print(f"   ⚠️ Split the Merge: Header count ({len(headers)}) doesn't match chapter count ({expected_count}), using normal merged behavior")
+            return None
+        
+        if len(headers) == 0:
+            return None
+        
+        # Split content by headers
+        sections = []
+        
+        # Get the string representation to work with
+        content_str = str(soup)
+        
+        # Find positions of each header in the content
+        header_positions = []
+        for header in headers:
+            header_str = str(header)
+            pos = content_str.find(header_str)
+            if pos != -1:
+                header_positions.append((pos, header_str))
+        
+        # Sort by position (should already be in order, but just to be safe)
+        header_positions.sort(key=lambda x: x[0])
+        
+        # Extract content sections
+        for i, (pos, header_str) in enumerate(header_positions):
+            if i < len(header_positions) - 1:
+                # Get content from this header to the next
+                next_pos = header_positions[i + 1][0]
+                section = content_str[pos:next_pos].strip()
+            else:
+                # Last section - get from this header to end
+                section = content_str[pos:].strip()
+            
+            sections.append(section)
+        
+        print(f"   ✅ Split the Merge: Successfully split into {len(sections)} sections by headers")
+        return sections
 
 
 # =====================================================
@@ -3156,6 +3216,77 @@ class BatchTranslationProcessor:
                 except Exception:
                     pass
             
+            # Check for QA failures on the merged content first
+            results = []
+            if is_qa_failed_response(cleaned):
+                # Save merged content for debugging, then mark all as qa_failed
+                fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
+                try:
+                    with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
+                        f.write(cleaned)
+                except Exception:
+                    pass
+                for actual_num, _, idx, chapter, content_hash in chapters_data:
+                    with self.progress_lock:
+                        self.update_progress_fn(idx, actual_num, content_hash, fname if idx == parent_idx else None, status="qa_failed")
+                        self.save_progress_fn()
+                    results.append((False, actual_num, None, None, None))
+                return results
+            
+            # Check if Split the Merge is enabled
+            split_the_merge = os.getenv('SPLIT_THE_MERGE', '0') == '1'
+            split_sections = None
+            
+            if split_the_merge and len(chapters_data) > 1:
+                # Try to split by headers
+                split_sections = RequestMerger.split_by_headers(cleaned, len(chapters_data))
+            
+            if split_sections and len(split_sections) == len(chapters_data):
+                # Split successful - save each section as individual file
+                print(f"   ✂️ Splitting merged content into {len(split_sections)} individual files")
+                
+                saved_files = []
+                for i, (actual_num, content, idx, chapter, content_hash) in enumerate(chapters_data):
+                    section_content = split_sections[i]
+                    
+                    # Generate filename for this chapter using content.opf naming
+                    fname = FileUtilities.create_chapter_filename(chapter, actual_num)
+                    
+                    # Handle text file mode
+                    if getattr(self, 'is_text_file', False):
+                        fname = fname.replace('.html', '.txt')
+                        from bs4 import BeautifulSoup
+                        soup = BeautifulSoup(section_content, 'html.parser')
+                        section_content = soup.get_text(strip=True)
+                    
+                    # Save the section
+                    with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
+                        f.write(section_content)
+                    
+                    saved_files.append((actual_num, fname, idx, chapter, content_hash))
+                    print(f"      💾 Saved Chapter {actual_num}: {fname} ({len(section_content)} chars)")
+                
+                # Mark all chapters as completed (not merged)
+                with self.progress_lock:
+                    for actual_num, fname, idx, chapter, content_hash in saved_files:
+                        self.update_progress_fn(
+                            idx, actual_num, content_hash, fname,
+                            status="completed"
+                        )
+                        self.chapters_completed += 1
+                    
+                    # Save once after all updates
+                    self.save_progress_fn()
+                
+                # Build results - first chapter gets the history context
+                results.append((True, chapters_data[0][0], merged_content, merged_response, raw_obj))
+                for actual_num, _, idx, chapter, content_hash in chapters_data[1:]:
+                    results.append((True, actual_num, None, None, None))
+                
+                print(f"   ✅ Split the Merge complete: {len(saved_files)} files created")
+                return results
+            
+            # Normal merged behavior (split not enabled or header count mismatch)
             # Save entire merged response to parent chapter's file
             fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
             
@@ -3174,17 +3305,6 @@ class BatchTranslationProcessor:
                 saved_name = fname
             
             print(f"   💾 Saved merged content to Chapter {parent_actual_num}: {saved_name} ({len(cleaned)} chars)")
-            
-            # Check for QA failures on the merged content
-            results = []
-            if is_qa_failed_response(cleaned):
-                # Mark all chapters as qa_failed
-                for actual_num, _, idx, chapter, content_hash in chapters_data:
-                    with self.progress_lock:
-                        self.update_progress_fn(idx, actual_num, content_hash, fname if idx == parent_idx else None, status="qa_failed")
-                        self.save_progress_fn()
-                    results.append((False, actual_num, None, None, None))
-                return results
             
             # Mark parent chapter as completed AND children as merged in single atomic operation
             with self.progress_lock:
@@ -7583,6 +7703,77 @@ def main(log_callback=None, stop_callback=None):
                 parent_idx, parent_chapter, parent_actual_num, parent_content_hash = merge_info['group'][0]
                 merged_child_nums = [g[2] for g in merge_info['group'][1:]]  # All except parent
                 
+                # Check for QA failures first
+                if is_qa_failed_response(cleaned):
+                    parent_status = "qa_failed"
+                    print(f"   ⚠️ Chapter {parent_actual_num} marked as qa_failed")
+                    
+                    # Save for debugging
+                    parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
+                    try:
+                        with open(os.path.join(out, parent_fname), 'w', encoding='utf-8') as f:
+                            f.write(cleaned)
+                    except Exception:
+                        pass
+                    
+                    # Mark all as qa_failed
+                    progress_manager.update(
+                        parent_idx, parent_actual_num, parent_content_hash, parent_fname,
+                        status=parent_status, chapter_obj=parent_chapter
+                    )
+                    for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group'][1:]:
+                        progress_manager.update(g_idx, g_actual_num, g_content_hash, None, status="qa_failed", chapter_obj=g_chapter)
+                    progress_manager.save()
+                    print(f"   ⚠️ Merged group marked as qa_failed")
+                    continue
+                
+                # Check if Split the Merge is enabled
+                split_the_merge = os.getenv('SPLIT_THE_MERGE', '0') == '1'
+                split_sections = None
+                
+                if split_the_merge and len(merge_info['group']) > 1:
+                    # Try to split by headers
+                    split_sections = RequestMerger.split_by_headers(cleaned, len(merge_info['group']))
+                
+                if split_sections and len(split_sections) == len(merge_info['group']):
+                    # Split successful - save each section as individual file
+                    print(f"   ✂️ Splitting merged content into {len(split_sections)} individual files")
+                    
+                    saved_files = []
+                    for i, (g_idx, g_chapter, g_actual_num, g_content_hash) in enumerate(merge_info['group']):
+                        section_content = split_sections[i]
+                        
+                        # Generate filename for this chapter using content.opf naming
+                        split_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
+                        
+                        # Handle text file mode
+                        if is_text_file:
+                            split_fname = split_fname.replace('.html', '.txt')
+                            from bs4 import BeautifulSoup
+                            soup = BeautifulSoup(section_content, 'html.parser')
+                            section_content = soup.get_text(strip=True)
+                        
+                        # Save the section
+                        with open(os.path.join(out, split_fname), 'w', encoding='utf-8') as f:
+                            f.write(section_content)
+                        
+                        saved_files.append((g_idx, g_chapter, g_actual_num, g_content_hash, split_fname))
+                        print(f"      💾 Saved Chapter {g_actual_num}: {split_fname} ({len(section_content)} chars)")
+                    
+                    # Mark all chapters as completed (not merged)
+                    for g_idx, g_chapter, g_actual_num, g_content_hash, split_fname in saved_files:
+                        progress_manager.update(
+                            g_idx, g_actual_num, g_content_hash, split_fname,
+                            status="completed", chapter_obj=g_chapter
+                        )
+                        chapters_completed += 1
+                    
+                    # Save once after all updates
+                    progress_manager.save()
+                    print(f"   ✅ Split the Merge complete: {len(saved_files)} files created")
+                    continue
+                
+                # Normal merged behavior (split not enabled or header count mismatch)
                 # Save entire merged response to parent chapter's file
                 if is_text_file:
                     parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num).replace('.html', '.txt')
@@ -7599,42 +7790,23 @@ def main(log_callback=None, stop_callback=None):
                 
                 print(f"   💾 Saved merged content to Chapter {parent_actual_num}: {parent_fname} ({len(cleaned)} chars)")
                 
-                # Check for QA failures
-                if is_qa_failed_response(cleaned):
-                    parent_status = "qa_failed"
-                    print(f"   ⚠️ Chapter {parent_actual_num} marked as qa_failed")
-                else:
-                    parent_status = "completed"
+                # Update parent chapter with merged_chapters list
+                progress_manager.update(
+                    parent_idx, parent_actual_num, parent_content_hash, parent_fname,
+                    status="completed", chapter_obj=parent_chapter,
+                    merged_chapters=merged_child_nums
+                )
+                chapters_completed += 1
                 
-                # Only mark children as merged if parent completed successfully (not qa_failed)
-                if parent_status == "completed":
-                    # Update parent chapter with merged_chapters list
-                    progress_manager.update(
-                        parent_idx, parent_actual_num, parent_content_hash, parent_fname,
-                        status=parent_status, chapter_obj=parent_chapter,
-                        merged_chapters=merged_child_nums
-                    )
+                # Mark child chapters as merged (point to parent's output file) - atomically after parent
+                for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group'][1:]:
+                    progress_manager.mark_as_merged(g_idx, g_actual_num, g_content_hash, parent_actual_num, g_chapter, parent_output_file=parent_fname)
                     chapters_completed += 1
-                    
-                    # Mark child chapters as merged (point to parent's output file) - atomically after parent
-                    for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group'][1:]:
-                        progress_manager.mark_as_merged(g_idx, g_actual_num, g_content_hash, parent_actual_num, g_chapter, parent_output_file=parent_fname)
-                        chapters_completed += 1
-                        print(f"   🔗 Marked chapter {g_actual_num} as merged into chapter {parent_actual_num}")
-                    
-                    # Save once after all updates
-                    progress_manager.save()
-                    print(f"   📊 Saved merged content for {len(merge_info['group'])} chapters")
-                else:
-                    # Parent failed QA - mark all as qa_failed, don't mark as merged
-                    progress_manager.update(
-                        parent_idx, parent_actual_num, parent_content_hash, parent_fname,
-                        status=parent_status, chapter_obj=parent_chapter
-                    )
-                    for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group'][1:]:
-                        progress_manager.update(g_idx, g_actual_num, g_content_hash, None, status="qa_failed", chapter_obj=g_chapter)
-                    progress_manager.save()
-                    print(f"   ⚠️ Merged group marked as qa_failed")
+                    print(f"   🔗 Marked chapter {g_actual_num} as merged into chapter {parent_actual_num}")
+                
+                # Save once after all updates
+                progress_manager.save()
+                print(f"   📊 Saved merged content for {len(merge_info['group'])} chapters")
                 
                 # Skip normal save since we handled it above
                 continue

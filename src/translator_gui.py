@@ -8868,6 +8868,7 @@ Important rules:
                 # Request merging settings
                 ('request_merging_enabled', ['request_merging_enabled_var'], False, bool),
                 ('request_merge_count', ['request_merge_count_var'], 3, lambda v: safe_int(v, 3)),
+                ('split_the_merge', ['split_the_merge_var'], False, bool),
                 ('use_gemini_openai_endpoint', ['use_gemini_openai_endpoint_var'], False, bool),
                 ('use_fallback_keys', ['use_fallback_keys_var'], False, bool),
                 ('auto_update_check', ['auto_update_check_var'], True, bool),
@@ -9710,6 +9711,7 @@ Important rules:
                 # Request merging (combine multiple chapters into single API request)
                 ('REQUEST_MERGING_ENABLED', '1' if getattr(self, 'request_merging_enabled_var', False) else '0'),
                 ('REQUEST_MERGE_COUNT', str(getattr(self, 'request_merge_count_var', '3'))),
+                ('SPLIT_THE_MERGE', '1' if getattr(self, 'split_the_merge_var', False) else '0'),
 
                 # Image translation controls
                 ('ENABLE_IMAGE_TRANSLATION', '1' if getattr(self, 'enable_image_translation_var', False) else '0'),
