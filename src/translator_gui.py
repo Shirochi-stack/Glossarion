@@ -750,6 +750,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         # Request merging - combine multiple chapters into single API request
         self.request_merging_enabled_var = self.config.get('request_merging_enabled', False)
         self.request_merge_count_var = str(self.config.get('request_merge_count', 3))
+        self.split_the_merge_var = self.config.get('split_the_merge', False)
         self.selected_files = []
         self.current_file_index = 0
         self.use_gemini_openai_endpoint_var = self.config.get('use_gemini_openai_endpoint', False)
