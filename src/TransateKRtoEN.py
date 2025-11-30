@@ -226,66 +226,27 @@ class TranslationConfig:
 # REQUEST MERGING UTILITIES
 # =====================================================
 class RequestMerger:
-    """Handles merging multiple chapters into a single request and splitting responses"""
-    
-    # Separator format for merged chapters
-    START_SEPARATOR = "<!-- ==== MERGED_CHAPTER_START: {chapter_num} ==== -->"
-    END_SEPARATOR = "<!-- ==== MERGED_CHAPTER_END: {chapter_num} ==== -->"
+    """Handles merging multiple chapters into a single request"""
     
     @classmethod
     def merge_chapters(cls, chapters_data):
         """
-        Merge multiple chapters into a single content block with separators.
+        Merge multiple chapters into a single content block.
         
         Args:
             chapters_data: List of tuples (chapter_num, content, chapter_obj)
             
         Returns:
-            Merged content string with separators
+            Merged content string
         """
         if not chapters_data:
             return ""
         
         merged_parts = []
         for chapter_num, content, chapter_obj in chapters_data:
-            start_sep = cls.START_SEPARATOR.format(chapter_num=chapter_num)
-            end_sep = cls.END_SEPARATOR.format(chapter_num=chapter_num)
-            merged_parts.append(f"{start_sep}\n{content}\n{end_sep}")
+            merged_parts.append(content)
         
         return "\n\n".join(merged_parts)
-    
-    @classmethod
-    def split_response(cls, merged_response, expected_chapters):
-        """
-        Split a merged response back into individual chapter contents.
-        
-        Args:
-            merged_response: The translated merged content
-            expected_chapters: List of expected chapter numbers
-            
-        Returns:
-            Dict mapping chapter_num -> translated_content
-        """
-        result = {}
-        
-        for chapter_num in expected_chapters:
-            start_sep = cls.START_SEPARATOR.format(chapter_num=chapter_num)
-            end_sep = cls.END_SEPARATOR.format(chapter_num=chapter_num)
-            
-            start_idx = merged_response.find(start_sep)
-            end_idx = merged_response.find(end_sep)
-            
-            if start_idx != -1 and end_idx != -1:
-                # Extract content between separators
-                content_start = start_idx + len(start_sep)
-                content = merged_response[content_start:end_idx].strip()
-                result[chapter_num] = content
-            else:
-                # Separator not found - log warning
-                print(f"⚠️ Could not find separators for chapter {chapter_num} in merged response")
-                result[chapter_num] = None
-        
-        return result
     
     @classmethod
     def create_merge_groups(cls, chapters_to_translate, merge_count):
