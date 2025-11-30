@@ -1116,7 +1116,7 @@ class ProgressManager:
                 except:
                     pass
     
-    def update(self, idx, actual_num, content_hash, output_file, status="in_progress", ai_features=None, raw_num=None, chapter_obj=None):
+    def update(self, idx, actual_num, content_hash, output_file, status="in_progress", ai_features=None, raw_num=None, chapter_obj=None, merged_chapters=None):
         """Update progress for a chapter"""
         # Use helper method to get consistent key
         chapter_key = self._get_chapter_key(actual_num, output_file, chapter_obj, content_hash)
@@ -1151,9 +1151,13 @@ class ProgressManager:
         elif chapter_key in self.prog["chapters"] and "ai_features" in self.prog["chapters"][chapter_key]:
             chapter_info["ai_features"] = self.prog["chapters"][chapter_key]["ai_features"]
         
+        # Add merged chapters list if provided (for parent chapters in request merging)
+        if merged_chapters is not None:
+            chapter_info["merged_chapters"] = merged_chapters
+        
         self.prog["chapters"][chapter_key] = chapter_info
     
-    def mark_as_merged(self, actual_num, parent_chapter_num, content_hash=None, chapter_obj=None):
+    def mark_as_merged(self, idx, actual_num, content_hash, parent_chapter_num, chapter_obj=None):
         """Mark a chapter as merged into a parent chapter"""
         chapter_key = self._get_chapter_key(actual_num, output_file=None, chapter_obj=chapter_obj, content_hash=content_hash)
         
@@ -3110,100 +3114,74 @@ class BatchTranslationProcessor:
             
             # Call API for merged content
             print(f"   🌐 Sending merged request to API...")
-            resp_obj = self.client.chat_complete(msgs, temperature=self.config.TEMPERATURE, max_tokens=mtoks)
+            
+            merged_response, finish_reason, raw_obj = send_with_interrupt(
+                msgs,
+                self.client,
+                self.config.TEMP,
+                mtoks,
+                self.check_stop_fn,
+                context='translation'
+            )
             
             if self.check_stop_fn():
                 raise Exception("Translation stopped by user")
-            
-            # Extract response text
-            merged_response = ""
-            raw_obj = None
-            
-            if hasattr(resp_obj, 'candidates') and resp_obj.candidates:
-                raw_obj = resp_obj.candidates[0].content
-                for part in resp_obj.candidates[0].content.parts:
-                    if hasattr(part, 'text') and part.text:
-                        merged_response += part.text
-            elif hasattr(resp_obj, 'choices') and resp_obj.choices:
-                raw_obj = resp_obj.choices[0]
-                merged_response = resp_obj.choices[0].message.content or ""
-            elif isinstance(resp_obj, dict):
-                raw_obj = resp_obj
-                if 'candidates' in resp_obj:
-                    for part in resp_obj['candidates'][0].get('content', {}).get('parts', []):
-                        merged_response += part.get('text', '')
-                elif 'choices' in resp_obj:
-                    merged_response = resp_obj['choices'][0].get('message', {}).get('content', '')
             
             if not merged_response:
                 raise Exception("Empty response from API for merged request")
             
             print(f"   ✅ Received merged response ({len(merged_response):,} chars)")
             
-            # Split response back into individual chapters
-            split_contents = RequestMerger.split_response(merged_response, expected_chapters)
+            # Clean the merged response
+            cleaned = merged_response
+            if self.config.REMOVE_AI_ARTIFACTS:
+                cleaned = ContentProcessor.clean_ai_artifacts(cleaned, True)
+            cleaned = ContentProcessor.clean_memory_artifacts(cleaned)
+            cleaned = re.sub(r"^```(?:html)?\s*\n?", "", cleaned, count=1, flags=re.MULTILINE)
+            cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
             
-            # Process each chapter's content
-            results = []
-            parent_actual_num = chapters_data[0][0]
-            parent_idx = chapters_data[0][2]
+            # Get parent chapter info
+            parent_actual_num, parent_content, parent_idx, parent_chapter, parent_content_hash = chapters_data[0]
             merged_child_nums = [cn for cn, _, _, _, _ in chapters_data[1:]]
             
-            for i, (actual_num, original_content, idx, chapter, content_hash) in enumerate(chapters_data):
-                chapter_content = split_contents.get(actual_num)
-                
-                if chapter_content is None:
-                    print(f"   ⚠️ Failed to extract content for chapter {actual_num}")
+            # Save entire merged response to parent chapter's file
+            fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
+            
+            with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
+                f.write(cleaned)
+            
+            print(f"   💾 Saved merged content to Chapter {parent_actual_num}: {fname} ({len(cleaned)} chars)")
+            
+            # Check for QA failures on the merged content
+            results = []
+            if is_qa_failed_response(cleaned):
+                # Mark all chapters as qa_failed
+                for actual_num, _, idx, chapter, content_hash in chapters_data:
                     with self.progress_lock:
-                        self.update_progress_fn(idx, actual_num, content_hash, None, status="failed")
+                        self.update_progress_fn(idx, actual_num, content_hash, fname if idx == parent_idx else None, status="qa_failed")
                         self.save_progress_fn()
                     results.append((False, actual_num, None, None, None))
-                    continue
-                
-                # Clean the content
-                cleaned = chapter_content
-                if self.config.REMOVE_AI_ARTIFACTS:
-                    cleaned = ContentProcessor.clean_ai_artifacts(cleaned, True)
-                cleaned = ContentProcessor.clean_memory_artifacts(cleaned)
-                cleaned = re.sub(r"^```(?:html)?\s*\n?", "", cleaned, count=1, flags=re.MULTILINE)
-                cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
-                
-                # Save the file
-                fname = FileUtilities.create_chapter_filename(chapter, actual_num)
-                
-                with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
-                    f.write(cleaned)
-                
-                print(f"   💾 Saved Chapter {actual_num}: {fname} ({len(cleaned)} chars)")
-                
-                # Check for QA failures
-                if is_qa_failed_response(cleaned):
-                    with self.progress_lock:
-                        self.update_progress_fn(idx, actual_num, content_hash, fname, status="qa_failed")
-                        self.save_progress_fn()
-                    results.append((False, actual_num, None, None, None))
-                    continue
-                
-                # Update progress based on whether this is parent or child
+                return results
+            
+            # Mark parent chapter as completed with merged_chapters list
+            with self.progress_lock:
+                self.update_progress_fn(
+                    parent_idx, parent_actual_num, parent_content_hash, fname,
+                    status="completed",
+                    merged_chapters=merged_child_nums
+                )
+                self.save_progress_fn()
+                self.chapters_completed += 1
+            
+            results.append((True, parent_actual_num, merged_content, merged_response, raw_obj))
+            
+            # Mark child chapters as merged (no separate files)
+            for actual_num, _, idx, chapter, content_hash in chapters_data[1:]:
                 with self.progress_lock:
-                    if i == 0:
-                        # Parent chapter - mark as completed with merged_chapters list
-                        self.update_progress_fn(
-                            idx, actual_num, content_hash, fname, 
-                            status="completed",
-                            merged_chapters=merged_child_nums
-                        )
-                    else:
-                        # Child chapter - mark as merged
-                        progress_manager.mark_as_merged(idx, actual_num, content_hash, parent_actual_num, chapter)
+                    progress_manager.mark_as_merged(idx, actual_num, content_hash, parent_actual_num, chapter)
                     self.save_progress_fn()
                     self.chapters_completed += 1
-                
-                # Only return history for parent chapter
-                if i == 0:
-                    results.append((True, actual_num, merged_content, merged_response, raw_obj))
-                else:
-                    results.append((True, actual_num, None, None, None))
+                results.append((True, actual_num, None, None, None))
             
             return results
             
@@ -6710,7 +6688,7 @@ def main(log_callback=None, stop_callback=None):
                             # Child chapter - mark as merged
                             merged_children.add(idx)
                             # Mark in progress file
-                            progress_manager.mark_as_merged(actual_num, parent_actual_num, content_hash, c)
+                            progress_manager.mark_as_merged(idx, actual_num, content_hash, parent_actual_num, c)
                     
                     child_nums = [g[2] for g in group[1:]]
                     print(f"   📎 Chapters {parent_actual_num} + {child_nums} will be merged into one request")
@@ -7577,66 +7555,53 @@ def main(log_callback=None, stop_callback=None):
                 cleaned = str(soup_translated)
                 print(f"✅ Successfully merged image translations")
             
-            # REQUEST MERGING: If this was a merged request, split response and save individual files
+            # REQUEST MERGING: If this was a merged request, save to parent chapter file only
             if merge_info is not None:
-                print(f"\n🔀 SPLITTING merged response into individual chapter files...")
+                print(f"\n🔗 Saving merged response to parent chapter file...")
                 
-                # Split the response
-                split_results = RequestMerger.split_response(cleaned, merge_info['expected_chapters'])
+                # Get parent chapter info (first in the group)
+                parent_idx, parent_chapter, parent_actual_num, parent_content_hash = merge_info['group'][0]
+                merged_child_nums = [g[2] for g in merge_info['group'][1:]]  # All except parent
                 
-                # Save individual files for each chapter in the merge group
-                for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
-                    chapter_content = split_results.get(g_actual_num)
+                # Save entire merged response to parent chapter's file
+                if is_text_file:
+                    parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num).replace('.html', '.txt')
+                    from bs4 import BeautifulSoup
+                    soup = BeautifulSoup(cleaned, 'html.parser')
+                    text_content = soup.get_text(strip=True)
                     
-                    if chapter_content is None:
-                        print(f"   ⚠️ Could not extract chapter {g_actual_num} from merged response")
-                        # Mark as failed
-                        progress_manager.update(g_idx, g_actual_num, g_content_hash, None, status="failed", chapter_obj=g_chapter)
-                        continue
-                    
-                    # Create filename for this chapter
-                    g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
-                    
-                    # Clean the individual chapter content
-                    g_cleaned = ContentProcessor.clean_ai_artifacts(chapter_content, remove_artifacts=config.REMOVE_AI_ARTIFACTS)
-                    
-                    if is_text_file:
-                        # For text files, save as plain text
-                        g_fname_txt = g_fname.replace('.html', '.txt')
-                        from bs4 import BeautifulSoup
-                        soup = BeautifulSoup(g_cleaned, 'html.parser')
-                        text_content = soup.get_text(strip=True)
-                        
-                        with open(os.path.join(out, g_fname_txt), 'w', encoding='utf-8') as f:
-                            f.write(text_content)
-                        
-                        print(f"   ✅ Saved chapter {g_actual_num}: {g_fname_txt}")
-                    else:
-                        # For EPUB files, save as HTML
-                        with open(os.path.join(out, g_fname), 'w', encoding='utf-8') as f:
-                            f.write(g_cleaned)
-                        
-                        print(f"   ✅ Saved chapter {g_actual_num}: {g_fname}")
-                    
-                    # Determine status
-                    if is_qa_failed_response(g_cleaned):
-                        g_status = "qa_failed"
-                        print(f"   ⚠️ Chapter {g_actual_num} marked as qa_failed")
-                    else:
-                        g_status = "completed"
-                    
-                    # Update progress for this chapter
-                    progress_manager.update(g_idx, g_actual_num, g_content_hash, g_fname if not is_text_file else g_fname.replace('.html', '.txt'), status=g_status, chapter_obj=g_chapter)
-                    
-                    # Update merged_chapters list on parent
-                    if g_idx == idx:  # This is the parent
-                        merged_child_nums = [g[2] for g in merge_info['group'][1:]]  # All except parent
-                        progress_manager.update_merged_chapters_list(g_actual_num, merged_child_nums, g_content_hash, g_chapter)
-                    
+                    with open(os.path.join(out, parent_fname), 'w', encoding='utf-8') as f:
+                        f.write(text_content)
+                else:
+                    parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
+                    with open(os.path.join(out, parent_fname), 'w', encoding='utf-8') as f:
+                        f.write(cleaned)
+                
+                print(f"   💾 Saved merged content to Chapter {parent_actual_num}: {parent_fname} ({len(cleaned)} chars)")
+                
+                # Check for QA failures
+                if is_qa_failed_response(cleaned):
+                    parent_status = "qa_failed"
+                    print(f"   ⚠️ Chapter {parent_actual_num} marked as qa_failed")
+                else:
+                    parent_status = "completed"
+                
+                # Update parent chapter with merged_chapters list
+                progress_manager.update(
+                    parent_idx, parent_actual_num, parent_content_hash, parent_fname,
+                    status=parent_status, chapter_obj=parent_chapter,
+                    merged_chapters=merged_child_nums
+                )
+                chapters_completed += 1
+                
+                # Mark child chapters as merged (no separate files)
+                for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group'][1:]:
+                    progress_manager.mark_as_merged(g_idx, g_actual_num, g_content_hash, parent_actual_num, g_chapter)
                     chapters_completed += 1
+                    print(f"   🔗 Marked chapter {g_actual_num} as merged into chapter {parent_actual_num}")
                 
                 progress_manager.save()
-                print(f"   📊 Split and saved {len(merge_info['group'])} chapters from merged response")
+                print(f"   📊 Saved merged content for {len(merge_info['group'])} chapters")
                 
                 # Skip normal save since we handled it above
                 continue
