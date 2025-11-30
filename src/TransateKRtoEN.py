@@ -6673,22 +6673,17 @@ def main(log_callback=None, stop_callback=None):
                 if len(group) > 1:
                     parent_idx = group[0][0]  # First chapter in group is the parent
                     parent_actual_num = group[0][2]
-                    merge_groups[parent_idx] = []
+                    merge_groups[parent_idx] = group
                     
+                    # Track children to skip - but DON'T mark as merged yet
+                    # (they'll be marked as merged only after parent completes)
                     for i, (idx, c, actual_num, content_hash) in enumerate(group):
-                        if i == 0:
-                            # Parent chapter - store list of all chapters in group for merging
-                            merge_groups[parent_idx] = group
-                        else:
-                            # Child chapter - mark as merged
+                        if i > 0:
                             merged_children.add(idx)
-                            # Mark in progress file
-                            progress_manager.mark_as_merged(idx, actual_num, content_hash, parent_actual_num, c)
                     
                     child_nums = [g[2] for g in group[1:]]
                     print(f"   📎 Chapters {parent_actual_num} + {child_nums} will be merged into one request")
             
-            progress_manager.save()
             print(f"   📊 Created {len(merge_groups)} merge groups from {len(chapters_needing_translation)} chapters")
 
         # Second pass: process chapters
@@ -7581,22 +7576,35 @@ def main(log_callback=None, stop_callback=None):
                 else:
                     parent_status = "completed"
                 
-                # Update parent chapter with merged_chapters list
-                progress_manager.update(
-                    parent_idx, parent_actual_num, parent_content_hash, parent_fname,
-                    status=parent_status, chapter_obj=parent_chapter,
-                    merged_chapters=merged_child_nums
-                )
-                chapters_completed += 1
-                
-                # Mark child chapters as merged (no separate files)
-                for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group'][1:]:
-                    progress_manager.mark_as_merged(g_idx, g_actual_num, g_content_hash, parent_actual_num, g_chapter)
+                # Only mark children as merged if parent completed successfully (not qa_failed)
+                if parent_status == "completed":
+                    # Update parent chapter with merged_chapters list
+                    progress_manager.update(
+                        parent_idx, parent_actual_num, parent_content_hash, parent_fname,
+                        status=parent_status, chapter_obj=parent_chapter,
+                        merged_chapters=merged_child_nums
+                    )
                     chapters_completed += 1
-                    print(f"   🔗 Marked chapter {g_actual_num} as merged into chapter {parent_actual_num}")
-                
-                progress_manager.save()
-                print(f"   📊 Saved merged content for {len(merge_info['group'])} chapters")
+                    
+                    # Mark child chapters as merged (point to parent's output file) - atomically after parent
+                    for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group'][1:]:
+                        progress_manager.mark_as_merged(g_idx, g_actual_num, g_content_hash, parent_actual_num, g_chapter, parent_output_file=parent_fname)
+                        chapters_completed += 1
+                        print(f"   🔗 Marked chapter {g_actual_num} as merged into chapter {parent_actual_num}")
+                    
+                    # Save once after all updates
+                    progress_manager.save()
+                    print(f"   📊 Saved merged content for {len(merge_info['group'])} chapters")
+                else:
+                    # Parent failed QA - mark all as qa_failed, don't mark as merged
+                    progress_manager.update(
+                        parent_idx, parent_actual_num, parent_content_hash, parent_fname,
+                        status=parent_status, chapter_obj=parent_chapter
+                    )
+                    for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group'][1:]:
+                        progress_manager.update(g_idx, g_actual_num, g_content_hash, None, status="qa_failed", chapter_obj=g_chapter)
+                    progress_manager.save()
+                    print(f"   ⚠️ Merged group marked as qa_failed")
                 
                 # Skip normal save since we handled it above
                 continue
