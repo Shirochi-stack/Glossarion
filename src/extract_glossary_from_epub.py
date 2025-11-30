@@ -1953,6 +1953,176 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
             'error': str(e)
         }
 
+def process_merged_group_api_call(merge_group: list, msgs_builder_fn, 
+                                   client, temp: float, mtoks: int,
+                                   stop_check_fn, chunk_timeout: int = None) -> Dict:
+    """
+    Process a merged group of chapters in a single API call.
+    
+    Args:
+        merge_group: List of (idx, chap) tuples
+        msgs_builder_fn: Function to build messages, takes (chapter_content, history_context)
+        client: UnifiedClient instance
+        temp: Temperature for API call
+        mtoks: Max tokens for API call
+        stop_check_fn: Function to check if stop is requested
+        chunk_timeout: Optional timeout for API call
+        
+    Returns:
+        Dict with keys: 'results' (list of per-chapter results), 'merged_indices' (list of child indices)
+    """
+    if len(merge_group) == 1:
+        # Single chapter, use normal processing
+        idx, chap = merge_group[0]
+        system_prompt, user_prompt = msgs_builder_fn(chap)
+        msgs = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+        result = process_single_chapter_api_call(idx, chap, msgs, client, temp, mtoks, stop_check_fn, chunk_timeout)
+        return {'results': [result], 'merged_indices': []}
+    
+    # Merge chapter contents with separators
+    START_SEPARATOR = "<!-- ==== MERGED_CHAPTER_START: {chapter_num} ==== -->"
+    END_SEPARATOR = "<!-- ==== MERGED_CHAPTER_END: {chapter_num} ==== -->"
+    
+    parent_idx = merge_group[0][0]
+    merged_parts = []
+    chapter_nums = []
+    
+    for idx, chap in merge_group:
+        chapter_num = idx + 1  # 1-based chapter numbering
+        chapter_nums.append(chapter_num)
+        start_sep = START_SEPARATOR.format(chapter_num=chapter_num)
+        end_sep = END_SEPARATOR.format(chapter_num=chapter_num)
+        merged_parts.append(f"{start_sep}\n{chap}\n{end_sep}")
+    
+    merged_content = "\n\n".join(merged_parts)
+    
+    print(f"\n🔗 Processing MERGED group: Chapters {chapter_nums}")
+    print(f"   📊 Merged content: {len(merged_content):,} characters")
+    
+    # Build messages for merged content
+    system_prompt, user_prompt = msgs_builder_fn(merged_content)
+    msgs = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+    
+    # Thread-safe payload directory
+    thread_name = threading.current_thread().name
+    thread_id = threading.current_thread().ident
+    thread_dir = os.path.join("Payloads", "glossary", f"{thread_name}_{thread_id}")
+    os.makedirs(thread_dir, exist_ok=True)
+    
+    start_time = time.time()
+    
+    try:
+        # Save request payload
+        payload_file = os.path.join(thread_dir, f"merged_chapters_{parent_idx+1}_request.json")
+        with open(payload_file, 'w', encoding='utf-8') as f:
+            clean_msgs = [{'role': msg.get('role'), 'content': msg.get('content')} for msg in msgs]
+            json.dump({
+                'chapters': chapter_nums,
+                'messages': clean_msgs,
+                'temperature': temp,
+                'max_tokens': mtoks,
+                'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+            }, f, indent=2, ensure_ascii=False)
+        
+        # Make API call
+        raw, finish_reason, raw_obj = send_with_interrupt(
+            messages=msgs,
+            client=client,
+            temperature=temp,
+            max_tokens=mtoks,
+            stop_check_fn=stop_check_fn,
+            chunk_timeout=chunk_timeout
+        )
+        
+        # Extract response text
+        resp = ""
+        if raw is None:
+            print(f"⚠️ API returned None for merged group")
+            return {
+                'results': [{'idx': idx, 'data': [], 'resp': '', 'chap': chap, 'error': 'API returned None'}
+                           for idx, chap in merge_group],
+                'merged_indices': [idx for idx, _ in merge_group[1:]]
+            }
+        
+        if isinstance(raw, tuple):
+            resp = raw[0] if raw[0] is not None else ""
+        elif isinstance(raw, str):
+            resp = raw
+        elif hasattr(raw, 'content'):
+            resp = raw.content if raw.content is not None else ""
+        elif hasattr(raw, 'text'):
+            resp = raw.text if raw.text is not None else ""
+        else:
+            resp = str(raw) if raw is not None else ""
+        
+        if resp is None:
+            resp = ""
+        
+        # Save response
+        response_file = os.path.join(thread_dir, f"merged_chapters_{parent_idx+1}_response.txt")
+        with open(response_file, "w", encoding="utf-8", errors="replace") as f:
+            f.write(resp)
+        
+        elapsed = time.time() - start_time
+        print(f"   ✅ Received merged response ({len(resp):,} chars) in {elapsed:.1f}s")
+        
+        # Parse the entire merged response
+        all_data = parse_api_response(resp)
+        
+        # Filter valid entries
+        valid_data = []
+        for entry in all_data:
+            if validate_extracted_entry(entry):
+                if 'raw_name' in entry:
+                    entry['raw_name'] = entry['raw_name'].strip()
+                valid_data.append(entry)
+        
+        print(f"   📊 Extracted {len(valid_data)} valid entries from merged response")
+        
+        # Create results for each chapter in the group
+        # Since we can't easily attribute entries to specific chapters in a merged response,
+        # all entries go to the parent chapter's result, children get empty lists
+        results = []
+        for i, (idx, chap) in enumerate(merge_group):
+            if i == 0:
+                # Parent chapter gets all entries
+                results.append({
+                    'idx': idx,
+                    'data': valid_data,
+                    'resp': resp,
+                    'chap': chap,
+                    'raw_obj': raw_obj,
+                    'error': None
+                })
+            else:
+                # Child chapters get empty results (they're merged)
+                results.append({
+                    'idx': idx,
+                    'data': [],
+                    'resp': '',
+                    'chap': chap,
+                    'raw_obj': None,
+                    'error': None,
+                    'merged_into': parent_idx
+                })
+        
+        return {
+            'results': results,
+            'merged_indices': [idx for idx, _ in merge_group[1:]]
+        }
+        
+    except Exception as e:
+        print(f"❌ Merged group failed: {e}")
+        import traceback
+        print(f"   Traceback: {traceback.format_exc()}")
+        
+        return {
+            'results': [{'idx': idx, 'data': [], 'resp': '', 'chap': chap, 'error': str(e)}
+                       for idx, chap in merge_group],
+            'merged_indices': [idx for idx, _ in merge_group[1:]]
+        }
+
+
 # Update main function to support batch processing:
 def main(log_callback=None, stop_callback=None):
     # Declare global variables at the very start of the function
@@ -2179,14 +2349,27 @@ def main(log_callback=None, stop_callback=None):
     chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "900"))  # 15 minutes default
     
     # Process chapters based on mode
-    # If request merging is enabled, fall back to sequential mode
-    if request_merging_enabled and request_merge_count > 1 and batch_enabled:
-        print(f"🔗 Falling back to sequential mode for merged requests")
-        batch_enabled = False
+    # Request merging now works with both batch and sequential modes
+    use_request_merging = request_merging_enabled and request_merge_count > 1
     
     if batch_enabled and len(chapters_to_process) > 0:
         # BATCH MODE: Process in batches with per-entry saving
-        total_batches = (len(chapters_to_process) + batch_size - 1) // batch_size
+        
+        # Create merge groups if request merging is enabled
+        if use_request_merging:
+            # Group chapters for merging
+            merge_groups = []
+            for i in range(0, len(chapters_to_process), request_merge_count):
+                group = chapters_to_process[i:i + request_merge_count]
+                merge_groups.append(group)
+            print(f"🔗 Created {len(merge_groups)} merge groups from {len(chapters_to_process)} chapters")
+            units_to_process = merge_groups
+            is_merged_mode = True
+        else:
+            units_to_process = [[ch] for ch in chapters_to_process]  # Each chapter as single-item group
+            is_merged_mode = False
+        
+        total_batches = (len(units_to_process) + batch_size - 1) // batch_size
         
         for batch_num in range(total_batches):
             # Check for stop at the beginning of each batch
@@ -2214,13 +2397,20 @@ def main(log_callback=None, stop_callback=None):
                     print(f"✅ Saved {len(glossary)} deduplicated entries before exit")
                 return
             
-            # Get current batch
+            # Get current batch of units
             batch_start = batch_num * batch_size
-            batch_end = min(batch_start + batch_size, len(chapters_to_process))
-            current_batch = chapters_to_process[batch_start:batch_end]
+            batch_end = min(batch_start + batch_size, len(units_to_process))
+            current_batch_units = units_to_process[batch_start:batch_end]
             
-            print(f"\n🔄 Processing Batch {batch_num+1}/{total_batches} (Chapters: {[idx+1 for idx, _ in current_batch]})")
-            print(f"[BATCH] Submitting {len(current_batch)} chapters for parallel processing...")
+            # Count total chapters in this batch
+            chapters_in_batch = sum(len(unit) for unit in current_batch_units)
+            
+            if is_merged_mode:
+                print(f"\n🔄 Processing Batch {batch_num+1}/{total_batches} ({len(current_batch_units)} merged groups, {chapters_in_batch} chapters)")
+            else:
+                current_batch = [unit[0] for unit in current_batch_units]
+                print(f"\n🔄 Processing Batch {batch_num+1}/{total_batches} (Chapters: {[idx+1 for idx, _ in current_batch]})")
+            print(f"[BATCH] Submitting {len(current_batch_units)} work units for parallel processing...")
             batch_start_time = time.time()
             
             # Process batch in parallel BUT handle results as they complete
@@ -2234,44 +2424,55 @@ def main(log_callback=None, stop_callback=None):
             batch_entry_count = 0
             stopped_early = False
             
-            with ThreadPoolExecutor(max_workers=len(current_batch)) as executor:
+            # Determine number of workers - for merged mode, use the number of merge groups
+            num_workers = len(current_batch_units) if is_merged_mode else min(len(current_batch_units), batch_size)
+            
+            with ThreadPoolExecutor(max_workers=num_workers) as executor:
                 futures = {}
                 
-                # Submit all chapters in the batch
-                for idx, chap in current_batch:
+                # Submit work units
+                for unit in current_batch_units:
                     if check_stop():
                         stopped_early = True
                         break
-                        
-                    # Get system and user prompts
-                    system_prompt, user_prompt = build_prompt(chap)
                     
-                    # Build messages
-                    if not contextual_enabled:
-                        msgs = [
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_prompt}
-                        ]
+                    if is_merged_mode:
+                        # Submit merged group
+                        future = executor.submit(
+                            process_merged_group_api_call,
+                            unit, build_prompt, client, temp, mtoks, check_stop, chunk_timeout
+                        )
+                        futures[future] = unit
                     else:
-                        # Microsecond lock to prevent race conditions when reading history
-                        time.sleep(0.000001)
-                        with _history_lock:
-                            msgs = [{"role": "system", "content": system_prompt}] \
-                                 + trim_context_history(history, ctx_limit, rolling_window) \
-                                 + [{"role": "user", "content": user_prompt}]
+                        # Submit single chapter
+                        idx, chap = unit[0]
+                        
+                        # Get system and user prompts
+                        system_prompt, user_prompt = build_prompt(chap)
+                        
+                        # Build messages
+                        if not contextual_enabled:
+                            msgs = [
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_prompt}
+                            ]
+                        else:
+                            # Microsecond lock to prevent race conditions when reading history
+                            time.sleep(0.000001)
+                            with _history_lock:
+                                msgs = [{"role": "system", "content": system_prompt}] \
+                                     + trim_context_history(history, ctx_limit, rolling_window) \
+                                     + [{"role": "user", "content": user_prompt}]
+                        
+                        # Submit to thread pool
+                        future = executor.submit(
+                            process_single_chapter_api_call,
+                            idx, chap, msgs, client, temp, mtoks, check_stop, chunk_timeout
+                        )
+                        futures[future] = unit
                     
-                    # Submit to thread pool
-                    future = executor.submit(
-                        process_single_chapter_api_call,
-                        idx, chap, msgs, client, temp, mtoks, check_stop, chunk_timeout
-                    )
-                    futures[future] = (idx, chap)
-                    # Small yield to keep GUI responsive when submitting many tasks
-                    if idx % 5 == 0:
-                        time.sleep(0.001)
-                    # Small yield to keep GUI responsive when submitting many tasks
-                    if idx % 5 == 0:
-                        time.sleep(0.001)
+                    # Small yield to keep GUI responsive
+                    time.sleep(0.001)
                 
                 # Collect batch results for history update (same as TransateKRtoEN)
                 batch_history_map = {}  # Will store (idx, user_prompt, resp, raw_obj) for each successful chapter
@@ -2287,66 +2488,129 @@ def main(log_callback=None, stop_callback=None):
                         executor.shutdown(wait=False)
                         break
                     
-                    idx, chap = futures[future]
+                    unit = futures[future]
                     
                     try:
-                        result = future.result(timeout=0.5)
-                        
-                        # Process this chapter's results immediately
-                        data = result.get('data', [])
-                        resp = result.get('resp', '')
-                        error = result.get('error')
-                        raw_obj = result.get('raw_obj')
-                        
-                        if error:
-                            print(f"[Chapter {idx+1}] Error: {error}")
-                            completed.append(idx)
-                            continue
-                        
-                        # Process entries as each chapter completes
-                        if data and len(data) > 0:
-                            total_ent = len(data)
-                            batch_entry_count += total_ent
+                        if is_merged_mode:
+                            # Handle merged group result
+                            group_result = future.result(timeout=0.5)
+                            results = group_result.get('results', [])
+                            new_merged_indices = group_result.get('merged_indices', [])
                             
-                            for eidx, entry in enumerate(data, start=1):
-                                elapsed = time.time() - start
+                            # Add new merged indices to tracking
+                            for mi in new_merged_indices:
+                                if mi not in merged_indices:
+                                    merged_indices.append(mi)
+                            
+                            for result in results:
+                                idx = result.get('idx')
+                                data = result.get('data', [])
+                                resp = result.get('resp', '')
+                                error = result.get('error')
+                                raw_obj = result.get('raw_obj')
+                                chap = result.get('chap')
                                 
-                                # Get entry info
-                                entry_type = entry.get("type", "?")
-                                raw_name = entry.get("raw_name", "?")
-                                trans_name = entry.get("translated_name", "?")
+                                if error:
+                                    print(f"[Chapter {idx+1}] Error: {error}")
+                                    completed.append(idx)
+                                    continue
                                 
-                                print(f'[Chapter {idx+1}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed) → {entry_type}: {raw_name} ({trans_name})')
+                                # Process entries
+                                if data and len(data) > 0:
+                                    total_ent = len(data)
+                                    batch_entry_count += total_ent
+                                    
+                                    for eidx, entry in enumerate(data, start=1):
+                                        elapsed = time.time() - start
+                                        entry_type = entry.get("type", "?")
+                                        raw_name = entry.get("raw_name", "?")
+                                        trans_name = entry.get("translated_name", "?")
+                                        print(f'[Chapter {idx+1}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed) → {entry_type}: {raw_name} ({trans_name})')
+                                        glossary.append(entry)
                                 
-                                # Add entry immediately WITHOUT deduplication
-                                glossary.append(entry)
-                        
-                        completed.append(idx)
-                        
-                        # Store history entry for this chapter (will be added after batch completes)
-                        if contextual_enabled and resp and chap:
-                            system_prompt, user_prompt = build_prompt(chap)
-                            batch_history_map[idx] = (user_prompt, resp, raw_obj)
+                                completed.append(idx)
+                                
+                                # Store history for parent chapter only
+                                if contextual_enabled and resp and chap and 'merged_into' not in result:
+                                    system_prompt, user_prompt = build_prompt(chap)
+                                    batch_history_map[idx] = (user_prompt, resp, raw_obj)
+                            
+                            print(f"✅ Merged group done: {len(results)} chapters")
+                        else:
+                            # Handle single chapter result
+                            idx, chap = unit[0]
+                            result = future.result(timeout=0.5)
+                            
+                            # Process this chapter's results immediately
+                            data = result.get('data', [])
+                            resp = result.get('resp', '')
+                            error = result.get('error')
+                            raw_obj = result.get('raw_obj')
+                            
+                            if error:
+                                print(f"[Chapter {idx+1}] Error: {error}")
+                                completed.append(idx)
+                                continue
+                            
+                            # Process entries as each chapter completes
+                            if data and len(data) > 0:
+                                total_ent = len(data)
+                                batch_entry_count += total_ent
+                                
+                                for eidx, entry in enumerate(data, start=1):
+                                    elapsed = time.time() - start
+                                    
+                                    # Get entry info
+                                    entry_type = entry.get("type", "?")
+                                    raw_name = entry.get("raw_name", "?")
+                                    trans_name = entry.get("translated_name", "?")
+                                    
+                                    print(f'[Chapter {idx+1}/{total_chapters}] [{eidx}/{total_ent}] ({elapsed:.1f}s elapsed) → {entry_type}: {raw_name} ({trans_name})')
+                                    
+                                    # Add entry immediately WITHOUT deduplication
+                                    glossary.append(entry)
+                            
+                            completed.append(idx)
+                            
+                            # Store history entry for this chapter (will be added after batch completes)
+                            if contextual_enabled and resp and chap:
+                                system_prompt, user_prompt = build_prompt(chap)
+                                batch_history_map[idx] = (user_prompt, resp, raw_obj)
                         
                         # Save progress after each chapter completes (crash-safe with atomic writes)
-                        save_progress(completed, glossary)
+                        save_progress(completed, glossary, merged_indices)
                         # Also save glossary files for incremental updates
                         save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                         save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                         
                     except Exception as e:
-                        if "stopped by user" in str(e).lower():
-                            print(f"✅ Chapter {idx+1} stopped by user")
+                        if is_merged_mode:
+                            # For merged mode, mark all chapters in the unit as completed on error
+                            for u_idx, u_chap in unit:
+                                if "stopped by user" in str(e).lower():
+                                    print(f"✅ Chapter {u_idx+1} stopped by user")
+                                else:
+                                    print(f"Error processing merged chapter {u_idx+1}: {e}")
+                                if u_idx not in completed:
+                                    completed.append(u_idx)
                         else:
-                            print(f"Error processing chapter {idx+1}: {e}")
-                        completed.append(idx)
+                            idx, chap = unit[0]
+                            if "stopped by user" in str(e).lower():
+                                print(f"✅ Chapter {idx+1} stopped by user")
+                            else:
+                                print(f"Error processing chapter {idx+1}: {e}")
+                            if idx not in completed:
+                                completed.append(idx)
             
             # After all futures in this batch complete, append history entries in order
             # This matches TransateKRtoEN batch mode behavior
             if contextual_enabled and batch_history_map:
                 print(f"\n📝 Updating context history for batch {batch_num+1}...")
-                # Sort by chapter index to maintain order
-                sorted_chapters = sorted(current_batch, key=lambda x: x[0])
+                # Flatten units to get all chapters and sort by index
+                all_chapters_in_batch = []
+                for unit in current_batch_units:
+                    all_chapters_in_batch.extend(unit)
+                sorted_chapters = sorted(all_chapters_in_batch, key=lambda x: x[0])
                 for idx, chap in sorted_chapters:
                     if idx in batch_history_map:
                         user_content, assistant_content, raw_obj = batch_history_map[idx]
@@ -2431,14 +2695,14 @@ def main(log_callback=None, stop_callback=None):
                 print(f"📊 Glossary size: {deduplicated_size} unique entries")
                 
                 # Save final deduplicated and sorted glossary
-                save_progress(completed, glossary)
+                save_progress(completed, glossary, merged_indices)
                 save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                 save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
             
             # Print batch summary
             if batch_entry_count > 0:
                 print(f"\n📊 Batch {batch_num+1}/{total_batches} Summary:")
-                print(f"   • Chapters processed: {len(current_batch)}")
+                print(f"   • Chapters processed: {chapters_in_batch}")
                 print(f"   • Total entries extracted: {batch_entry_count}")
                 print(f"   • Glossary size: {len(glossary)} unique entries")
             
@@ -2458,7 +2722,7 @@ def main(log_callback=None, stop_callback=None):
                         x.get('raw_name', '').lower()
                     ))
                     
-                    save_progress(completed, glossary)
+                    save_progress(completed, glossary, merged_indices)
                     save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                     save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                     print(f"✅ Saved {len(glossary)} deduplicated entries before exit")

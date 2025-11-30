@@ -3019,7 +3019,204 @@ class BatchTranslationProcessor:
                 self.save_progress_fn()
             # No history for failed chapters
             return False, actual_num, None, None, None
+    
+    def process_merged_group(self, merge_group, progress_manager):
+        """
+        Process a merge group (multiple chapters merged into a single API request).
+        
+        Args:
+            merge_group: List of (idx, chapter) tuples to merge
+            progress_manager: ProgressManager instance for updating merged chapter status
             
+        Returns:
+            List of results, each in format: (success, actual_num, hist_user, hist_assistant, raw_obj)
+        """
+        import threading
+        
+        if len(merge_group) == 1:
+            # Single chapter, process normally
+            result = self.process_single_chapter(merge_group[0])
+            return [result]
+        
+        # Get info for all chapters in the group
+        chapters_data = []  # List of (chapter_num, content, idx, chapter_obj, content_hash)
+        parent_idx, parent_chapter = merge_group[0]
+        parent_actual_num = parent_chapter.get('actual_chapter_num', parent_chapter['num'])
+        
+        thread_name = threading.current_thread().name
+        print(f"\n🔗 [{thread_name}] Processing MERGED group: Chapters {[c.get('actual_chapter_num', c['num']) for _, c in merge_group]}")
+        
+        for idx, chapter in merge_group:
+            actual_num = chapter.get('actual_chapter_num', chapter['num'])
+            content_hash = chapter.get("content_hash") or ContentProcessor.get_content_hash(chapter["body"])
+            chapters_data.append((actual_num, chapter["body"], idx, chapter, content_hash))
+        
+        try:
+            # Mark all chapters as in_progress
+            for actual_num, _, idx, chapter, content_hash in chapters_data:
+                with self.progress_lock:
+                    self.update_progress_fn(idx, actual_num, content_hash, None, status="in_progress")
+                    self.save_progress_fn()
+            
+            # Merge chapter contents
+            merge_input = [(cn, content, ch) for cn, content, _, ch, _ in chapters_data]
+            merged_content = RequestMerger.merge_chapters(merge_input)
+            
+            expected_chapters = [cn for cn, _, _, _, _ in chapters_data]
+            print(f"   📊 Merged {len(merge_group)} chapters ({len(merged_content):,} chars total)")
+            
+            # Build system prompt with glossary
+            glossary_path = find_glossary_file(self.out_dir)
+            chapter_system_prompt = build_system_prompt(
+                self.config.SYSTEM_PROMPT, 
+                glossary_path, 
+                source_text=merged_content
+            )
+            
+            # Build messages
+            memory_msgs = []
+            if (self.config.CONTEXTUAL 
+                and self.history_manager is not None 
+                and getattr(self.config, 'HIST_LIMIT', 0) > 0):
+                try:
+                    history = self.history_manager.load_history()
+                    hist_limit = getattr(self.config, 'HIST_LIMIT', 0)
+                    trimmed = history[-hist_limit * 2:]
+                    include_source = os.getenv("INCLUDE_SOURCE_IN_HISTORY", "0") == "1"
+                    
+                    for h in trimmed:
+                        if not isinstance(h, dict):
+                            continue
+                        role = h.get('role', 'user')
+                        content = h.get('content', '')
+                        
+                        if role == 'user' and not include_source:
+                            memory_msgs.append({"role": "user", "content": "[Previous chapter - source hidden]"})
+                        else:
+                            memory_msgs.append({"role": role, "content": content})
+                except Exception as e:
+                    print(f"   ⚠️ Failed to load history for merged group: {e}")
+            
+            msgs = [{"role": "system", "content": chapter_system_prompt}] + memory_msgs + [
+                {"role": "user", "content": merged_content}
+            ]
+            
+            # Get max output tokens
+            env_max_output = os.getenv("MAX_OUTPUT_TOKENS", "")
+            if env_max_output.isdigit() and int(env_max_output) > 0:
+                mtoks = int(env_max_output)
+            else:
+                mtoks = self.config.MAX_OUTPUT_TOKENS
+            
+            # Call API for merged content
+            print(f"   🌐 Sending merged request to API...")
+            resp_obj = self.client.chat_complete(msgs, temperature=self.config.TEMPERATURE, max_tokens=mtoks)
+            
+            if self.check_stop_fn():
+                raise Exception("Translation stopped by user")
+            
+            # Extract response text
+            merged_response = ""
+            raw_obj = None
+            
+            if hasattr(resp_obj, 'candidates') and resp_obj.candidates:
+                raw_obj = resp_obj.candidates[0].content
+                for part in resp_obj.candidates[0].content.parts:
+                    if hasattr(part, 'text') and part.text:
+                        merged_response += part.text
+            elif hasattr(resp_obj, 'choices') and resp_obj.choices:
+                raw_obj = resp_obj.choices[0]
+                merged_response = resp_obj.choices[0].message.content or ""
+            elif isinstance(resp_obj, dict):
+                raw_obj = resp_obj
+                if 'candidates' in resp_obj:
+                    for part in resp_obj['candidates'][0].get('content', {}).get('parts', []):
+                        merged_response += part.get('text', '')
+                elif 'choices' in resp_obj:
+                    merged_response = resp_obj['choices'][0].get('message', {}).get('content', '')
+            
+            if not merged_response:
+                raise Exception("Empty response from API for merged request")
+            
+            print(f"   ✅ Received merged response ({len(merged_response):,} chars)")
+            
+            # Split response back into individual chapters
+            split_contents = RequestMerger.split_response(merged_response, expected_chapters)
+            
+            # Process each chapter's content
+            results = []
+            parent_actual_num = chapters_data[0][0]
+            parent_idx = chapters_data[0][2]
+            merged_child_nums = [cn for cn, _, _, _, _ in chapters_data[1:]]
+            
+            for i, (actual_num, original_content, idx, chapter, content_hash) in enumerate(chapters_data):
+                chapter_content = split_contents.get(actual_num)
+                
+                if chapter_content is None:
+                    print(f"   ⚠️ Failed to extract content for chapter {actual_num}")
+                    with self.progress_lock:
+                        self.update_progress_fn(idx, actual_num, content_hash, None, status="failed")
+                        self.save_progress_fn()
+                    results.append((False, actual_num, None, None, None))
+                    continue
+                
+                # Clean the content
+                cleaned = chapter_content
+                if self.config.REMOVE_AI_ARTIFACTS:
+                    cleaned = ContentProcessor.clean_ai_artifacts(cleaned, True)
+                cleaned = ContentProcessor.clean_memory_artifacts(cleaned)
+                cleaned = re.sub(r"^```(?:html)?\s*\n?", "", cleaned, count=1, flags=re.MULTILINE)
+                cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
+                
+                # Save the file
+                fname = FileUtilities.create_chapter_filename(chapter, actual_num)
+                
+                with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
+                    f.write(cleaned)
+                
+                print(f"   💾 Saved Chapter {actual_num}: {fname} ({len(cleaned)} chars)")
+                
+                # Check for QA failures
+                if is_qa_failed_response(cleaned):
+                    with self.progress_lock:
+                        self.update_progress_fn(idx, actual_num, content_hash, fname, status="qa_failed")
+                        self.save_progress_fn()
+                    results.append((False, actual_num, None, None, None))
+                    continue
+                
+                # Update progress based on whether this is parent or child
+                with self.progress_lock:
+                    if i == 0:
+                        # Parent chapter - mark as completed with merged_chapters list
+                        self.update_progress_fn(
+                            idx, actual_num, content_hash, fname, 
+                            status="completed",
+                            merged_chapters=merged_child_nums
+                        )
+                    else:
+                        # Child chapter - mark as merged
+                        progress_manager.mark_as_merged(idx, actual_num, content_hash, parent_actual_num, chapter)
+                    self.save_progress_fn()
+                    self.chapters_completed += 1
+                
+                # Only return history for parent chapter
+                if i == 0:
+                    results.append((True, actual_num, merged_content, merged_response, raw_obj))
+                else:
+                    results.append((True, actual_num, None, None, None))
+            
+            return results
+            
+        except Exception as e:
+            print(f"❌ Merged group failed: {e}")
+            # Mark all chapters as failed
+            results = []
+            for actual_num, _, idx, chapter, content_hash in chapters_data:
+                with self.progress_lock:
+                    self.update_progress_fn(idx, actual_num, content_hash, None, status="failed")
+                    self.save_progress_fn()
+                results.append((False, actual_num, None, None, None))
+            return results
 
 
 # =====================================================
@@ -6004,13 +6201,13 @@ def main(log_callback=None, stop_callback=None):
     current_chunk_number = 0
 
     if config.BATCH_TRANSLATION:
-        # Check if request merging is enabled - if so, fall back to sequential mode
-        if config.REQUEST_MERGING_ENABLED and config.REQUEST_MERGE_COUNT > 1:
-            print(f"\n🔗 REQUEST MERGING is enabled with batch mode")
-            print(f"🔗 Falling back to sequential processing for merged requests")
+        # Check if request merging is enabled
+        use_request_merging = config.REQUEST_MERGING_ENABLED and config.REQUEST_MERGE_COUNT > 1
+        
+        if use_request_merging:
+            print(f"\n🔗 REQUEST MERGING + BATCH MODE ENABLED")
             print(f"🔗 Merging {config.REQUEST_MERGE_COUNT} chapters per API request")
-            # Force sequential mode - the non-batch section below handles merging
-            config.BATCH_TRANSLATION = False
+            print(f"📦 Processing with up to {config.BATCH_SIZE} concurrent merged requests")
         else:
             print(f"\n📦 PARALLEL TRANSLATION MODE ENABLED")
             print(f"📦 Processing chapters with up to {config.BATCH_SIZE} concurrent API calls")
@@ -6157,23 +6354,47 @@ def main(log_callback=None, stop_callback=None):
         else:
             print(f"📦 Using direct batching (default): {batch_group_size} chapters per group, {config.BATCH_SIZE} parallel")
         
+        # Create merge groups if request merging is enabled
+        if use_request_merging:
+            merge_groups = RequestMerger.create_merge_groups(chapters_to_translate, config.REQUEST_MERGE_COUNT)
+            print(f"🔗 Created {len(merge_groups)} merge groups from {total_to_process} chapters")
+            units_to_process = merge_groups
+            is_merged_mode = True
+        else:
+            units_to_process = [[ch] for ch in chapters_to_translate]  # Wrap each chapter as single-item group
+            is_merged_mode = False
+        
         with concurrent.futures.ThreadPoolExecutor(max_workers=config.BATCH_SIZE) as executor:
-            for batch_start in range(0, total_to_process, batch_group_size):
+            for batch_start in range(0, len(units_to_process), batch_group_size if not is_merged_mode else config.BATCH_SIZE):
                 if check_stop():
                     print("❌ Translation stopped during parallel processing")
                     executor.shutdown(wait=False)
                     return
                 
-                batch_end = min(batch_start + batch_group_size, total_to_process)
-                current_batch = chapters_to_translate[batch_start:batch_end]
+                effective_batch_size = batch_group_size if not is_merged_mode else config.BATCH_SIZE
+                batch_end = min(batch_start + effective_batch_size, len(units_to_process))
+                current_batch_units = units_to_process[batch_start:batch_end]
                 
-                batch_number = (batch_start // batch_group_size) + 1
-                print(f"\n📦 Submitting batch {batch_number}: {len(current_batch)} chapters")
+                # Count total chapters in this batch
+                chapters_in_batch = sum(len(unit) for unit in current_batch_units)
                 
-                future_to_chapter = {
-                    executor.submit(batch_processor.process_single_chapter, chapter_data): chapter_data
-                    for chapter_data in current_batch
-                }
+                batch_number = (batch_start // effective_batch_size) + 1
+                if is_merged_mode:
+                    print(f"\n📦 Submitting batch {batch_number}: {len(current_batch_units)} merged groups ({chapters_in_batch} chapters)")
+                else:
+                    print(f"\n📦 Submitting batch {batch_number}: {chapters_in_batch} chapters")
+                
+                # Submit work units (either single chapters or merge groups)
+                if is_merged_mode:
+                    future_to_unit = {
+                        executor.submit(batch_processor.process_merged_group, unit, progress_manager): unit
+                        for unit in current_batch_units
+                    }
+                else:
+                    future_to_unit = {
+                        executor.submit(batch_processor.process_single_chapter, unit[0]): unit
+                        for unit in current_batch_units
+                    }
                 
                 active_count = 0
                 completed_in_batch = 0
@@ -6182,30 +6403,53 @@ def main(log_callback=None, stop_callback=None):
                 # Collect history entries for this batch keyed by chapter index
                 batch_history_map = {}
                 
-                for future in concurrent.futures.as_completed(future_to_chapter):
+                for future in concurrent.futures.as_completed(future_to_unit):
                     if check_stop():
                         print("❌ Translation stopped")
                         executor.shutdown(wait=False)
                         return
                     
-                    chapter_data = future_to_chapter[future]
-                    idx, chapter = chapter_data
+                    unit = future_to_unit[future]
                     
                     try:
-                        success, chap_num, hist_user, hist_assistant, raw_obj = future.result()
-                        if success:
-                            completed_in_batch += 1
-                            print(f"✅ Chapter {chap_num} done ({completed_in_batch + failed_in_batch}/{len(current_batch)} in batch)")
-                            if hist_user and hist_assistant:
-                                batch_history_map[idx] = (hist_user, hist_assistant, raw_obj)
+                        if is_merged_mode:
+                            # Merged mode returns list of results
+                            results = future.result()
+                            for result in results:
+                                success, chap_num, hist_user, hist_assistant, raw_obj = result
+                                if success:
+                                    completed_in_batch += 1
+                                    if hist_user and hist_assistant:
+                                        # Find the idx from the unit
+                                        for idx, ch in unit:
+                                            if ch.get('actual_chapter_num', ch['num']) == chap_num:
+                                                batch_history_map[idx] = (hist_user, hist_assistant, raw_obj)
+                                                break
+                                else:
+                                    failed_in_batch += 1
+                                processed += 1
+                            print(f"✅ Merged group done: {len(results)} chapters")
+                        else:
+                            # Single chapter mode
+                            success, chap_num, hist_user, hist_assistant, raw_obj = future.result()
+                            idx, chapter = unit[0]
+                            if success:
+                                completed_in_batch += 1
+                                print(f"✅ Chapter {chap_num} done ({completed_in_batch + failed_in_batch}/{chapters_in_batch} in batch)")
+                                if hist_user and hist_assistant:
+                                    batch_history_map[idx] = (hist_user, hist_assistant, raw_obj)
+                            else:
+                                failed_in_batch += 1
+                                print(f"❌ Chapter {chap_num} failed ({completed_in_batch + failed_in_batch}/{chapters_in_batch} in batch)")
+                            processed += 1
+                    except Exception as e:
+                        if is_merged_mode:
+                            failed_in_batch += len(unit)
+                            processed += len(unit)
                         else:
                             failed_in_batch += 1
-                            print(f"❌ Chapter {chap_num} failed ({completed_in_batch + failed_in_batch}/{len(current_batch)} in batch)")
-                    except Exception as e:
-                        failed_in_batch += 1
-                        print(f"❌ Chapter thread error: {e}")
-                    
-                    processed += 1
+                            processed += 1
+                        print(f"❌ Thread error: {e}")
                     
                     progress_percent = (processed / total_to_process) * 100
                     print(f"📊 Overall Progress: {processed}/{total_to_process} ({progress_percent:.1f}%)")
@@ -6214,8 +6458,11 @@ def main(log_callback=None, stop_callback=None):
                 # Thread-safe history updates with microsecond delays between appends
                 if config.CONTEXTUAL and getattr(config, 'HIST_LIMIT', 0) > 0:
                     hist_limit = getattr(config, 'HIST_LIMIT', 0)
-                    # Sort by chapter index to maintain order
-                    sorted_chapters = sorted([(idx, chapter) for idx, chapter in current_batch], key=lambda x: x[0])
+                    # Flatten units to get all chapters and sort by index
+                    all_chapters_in_batch = []
+                    for unit in current_batch_units:
+                        all_chapters_in_batch.extend(unit)
+                    sorted_chapters = sorted(all_chapters_in_batch, key=lambda x: x[0])
                     for idx, chapter in sorted_chapters:
                         if idx in batch_history_map:
                             user_content, assistant_content, raw_obj = batch_history_map[idx]
