@@ -3195,24 +3195,26 @@ class BatchTranslationProcessor:
                     results.append((False, actual_num, None, None, None))
                 return results
             
-            # Mark parent chapter as completed with merged_chapters list
+            # Mark parent chapter as completed AND children as merged in single atomic operation
             with self.progress_lock:
+                # First mark parent as completed
                 self.update_progress_fn(
                     parent_idx, parent_actual_num, parent_content_hash, saved_name,
                     status="completed",
                     merged_chapters=merged_child_nums
                 )
-                self.save_progress_fn()
                 self.chapters_completed += 1
+                
+                # Then mark all child chapters as merged (only after parent is completed)
+                for actual_num, _, idx, chapter, content_hash in chapters_data[1:]:
+                    progress_manager.mark_as_merged(idx, actual_num, content_hash, parent_actual_num, chapter, parent_output_file=saved_name)
+                    self.chapters_completed += 1
+                
+                # Save once after all updates
+                self.save_progress_fn()
             
             results.append((True, parent_actual_num, merged_content, merged_response, raw_obj))
-            
-            # Mark child chapters as merged (point to parent's output file)
             for actual_num, _, idx, chapter, content_hash in chapters_data[1:]:
-                with self.progress_lock:
-                    progress_manager.mark_as_merged(idx, actual_num, content_hash, parent_actual_num, chapter, parent_output_file=saved_name)
-                    self.save_progress_fn()
-                    self.chapters_completed += 1
                 results.append((True, actual_num, None, None, None))
             
             return results

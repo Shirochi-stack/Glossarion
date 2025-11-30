@@ -558,6 +558,26 @@ class RetranslationMixin:
                         if actual_num is not None and actual_num == chapter_num:
                             orig_base = os.path.basename(chapter_info.get('original_basename', '') or '')
                             out_file = chapter_info.get('output_file')
+                            status = chapter_info.get('status', '')
+                            
+                            # Merged chapters: match by actual_num alone (they point to parent's output)
+                            # But only treat as merged if the parent chapter is actually completed
+                            if status == 'merged':
+                                parent_num = chapter_info.get('merged_parent_chapter')
+                                parent_completed = False
+                                if parent_num is not None:
+                                    # Check if parent chapter is completed
+                                    parent_key = str(parent_num)
+                                    if parent_key in prog.get("chapters", {}):
+                                        parent_info = prog["chapters"][parent_key]
+                                        if parent_info.get('status') == 'completed':
+                                            parent_completed = True
+                                
+                                if parent_completed:
+                                    matched_info = chapter_info
+                                    break
+                                # else: don't match - will fall through to not_translated
+                            
                             # Only treat as a match if the original basename matches this filename,
                             # or, when original_basename is missing, the output_file matches what we expect.
                             if (orig_base and orig_base == filename) or (not orig_base and out_file and out_file == expected_response):
