@@ -986,6 +986,7 @@ class RetranslationMixin:
             
             total_chapters = len(spine_chapters)
             completed = sum(1 for ch in spine_chapters if ch['status'] == 'completed')
+            merged = sum(1 for ch in spine_chapters if ch['status'] == 'merged')
             missing = sum(1 for ch in spine_chapters if ch['status'] == 'not_translated')
             failed = sum(1 for ch in spine_chapters if ch['status'] in ['failed', 'qa_failed'])
             file_missing = sum(1 for ch in spine_chapters if ch['status'] == 'file_missing')
@@ -1000,6 +1001,13 @@ class RetranslationMixin:
             lbl_completed.setFont(stats_font)
             lbl_completed.setStyleSheet("color: green;")
             stats_layout.addWidget(lbl_completed)
+            
+            # Merged: chapters combined into parent request
+            if merged > 0:
+                lbl_merged = QLabel(f"🔗 Merged: {merged} | ")
+                lbl_merged.setFont(stats_font)
+                lbl_merged.setStyleSheet("color: #17a2b8;")  # Cyan/teal
+                stats_layout.addWidget(lbl_merged)
             
             # Not Translated: unique emoji/color (distinct from failures)
             lbl_missing = QLabel(f"⬜ Not Translated: {missing} | ")
@@ -1040,6 +1048,7 @@ class RetranslationMixin:
         # Populate listbox with dynamic column widths
         status_icons = {
             'completed': '✅',
+            'merged': '🔗',
             'failed': '❌',
             'qa_failed': '❌',
             'file_missing': '⚠️',
@@ -1050,6 +1059,7 @@ class RetranslationMixin:
         
         status_labels = {
             'completed': 'Completed',
+            'merged': 'Merged',
             'failed': 'Failed',
             'qa_failed': 'QA Failed',
             'file_missing': 'File Missing',
@@ -1111,6 +1121,13 @@ class RetranslationMixin:
                         issues_display += f' (+{len(qa_issues)-2} more)'
                     display += f" | {issues_display}"
             
+            # Add parent chapter info if status is merged
+            if status == 'merged':
+                chapter_info = info.get('info', {})
+                parent_chapter = chapter_info.get('merged_parent_chapter')
+                if parent_chapter:
+                    display += f" | → Ch.{parent_chapter}"
+            
             if info.get('duplicate_count', 1) > 1:
                 display += f" | ({info['duplicate_count']} entries)"
             
@@ -1119,6 +1136,8 @@ class RetranslationMixin:
             # Color code based on status
             if status == 'completed':
                 item.setForeground(QColor('green'))
+            elif status == 'merged':
+                item.setForeground(QColor('#17a2b8'))  # Cyan/teal for merged
             elif status in ['failed', 'qa_failed']:
                 item.setForeground(QColor('red'))
             elif status == 'not_translated':
