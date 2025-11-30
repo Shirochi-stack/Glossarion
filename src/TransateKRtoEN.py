@@ -3144,13 +3144,45 @@ class BatchTranslationProcessor:
             parent_actual_num, parent_content, parent_idx, parent_chapter, parent_content_hash = chapters_data[0]
             merged_child_nums = [cn for cn, _, _, _, _ in chapters_data[1:]]
             
+            # If any chapter in the merge group used enhanced (html2text) extraction,
+            # convert the translated markdown/plain text back to HTML before saving
+            try:
+                enhanced_group = any(bool(ch.get('enhanced_extraction')) for _, _, _, ch, _ in chapters_data)
+            except Exception:
+                enhanced_group = False
+            if enhanced_group and isinstance(cleaned, str):
+                print("   🔄 Converting merged enhanced text back to HTML...")
+                try:
+                    cleaned = convert_enhanced_text_to_html(cleaned, parent_chapter)
+                except Exception as conv_err:
+                    print(f"   ⚠️ Enhanced HTML conversion failed: {conv_err} — saving raw content")
+            
+            # Optionally restore paragraphs if the output lacks structure
+            if getattr(self.config, 'EMERGENCY_RESTORE', False):
+                try:
+                    if cleaned and cleaned.count('<p>') < 3 and len(cleaned) > 300:
+                        cleaned = ContentProcessor.emergency_restore_paragraphs(cleaned)
+                except Exception:
+                    pass
+            
             # Save entire merged response to parent chapter's file
             fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
             
-            with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
-                f.write(cleaned)
+            # If translating a plain text source, mirror non-merged behavior and write .txt
+            if getattr(self, 'is_text_file', False):
+                parent_fname = fname.replace('.html', '.txt')
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(cleaned, 'html.parser')
+                text_content = soup.get_text(strip=True)
+                with open(os.path.join(self.out_dir, parent_fname), 'w', encoding='utf-8') as f:
+                    f.write(text_content)
+                saved_name = parent_fname
+            else:
+                with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
+                    f.write(cleaned)
+                saved_name = fname
             
-            print(f"   💾 Saved merged content to Chapter {parent_actual_num}: {fname} ({len(cleaned)} chars)")
+            print(f"   💾 Saved merged content to Chapter {parent_actual_num}: {saved_name} ({len(cleaned)} chars)")
             
             # Check for QA failures on the merged content
             results = []
