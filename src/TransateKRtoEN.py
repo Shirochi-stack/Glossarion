@@ -1021,9 +1021,16 @@ class ProgressManager:
         if chapter_key in self.prog["chapters"]:
             existing_info = self.prog["chapters"][chapter_key]
             existing_file = existing_info.get("output_file")
+            existing_status = existing_info.get("status")
             
             # If the existing entry is for the same file, use simple key
             if existing_file == filename:
+                return chapter_key
+            
+            # MERGED STATUS FIX: If existing entry is merged, always use simple key
+            # Merged chapters point to parent's output_file, so filename won't match
+            # but we still want to use the same key to find the merged status
+            if existing_status == "merged":
                 return chapter_key
             
             # Different file with same chapter number - use composite key
@@ -1210,15 +1217,27 @@ class ProgressManager:
     def cleanup_missing_files(self, output_dir):
         """Remove missing files and duplicates - NO RESTORATION BULLSHIT"""
         cleaned_count = 0
+        deleted_parents = set()  # Track which parent chapters were deleted
         
-        # Remove entries for missing files
+        # First pass: Remove entries for missing files (except merged children)
         for chapter_key, chapter_info in list(self.prog["chapters"].items()):
             output_file = chapter_info.get("output_file")
+            status = chapter_info.get("status")
+            
+            # MERGED CHAPTERS FIX: Don't delete merged children in first pass
+            # They will be handled in second pass if their parent was deleted
+            if status == "merged":
+                continue
             
             if output_file:
                 output_path = os.path.join(output_dir, output_file)
                 if not os.path.exists(output_path):
                     print(f"🗑️ Removing entry for missing file: {output_file}")
+                    
+                    # Track if this was a parent of merged chapters
+                    actual_num = chapter_info.get("actual_num")
+                    if actual_num is not None:
+                        deleted_parents.add(actual_num)
                     
                     # Delete the entry
                     del self.prog["chapters"][chapter_key]
@@ -1228,6 +1247,17 @@ class ProgressManager:
                         del self.prog["chapter_chunks"][chapter_key]
                     
                     cleaned_count += 1
+        
+        # Second pass: Invalidate merged children whose parents were deleted
+        if deleted_parents:
+            for chapter_key, chapter_info in list(self.prog["chapters"].items()):
+                if chapter_info.get("status") == "merged":
+                    parent_num = chapter_info.get("merged_parent_chapter")
+                    if parent_num in deleted_parents:
+                        actual_num = chapter_info.get("actual_num")
+                        print(f"🗑️ Removing merged child chapter {actual_num} (parent {parent_num} was deleted)")
+                        del self.prog["chapters"][chapter_key]
+                        cleaned_count += 1
         
         if cleaned_count > 0:
             print(f"🔄 Removed {cleaned_count} entries - will retranslate")
