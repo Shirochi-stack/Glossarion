@@ -3354,16 +3354,27 @@ def update_new_format_progress(prog, faulty_chapters, log, folder_path):
     output_file_to_chapter_key = {}
     actual_num_to_chapter_key = {}
     basename_to_chapter_key = {}
+    merged_child_to_parent = {}  # Maps merged child actual_num -> parent actual_num
     
     for chapter_key, chapter_info in prog["chapters"].items():
         output_file = chapter_info.get("output_file")
+        status = chapter_info.get("status", "")
+        
         if output_file:
-            output_file_to_chapter_key[output_file] = chapter_key
-            
-            # Also map without response_ prefix for matching
-            if output_file.startswith("response_"):
-                alt_name = output_file[9:]  # Remove "response_" prefix
-                output_file_to_chapter_key[alt_name] = chapter_key
+            # IMPORTANT: Only map non-merged chapters to output_file
+            # Merged children share parent's output_file, so we don't want them to overwrite
+            if status != "merged":
+                # Only set if not already mapped, OR if this is a completed/parent chapter
+                # This ensures parents take priority over any lingering mappings
+                existing_key = output_file_to_chapter_key.get(output_file)
+                if not existing_key or status == "completed":
+                    output_file_to_chapter_key[output_file] = chapter_key
+                
+                # Also map without response_ prefix for matching
+                if output_file.startswith("response_"):
+                    alt_name = output_file[9:]  # Remove "response_" prefix
+                    if alt_name not in output_file_to_chapter_key or status == "completed":
+                        output_file_to_chapter_key[alt_name] = chapter_key
         
         # Map by actual chapter number
         actual_num = chapter_info.get("actual_num")
@@ -3378,22 +3389,63 @@ def update_new_format_progress(prog, faulty_chapters, log, folder_path):
             basename_to_chapter_key[original_basename] = chapter_key
             # Also map response_ version
             basename_to_chapter_key[f"response_{original_basename}"] = chapter_key
+        
+        # Track merged children -> parent mapping (Method 1: from child's merged status)
+        if chapter_info.get("status") == "merged":
+            child_num = actual_num
+            parent_num = chapter_info.get("merged_parent_chapter")
+            if child_num is not None and parent_num is not None:
+                merged_child_to_parent[child_num] = parent_num
+        
+        # Track merged children -> parent mapping (Method 2: from parent's merged_chapters list)
+        # This catches cases where child's status was corrupted but parent still has the list
+        merged_chapters_list = chapter_info.get("merged_chapters")
+        if merged_chapters_list and actual_num is not None:
+            for child_num in merged_chapters_list:
+                if child_num not in merged_child_to_parent:
+                    merged_child_to_parent[child_num] = actual_num
     
     updated_count = 0
     for faulty_row in faulty_chapters:
         faulty_filename = faulty_row["filename"]
         chapter_key = None
         
-        # Method 1: Direct output file match
-        chapter_key = output_file_to_chapter_key.get(faulty_filename)
+        # MERGED CHILDREN HANDLING: Check if this file is for a merged child chapter
+        # If so, redirect QA issues to the parent chapter
+        import re
+        file_chapter_num = None
+        num_matches = re.findall(r'(\d+)', faulty_filename)
+        if num_matches:
+            file_chapter_num = int(num_matches[-1])
+        
+        is_merged_child = False
+        if file_chapter_num is not None and file_chapter_num in merged_child_to_parent:
+            parent_num = merged_child_to_parent[file_chapter_num]
+            is_merged_child = True
+            log(f"   🔗 File {faulty_filename} (chapter {file_chapter_num}) is merged child of chapter {parent_num} - redirecting QA issues to parent")
+            
+            # Find the parent chapter key - this is the only key we want to update
+            if parent_num in actual_num_to_chapter_key:
+                parent_keys = actual_num_to_chapter_key[parent_num]
+                log(f"      DEBUG: actual_num_to_chapter_key[{parent_num}] = {parent_keys}")
+                chapter_key = parent_keys[0]
+                log(f"      DEBUG: Using chapter_key = '{chapter_key}' for parent")
+                # Skip all other matching methods - we ONLY want to update the parent
+            else:
+                log(f"      DEBUG: parent_num {parent_num} NOT in actual_num_to_chapter_key!")
+                log(f"      DEBUG: actual_num_to_chapter_key keys = {list(actual_num_to_chapter_key.keys())}")
+        
+        # Method 1: Direct output file match (if not already found via merge redirect)
+        if not chapter_key and not is_merged_child:
+            chapter_key = output_file_to_chapter_key.get(faulty_filename)
         
         # Method 2: Try without response_ prefix
-        if not chapter_key and faulty_filename.startswith("response_"):
+        if not chapter_key and not is_merged_child and faulty_filename.startswith("response_"):
             base_name = faulty_filename[9:]
             chapter_key = basename_to_chapter_key.get(base_name)
         
         # Method 3: Extract chapter number and match
-        if not chapter_key:
+        if not chapter_key and not is_merged_child:
             # Extract chapter number from filename
             import re
             matches = re.findall(r'(\d+)', faulty_filename)
@@ -3416,7 +3468,7 @@ def update_new_format_progress(prog, faulty_chapters, log, folder_path):
                         chapter_key = candidates[0]
         
         # Method 4: If still not found, try to calculate content hash from file
-        if not chapter_key and os.path.exists(os.path.join(folder_path, faulty_filename)):
+        if not chapter_key and not is_merged_child and os.path.exists(os.path.join(folder_path, faulty_filename)):
             try:
                 # Read the file and calculate its content hash
                 # This is a fallback for when the mapping isn't found
@@ -3434,6 +3486,8 @@ def update_new_format_progress(prog, faulty_chapters, log, folder_path):
         if chapter_key and chapter_key in prog["chapters"]:
             chapter_info = prog["chapters"][chapter_key]
             old_status = chapter_info.get("status", "unknown")
+            actual_num_being_updated = chapter_info.get("actual_num")
+            log(f"      DEBUG: Updating chapter_key='{chapter_key}', actual_num={actual_num_being_updated}, old_status={old_status}")
             
             # Update status to qa_failed
             chapter_info["status"] = "qa_failed"
@@ -3463,14 +3517,17 @@ def update_new_format_progress(prog, faulty_chapters, log, folder_path):
             if content_hash:
                 log(f"   └─ Keeping content hash {content_hash[:8]}... for retranslation")
         else:
+            # For merged children where we couldn't find parent, skip creating new entries
+            if is_merged_child:
+                log(f"   ⚠️ Merged child {faulty_filename} - could not find parent chapter {merged_child_to_parent.get(file_chapter_num, '?')} to update")
+                continue
+            
             # Log failure to find chapter
             log(f"   ⚠️ Could not find chapter entry for {faulty_filename}")
             
             # Try to create a new entry if we can determine the chapter number
             import re
             matches = re.findall(r'(\d+)', faulty_filename)
-            # When creating a new qa_failed entry (around line 116-132)
-            # When creating a new qa_failed entry (around line 116-132)
             if matches:
                 chapter_num = int(matches[-1])
                 
@@ -3761,6 +3818,45 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
     if search_name.lower().startswith('response_'):
         search_name = search_name[9:]  # Remove 'response_' prefix
     
+    # Extract chapter number from filename for merge checking
+    file_chapter_num = None
+    num_match = re.search(r'(\d+)', search_name)
+    if num_match:
+        file_chapter_num = int(num_match.group(1))
+    
+    # CHECK: Is this file a merged CHILD chapter? If so, skip it - the parent handles word count
+    if merge_info and file_chapter_num is not None:
+        for parent_num, children in merge_info.items():
+            if file_chapter_num in children:
+                # This is a merged child - return a special result indicating it's merged
+                return {
+                    'found_match': True,
+                    'is_merged_child': True,
+                    'parent_chapter': parent_num,
+                    'chapter_num': file_chapter_num,
+                    'original_wc': 0,
+                    'translated_wc': 0,
+                    'ratio': 1.0,
+                    'percentage': 100,
+                    'is_reasonable': True,
+                    'is_typical': True,
+                    'skip_reason': f'Merged into chapter {parent_num}'
+                }
+    
+    # Build a filename-to-spine-idx map for merge lookups
+    # This allows us to find child chapter word counts by their filenames
+    filename_to_spine_idx = {}
+    for sidx, cinfo in original_counts.items():
+        fname = os.path.splitext(cinfo['filename'])[0].lower()
+        filename_to_spine_idx[fname] = sidx
+        # Also extract chapter number from filename for fallback matching
+        fname_num_match = re.search(r'(\d+)', fname)
+        if fname_num_match:
+            fname_num = int(fname_num_match.group(1))
+            # Map chapter number to spine idx (for merge_info lookup)
+            if fname_num not in filename_to_spine_idx:
+                filename_to_spine_idx[f"chapnum_{fname_num}"] = sidx
+    
     # Try to find matching filename in original_counts
     for spine_idx, count_info in original_counts.items():
         epub_filename = os.path.splitext(count_info['filename'])[0]  # Remove extension from EPUB filename
@@ -3771,14 +3867,25 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
             is_cjk = count_info.get('is_cjk', True)
             
             # REQUEST MERGING: If this chapter has merged children, combine word counts
-            if merge_info and spine_idx in merge_info:
-                merged_children = merge_info[spine_idx]
+            # merge_info uses actual_num (chapter numbers), need to map to spine indices
+            if merge_info and file_chapter_num is not None and file_chapter_num in merge_info:
+                merged_children = merge_info[file_chapter_num]
                 original_wc_base = original_wc
+                children_found = 0
                 for child_num in merged_children:
-                    if child_num in original_counts:
+                    # Find child's spine_idx by its chapter number
+                    child_spine_key = f"chapnum_{child_num}"
+                    if child_spine_key in filename_to_spine_idx:
+                        child_spine_idx = filename_to_spine_idx[child_spine_key]
+                        if child_spine_idx in original_counts:
+                            original_wc += original_counts[child_spine_idx]['word_count']
+                            children_found += 1
+                    # Also try direct spine index lookup as fallback
+                    elif child_num in original_counts:
                         original_wc += original_counts[child_num]['word_count']
-                if merged_children:
-                    log(f"   🔗 Merged chapter {spine_idx}: combining word counts from {len(merged_children)} child chapters")
+                        children_found += 1
+                if children_found > 0:
+                    log(f"   🔗 Merged chapter {file_chapter_num}: combining word counts from {children_found} child chapters")
                     log(f"      Base: {original_wc_base}, Combined: {original_wc}")
             
             # Count words in translated text
@@ -3886,10 +3993,18 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
         is_cjk = original_counts[chapter_num].get('is_cjk', True)  # Get CJK flag if available
         
         # REQUEST MERGING: If this chapter has merged children, combine word counts
+        # Need to map child chapter numbers to spine indices
         if merge_info and chapter_num in merge_info:
             merged_children = merge_info[chapter_num]
             for child_num in merged_children:
-                if child_num in original_counts:
+                # Try to find child by chapter number mapping
+                child_spine_key = f"chapnum_{child_num}"
+                if child_spine_key in filename_to_spine_idx:
+                    child_spine_idx = filename_to_spine_idx[child_spine_key]
+                    if child_spine_idx in original_counts:
+                        original_wc += original_counts[child_spine_idx]['word_count']
+                # Fallback: try direct spine index
+                elif child_num in original_counts:
                     original_wc += original_counts[child_num]['word_count']
         
         # Count words in translated text
@@ -4258,6 +4373,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                         progress_data = json.load(f)
                     
                     # Build merge_info: {parent_chapter_num: [list of merged child chapter nums]}
+                    # Method 1: From parent chapters with merged_chapters list
                     for chapter_key, chapter_data in progress_data.get('chapters', {}).items():
                         if isinstance(chapter_data, dict) and chapter_data.get('merged_chapters'):
                             try:
@@ -4267,8 +4383,26 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                             except (ValueError, TypeError):
                                 pass
                     
+                    # Method 2: From child chapters with status: "merged" and merged_parent_chapter
+                    # This ensures we capture merging even if we only have the child info
+                    for chapter_key, chapter_data in progress_data.get('chapters', {}).items():
+                        if isinstance(chapter_data, dict) and chapter_data.get('status') == 'merged':
+                            try:
+                                child_num = chapter_data.get('actual_num')
+                                if child_num is None:
+                                    child_num = int(chapter_key)
+                                parent_num = chapter_data.get('merged_parent_chapter')
+                                if parent_num is not None:
+                                    if parent_num not in merge_info:
+                                        merge_info[parent_num] = []
+                                    if child_num not in merge_info[parent_num]:
+                                        merge_info[parent_num].append(child_num)
+                            except (ValueError, TypeError):
+                                pass
+                    
                     if merge_info:
-                        log(f"   🔗 Found {len(merge_info)} parent chapters with merged content")
+                        total_children = sum(len(v) for v in merge_info.values())
+                        log(f"   🔗 Found {len(merge_info)} parent chapters with {total_children} merged children")
                 except Exception as e:
                     log(f"   ⚠️ Could not load merge info: {e}")
         else:
