@@ -1734,44 +1734,21 @@ class RetranslationMixin:
             
             # Find matching progress entry
             matched_info = None
+            
+            # PRIORITY 1: Try to match by actual_num first (most reliable for merged chapters)
+            # This prevents merged chapters from matching the parent's entry by output_file
             for chapter_key, chapter_info in data['prog'].get("chapters", {}).items():
-                if chapter_info.get('output_file') == output_file:
+                actual_num = chapter_info.get('actual_num') or chapter_info.get('chapter_num')
+                if actual_num is not None and actual_num == info['num']:
                     matched_info = chapter_info
                     break
             
-            # If no match by output_file, try matching by chapter number,
-            # but avoid conflating different files that share the same numeric chapter.
+            # PRIORITY 2: Fall back to output_file matching if no actual_num match
             if not matched_info:
                 for chapter_key, chapter_info in data['prog'].get("chapters", {}).items():
-                    actual_num = chapter_info.get('actual_num') or chapter_info.get('chapter_num')
-                    if actual_num is not None and actual_num == info['num']:
-                        status = chapter_info.get('status', '')
-                        out_file = chapter_info.get('output_file')
-                        orig_base = os.path.basename(chapter_info.get('original_basename', '') or '')
-                        target_filename = info.get('original_filename') or ''
-                        
-                        # Merged chapters: match by actual_num if parent is completed
-                        if status == 'merged':
-                            parent_num = chapter_info.get('merged_parent_chapter')
-                            if parent_num is not None:
-                                parent_key = str(parent_num)
-                                if parent_key in data['prog'].get("chapters", {}):
-                                    parent_info = data['prog']["chapters"][parent_key]
-                                    if parent_info.get('status') == 'completed':
-                                        matched_info = chapter_info
-                                        break
-                            continue
-                        
-                        # In-progress chapters: match by actual_num (they have null output_file)
-                        if status == 'in_progress' and not out_file:
-                            matched_info = chapter_info
-                            break
-                        
-                        # Accept match only if the original_basename matches the OPF filename,
-                        # or, when missing, if the output_file matches the current entry's output file.
-                        if (orig_base and orig_base == target_filename) or (not orig_base and out_file and out_file == info['output_file']):
-                            matched_info = chapter_info
-                            break
+                    if chapter_info.get('output_file') == output_file:
+                        matched_info = chapter_info
+                        break
             
             # Update status based on current state from progress file
             if matched_info:
@@ -1779,13 +1756,28 @@ class RetranslationMixin:
                 # Handle completed_empty as completed for display
                 if new_status == 'completed_empty':
                     new_status = 'completed'
-                # Verify file actually exists for completed status
+                # Verify file actually exists for completed status (but NOT for merged - merged chapters
+                # don't have their own output files, they point to parent's file)
                 if new_status == 'completed' and not os.path.exists(output_path):
                     new_status = 'file_missing'
                 info['status'] = new_status
                 info['info'] = matched_info
             elif os.path.exists(output_path):
-                info['status'] = 'completed'
+                # Before marking as completed based on file existence, check if this chapter
+                # is actually marked as merged in the progress file (by actual_num lookup)
+                # This handles the case where old output files exist from before merging was enabled
+                is_merged_chapter = False
+                for chapter_key, chapter_info in data['prog'].get("chapters", {}).items():
+                    actual_num = chapter_info.get('actual_num') or chapter_info.get('chapter_num')
+                    if actual_num is not None and actual_num == info['num']:
+                        if chapter_info.get('status') == 'merged':
+                            is_merged_chapter = True
+                            info['status'] = 'merged'
+                            info['info'] = chapter_info
+                            break
+                
+                if not is_merged_chapter:
+                    info['status'] = 'completed'
             else:
                 info['status'] = 'not_translated'
     
