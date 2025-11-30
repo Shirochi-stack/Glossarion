@@ -1157,14 +1157,14 @@ class ProgressManager:
         
         self.prog["chapters"][chapter_key] = chapter_info
     
-    def mark_as_merged(self, idx, actual_num, content_hash, parent_chapter_num, chapter_obj=None):
+    def mark_as_merged(self, idx, actual_num, content_hash, parent_chapter_num, chapter_obj=None, parent_output_file=None):
         """Mark a chapter as merged into a parent chapter"""
         chapter_key = self._get_chapter_key(actual_num, output_file=None, chapter_obj=chapter_obj, content_hash=content_hash)
         
         self.prog["chapters"][chapter_key] = {
             "actual_num": actual_num,
             "content_hash": content_hash,
-            "output_file": None,
+            "output_file": parent_output_file,  # Point to parent's output file
             "status": "merged",
             "merged_parent_chapter": parent_chapter_num,
             "last_updated": time.time()
@@ -3198,7 +3198,7 @@ class BatchTranslationProcessor:
             # Mark parent chapter as completed with merged_chapters list
             with self.progress_lock:
                 self.update_progress_fn(
-                    parent_idx, parent_actual_num, parent_content_hash, fname,
+                    parent_idx, parent_actual_num, parent_content_hash, saved_name,
                     status="completed",
                     merged_chapters=merged_child_nums
                 )
@@ -3207,10 +3207,10 @@ class BatchTranslationProcessor:
             
             results.append((True, parent_actual_num, merged_content, merged_response, raw_obj))
             
-            # Mark child chapters as merged (no separate files)
+            # Mark child chapters as merged (point to parent's output file)
             for actual_num, _, idx, chapter, content_hash in chapters_data[1:]:
                 with self.progress_lock:
-                    progress_manager.mark_as_merged(idx, actual_num, content_hash, parent_actual_num, chapter)
+                    progress_manager.mark_as_merged(idx, actual_num, content_hash, parent_actual_num, chapter, parent_output_file=saved_name)
                     self.save_progress_fn()
                     self.chapters_completed += 1
                 results.append((True, actual_num, None, None, None))

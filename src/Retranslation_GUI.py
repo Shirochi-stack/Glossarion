@@ -1002,12 +1002,13 @@ class RetranslationMixin:
             lbl_completed.setStyleSheet("color: green;")
             stats_layout.addWidget(lbl_completed)
             
-            # Merged: chapters combined into parent request
-            if merged > 0:
-                lbl_merged = QLabel(f"🔗 Merged: {merged} | ")
-                lbl_merged.setFont(stats_font)
-                lbl_merged.setStyleSheet("color: #17a2b8;")  # Cyan/teal
-                stats_layout.addWidget(lbl_merged)
+            # Merged: chapters combined into parent request (always create, hide if 0)
+            lbl_merged = QLabel(f"🔗 Merged: {merged} | ")
+            lbl_merged.setFont(stats_font)
+            lbl_merged.setStyleSheet("color: #17a2b8;")  # Cyan/teal
+            stats_layout.addWidget(lbl_merged)
+            if merged == 0:
+                lbl_merged.setVisible(False)
             
             # Not Translated: unique emoji/color (distinct from failures)
             lbl_missing = QLabel(f"⬜ Not Translated: {missing} | ")
@@ -1729,16 +1730,18 @@ class RetranslationMixin:
         # Status icons and labels
         status_icons = {
             'completed': '✅',
+            'merged': '🔗',
             'failed': '❌',
             'qa_failed': '❌',
             'file_missing': '⚠️',
             'in_progress': '🔄',
-'not_translated': '⬜',
+            'not_translated': '⬜',
             'unknown': '❓'
         }
         
         status_labels = {
             'completed': 'Completed',
+            'merged': 'Merged',
             'failed': 'Failed',
             'qa_failed': 'QA Failed',
             'file_missing': 'File Missing',
@@ -1801,6 +1804,13 @@ class RetranslationMixin:
                         issues_display += f' (+{len(qa_issues)-2} more)'
                     display += f" | {issues_display}"
             
+            # Add parent chapter info if status is merged
+            if status == 'merged':
+                chapter_info = info.get('info', {})
+                parent_chapter = chapter_info.get('merged_parent_chapter')
+                if parent_chapter:
+                    display += f" | → Ch.{parent_chapter}"
+            
             if info.get('duplicate_count', 1) > 1:
                 display += f" | ({info['duplicate_count']} entries)"
             
@@ -1811,6 +1821,8 @@ class RetranslationMixin:
             # Color code based on status
             if status == 'completed':
                 item.setForeground(QColor('green'))
+            elif status == 'merged':
+                item.setForeground(QColor('#17a2b8'))  # Cyan/teal for merged
             elif status in ['failed', 'qa_failed']:
                 item.setForeground(QColor('red'))
             elif status == 'not_translated':
@@ -1841,6 +1853,8 @@ class RetranslationMixin:
                             labels['total'] = child
                         elif text.startswith('✅ Completed:'):
                             labels['completed'] = child
+                        elif text.startswith('🔗 Merged:'):
+                            labels['merged'] = child
                         elif text.startswith('⬜ Not Translated:'):
                             labels['missing'] = child
                         elif text.startswith('❌ Failed:'):
@@ -1859,6 +1873,7 @@ class RetranslationMixin:
             spine_chapters = data['spine_chapters']
             total_chapters = len(spine_chapters)
             completed = sum(1 for info in data['chapter_display_info'] if info['status'] == 'completed')
+            merged = sum(1 for info in data['chapter_display_info'] if info['status'] == 'merged')
             missing = sum(1 for info in data['chapter_display_info'] if info['status'] == 'not_translated')
             failed = sum(1 for info in data['chapter_display_info'] if info['status'] in ['failed', 'qa_failed'])
             file_missing = sum(1 for info in data['chapter_display_info'] if info['status'] == 'file_missing')
@@ -1868,6 +1883,12 @@ class RetranslationMixin:
                 stats_labels['total'].setText(f"Total: {total_chapters} | ")
             if 'completed' in stats_labels:
                 stats_labels['completed'].setText(f"✅ Completed: {completed} | ")
+            if 'merged' in stats_labels:
+                if merged > 0:
+                    stats_labels['merged'].setText(f"🔗 Merged: {merged} | ")
+                    stats_labels['merged'].setVisible(True)
+                else:
+                    stats_labels['merged'].setVisible(False)
             if 'missing' in stats_labels:
                 stats_labels['missing'].setText(f"⬜ Not Translated: {missing} | ")
             if 'failed' in stats_labels:
