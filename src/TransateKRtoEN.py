@@ -112,6 +112,8 @@ class TranslationConfig:
         self.EMERGENCY_RESTORE = os.getenv("EMERGENCY_PARAGRAPH_RESTORE", "1") == "1"
         self.BATCH_TRANSLATION = os.getenv("BATCH_TRANSLATION", "0") == "1"  
         self.BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10"))
+        self.REQUEST_MERGING_ENABLED = os.getenv("REQUEST_MERGING_ENABLED", "0") == "1"
+        self.REQUEST_MERGE_COUNT = int(os.getenv("REQUEST_MERGE_COUNT", "3"))
         self.ENABLE_IMAGE_TRANSLATION = os.getenv("ENABLE_IMAGE_TRANSLATION", "1") == "1"
         self.TRANSLATE_BOOK_TITLE = os.getenv("TRANSLATE_BOOK_TITLE", "1") == "1"
         self.DISABLE_ZERO_DETECTION = os.getenv("DISABLE_ZERO_DETECTION", "0") == "1"
@@ -218,6 +220,95 @@ class TranslationConfig:
             effective = min(effective, min(per_key_limits))
 
         return effective
+
+
+# =====================================================
+# REQUEST MERGING UTILITIES
+# =====================================================
+class RequestMerger:
+    """Handles merging multiple chapters into a single request and splitting responses"""
+    
+    # Separator format for merged chapters
+    START_SEPARATOR = "<!-- ==== MERGED_CHAPTER_START: {chapter_num} ==== -->"
+    END_SEPARATOR = "<!-- ==== MERGED_CHAPTER_END: {chapter_num} ==== -->"
+    
+    @classmethod
+    def merge_chapters(cls, chapters_data):
+        """
+        Merge multiple chapters into a single content block with separators.
+        
+        Args:
+            chapters_data: List of tuples (chapter_num, content, chapter_obj)
+            
+        Returns:
+            Merged content string with separators
+        """
+        if not chapters_data:
+            return ""
+        
+        merged_parts = []
+        for chapter_num, content, chapter_obj in chapters_data:
+            start_sep = cls.START_SEPARATOR.format(chapter_num=chapter_num)
+            end_sep = cls.END_SEPARATOR.format(chapter_num=chapter_num)
+            merged_parts.append(f"{start_sep}\n{content}\n{end_sep}")
+        
+        return "\n\n".join(merged_parts)
+    
+    @classmethod
+    def split_response(cls, merged_response, expected_chapters):
+        """
+        Split a merged response back into individual chapter contents.
+        
+        Args:
+            merged_response: The translated merged content
+            expected_chapters: List of expected chapter numbers
+            
+        Returns:
+            Dict mapping chapter_num -> translated_content
+        """
+        result = {}
+        
+        for chapter_num in expected_chapters:
+            start_sep = cls.START_SEPARATOR.format(chapter_num=chapter_num)
+            end_sep = cls.END_SEPARATOR.format(chapter_num=chapter_num)
+            
+            start_idx = merged_response.find(start_sep)
+            end_idx = merged_response.find(end_sep)
+            
+            if start_idx != -1 and end_idx != -1:
+                # Extract content between separators
+                content_start = start_idx + len(start_sep)
+                content = merged_response[content_start:end_idx].strip()
+                result[chapter_num] = content
+            else:
+                # Separator not found - log warning
+                print(f"⚠️ Could not find separators for chapter {chapter_num} in merged response")
+                result[chapter_num] = None
+        
+        return result
+    
+    @classmethod
+    def create_merge_groups(cls, chapters_to_translate, merge_count):
+        """
+        Group chapters into merge groups.
+        
+        Args:
+            chapters_to_translate: List of (idx, chapter_obj) tuples
+            merge_count: Number of chapters to merge per request
+            
+        Returns:
+            List of merge groups, each group is a list of (idx, chapter_obj) tuples
+        """
+        if merge_count <= 1:
+            # No merging, return each chapter as its own group
+            return [[ch] for ch in chapters_to_translate]
+        
+        groups = []
+        for i in range(0, len(chapters_to_translate), merge_count):
+            group = chapters_to_translate[i:i + merge_count]
+            groups.append(group)
+        
+        return groups
 
 
 # =====================================================
@@ -1061,6 +1152,26 @@ class ProgressManager:
             chapter_info["ai_features"] = self.prog["chapters"][chapter_key]["ai_features"]
         
         self.prog["chapters"][chapter_key] = chapter_info
+    
+    def mark_as_merged(self, actual_num, parent_chapter_num, content_hash=None, chapter_obj=None):
+        """Mark a chapter as merged into a parent chapter"""
+        chapter_key = self._get_chapter_key(actual_num, output_file=None, chapter_obj=chapter_obj, content_hash=content_hash)
+        
+        self.prog["chapters"][chapter_key] = {
+            "actual_num": actual_num,
+            "content_hash": content_hash,
+            "output_file": None,
+            "status": "merged",
+            "merged_parent_chapter": parent_chapter_num,
+            "last_updated": time.time()
+        }
+    
+    def update_merged_chapters_list(self, parent_chapter_num, merged_chapter_nums, parent_content_hash=None, parent_chapter_obj=None):
+        """Update the parent chapter to track which chapters were merged into it"""
+        chapter_key = self._get_chapter_key(parent_chapter_num, output_file=None, chapter_obj=parent_chapter_obj, content_hash=parent_content_hash)
+        
+        if chapter_key in self.prog["chapters"]:
+            self.prog["chapters"][chapter_key]["merged_chapters"] = merged_chapter_nums
         
     def check_chapter_status(self, chapter_idx, actual_num, content_hash, output_dir, chapter_obj=None):
         """Check if a chapter needs translation"""
@@ -1076,6 +1187,11 @@ class ProgressManager:
             # Failed statuses ALWAYS trigger retranslation
             if status in ["qa_failed", "failed", "error", "file_missing"]:
                 return True, None, None
+            
+            # Merged status - skip translation, content is in parent chapter
+            if status == "merged":
+                parent_chapter = chapter_info.get("merged_parent_chapter")
+                return False, f"Chapter {actual_num} merged into chapter {parent_chapter}", None
             
             # Completed - check file exists
             if status in ["completed", "completed_empty", "completed_image_only"]:
@@ -5888,8 +6004,16 @@ def main(log_callback=None, stop_callback=None):
     current_chunk_number = 0
 
     if config.BATCH_TRANSLATION:
-        print(f"\n📦 PARALLEL TRANSLATION MODE ENABLED")
-        print(f"📦 Processing chapters with up to {config.BATCH_SIZE} concurrent API calls")
+        # Check if request merging is enabled - if so, fall back to sequential mode
+        if config.REQUEST_MERGING_ENABLED and config.REQUEST_MERGE_COUNT > 1:
+            print(f"\n🔗 REQUEST MERGING is enabled with batch mode")
+            print(f"🔗 Falling back to sequential processing for merged requests")
+            print(f"🔗 Merging {config.REQUEST_MERGE_COUNT} chapters per API request")
+            # Force sequential mode - the non-batch section below handles merging
+            config.BATCH_TRANSLATION = False
+        else:
+            print(f"\n📦 PARALLEL TRANSLATION MODE ENABLED")
+            print(f"📦 Processing chapters with up to {config.BATCH_SIZE} concurrent API calls")
         
         import concurrent.futures
         from threading import Lock
@@ -6271,9 +6395,97 @@ def main(log_callback=None, stop_callback=None):
                     c['actual_chapter_num'] = raw_num
                     c['zero_adjusted'] = False
 
+        # Request merging preprocessing
+        merge_groups = {}  # Maps parent_idx -> list of child (idx, chapter) tuples
+        merged_children = set()  # Set of idx that are merged into another chapter
+        
+        if config.REQUEST_MERGING_ENABLED and config.REQUEST_MERGE_COUNT > 1:
+            print(f"\n🔗 REQUEST MERGING ENABLED: Combining up to {config.REQUEST_MERGE_COUNT} chapters per request")
+            
+            # Collect chapters that need translation
+            chapters_needing_translation = []
+            for idx, c in enumerate(chapters):
+                if (is_text_file and c.get('is_chunk', False) and isinstance(c['num'], float)):
+                    actual_num = c['num']
+                else:
+                    actual_num = c.get('actual_chapter_num', c['num'])
+                content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
+                
+                # Skip special files (chapter 0) if translation is disabled
+                raw_num = c.get('raw_chapter_num', FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config))
+                if not translate_special and raw_num == 0:
+                    name = c.get('original_basename') or os.path.basename(c.get('filename', ''))
+                    name_noext = os.path.splitext(name)[0] if name else ''
+                    has_digits_in_name = bool(re.search(r'\d', name_noext))
+                    if not has_digits_in_name:
+                        continue
+                
+                if start is not None and not (start <= actual_num <= end):
+                    continue
+                
+                needs_translation, skip_reason, existing_file = progress_manager.check_chapter_status(
+                    idx, actual_num, content_hash, out, c
+                )
+                
+                # Check file exists
+                if not needs_translation and existing_file:
+                    file_path = os.path.join(out, existing_file)
+                    if not os.path.exists(file_path):
+                        needs_translation = True
+                
+                # Skip empty/image-only chapters from merging
+                has_images = c.get('has_images', False)
+                has_meaningful_text = ContentProcessor.is_meaningful_text_content(c["body"])
+                text_size = c.get('file_size', 0)
+                is_empty_chapter = (not has_images and text_size < 1)
+                is_image_only_chapter = (has_images and not has_meaningful_text)
+                
+                if needs_translation and not is_empty_chapter and not is_image_only_chapter:
+                    chapters_needing_translation.append((idx, c, actual_num, content_hash))
+            
+            # Create merge groups
+            groups = RequestMerger.create_merge_groups(
+                chapters_needing_translation, 
+                config.REQUEST_MERGE_COUNT
+            )
+            
+            for group in groups:
+                if len(group) > 1:
+                    parent_idx = group[0][0]  # First chapter in group is the parent
+                    parent_actual_num = group[0][2]
+                    merge_groups[parent_idx] = []
+                    
+                    for i, (idx, c, actual_num, content_hash) in enumerate(group):
+                        if i == 0:
+                            # Parent chapter - store list of all chapters in group for merging
+                            merge_groups[parent_idx] = group
+                        else:
+                            # Child chapter - mark as merged
+                            merged_children.add(idx)
+                            # Mark in progress file
+                            progress_manager.mark_as_merged(actual_num, parent_actual_num, content_hash, c)
+                    
+                    child_nums = [g[2] for g in group[1:]]
+                    print(f"   📎 Chapters {parent_actual_num} + {child_nums} will be merged into one request")
+            
+            progress_manager.save()
+            print(f"   📊 Created {len(merge_groups)} merge groups from {len(chapters_needing_translation)} chapters")
+
         # Second pass: process chapters
         for idx, c in enumerate(chapters):
             chap_num = c["num"]
+            
+            # Skip if this chapter was merged into another
+            if idx in merged_children:
+                if (is_text_file and c.get('is_chunk', False) and isinstance(c['num'], float)):
+                    actual_num = c['num']
+                else:
+                    actual_num = c.get('actual_chapter_num', c['num'])
+                is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
+                terminology = "Section" if is_text_source else "Chapter"
+                print(f"\n⏭️ Skipping {terminology} {actual_num} (merged into parent)")
+                chapters_completed += 1
+                continue
             
             # Check if this is a pre-split text chunk with decimal number
             if (is_text_file and c.get('is_chunk', False) and isinstance(c['num'], float)):
@@ -6332,6 +6544,9 @@ def main(log_callback=None, stop_callback=None):
             print(f"\n🔄 Processing #{idx+1}/{total_chapters} (Actual: {terminology} {actual_num}) ({chapter_position} to translate): {c['title']} [File: {file_ref}]")
 
             chunk_context_manager.start_chapter(chap_num, c['title'])
+            
+            # Initialize merge_info for this chapter (will be populated if this is a parent in a merge group)
+            merge_info = None
             
             has_images = c.get('has_images', False)
             has_meaningful_text = ContentProcessor.is_meaningful_text_content(c["body"])
@@ -6524,6 +6739,34 @@ def main(log_callback=None, stop_callback=None):
                 print(f"📖 Translating text content ({text_size} characters)")
                 progress_manager.update(idx, actual_num, content_hash, output_file=None, status="in_progress", chapter_obj=c)
                 progress_manager.save()
+                
+                # REQUEST MERGING: If this is a parent chapter, merge content from child chapters
+                merge_info = None  # Will store info for response splitting
+                if idx in merge_groups:
+                    group = merge_groups[idx]
+                    if len(group) > 1:
+                        print(f"\n🔗 MERGING {len(group)} chapters into single request...")
+                        
+                        # Build merged content with separators
+                        chapters_data = []
+                        for g_idx, g_chapter, g_actual_num, g_content_hash in group:
+                            chapters_data.append((g_actual_num, g_chapter["body"], g_chapter))
+                            if g_idx != idx:  # Don't print for parent
+                                print(f"   → Including chapter {g_actual_num}")
+                        
+                        # Merge the content
+                        original_body = c["body"]  # Save original for later
+                        c["body"] = RequestMerger.merge_chapters(chapters_data)
+                        
+                        # Store merge info for response splitting
+                        merge_info = {
+                            'group': group,
+                            'expected_chapters': [g[2] for g in group],  # actual_nums
+                            'original_body': original_body
+                        }
+                        
+                        merged_char_count = len(c["body"])
+                        print(f"   📊 Merged content: {merged_char_count:,} characters")
 
                 # Apply ignore filtering to the content before chunk splitting
                 batch_translate_active = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
@@ -7086,7 +7329,70 @@ def main(log_callback=None, stop_callback=None):
                 # Update cleaned with the merged content
                 cleaned = str(soup_translated)
                 print(f"✅ Successfully merged image translations")
+            
+            # REQUEST MERGING: If this was a merged request, split response and save individual files
+            if merge_info is not None:
+                print(f"\n🔀 SPLITTING merged response into individual chapter files...")
                 
+                # Split the response
+                split_results = RequestMerger.split_response(cleaned, merge_info['expected_chapters'])
+                
+                # Save individual files for each chapter in the merge group
+                for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
+                    chapter_content = split_results.get(g_actual_num)
+                    
+                    if chapter_content is None:
+                        print(f"   ⚠️ Could not extract chapter {g_actual_num} from merged response")
+                        # Mark as failed
+                        progress_manager.update(g_idx, g_actual_num, g_content_hash, None, status="failed", chapter_obj=g_chapter)
+                        continue
+                    
+                    # Create filename for this chapter
+                    g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
+                    
+                    # Clean the individual chapter content
+                    g_cleaned = ContentProcessor.clean_ai_artifacts(chapter_content, remove_artifacts=config.REMOVE_AI_ARTIFACTS)
+                    
+                    if is_text_file:
+                        # For text files, save as plain text
+                        g_fname_txt = g_fname.replace('.html', '.txt')
+                        from bs4 import BeautifulSoup
+                        soup = BeautifulSoup(g_cleaned, 'html.parser')
+                        text_content = soup.get_text(strip=True)
+                        
+                        with open(os.path.join(out, g_fname_txt), 'w', encoding='utf-8') as f:
+                            f.write(text_content)
+                        
+                        print(f"   ✅ Saved chapter {g_actual_num}: {g_fname_txt}")
+                    else:
+                        # For EPUB files, save as HTML
+                        with open(os.path.join(out, g_fname), 'w', encoding='utf-8') as f:
+                            f.write(g_cleaned)
+                        
+                        print(f"   ✅ Saved chapter {g_actual_num}: {g_fname}")
+                    
+                    # Determine status
+                    if is_qa_failed_response(g_cleaned):
+                        g_status = "qa_failed"
+                        print(f"   ⚠️ Chapter {g_actual_num} marked as qa_failed")
+                    else:
+                        g_status = "completed"
+                    
+                    # Update progress for this chapter
+                    progress_manager.update(g_idx, g_actual_num, g_content_hash, g_fname if not is_text_file else g_fname.replace('.html', '.txt'), status=g_status, chapter_obj=g_chapter)
+                    
+                    # Update merged_chapters list on parent
+                    if g_idx == idx:  # This is the parent
+                        merged_child_nums = [g[2] for g in merge_info['group'][1:]]  # All except parent
+                        progress_manager.update_merged_chapters_list(g_actual_num, merged_child_nums, g_content_hash, g_chapter)
+                    
+                    chapters_completed += 1
+                
+                progress_manager.save()
+                print(f"   📊 Split and saved {len(merge_info['group'])} chapters from merged response")
+                
+                # Skip normal save since we handled it above
+                continue
 
             if is_text_file:
                 # For text files, save as plain text instead of HTML

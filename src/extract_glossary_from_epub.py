@@ -876,6 +876,8 @@ def load_progress() -> Dict:
                     data["completed"] = []
                 if "glossary" not in data:
                     data["glossary"] = []
+                if "merged_indices" not in data:
+                    data["merged_indices"] = []  # Track which chapters were merged into others
                 
                 # Filter text from _raw_content_object in existing history to avoid duplication
                 # This cleans up history that was saved before we added filtering
@@ -929,7 +931,7 @@ def load_progress() -> Dict:
         except Exception as e:
             print(f"[Warning] Error loading progress file: {e}")
             return {"completed": [], "glossary": [], "context_history": []}
-    return {"completed": [], "glossary": [], "context_history": []}
+    return {"completed": [], "glossary": [], "context_history": [], "merged_indices": []}
 
 def parse_api_response(response_text: str) -> List[Dict]:
     """Parse API response to extract glossary entries - handles custom types"""
@@ -2139,6 +2141,14 @@ def main(log_callback=None, stop_callback=None):
     prog = load_progress()
     completed = prog['completed']
     glossary = prog['glossary']
+    merged_indices = prog.get('merged_indices', [])
+    
+    # Request merging configuration
+    request_merging_enabled = os.getenv('REQUEST_MERGING_ENABLED', '0') == '1'
+    request_merge_count = int(os.getenv('REQUEST_MERGE_COUNT', '3'))
+    
+    if request_merging_enabled and request_merge_count > 1:
+        print(f"\n🔗 REQUEST MERGING ENABLED: Combining up to {request_merge_count} chapters per request")
     
     # Get both settings
     contextual_enabled = os.getenv('CONTEXTUAL', '1') == '1'
@@ -2169,6 +2179,11 @@ def main(log_callback=None, stop_callback=None):
     chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "900"))  # 15 minutes default
     
     # Process chapters based on mode
+    # If request merging is enabled, fall back to sequential mode
+    if request_merging_enabled and request_merge_count > 1 and batch_enabled:
+        print(f"🔗 Falling back to sequential mode for merged requests")
+        batch_enabled = False
+    
     if batch_enabled and len(chapters_to_process) > 0:
         # BATCH MODE: Process in batches with per-entry saving
         total_batches = (len(chapters_to_process) + batch_size - 1) // batch_size
@@ -2485,11 +2500,53 @@ def main(log_callback=None, stop_callback=None):
     
     else:
         # SEQUENTIAL MODE: Original behavior
+        
+        # Request merging preprocessing
+        merge_groups = {}  # Maps parent_idx -> list of child indices
+        
+        if request_merging_enabled and request_merge_count > 1:
+            # Collect chapters that need processing (not completed, not merged)
+            chapters_needing_processing = []
+            for idx, chap in enumerate(chapters):
+                # Skip if already completed or merged
+                if idx in completed or idx in merged_indices:
+                    continue
+                
+                # Apply chapter range filter
+                if range_start is not None and range_end is not None:
+                    chapter_num = idx + 1
+                    if not (range_start <= chapter_num <= range_end):
+                        continue
+                
+                chapters_needing_processing.append((idx, chap))
+            
+            # Create merge groups
+            for i in range(0, len(chapters_needing_processing), request_merge_count):
+                group = chapters_needing_processing[i:i + request_merge_count]
+                if len(group) > 1:
+                    parent_idx = group[0][0]
+                    merge_groups[parent_idx] = group
+                    child_indices = [g[0] for g in group[1:]]
+                    print(f"   📎 Chapters {parent_idx+1} + {[c+1 for c in child_indices]} will be merged")
+                    # Mark child indices as merged
+                    for child_idx in child_indices:
+                        if child_idx not in merged_indices:
+                            merged_indices.append(child_idx)
+            
+            if merge_groups:
+                save_progress(completed, glossary, merged_indices)
+                print(f"   📊 Created {len(merge_groups)} merge groups")
+        
         for idx, chap in enumerate(chapters):
             # Check for stop at the beginning of each chapter
             if check_stop():
                 print(f"❌ Glossary extraction stopped at chapter {idx+1}")
                 return
+            
+            # Skip if this chapter was merged into another
+            if idx in merged_indices:
+                print(f"⏭️ Skipping chapter {idx+1} (merged into parent)")
+                continue
             
             # Apply chapter range filter
             if range_start is not None and range_end is not None:
@@ -2512,13 +2569,30 @@ def main(log_callback=None, stop_callback=None):
                     
             print(f"🔄 Processing Chapter {idx+1}/{total_chapters}")
             
+            # Request merging: If this is a parent chapter, merge content from child chapters
+            chapter_content = chap
+            if idx in merge_groups:
+                group = merge_groups[idx]
+                print(f"\n🔗 MERGING {len(group)} chapters into single request...")
+                merged_contents = []
+                for g_idx, g_chap in group:
+                    # Add separator for merged content
+                    separator_start = f"<!-- ==== MERGED_CHAPTER_START: {g_idx+1} ==== -->"
+                    separator_end = f"<!-- ==== MERGED_CHAPTER_END: {g_idx+1} ==== -->"
+                    merged_contents.append(f"{separator_start}\n{g_chap}\n{separator_end}")
+                    if g_idx != idx:
+                        print(f"   → Including chapter {g_idx+1}")
+                
+                chapter_content = "\n\n".join(merged_contents)
+                print(f"   📊 Merged content: {len(chapter_content):,} characters")
+            
             # Check if history will reset on this chapter
             if contextual_enabled and len(history) >= ctx_limit and ctx_limit > 0 and not rolling_window:
                 print(f"  📌 Glossary context will reset after this chapter (current: {len(history)}/{ctx_limit} chapters)")        
 
             try:
                 # Get system and user prompts from build_prompt
-                system_prompt, user_prompt = build_prompt(chap)
+                system_prompt, user_prompt = build_prompt(chapter_content)
                 
                 if not contextual_enabled:
                     # No context at all
@@ -2998,6 +3072,13 @@ def main(log_callback=None, stop_callback=None):
                 glossary.extend(data)
                 glossary[:] = skip_duplicate_entries(glossary)
                 completed.append(idx)
+                
+                # If this was a merged request, also mark child chapters as completed
+                if idx in merge_groups:
+                    for g_idx, _ in merge_groups[idx]:
+                        if g_idx != idx and g_idx not in completed:
+                            completed.append(g_idx)
+                            print(f"   ✅ Marked chapter {g_idx+1} as completed (merged)")
 
                 # Only add to history if contextual is enabled
                 if contextual_enabled:
@@ -3101,7 +3182,7 @@ def main(log_callback=None, stop_callback=None):
     except Exception as e:
         print(f"[Warning] Could not save CSV format: {e}")
 
-def save_progress(completed: List[int], glossary: List[Dict]):
+def save_progress(completed: List[int], glossary: List[Dict], merged_indices: List[int] = None):
     """Save progress to JSON file (history is now managed separately)"""
     global _progress_lock
     
@@ -3112,6 +3193,10 @@ def save_progress(completed: List[int], glossary: List[Dict]):
             "glossary": glossary
             # History is now managed separately by HistoryManager
         }
+        
+        # Add merged_indices if provided
+        if merged_indices is not None:
+            progress_data["merged_indices"] = merged_indices
         
         try:
             # Use atomic write with proper temp file handling

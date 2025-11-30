@@ -747,6 +747,9 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.remove_ai_artifacts = os.getenv("REMOVE_AI_ARTIFACTS", "0") == "1"
         print(f"   🎨 Remove AI Artifacts: {'ENABLED' if self.remove_ai_artifacts else 'DISABLED'}")
         self.disable_chapter_merging_var = self.config.get('disable_chapter_merging', True)
+        # Request merging - combine multiple chapters into single API request
+        self.request_merging_enabled_var = self.config.get('request_merging_enabled', False)
+        self.request_merge_count_var = str(self.config.get('request_merge_count', 3))
         self.selected_files = []
         self.current_file_index = 0
         self.use_gemini_openai_endpoint_var = self.config.get('use_gemini_openai_endpoint', False)
@@ -8862,6 +8865,9 @@ Important rules:
                 ('single_api_image_chunks', ['single_api_image_chunks_var'], False, bool),
                 ('use_custom_openai_endpoint', ['use_custom_openai_endpoint_var'], False, bool),
                 ('disable_chapter_merging', ['disable_chapter_merging_var'], False, bool),
+                # Request merging settings
+                ('request_merging_enabled', ['request_merging_enabled_var'], False, bool),
+                ('request_merge_count', ['request_merge_count_var'], 3, lambda v: safe_int(v, 3)),
                 ('use_gemini_openai_endpoint', ['use_gemini_openai_endpoint_var'], False, bool),
                 ('use_fallback_keys', ['use_fallback_keys_var'], False, bool),
                 ('auto_update_check', ['auto_update_check_var'], True, bool),
@@ -9701,6 +9707,9 @@ Important rules:
                 # Safety/merge toggles
                 ('EMERGENCY_PARAGRAPH_RESTORE', '1' if getattr(self, 'emergency_restore_var', False) else '0'),
                 ('DISABLE_CHAPTER_MERGING', '1' if getattr(self, 'disable_chapter_merging_var', False) else '0'),
+                # Request merging (combine multiple chapters into single API request)
+                ('REQUEST_MERGING_ENABLED', '1' if getattr(self, 'request_merging_enabled_var', False) else '0'),
+                ('REQUEST_MERGE_COUNT', str(getattr(self, 'request_merge_count_var', '3'))),
 
                 # Image translation controls
                 ('ENABLE_IMAGE_TRANSLATION', '1' if getattr(self, 'enable_image_translation_var', False) else '0'),

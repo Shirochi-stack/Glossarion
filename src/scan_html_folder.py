@@ -3738,11 +3738,19 @@ def detect_multiple_headers(html_content):
     
     return False, len(headers), []
 
-def cross_reference_word_counts(original_counts, translated_file, translated_text, log=print):
+def cross_reference_word_counts(original_counts, translated_file, translated_text, log=print, merge_info=None):
     """Cross-reference word counts between original and translated files.
     
     Matches translated files to original EPUB chapters by filename.
     Handles response_ prefix and ignores file extensions.
+    
+    Args:
+        original_counts: Dict of chapter word counts from original EPUB
+        translated_file: Filename of the translated file
+        translated_text: Text content of the translated file
+        log: Logging function
+        merge_info: Dict with merged_chapters info from translation_progress.json
+                   Format: {parent_chapter_num: [list of merged child chapter nums]}
     """
     basename = os.path.basename(translated_file)
     # Remove extension for matching (don't consider .html, .xhtml, .htm, etc.)
@@ -3761,6 +3769,17 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
         if search_name.lower() == epub_filename.lower():
             original_wc = count_info['word_count']
             is_cjk = count_info.get('is_cjk', True)
+            
+            # REQUEST MERGING: If this chapter has merged children, combine word counts
+            if merge_info and spine_idx in merge_info:
+                merged_children = merge_info[spine_idx]
+                original_wc_base = original_wc
+                for child_num in merged_children:
+                    if child_num in original_counts:
+                        original_wc += original_counts[child_num]['word_count']
+                if merged_children:
+                    log(f"   🔗 Merged chapter {spine_idx}: combining word counts from {len(merged_children)} child chapters")
+                    log(f"      Base: {original_wc_base}, Combined: {original_wc}")
             
             # Count words in translated text
             translated_wc = len(translated_text.split())
@@ -3866,6 +3885,13 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
         original_wc = original_counts[chapter_num]['word_count']
         is_cjk = original_counts[chapter_num].get('is_cjk', True)  # Get CJK flag if available
         
+        # REQUEST MERGING: If this chapter has merged children, combine word counts
+        if merge_info and chapter_num in merge_info:
+            merged_children = merge_info[chapter_num]
+            for child_num in merged_children:
+                if child_num in original_counts:
+                    original_wc += original_counts[child_num]['word_count']
+        
         # Count words in translated text
         translated_wc = len(translated_text.split())
         
@@ -3940,7 +3966,7 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
 
 def process_html_file_batch(args):
     """Process a batch of HTML files - MUST BE AT MODULE LEVEL"""
-    file_batch, folder_path, qa_settings, mode, original_word_counts = args
+    file_batch, folder_path, qa_settings, mode, original_word_counts, merge_info = args
     batch_results = []
     
     # Import what we need inside the worker
@@ -4073,7 +4099,8 @@ def process_html_file_batch(args):
                 original_word_counts, 
                 filename, 
                 raw_text,
-                dummy_log
+                dummy_log,
+                merge_info
             )
             
             if wc_result['found_match']:
@@ -4215,12 +4242,35 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     
     # Extract word counts from original EPUB if needed
     original_word_counts = {}
+    merge_info = {}  # For request merging support
     if check_word_count:
         if epub_path and os.path.exists(epub_path):
             log(f"📚 Extracting word counts from original EPUB: {os.path.basename(epub_path)}")
             min_length = qa_settings.get('min_file_length', 0)
             original_word_counts = extract_epub_word_counts(epub_path, log, min_file_length=min_length)
             log(f"   Found word counts for {len(original_word_counts)} chapters (min length: {min_length} chars)")
+            
+            # Load merge info from translation_progress.json for request merging support
+            progress_file = os.path.join(folder_path, 'translation_progress.json')
+            if os.path.exists(progress_file):
+                try:
+                    with open(progress_file, 'r', encoding='utf-8') as f:
+                        progress_data = json.load(f)
+                    
+                    # Build merge_info: {parent_chapter_num: [list of merged child chapter nums]}
+                    for chapter_key, chapter_data in progress_data.get('chapters', {}).items():
+                        if isinstance(chapter_data, dict) and chapter_data.get('merged_chapters'):
+                            try:
+                                parent_num = int(chapter_key)
+                                merged_children = [int(c) for c in chapter_data['merged_chapters']]
+                                merge_info[parent_num] = merged_children
+                            except (ValueError, TypeError):
+                                pass
+                    
+                    if merge_info:
+                        log(f"   🔗 Found {len(merge_info)} parent chapters with merged content")
+                except Exception as e:
+                    log(f"   ⚠️ Could not load merge info: {e}")
         else:
             log("⚠️ Word count cross-reference enabled but no valid EPUB provided - skipping this check")
             check_word_count = False
@@ -4316,7 +4366,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     # Prepare worker data
     worker_args = []
     for batch in batches:
-        args = (batch, folder_path, qa_settings, mode, original_word_counts)
+        args = (batch, folder_path, qa_settings, mode, original_word_counts, merge_info)
         worker_args.append(args)
     
     # Process files in parallel

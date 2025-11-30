@@ -3921,11 +3921,11 @@ def _create_processing_options_section(self, parent):
     sep_extract2.setFrameShadow(QFrame.Sunken)
     extraction_v.addWidget(sep_extract2)
     
-    # Disable Chapter Merging
+    # Disable Section Merging (renamed from Chapter Merging)
     if not hasattr(self, 'disable_chapter_merging_var'):
         self.disable_chapter_merging_var = self.config.get('disable_chapter_merging', True)
     
-    disable_merging_cb = self._create_styled_checkbox("Disable Chapter Merging")
+    disable_merging_cb = self._create_styled_checkbox("Disable Section Merging")
     try:
         disable_merging_cb.setChecked(bool(self.disable_chapter_merging_var))
     except Exception:
@@ -3939,10 +3939,74 @@ def _create_processing_options_section(self, parent):
     disable_merging_cb.setContentsMargins(0, 2, 0, 0)
     extraction_v.addWidget(disable_merging_cb)
     
-    disable_merging_desc = QLabel("Disable automatic merging of Section/Chapter pairs.\nEach file will be treated as a separate chapter.")
+    disable_merging_desc = QLabel("Disable automatic merging of Section/Chapter pairs.\nEach file will be treated as a separate section.")
     disable_merging_desc.setStyleSheet("color: gray; font-size: 9pt;")
     disable_merging_desc.setContentsMargins(20, 0, 0, 5)
     extraction_v.addWidget(disable_merging_desc)
+    
+    # Request Merging (combine multiple chapters into single API request)
+    if not hasattr(self, 'request_merging_enabled_var'):
+        self.request_merging_enabled_var = self.config.get('request_merging_enabled', False)
+    if not hasattr(self, 'request_merge_count_var'):
+        self.request_merge_count_var = str(self.config.get('request_merge_count', 3))
+    
+    request_merge_cb = self._create_styled_checkbox("Request Merging")
+    try:
+        request_merge_cb.setChecked(bool(self.request_merging_enabled_var))
+    except Exception:
+        pass
+    
+    # Container for merge count setting
+    merge_count_widgets = []
+    
+    def _on_request_merge_toggle(checked):
+        try:
+            self.request_merging_enabled_var = bool(checked)
+            # Enable/disable the merge count field
+            for widget in merge_count_widgets:
+                widget.setEnabled(checked)
+        except Exception:
+            pass
+    request_merge_cb.toggled.connect(_on_request_merge_toggle)
+    request_merge_cb.setContentsMargins(0, 2, 0, 0)
+    extraction_v.addWidget(request_merge_cb)
+    
+    # Row for merge count setting
+    merge_count_row = QWidget()
+    merge_count_h = QHBoxLayout(merge_count_row)
+    merge_count_h.setContentsMargins(20, 2, 0, 0)
+    
+    merge_count_label = QLabel("Chapters per request:")
+    merge_count_h.addWidget(merge_count_label)
+    merge_count_widgets.append(merge_count_label)
+    
+    merge_count_edit = QLineEdit()
+    merge_count_edit.setFixedWidth(50)
+    try:
+        merge_count_edit.setText(str(self.request_merge_count_var))
+    except Exception:
+        merge_count_edit.setText("3")
+    def _on_merge_count_changed(text):
+        try:
+            self.request_merge_count_var = text
+        except Exception:
+            pass
+    merge_count_edit.textChanged.connect(_on_merge_count_changed)
+    merge_count_h.addWidget(merge_count_edit)
+    merge_count_widgets.append(merge_count_edit)
+    
+    merge_count_h.addWidget(QLabel("(default: 3)"))
+    merge_count_h.addStretch()
+    extraction_v.addWidget(merge_count_row)
+    
+    # Set initial enabled state
+    for widget in merge_count_widgets:
+        widget.setEnabled(bool(self.request_merging_enabled_var))
+    
+    request_merge_desc = QLabel("Combine multiple chapters into a single translation request.\nReduces API overhead and may improve context consistency.")
+    request_merge_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    request_merge_desc.setContentsMargins(20, 0, 0, 5)
+    extraction_v.addWidget(request_merge_desc)
     
     section_v.addWidget(extraction_box)
     
