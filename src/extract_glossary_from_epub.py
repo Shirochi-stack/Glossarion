@@ -2111,6 +2111,23 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
             'merged_indices': [idx for idx, _ in merge_group[1:]]
         }
         
+    except UnifiedClientError as e:
+        # Check if this is a user stop (not an actual error)
+        if "stopped by user" in str(e).lower():
+            print(f"🛑 Glossary extraction stopped by user")
+            # Re-raise to propagate the stop signal up the call stack
+            raise
+        else:
+            # Actual API error (timeout, etc.)
+            print(f"❌ Merged group failed: {e}")
+            import traceback
+            print(f"   Traceback: {traceback.format_exc()}")
+            
+            return {
+                'results': [{'idx': idx, 'data': [], 'resp': '', 'chap': chap, 'error': str(e)}
+                           for idx, chap in merge_group],
+                'merged_indices': [idx for idx, _ in merge_group[1:]]
+            }
     except Exception as e:
         print(f"❌ Merged group failed: {e}")
         import traceback
