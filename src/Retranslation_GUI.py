@@ -528,8 +528,23 @@ class RetranslationMixin:
                 simple_key = str(chapter_num)
                 if simple_key in prog.get("chapters", {}):
                     chapter_info = prog["chapters"][simple_key]
-                    # Verify the output file matches
-                    if chapter_info.get('output_file') == expected_response:
+                    out_file = chapter_info.get('output_file')
+                    status = chapter_info.get('status', '')
+                    
+                    # Merged chapters: check if parent is completed
+                    if status == 'merged':
+                        parent_num = chapter_info.get('merged_parent_chapter')
+                        if parent_num is not None:
+                            parent_key = str(parent_num)
+                            if parent_key in prog.get("chapters", {}):
+                                parent_info = prog["chapters"][parent_key]
+                                if parent_info.get('status') == 'completed':
+                                    matched_info = chapter_info
+                    # In-progress chapters: match by key (they have null output_file)
+                    elif status == 'in_progress' and not out_file:
+                        matched_info = chapter_info
+                    # Normal match: output file matches expected
+                    elif out_file == expected_response:
                         matched_info = chapter_info
                 
                 # If not found, check for composite key (chapter_num + filename)
@@ -577,6 +592,11 @@ class RetranslationMixin:
                                     matched_info = chapter_info
                                     break
                                 # else: don't match - will fall through to not_translated
+                            
+                            # In-progress chapters: match by actual_num (they have null output_file)
+                            if status == 'in_progress' and not out_file:
+                                matched_info = chapter_info
+                                break
                             
                             # Only treat as a match if the original basename matches this filename,
                             # or, when original_basename is missing, the output_file matches what we expect.
@@ -1007,6 +1027,7 @@ class RetranslationMixin:
             total_chapters = len(spine_chapters)
             completed = sum(1 for ch in spine_chapters if ch['status'] == 'completed')
             merged = sum(1 for ch in spine_chapters if ch['status'] == 'merged')
+            in_progress = sum(1 for ch in spine_chapters if ch['status'] == 'in_progress')
             missing = sum(1 for ch in spine_chapters if ch['status'] == 'not_translated')
             failed = sum(1 for ch in spine_chapters if ch['status'] in ['failed', 'qa_failed'])
             file_missing = sum(1 for ch in spine_chapters if ch['status'] == 'file_missing')
@@ -1029,6 +1050,14 @@ class RetranslationMixin:
             stats_layout.addWidget(lbl_merged)
             if merged == 0:
                 lbl_merged.setVisible(False)
+            
+            # In Progress: currently being translated (always create, hide if 0)
+            lbl_in_progress = QLabel(f"🔄 In Progress: {in_progress} | ")
+            lbl_in_progress.setFont(stats_font)
+            lbl_in_progress.setStyleSheet("color: orange;")
+            stats_layout.addWidget(lbl_in_progress)
+            if in_progress == 0:
+                lbl_in_progress.setVisible(False)
             
             # Not Translated: unique emoji/color (distinct from failures)
             lbl_missing = QLabel(f"⬜ Not Translated: {missing} | ")
@@ -1716,11 +1745,31 @@ class RetranslationMixin:
                 for chapter_key, chapter_info in data['prog'].get("chapters", {}).items():
                     actual_num = chapter_info.get('actual_num') or chapter_info.get('chapter_num')
                     if actual_num is not None and actual_num == info['num']:
+                        status = chapter_info.get('status', '')
+                        out_file = chapter_info.get('output_file')
                         orig_base = os.path.basename(chapter_info.get('original_basename', '') or '')
                         target_filename = info.get('original_filename') or ''
+                        
+                        # Merged chapters: match by actual_num if parent is completed
+                        if status == 'merged':
+                            parent_num = chapter_info.get('merged_parent_chapter')
+                            if parent_num is not None:
+                                parent_key = str(parent_num)
+                                if parent_key in data['prog'].get("chapters", {}):
+                                    parent_info = data['prog']["chapters"][parent_key]
+                                    if parent_info.get('status') == 'completed':
+                                        matched_info = chapter_info
+                                        break
+                            continue
+                        
+                        # In-progress chapters: match by actual_num (they have null output_file)
+                        if status == 'in_progress' and not out_file:
+                            matched_info = chapter_info
+                            break
+                        
                         # Accept match only if the original_basename matches the OPF filename,
                         # or, when missing, if the output_file matches the current entry's output file.
-                        if (orig_base and orig_base == target_filename) or (not orig_base and chapter_info.get('output_file') == info['output_file']):
+                        if (orig_base and orig_base == target_filename) or (not orig_base and out_file and out_file == info['output_file']):
                             matched_info = chapter_info
                             break
             
@@ -1875,6 +1924,8 @@ class RetranslationMixin:
                             labels['completed'] = child
                         elif text.startswith('🔗 Merged:'):
                             labels['merged'] = child
+                        elif text.startswith('🔄 In Progress:'):
+                            labels['in_progress'] = child
                         elif text.startswith('⬜ Not Translated:'):
                             labels['missing'] = child
                         elif text.startswith('❌ Failed:'):
@@ -1894,6 +1945,7 @@ class RetranslationMixin:
             total_chapters = len(spine_chapters)
             completed = sum(1 for info in data['chapter_display_info'] if info['status'] == 'completed')
             merged = sum(1 for info in data['chapter_display_info'] if info['status'] == 'merged')
+            in_progress = sum(1 for info in data['chapter_display_info'] if info['status'] == 'in_progress')
             missing = sum(1 for info in data['chapter_display_info'] if info['status'] == 'not_translated')
             failed = sum(1 for info in data['chapter_display_info'] if info['status'] in ['failed', 'qa_failed'])
             file_missing = sum(1 for info in data['chapter_display_info'] if info['status'] == 'file_missing')
@@ -1909,6 +1961,12 @@ class RetranslationMixin:
                     stats_labels['merged'].setVisible(True)
                 else:
                     stats_labels['merged'].setVisible(False)
+            if 'in_progress' in stats_labels:
+                if in_progress > 0:
+                    stats_labels['in_progress'].setText(f"🔄 In Progress: {in_progress} | ")
+                    stats_labels['in_progress'].setVisible(True)
+                else:
+                    stats_labels['in_progress'].setVisible(False)
             if 'missing' in stats_labels:
                 stats_labels['missing'].setText(f"⬜ Not Translated: {missing} | ")
             if 'failed' in stats_labels:
