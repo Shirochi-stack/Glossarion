@@ -401,11 +401,12 @@ class TitleExtractor:
         title = re.sub(r'[\xa0\u2000-\u200a\u202f\u205f\u3000]+', ' ', title)
         title = re.sub(r'\s+', ' ', title).strip()
         
-        # Remove leading/trailing punctuation EXCEPT for roman numeral dots
+        # Remove leading/trailing punctuation EXCEPT for roman numeral dots and parentheses in titles
         # Don't strip trailing dots from roman numerals like "III." or "IX."
+        # Don't strip parentheses as they're often part of the title (e.g., "Chapter (1)")
         if not re.match(r'^[IVXLCDM]+\.?$', title, re.IGNORECASE):
-            title = re.sub(r'^[][(){}\s\-\u2013\u2014:;,.|/\\]+', '', title).strip()
-            title = re.sub(r'[][(){}\s\-\u2013\u2014:;,.|/\\]+$', '', title).strip()
+            title = re.sub(r'^[][{}\s\-\u2013\u2014:;,.|/\\]+', '', title).strip()
+            title = re.sub(r'[][{}\s\-\u2013\u2014:;,.|/\\]+$', '', title).strip()
         
         # Remove quotes if they wrap the entire title
         quote_pairs = [
