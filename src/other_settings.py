@@ -4010,7 +4010,7 @@ def _create_processing_options_section(self, parent):
     
     # Split the Merge (split merged output back into individual files by headers)
     if not hasattr(self, 'split_the_merge_var'):
-        self.split_the_merge_var = self.config.get('split_the_merge', False)
+        self.split_the_merge_var = self.config.get('split_the_merge', True)
     
     split_merge_cb = self._create_styled_checkbox("Split the Merge")
     try:
