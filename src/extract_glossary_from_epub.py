@@ -1979,10 +1979,7 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
         result = process_single_chapter_api_call(idx, chap, msgs, client, temp, mtoks, stop_check_fn, chunk_timeout)
         return {'results': [result], 'merged_indices': []}
     
-    # Merge chapter contents with separators
-    START_SEPARATOR = "<!-- ==== MERGED_CHAPTER_START: {chapter_num} ==== -->"
-    END_SEPARATOR = "<!-- ==== MERGED_CHAPTER_END: {chapter_num} ==== -->"
-    
+    # Merge chapter contents WITHOUT separators (glossary extraction doesn't need them)
     parent_idx = merge_group[0][0]
     merged_parts = []
     chapter_nums = []
@@ -1990,9 +1987,7 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
     for idx, chap in merge_group:
         chapter_num = idx + 1  # 1-based chapter numbering
         chapter_nums.append(chapter_num)
-        start_sep = START_SEPARATOR.format(chapter_num=chapter_num)
-        end_sep = END_SEPARATOR.format(chapter_num=chapter_num)
-        merged_parts.append(f"{start_sep}\n{chap}\n{end_sep}")
+        merged_parts.append(chap)
     
     merged_content = "\n\n".join(merged_parts)
     
@@ -2857,10 +2852,8 @@ def main(log_callback=None, stop_callback=None):
                 print(f"\n🔗 MERGING {len(group)} chapters into single request...")
                 merged_contents = []
                 for g_idx, g_chap in group:
-                    # Add separator for merged content
-                    separator_start = f"<!-- ==== MERGED_CHAPTER_START: {g_idx+1} ==== -->"
-                    separator_end = f"<!-- ==== MERGED_CHAPTER_END: {g_idx+1} ==== -->"
-                    merged_contents.append(f"{separator_start}\n{g_chap}\n{separator_end}")
+                    # Don't add separators - glossary extraction doesn't need them
+                    merged_contents.append(g_chap)
                     if g_idx != idx:
                         print(f"   → Including chapter {g_idx+1}")
                 
