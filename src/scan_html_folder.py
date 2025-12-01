@@ -4158,12 +4158,13 @@ def process_html_file_batch(args):
                     
         # HTML tag check
         check_missing_html_tag = qa_settings.get('check_missing_html_tag', True)
+        check_body_tag = qa_settings.get('check_body_tag', False)
         if check_missing_html_tag and filename.lower().endswith(('.html', '.xhtml', '.htm')):
             # Create a dummy log function for the worker
             def dummy_log(msg):
                 pass
             
-            has_issues, html_issues = check_html_structure_issues(full_path, dummy_log)
+            has_issues, html_issues = check_html_structure_issues(full_path, dummy_log, check_body_tag=check_body_tag)
             
             if has_issues:
                 for issue in html_issues:
@@ -4343,6 +4344,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'report_format': 'detailed',
             'auto_save_report': True,
             'check_missing_html_tag': True,
+            'check_body_tag': False,
             'check_missing_header_tags': True,
             'check_paragraph_structure': True,
             'check_invalid_nesting': False,
@@ -4727,7 +4729,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     log("⚡ ProcessPoolExecutor: ENABLED - Maximum performance achieved!")
 
 
-def check_html_structure_issues(file_path, log=print):
+def check_html_structure_issues(file_path, log, check_body_tag=False):
     """
     Check for HTML structure problems including unwrapped text and unclosed tags.
     
@@ -4820,7 +4822,9 @@ def check_html_structure_issues(file_path, log=print):
                 (" ..." if len(malformed_tags_found) > 3 else ""))
         
         # Check for unclosed HTML tags - Check common tags with simple logic
-        tags_to_check = ['html', 'body', 'head', 'p', 'div', 'span']
+        tags_to_check = ['html', 'head', 'p', 'div', 'span']
+        if check_body_tag:
+            tags_to_check.insert(1, 'body')  # Add body after html if enabled
         problematic_tags = []
         
         for tag in tags_to_check:
@@ -4875,10 +4879,12 @@ def check_html_structure_issues(file_path, log=print):
         elif head_close_exists and not head_open_exists:
             missing_structure.append('opening <head>')
             
-        if body_open_exists and not body_close_exists:
-            missing_structure.append('closing </body>')
-        elif body_close_exists and not body_open_exists:
-            missing_structure.append('opening <body>')
+        # Only check body tags if enabled
+        if check_body_tag:
+            if body_open_exists and not body_close_exists:
+                missing_structure.append('closing </body>')
+            elif body_close_exists and not body_open_exists:
+                missing_structure.append('opening <body>')
         
         # Only flag as incomplete if there are actual mismatches
         if missing_structure:
@@ -4928,7 +4934,8 @@ def check_html_structure_issues(file_path, log=print):
                 issues.append('unclosed_html_tags')
                 log(f"   Critical: Found opening <html> tag but missing closing </html> tag")
         
-        if body_open_exists and not body_close_exists:
+        # Only flag unclosed body tags if check is enabled
+        if check_body_tag and body_open_exists and not body_close_exists:
             if 'unclosed_html_tags' not in issues:
                 issues.append('unclosed_html_tags')
                 log(f"   Critical: Found opening <body> tag but missing closing </body> tag")

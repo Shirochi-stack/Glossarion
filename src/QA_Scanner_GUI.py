@@ -2050,20 +2050,25 @@ class QAScannerMixin:
         additional_layout.addSpacing(10)
 
         # Missing HTML tag check
-        html_tag_widget = QWidget()
-        html_tag_layout = QHBoxLayout(html_tag_widget)
-        html_tag_layout.setContentsMargins(0, 0, 0, 5)
-
-        check_missing_html_tag_checkbox = self._create_styled_checkbox("Flag HTML files with missing <html> tag")
+        check_missing_html_tag_checkbox = self._create_styled_checkbox("Check HTML structure and tag consistency")
         check_missing_html_tag_checkbox.setChecked(qa_settings.get('check_missing_html_tag', True))
-        html_tag_layout.addWidget(check_missing_html_tag_checkbox)
+        additional_layout.addWidget(check_missing_html_tag_checkbox)
 
-        html_tag_hint = QLabel("(Checks if HTML files have proper structure)")
-        html_tag_hint.setFont(QFont('Arial', 9))
-        html_tag_hint.setStyleSheet("color: gray;")
-        html_tag_layout.addWidget(html_tag_hint)
-        html_tag_layout.addStretch()
-        additional_layout.addWidget(html_tag_widget)
+        # Body tag check (separate, disabled by default)
+        body_tag_widget = QWidget()
+        body_tag_layout = QHBoxLayout(body_tag_widget)
+        body_tag_layout.setContentsMargins(0, 0, 0, 5)
+        
+        check_body_tag_checkbox = self._create_styled_checkbox("Check for <body> tag consistency")
+        check_body_tag_checkbox.setChecked(qa_settings.get('check_body_tag', False))
+        body_tag_layout.addWidget(check_body_tag_checkbox)
+        
+        body_tag_hint = QLabel("(Disabled by default - body tags not required in EPUBs)")
+        body_tag_hint.setFont(QFont('Arial', 9))
+        body_tag_hint.setStyleSheet("color: gray;")
+        body_tag_layout.addWidget(body_tag_hint)
+        body_tag_layout.addStretch()
+        additional_layout.addWidget(body_tag_widget)
 
         # Missing header tags check
         check_missing_header_tags_checkbox = self._create_styled_checkbox("Flag HTML files with no heading tags (h1-h6)")
@@ -2479,6 +2484,7 @@ class QAScannerMixin:
                     'check_multiple_headers': (check_multiple_headers_checkbox, lambda x: x.isChecked()),
                     'warn_name_mismatch': (warn_mismatch_checkbox, lambda x: x.isChecked()),
                     'check_missing_html_tag': (check_missing_html_tag_checkbox, lambda x: x.isChecked()),
+                    'check_body_tag': (check_body_tag_checkbox, lambda x: x.isChecked()),
                     'check_missing_header_tags': (check_missing_header_tags_checkbox, lambda x: x.isChecked()),
                     'check_paragraph_structure': (check_paragraph_structure_checkbox, lambda x: x.isChecked()),
                     'check_invalid_nesting': (check_invalid_nesting_checkbox, lambda x: x.isChecked()),
