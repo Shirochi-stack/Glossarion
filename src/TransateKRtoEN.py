@@ -5992,64 +5992,78 @@ def main(log_callback=None, stop_callback=None):
         # Don't create an empty glossary - let any existing manual glossary remain
 
     glossary_file = find_glossary_file(out)
+    # Only show glossary details if append glossary is enabled
+    append_glossary_enabled = os.getenv("APPEND_GLOSSARY", "1") == "1"
+    add_additional_enabled = os.getenv('ADD_ADDITIONAL_GLOSSARY', '0') == '1'
+    
     if glossary_file and os.path.exists(glossary_file):
-        try:
-            if glossary_file.lower().endswith(('.csv', '.txt')):
-                # Quick CSV/TXT stats
-                with open(glossary_file, 'r', encoding='utf-8') as f:
-                    lines = [ln.strip() for ln in f.readlines() if ln.strip()]
-                entry_count = max(0, len(lines) - 1) if lines and ',' in lines[0] else len(lines)
-                file_type = "TXT" if glossary_file.lower().endswith('.txt') else "CSV"
-                print(f"📑 Glossary ready ({file_type}) with {entry_count} entries")
-                print("📑 Sample glossary lines:")
-                for ln in lines[1:4]:
-                    print(f"   • {ln}")
-            elif glossary_file.lower().endswith('.json'):
-                with open(glossary_file, 'r', encoding='utf-8') as f:
-                    glossary_data = json.load(f)
-                
-                if isinstance(glossary_data, dict):
-                    if 'entries' in glossary_data and isinstance(glossary_data['entries'], dict):
-                        entry_count = len(glossary_data['entries'])
-                        sample_items = list(glossary_data['entries'].items())[:3]
-                    else:
-                        entry_count = len(glossary_data)
-                        sample_items = list(glossary_data.items())[:3]
-                    
-                    print(f"📑 Glossary ready with {entry_count} entries")
-                    print("📑 Sample glossary entries:")
-                    for key, value in sample_items:
-                        print(f"   • {key} → {value}")
-                        
-                elif isinstance(glossary_data, list):
-                    print(f"📑 Glossary ready with {len(glossary_data)} entries")
-                    print("📑 Sample glossary entries:")
-                    for i, entry in enumerate(glossary_data[:3]):
-                        if isinstance(entry, dict):
-                            original = entry.get('original_name', '?')
-                            translated = entry.get('name', original)
-                            print(f"   • {original} → {translated}")
-                else:
-                    print(f"⚠️ Unexpected glossary format: {type(glossary_data)}")
-            
-            # Check for glossary extension (after all glossary types)
-            additional_glossary = os.path.join(out, "glossary_extension.csv")
-            if os.path.exists(additional_glossary):
-                try:
-                    with open(additional_glossary, 'r', encoding='utf-8') as f:
-                        add_lines = [ln.strip() for ln in f.readlines() if ln.strip()]
-                    add_entry_count = max(0, len(add_lines) - 1) if add_lines and ',' in add_lines[0] else len(add_lines)
-                    print(f"📑 Glossary extension loaded with {add_entry_count} entries")
-                    print("📑 Sample glossary extension lines:")
-                    for ln in add_lines[1:4]:
+        if append_glossary_enabled:
+            try:
+                if glossary_file.lower().endswith(('.csv', '.txt')):
+                    # Quick CSV/TXT stats
+                    with open(glossary_file, 'r', encoding='utf-8') as f:
+                        lines = [ln.strip() for ln in f.readlines() if ln.strip()]
+                    entry_count = max(0, len(lines) - 1) if lines and ',' in lines[0] else len(lines)
+                    file_type = "TXT" if glossary_file.lower().endswith('.txt') else "CSV"
+                    print(f"📑 Glossary ready ({file_type}) with {entry_count} entries")
+                    print("📑 Sample glossary lines:")
+                    for ln in lines[1:4]:
                         print(f"   • {ln}")
-                except Exception as e:
-                    print(f"⚠️ Failed to read glossary extension: {e}")
+                elif glossary_file.lower().endswith('.json'):
+                    with open(glossary_file, 'r', encoding='utf-8') as f:
+                        glossary_data = json.load(f)
+                    
+                    if isinstance(glossary_data, dict):
+                        if 'entries' in glossary_data and isinstance(glossary_data['entries'], dict):
+                            entry_count = len(glossary_data['entries'])
+                            sample_items = list(glossary_data['entries'].items())[:3]
+                        else:
+                            entry_count = len(glossary_data)
+                            sample_items = list(glossary_data.items())[:3]
+                        
+                        print(f"📑 Glossary ready with {entry_count} entries")
+                        print("📑 Sample glossary entries:")
+                        for key, value in sample_items:
+                            print(f"   • {key} → {value}")
+                            
+                    elif isinstance(glossary_data, list):
+                        print(f"📑 Glossary ready with {len(glossary_data)} entries")
+                        print("📑 Sample glossary entries:")
+                        for i, entry in enumerate(glossary_data[:3]):
+                            if isinstance(entry, dict):
+                                original = entry.get('original_name', '?')
+                                translated = entry.get('name', original)
+                                print(f"   • {original} → {translated}")
+                    else:
+                        print(f"⚠️ Unexpected glossary format: {type(glossary_data)}")
                 
-        except Exception as e:
-            print(f"⚠️ Failed to inspect glossary file: {e}")
+                # Check for glossary extension (after all glossary types)
+                if add_additional_enabled:
+                    additional_glossary = os.path.join(out, "glossary_extension.csv")
+                    if os.path.exists(additional_glossary):
+                        try:
+                            with open(additional_glossary, 'r', encoding='utf-8') as f:
+                                add_lines = [ln.strip() for ln in f.readlines() if ln.strip()]
+                            add_entry_count = max(0, len(add_lines) - 1) if add_lines and ',' in add_lines[0] else len(add_lines)
+                            print(f"📑 Glossary extension loaded with {add_entry_count} entries")
+                            print("📑 Sample glossary extension lines:")
+                            for ln in add_lines[1:4]:
+                                print(f"   • {ln}")
+                        except Exception as e:
+                            print(f"⚠️ Failed to read glossary extension: {e}")
+                else:
+                    # Check if extension file exists but toggle is disabled
+                    additional_glossary = os.path.join(out, "glossary_extension.csv")
+                    if os.path.exists(additional_glossary):
+                        print("⏩ Skipping glossary extension - toggle disabled")
+                    
+            except Exception as e:
+                print(f"⚠️ Failed to inspect glossary file: {e}")
+        else:
+            print("⏩ Skipping glossary - toggle disabled")
     else:
-        print("📑 No glossary file found")
+        if append_glossary_enabled:
+            print("📑 No glossary file found")
 
     print("="*50)
     print("🚀 STARTING MAIN TRANSLATION PHASE")
