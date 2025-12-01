@@ -4428,34 +4428,36 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None):
             
             print(f"✅ Glossary appended ({len(glossary_text):,} characters)")
             
-            # Check for glossary extension file
-            glossary_dir = os.path.dirname(actual_glossary_path)
-            additional_glossary_path = os.path.join(glossary_dir, "glossary_extension.csv")
-            
-            if os.path.exists(additional_glossary_path):
-                try:
-                    print(f"✅ Loading glossary extension from: {os.path.basename(additional_glossary_path)}")
-                    with open(additional_glossary_path, "r", encoding="utf-8") as af:
-                        additional_glossary_text = af.read()
-                    
-                    # Apply same compression logic if enabled
-                    if compress_glossary_enabled and source_text:
-                        try:
-                            from glossary_compressor import compress_glossary
-                            original_add_length = len(additional_glossary_text)
-                            additional_glossary_text = compress_glossary(additional_glossary_text, source_text, glossary_format='auto')
-                            compressed_add_length = len(additional_glossary_text)
-                            add_reduction_pct = ((original_add_length - compressed_add_length) / original_add_length * 100) if original_add_length > 0 else 0
-                            print(f"🗃️ Glossary extension compressed: {original_add_length:,} → {compressed_add_length:,} chars ({add_reduction_pct:.1f}% reduction)")
-                        except Exception as e:
-                            print(f"⚠️ Glossary extension compression failed: {e}")
-                    
-                    # Append glossary extension
-                    system += f"\n\n{additional_glossary_text}"
-                    print(f"✅ Glossary extension appended ({len(additional_glossary_text):,} characters)")
-                    
-                except Exception as e:
-                    print(f"⚠️ Failed to load glossary extension: {e}")
+            # Check for glossary extension file (only if ADD_ADDITIONAL_GLOSSARY is enabled)
+            add_additional_glossary = os.getenv("ADD_ADDITIONAL_GLOSSARY", "0") == "1"
+            if add_additional_glossary:
+                glossary_dir = os.path.dirname(actual_glossary_path)
+                additional_glossary_path = os.path.join(glossary_dir, "glossary_extension.csv")
+                
+                if os.path.exists(additional_glossary_path):
+                    try:
+                        print(f"✅ Loading glossary extension from: {os.path.basename(additional_glossary_path)}")
+                        with open(additional_glossary_path, "r", encoding="utf-8") as af:
+                            additional_glossary_text = af.read()
+                        
+                        # Apply same compression logic if enabled
+                        if compress_glossary_enabled and source_text:
+                            try:
+                                from glossary_compressor import compress_glossary
+                                original_add_length = len(additional_glossary_text)
+                                additional_glossary_text = compress_glossary(additional_glossary_text, source_text, glossary_format='auto')
+                                compressed_add_length = len(additional_glossary_text)
+                                add_reduction_pct = ((original_add_length - compressed_add_length) / original_add_length * 100) if original_add_length > 0 else 0
+                                print(f"🗃️ Glossary extension compressed: {original_add_length:,} → {compressed_add_length:,} chars ({add_reduction_pct:.1f}% reduction)")
+                            except Exception as e:
+                                print(f"⚠️ Glossary extension compression failed: {e}")
+                        
+                        # Append glossary extension
+                        system += f"\n\n{additional_glossary_text}"
+                        print(f"✅ Glossary extension appended ({len(additional_glossary_text):,} characters)")
+                        
+                    except Exception as e:
+                        print(f"⚠️ Failed to load glossary extension: {e}")
                 
         except Exception as e:
             print(f"[ERROR] Could not load glossary: {e}")
