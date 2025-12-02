@@ -4044,12 +4044,9 @@ def _create_processing_options_section(self, parent):
     original_on_request_merge_toggle = _on_request_merge_toggle
     def _on_request_merge_toggle_with_split(checked):
         original_on_request_merge_toggle(checked)
-        # Enable/disable split merge option
+        # Enable/disable split merge option (but don't change its checked state)
         for widget in split_merge_widgets:
             widget.setEnabled(checked)
-        # If request merging is disabled, also uncheck split merge
-        if not checked:
-            split_merge_cb.setChecked(False)
     request_merge_cb.toggled.disconnect(_on_request_merge_toggle)
     request_merge_cb.toggled.connect(_on_request_merge_toggle_with_split)
     
