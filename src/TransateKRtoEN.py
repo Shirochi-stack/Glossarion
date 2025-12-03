@@ -7898,6 +7898,9 @@ def main(log_callback=None, stop_callback=None):
                     chapter_status = "qa_failed"
                     failure_reason = get_failure_reason(cleaned)
                     print(f"⚠️ Chapter {actual_num} marked as qa_failed: {failure_reason}")
+                elif finish_reason in ["length", "max_tokens"]:
+                    chapter_status = "qa_failed"
+                    print(f"⚠️ Chapter {actual_num} marked as qa_failed: truncated (finish_reason: {finish_reason})")
                 else:
                     chapter_status = "completed"
 
@@ -7917,6 +7920,9 @@ def main(log_callback=None, stop_callback=None):
                     chapter_status = "qa_failed"
                     failure_reason = get_failure_reason(cleaned)
                     print(f"⚠️ Chapter {actual_num} marked as qa_failed: {failure_reason}")
+                elif finish_reason in ["length", "max_tokens"]:
+                    chapter_status = "qa_failed"
+                    print(f"⚠️ Chapter {actual_num} marked as qa_failed: truncated (finish_reason: {finish_reason})")
                 else:
                     chapter_status = "completed"
 
