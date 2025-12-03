@@ -4216,33 +4216,12 @@ def process_html_file_batch(args):
             def dummy_log(msg):
                 pass
             
-            # For text files, do simpler word count comparison
+            # For text files, skip word count analysis on individual sections
+            # (sections are arbitrary splits and can't be meaningfully compared to the whole source)
             if text_file_mode and 1 in original_word_counts:
-                # Text file mode - compare against total source word count
-                translated_wc = len(raw_text.split())
-                original_wc = original_word_counts[1]
-                
-                if original_wc > 0:
-                    ratio = translated_wc / original_wc
-                    # For text files, use same reasonable bounds as EPUB
-                    is_reasonable = 0.7 <= ratio <= 2.0
-                    is_typical = 0.8 <= ratio <= 1.5
-                    
-                    word_count_check = {
-                        'found_match': True,
-                        'chapter_num': 1,
-                        'original_wc': original_wc,
-                        'translated_wc': translated_wc,
-                        'ratio': ratio,
-                        'percentage': ratio * 100,
-                        'is_reasonable': is_reasonable,
-                        'is_typical': is_typical,
-                        'original_file': 'source.txt'
-                    }
-                    
-                    # Only mark as issue if ratio is unreasonable
-                    if not is_reasonable:
-                        issues.append(f"word_count_mismatch_ratio_{ratio:.2f}")
+                # Skip word count check for text file sections
+                # Word count analysis only makes sense for the combined file
+                pass
             else:
                 # Normal EPUB mode
                 wc_result = cross_reference_word_counts(
