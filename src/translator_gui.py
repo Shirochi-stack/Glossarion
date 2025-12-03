@@ -1922,7 +1922,7 @@ Recent translations to summarize:
             ('chunk_timeout_var', 'chunk_timeout', '900'),
             ('batch_size_var', 'batch_size', '3'),
             ('chapter_number_offset_var', 'chapter_number_offset', '0'),
-            ('compression_factor_var', 'compression_factor', '1.1'),
+            ('compression_factor_var', 'compression_factor', '2.0'),
             # NEW: scanning phase mode (quick-scan/aggressive/ai-hunter/custom)
             ('scan_phase_mode_var', 'scan_phase_mode', 'quick-scan'),
             ('break_split_count_var', 'break_split_count', '')
@@ -8902,7 +8902,7 @@ Important rules:
                 # Image output mode
                 ('enable_image_output_mode', ['enable_image_output_mode_var'], False, bool),
                 ('image_output_resolution', ['image_output_resolution_var'], '1K', str),
-                ('compression_factor', ['compression_factor_var'], 1.1, float),
+                ('compression_factor', ['compression_factor_var'], 2.0, float),
                 ('image_chunk_overlap', ['image_chunk_overlap_var'], 1.0, lambda v: safe_float(v, 1.0)),
 
                 # Batching
