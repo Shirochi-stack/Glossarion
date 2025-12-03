@@ -1922,7 +1922,7 @@ Recent translations to summarize:
             ('chunk_timeout_var', 'chunk_timeout', '900'),
             ('batch_size_var', 'batch_size', '3'),
             ('chapter_number_offset_var', 'chapter_number_offset', '0'),
-            ('compression_factor_var', 'compression_factor', '2.0'),
+            ('compression_factor_var', 'compression_factor', '3.0'),
             # NEW: scanning phase mode (quick-scan/aggressive/ai-hunter/custom)
             ('scan_phase_mode_var', 'scan_phase_mode', 'quick-scan'),
             ('break_split_count_var', 'break_split_count', '')
@@ -6782,6 +6782,7 @@ Important rules:
                     'GLOSSARY_MAX_SENTENCES': str(self.config.get('glossary_max_sentences', 200)),
                     'GLOSSARY_MAX_TEXT_SIZE': str(self.config.get('glossary_max_text_size', 50000)),
                     'GLOSSARY_FILTER_MODE': self.config.get('glossary_filter_mode', 'all'),
+                    'COMPRESSION_FACTOR': str(self.config.get('compression_factor', 3.0)),
                 }
                 
                 # Add project ID for Vertex AI
@@ -8902,7 +8903,7 @@ Important rules:
                 # Image output mode
                 ('enable_image_output_mode', ['enable_image_output_mode_var'], False, bool),
                 ('image_output_resolution', ['image_output_resolution_var'], '1K', str),
-                ('compression_factor', ['compression_factor_var'], 2.0, float),
+                ('compression_factor', ['compression_factor_var'], 3.0, float),
                 ('image_chunk_overlap', ['image_chunk_overlap_var'], 1.0, lambda v: safe_float(v, 1.0)),
 
                 # Batching
@@ -8920,7 +8921,7 @@ Important rules:
                 
                 # Chapter processing
                 ('chapter_number_offset', ['chapter_number_offset_var'], 0, lambda v: safe_int(v, 0)),
-                ('max_output_tokens', ['max_output_tokens'], 8192, int),
+                ('max_output_tokens', ['max_output_tokens'], 65536, int),
 
                 # Glossary Settings
                 ('append_glossary', ['append_glossary_checkbox', 'append_glossary_var'], False, bool),

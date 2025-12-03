@@ -1615,7 +1615,7 @@ def _create_response_handling_section(self, parent):
             pass
     compression_edit.textChanged.connect(_on_compression_changed)
     compression_h.addWidget(compression_edit)
-    compression_h.addWidget(QLabel("(1.0-2.5)"))
+    compression_h.addWidget(QLabel("(1.0-5.0)"))
     compression_h.addStretch()
     section_v.addWidget(compression_w)
     
