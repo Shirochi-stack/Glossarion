@@ -198,7 +198,7 @@ class QAScannerMixin:
             'check_missing_html_tag': True,
             'check_missing_header_tags': True,
             'check_invalid_nesting': False,
-            'check_word_count_ratio': False,
+            'check_word_count_ratio': True,
             'check_multiple_headers': True,
             'warn_name_mismatch': True,
             'cache_enabled': True,
