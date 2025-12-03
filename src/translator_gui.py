@@ -615,7 +615,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 65536
         self.proc = self.glossary_proc = None
-        __version__ = "6.4.8"
+        __version__ = "6.5.0"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -1864,7 +1864,7 @@ Recent translations to summarize:
             ('preserve_original_text_var', 'preserve_original_text_on_failure', False),
             # NEW: QA scanning helpers
             ('qa_auto_search_output_var', 'qa_auto_search_output', True),
-            ('scan_phase_enabled_var', 'scan_phase_enabled', False),
+            ('scan_phase_enabled_var', 'scan_phase_enabled', True),
             ('indefinite_rate_limit_retry_var', 'indefinite_rate_limit_retry', True),
             # Keep existing variables intact
             ('enable_image_translation_var', 'enable_image_translation', False),
@@ -2038,7 +2038,7 @@ Recent translations to summarize:
             # Set the initial active profile for autosave
             self._active_profile_for_autosave = self.profile_var
         
-        self.append_log("🚀 Glossarion v6.4.8 - Ready to use!")
+        self.append_log("🚀 Glossarion v6.5.0 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -8917,7 +8917,7 @@ Important rules:
                 ('auto_update_check', ['auto_update_check_var'], True, bool),
                 ('ignore_header', ['ignore_header_var'], False, bool),
                 ('ignore_title', ['ignore_title_var'], False, bool),
-                ('scan_phase_enabled', ['scan_phase_enabled_var'], False, bool),
+                ('scan_phase_enabled', ['scan_phase_enabled_var'], True, bool),
 
                 # Prompts and text fields
                 ('summary_role', ['summary_role_var'], '', str),
@@ -10041,7 +10041,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v6.4.8...")
+    print("🚀 Starting Glossarion v6.5.0...")
     
     # Initialize splash screen
     splash_manager = None
