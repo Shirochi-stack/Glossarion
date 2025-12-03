@@ -2946,11 +2946,15 @@ class BatchTranslationProcessor:
                 
                 if finish_reason in ["length", "max_tokens"]:
                     print(f"    ⚠️ Chunk {chunk_idx}/{total_chunks} response was TRUNCATED!")
+                    # Track truncation status
+                    is_truncated = True
+                else:
+                    is_truncated = False
                 
                 if result:
                     # Remove chunk markers from result
                     result = re.sub(r'\[PART \d+/\d+\]\s*', '', result, flags=re.IGNORECASE)
-                    return result, chunk_idx, raw_obj
+                    return result, chunk_idx, raw_obj, is_truncated
                 else:
                     raise Exception(f"Empty result for chunk {chunk_idx}/{total_chunks}")
             
@@ -2959,6 +2963,7 @@ class BatchTranslationProcessor:
             max_chunk_workers = min(total_chunks, self.config.BATCH_SIZE)
             
             last_chunk_raw_obj = None
+            chapter_truncated = False  # Track if any chunk was truncated
             
             with ThreadPoolExecutor(max_workers=max_chunk_workers, thread_name_prefix=f"Ch{actual_num}Chunk") as chunk_executor:
                 # Submit all chunks
@@ -2974,7 +2979,7 @@ class BatchTranslationProcessor:
                         raise Exception("Translation stopped by user")
                     
                     try:
-                        result, chunk_idx, raw_obj = future.result()
+                        result, chunk_idx, raw_obj, is_truncated = future.result()
                         if result:
                             # Store result at correct index to maintain order
                             with chunks_lock:
@@ -2984,6 +2989,9 @@ class BatchTranslationProcessor:
                                 # Store the raw object if it's the last chunk (or the only chunk)
                                 if chunk_idx == total_chunks:
                                     last_chunk_raw_obj = raw_obj
+                                # Track if any chunk was truncated
+                                if is_truncated:
+                                    chapter_truncated = True
                             
                             print(f"✅ Chunk {chunk_idx}/{total_chunks} completed ({completed_chunks}/{total_chunks})")
                     except Exception as e:
@@ -3084,8 +3092,18 @@ class BatchTranslationProcessor:
                     print(f"    ⚠️ Failed to extract AI features: {e}")
             
             with self.progress_lock:
+                # Check for truncation first
+                if chapter_truncated:
+                    chapter_status = "qa_failed"
+                    print(f"⚠️ Batch: Chapter {actual_num} marked as qa_failed: Response was truncated")
+                    # Update progress to qa_failed status
+                    self.update_progress_fn(idx, actual_num, content_hash, fname, status=chapter_status, ai_features=ai_features)
+                    self.save_progress_fn()
+                    # DO NOT increment chapters_completed for qa_failed
+                    # Return False to indicate failure
+                    return False, actual_num
                 # Check for QA failures with comprehensive detection
-                if is_qa_failed_response(cleaned):
+                elif is_qa_failed_response(cleaned):
                     chapter_status = "qa_failed"
                     failure_reason = get_failure_reason(cleaned)
                     print(f"⚠️ Batch: Chapter {actual_num} marked as qa_failed: {failure_reason}")
@@ -3223,6 +3241,11 @@ class BatchTranslationProcessor:
             if not merged_response:
                 raise Exception("Empty response from API for merged request")
             
+            # Check for truncation
+            merged_truncated = finish_reason in ["length", "max_tokens"]
+            if merged_truncated:
+                print(f"   ⚠️ Merged response was TRUNCATED!")
+            
             print(f"   ✅ Received merged response ({len(merged_response):,} chars)")
             
             # Clean the merged response
@@ -3258,9 +3281,25 @@ class BatchTranslationProcessor:
                 except Exception:
                     pass
             
-            # Check for QA failures on the merged content first
+            # Check for truncation first
             results = []
-            if is_qa_failed_response(cleaned):
+            if merged_truncated:
+                # Save merged content for debugging, then mark all as qa_failed
+                fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
+                try:
+                    with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
+                        f.write(cleaned)
+                except Exception:
+                    pass
+                print(f"   ⚠️ Merged group marked as qa_failed: Response was truncated")
+                for actual_num, _, idx, chapter, content_hash in chapters_data:
+                    with self.progress_lock:
+                        self.update_progress_fn(idx, actual_num, content_hash, fname if idx == parent_idx else None, status="qa_failed")
+                        self.save_progress_fn()
+                    results.append((False, actual_num, None, None, None))
+                return results
+            # Check for QA failures on the merged content
+            elif is_qa_failed_response(cleaned):
                 # Save merged content for debugging, then mark all as qa_failed
                 fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                 try:
