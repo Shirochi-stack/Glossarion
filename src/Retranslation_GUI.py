@@ -668,17 +668,35 @@ class RetranslationMixin:
             files_to_entries = {}
             for chapter_key, chapter_info in prog.get("chapters", {}).items():
                 output_file = chapter_info.get("output_file", "")
-                if output_file:
-                    if output_file not in files_to_entries:
-                        files_to_entries[output_file] = []
-                    files_to_entries[output_file].append((chapter_key, chapter_info))
+                status = chapter_info.get("status", "")
+                
+                # Include chapters with output files OR in_progress with null output file
+                if output_file or status == "in_progress":
+                    # Use a placeholder key for null output files
+                    file_key = output_file if output_file else f"_in_progress_{chapter_key}"
+                    if file_key not in files_to_entries:
+                        files_to_entries[file_key] = []
+                    files_to_entries[file_key].append((chapter_key, chapter_info))
             
             for output_file, entries in files_to_entries.items():
                 chapter_key, chapter_info = entries[0]
                 
+                # Get the actual output file (strip placeholder prefix if present)
+                actual_output_file = output_file
+                if output_file.startswith("_in_progress_"):
+                    # For in_progress with null output, use expected filename based on chapter info
+                    actual_output_file = chapter_info.get("output_file", "")
+                    if not actual_output_file:
+                        # Generate expected filename based on actual_num
+                        actual_num = chapter_info.get("actual_num")
+                        if actual_num is not None:
+                            # Use .txt extension for text files, .html for EPUB
+                            ext = ".txt" if file_path.endswith(".txt") else ".html"
+                            actual_output_file = f"response_section_{actual_num}{ext}"
+                
                 # Check if this is a special file (files without numbers)
                 original_basename = chapter_info.get("original_basename", "")
-                filename_to_check = original_basename if original_basename else output_file
+                filename_to_check = original_basename if original_basename else actual_output_file
                 
                 # Check if filename contains any digits
                 import re
@@ -689,19 +707,21 @@ class RetranslationMixin:
                 if is_special and not show_special_files[0]:
                     continue
                 
-                # Extract chapter number
-                import re
-                matches = re.findall(r'(\d+)', output_file)
-                if matches:
-                    chapter_num = int(matches[-1])
-                else:
-                    chapter_num = 999999
-                
-                # Override with stored values if available
+                # Extract chapter number - prioritize stored values
+                chapter_num = None
                 if 'actual_num' in chapter_info and chapter_info['actual_num'] is not None:
                     chapter_num = chapter_info['actual_num']
                 elif 'chapter_num' in chapter_info and chapter_info['chapter_num'] is not None:
                     chapter_num = chapter_info['chapter_num']
+                
+                # Fallback: extract from filename
+                if chapter_num is None:
+                    import re
+                    matches = re.findall(r'(\d+)', actual_output_file)
+                    if matches:
+                        chapter_num = int(matches[-1])
+                    else:
+                        chapter_num = 999999
                 
                 status = chapter_info.get("status", "unknown")
                 if status == "completed_empty":
@@ -709,7 +729,7 @@ class RetranslationMixin:
                 
                 # Check file existence
                 if status == "completed":
-                    output_path = os.path.join(output_dir, output_file)
+                    output_path = os.path.join(output_dir, actual_output_file)
                     if not os.path.exists(output_path):
                         status = "file_missing"
                 
@@ -717,7 +737,7 @@ class RetranslationMixin:
                     'key': chapter_key,
                     'num': chapter_num,
                     'info': chapter_info,
-                    'output_file': output_file,
+                    'output_file': actual_output_file,  # Use actual output file, not placeholder
                     'status': status,
                     'duplicate_count': len(entries),
                     'entries': entries
@@ -1669,90 +1689,18 @@ class RetranslationMixin:
             with open(data['progress_file'], 'r', encoding='utf-8') as f:
                 data['prog'] = json.load(f)
             
-            # Re-parse and update chapter status information
-            self._update_chapter_status_info(data)
-            
-            # Rebuild chapter_display_info to respect show_special_files toggle
-            # Get current show_special_files state from data
-            show_special = data.get('show_special_files_state', False)
-            
-            # Rebuild chapter_display_info with current filter
+            # Check if we're using OPF-based display or fallback
             if data.get('spine_chapters'):
-                # OPF-based: filter spine_chapters
-                filtered_display_info = []
-                for info in data['chapter_display_info']:
-                    # Check if this is a special file
-                    original_file = info.get('original_filename', '')
-                    import re
-                    has_numbers = bool(re.search(r'\d', original_file))
-                    is_special = not has_numbers
-                    
-                    # Include if not special, or if showing special files
-                    if not is_special or show_special:
-                        filtered_display_info.append(info)
-                
-                data['chapter_display_info'] = filtered_display_info
+                # OPF-based: just update status info (spine_chapters are static)
+                self._update_chapter_status_info(data)
             else:
-                # Non-OPF: rebuild from progress data with filter
-                files_to_entries = {}
-                for chapter_key, chapter_info in data['prog'].get("chapters", {}).items():
-                    output_file = chapter_info.get("output_file", "")
-                    if output_file:
-                        if output_file not in files_to_entries:
-                            files_to_entries[output_file] = []
-                        files_to_entries[output_file].append((chapter_key, chapter_info))
-                
-                new_display_info = []
-                for output_file, entries in files_to_entries.items():
-                    chapter_key, chapter_info = entries[0]
-                    
-                    # Check if this is a special file
-                    original_basename = chapter_info.get("original_basename", "")
-                    filename_to_check = original_basename if original_basename else output_file
-                    import re
-                    has_numbers = bool(re.search(r'\d', filename_to_check))
-                    is_special = not has_numbers
-                    
-                    # Skip special files if toggle is off
-                    if is_special and not show_special:
-                        continue
-                    
-                    # Extract chapter number
-                    matches = re.findall(r'(\d+)', output_file)
-                    if matches:
-                        chapter_num = int(matches[-1])
-                    else:
-                        chapter_num = 999999
-                    
-                    # Override with stored values if available
-                    if 'actual_num' in chapter_info and chapter_info['actual_num'] is not None:
-                        chapter_num = chapter_info['actual_num']
-                    elif 'chapter_num' in chapter_info and chapter_info['chapter_num'] is not None:
-                        chapter_num = chapter_info['chapter_num']
-                    
-                    status = chapter_info.get("status", "unknown")
-                    if status == "completed_empty":
-                        status = "completed"
-                    
-                    # Check file existence
-                    if status == "completed":
-                        output_path = os.path.join(data['output_dir'], output_file)
-                        if not os.path.exists(output_path):
-                            status = "file_missing"
-                    
-                    new_display_info.append({
-                        'key': chapter_key,
-                        'num': chapter_num,
-                        'info': chapter_info,
-                        'output_file': output_file,
-                        'status': status,
-                        'duplicate_count': len(entries),
-                        'entries': entries
-                    })
-                
-                # Sort by chapter number
-                new_display_info.sort(key=lambda x: x['num'] if x['num'] is not None else 999999)
-                data['chapter_display_info'] = new_display_info
+                # Fallback mode: REBUILD chapter_display_info from scratch to pick up new entries
+                # This is necessary for text files or EPUBs without OPF
+                self._rebuild_chapter_display_info(data)
+            
+            # Note: chapter_display_info is already rebuilt/updated above
+            # For OPF mode: _update_chapter_status_info updated existing entries
+            # For fallback mode: _rebuild_chapter_display_info rebuilt from scratch
             
             # Update the listbox display
             self._update_listbox_display(data)
@@ -1806,6 +1754,102 @@ class RetranslationMixin:
             except (RuntimeError, AttributeError):
                 # Dialog was also deleted, just print to console
                 print(f"[WARN] Could not show error dialog - dialog was deleted")
+    
+    def _rebuild_chapter_display_info(self, data):
+        """Rebuild chapter_display_info from scratch (for fallback mode without OPF)"""
+        # This is the same logic as the initial build in _force_retranslation_epub_or_text
+        # but extracted here so refresh can use it
+        
+        prog = data['prog']
+        output_dir = data['output_dir']
+        file_path = data.get('file_path', '')
+        show_special = data.get('show_special_files_state', False)
+        
+        files_to_entries = {}
+        for chapter_key, chapter_info in prog.get("chapters", {}).items():
+            output_file = chapter_info.get("output_file", "")
+            status = chapter_info.get("status", "")
+            
+            # Include chapters with output files OR in_progress with null output file
+            if output_file or status == "in_progress":
+                # Use a placeholder key for null output files
+                file_key = output_file if output_file else f"_in_progress_{chapter_key}"
+                if file_key not in files_to_entries:
+                    files_to_entries[file_key] = []
+                files_to_entries[file_key].append((chapter_key, chapter_info))
+        
+        chapter_display_info = []
+        
+        for output_file, entries in files_to_entries.items():
+            chapter_key, chapter_info = entries[0]
+            
+            # Get the actual output file (strip placeholder prefix if present)
+            actual_output_file = output_file
+            if output_file.startswith("_in_progress_"):
+                # For in_progress with null output, use expected filename based on chapter info
+                actual_output_file = chapter_info.get("output_file", "")
+                if not actual_output_file:
+                    # Generate expected filename based on actual_num
+                    actual_num = chapter_info.get("actual_num")
+                    if actual_num is not None:
+                        # Use .txt extension for text files, .html for EPUB
+                        ext = ".txt" if file_path.endswith(".txt") else ".html"
+                        actual_output_file = f"response_section_{actual_num}{ext}"
+            
+            # Check if this is a special file (files without numbers)
+            original_basename = chapter_info.get("original_basename", "")
+            filename_to_check = original_basename if original_basename else actual_output_file
+            
+            # Check if filename contains any digits
+            import re
+            has_numbers = bool(re.search(r'\d', filename_to_check))
+            is_special = not has_numbers
+            
+            # Skip special files if the toggle is off
+            if is_special and not show_special:
+                continue
+            
+            # Extract chapter number - prioritize stored values
+            chapter_num = None
+            if 'actual_num' in chapter_info and chapter_info['actual_num'] is not None:
+                chapter_num = chapter_info['actual_num']
+            elif 'chapter_num' in chapter_info and chapter_info['chapter_num'] is not None:
+                chapter_num = chapter_info['chapter_num']
+            
+            # Fallback: extract from filename
+            if chapter_num is None:
+                import re
+                matches = re.findall(r'(\d+)', actual_output_file)
+                if matches:
+                    chapter_num = int(matches[-1])
+                else:
+                    chapter_num = 999999
+            
+            status = chapter_info.get("status", "unknown")
+            if status == "completed_empty":
+                status = "completed"
+            
+            # Check file existence
+            if status == "completed":
+                output_path = os.path.join(output_dir, actual_output_file)
+                if not os.path.exists(output_path):
+                    status = "file_missing"
+            
+            chapter_display_info.append({
+                'key': chapter_key,
+                'num': chapter_num,
+                'info': chapter_info,
+                'output_file': actual_output_file,  # Use actual output file, not placeholder
+                'status': status,
+                'duplicate_count': len(entries),
+                'entries': entries
+            })
+        
+        # Sort by chapter number
+        chapter_display_info.sort(key=lambda x: x['num'] if x['num'] is not None else 999999)
+        
+        # Update data with rebuilt list
+        data['chapter_display_info'] = chapter_display_info
     
     def _update_chapter_status_info(self, data):
         """Update chapter status information after refresh"""
