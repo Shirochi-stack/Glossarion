@@ -1948,6 +1948,34 @@ Recent translations to summarize:
         
         # Detection mode
         self.duplicate_detection_mode_var = self.config.get('duplicate_detection_mode', 'basic')
+    
+    def _update_auto_compression_factor(self):
+        """Update compression factor based on output token limit when auto is enabled"""
+        try:
+            # Check if auto compression is enabled
+            if not self.config.get('auto_compression_factor', True):
+                return
+            
+            # Get current output token limit
+            output_tokens = int(getattr(self, 'max_output_tokens', 65536))
+            
+            # Determine compression factor based on token limit
+            if output_tokens < 16379:
+                factor = 1.5
+            elif output_tokens < 32769:
+                factor = 2.0
+            elif output_tokens < 65536:
+                factor = 2.5
+            else:  # 65536 or above
+                factor = 3.0
+            
+            # Update the variable
+            self.compression_factor_var = str(factor)
+            
+            # Also update config so it persists
+            self.config['compression_factor'] = factor
+        except Exception as e:
+            print(f"Error updating auto compression factor: {e}")
 
     def _setup_gui(self):
         """Initialize all GUI components"""
@@ -2012,6 +2040,9 @@ Recent translations to summarize:
         
         self.append_log("🚀 Glossarion v6.4.8 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
+        
+        # Initialize auto compression factor based on current output token limit
+        self._update_auto_compression_factor()
         
         # Restore last selected input files if available
         try:
@@ -6782,7 +6813,7 @@ Important rules:
                     'GLOSSARY_MAX_SENTENCES': str(self.config.get('glossary_max_sentences', 200)),
                     'GLOSSARY_MAX_TEXT_SIZE': str(self.config.get('glossary_max_text_size', 50000)),
                     'GLOSSARY_FILTER_MODE': self.config.get('glossary_filter_mode', 'all'),
-                    'COMPRESSION_FACTOR': str(self.config.get('compression_factor', 3.0)),
+                    'COMPRESSION_FACTOR': str(getattr(self, 'compression_factor_var', self.config.get('compression_factor', 3.0))),
                 }
                 
                 # Add project ID for Vertex AI
@@ -8453,6 +8484,13 @@ Important rules:
            self.max_output_tokens = val
            self.output_btn.setText(f"Output Token Limit: {val}")
            self.append_log(f"✅ Output token limit set to {val}")
+           
+           # Update compression factor if auto mode is enabled
+           if hasattr(self, '_update_auto_compression_factor'):
+               try:
+                   self._update_auto_compression_factor()
+               except Exception as e:
+                   print(f"Error updating auto compression factor: {e}")
 
     # Note: open_other_settings method is bound from other_settings.py during __init__
     # No need to define it here - it's injected dynamically

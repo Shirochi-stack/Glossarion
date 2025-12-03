@@ -1598,6 +1598,13 @@ def _create_response_handling_section(self, parent):
     compression_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
     section_v.addWidget(compression_title)
     
+    # Auto Compression Factor toggle
+    auto_compression_cb = self._create_styled_checkbox("Auto Compression Factor")
+    try:
+        auto_compression_cb.setChecked(bool(self.config.get('auto_compression_factor', True)))
+    except Exception:
+        auto_compression_cb.setChecked(True)
+    
     compression_w = QWidget()
     compression_h = QHBoxLayout(compression_w)
     compression_h.setContentsMargins(20, 5, 0, 0)
@@ -1608,16 +1615,68 @@ def _create_response_handling_section(self, parent):
         compression_edit.setText(str(self.compression_factor_var))
     except Exception:
         pass
+    
+    def _update_compression_factor():
+        """Update compression factor based on output token limit when auto is enabled"""
+        try:
+            if not auto_compression_cb.isChecked():
+                return
+            
+            # Get current output token limit
+            output_tokens = int(getattr(self, 'max_output_tokens', 65536))
+            
+            # Determine compression factor based on token limit
+            if output_tokens < 16379:
+                factor = 1.5
+            elif output_tokens < 32769:
+                factor = 2.0
+            elif output_tokens < 65536:
+                factor = 2.5
+            else:  # 65536 or above
+                factor = 3.0
+            
+            # Update the field and variable
+            compression_edit.setText(str(factor))
+            self.compression_factor_var = str(factor)
+        except Exception as e:
+            print(f"Error updating compression factor: {e}")
+    
+    # Store the update function as an instance method so it can be called from main GUI
+    self._update_auto_compression_factor = _update_compression_factor
+    
     def _on_compression_changed(text):
         try:
             self.compression_factor_var = text
         except Exception:
             pass
+    
+    def _on_auto_compression_toggle(checked):
+        try:
+            self.config['auto_compression_factor'] = bool(checked)
+            # Enable/disable manual editing
+            compression_edit.setEnabled(not checked)
+            # Update factor when enabling auto
+            if checked:
+                _update_compression_factor()
+        except Exception as e:
+            print(f"Error toggling auto compression: {e}")
+    
+    auto_compression_cb.toggled.connect(_on_auto_compression_toggle)
+    section_v.addWidget(auto_compression_cb)
+    
+    auto_compression_desc = QLabel("Automatically adjusts based on output token limit:\n<16379: 1.5 | <32769: 2.0 | <65536: 2.5 | ≥65536: 3.0")
+    auto_compression_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    auto_compression_desc.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(auto_compression_desc)
+    
     compression_edit.textChanged.connect(_on_compression_changed)
     compression_h.addWidget(compression_edit)
     compression_h.addWidget(QLabel("(1.0-5.0)"))
     compression_h.addStretch()
     section_v.addWidget(compression_w)
+    
+    # Apply initial state
+    _on_auto_compression_toggle(auto_compression_cb.isChecked())
     
     compression_desc = QLabel("Ratio for chunk sizing based on output limits")
     compression_desc.setStyleSheet("color: gray; font-size: 10pt;")
