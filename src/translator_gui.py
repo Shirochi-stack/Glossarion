@@ -7017,6 +7017,9 @@ Important rules:
             os.environ['HEADERS_PER_BATCH'] = str(self.headers_per_batch_var)
             os.environ['UPDATE_HTML_HEADERS'] = "1" if self.update_html_headers_var else "0"
             os.environ['SAVE_HEADER_TRANSLATIONS'] = "1" if self.save_header_translations_var else "0"
+            # Set Chapter Headers prompts from config
+            os.environ['BATCH_HEADER_SYSTEM_PROMPT'] = self.config.get('batch_header_system_prompt', '')
+            os.environ['BATCH_HEADER_PROMPT'] = self.config.get('batch_header_prompt', '')
             
             # Set metadata translation settings
             os.environ['TRANSLATE_METADATA_FIELDS'] = json.dumps(self.translate_metadata_fields)

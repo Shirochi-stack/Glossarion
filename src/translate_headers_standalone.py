@@ -692,6 +692,9 @@ def run_translation(
             'headers_per_batch': int(os.getenv('HEADERS_PER_BATCH', '350')),
             'temperature': float(os.getenv('TRANSLATION_TEMPERATURE', '0.3')),
             'max_tokens': int(os.getenv('MAX_OUTPUT_TOKENS', '12000')),
+            # Add Chapter Headers prompts from environment variables
+            'batch_header_system_prompt': os.getenv('BATCH_HEADER_SYSTEM_PROMPT', ''),
+            'batch_header_prompt': os.getenv('BATCH_HEADER_PROMPT', ''),
         }
         
         # Get options from environment
@@ -852,6 +855,9 @@ def run_translate_headers_gui(gui_instance):
             'headers_per_batch': int(getattr(gui_instance, 'headers_per_batch_var', 350)),
             'temperature': float(os.getenv('TRANSLATION_TEMPERATURE', '0.3')),
             'max_tokens': int(os.getenv('MAX_OUTPUT_TOKENS', '12000')),
+            # Add Chapter Headers prompts from active profile/config
+            'batch_header_system_prompt': gui_instance.config.get('batch_header_system_prompt', ''),
+            'batch_header_prompt': gui_instance.config.get('batch_header_prompt', ''),
         }
         
         # Get options once
