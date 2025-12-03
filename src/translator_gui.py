@@ -613,7 +613,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
             }
         """)
         
-        self.max_output_tokens = 32768
+        self.max_output_tokens = 65536
         self.proc = self.glossary_proc = None
         __version__ = "6.4.8"
         self.__version__ = __version__
@@ -1909,7 +1909,7 @@ Recent translations to summarize:
             # New: max tokens for rolling summary generation
             ('rolling_summary_max_tokens_var', 'rolling_summary_max_tokens', '2048'),
             ('reinforcement_freq_var', 'reinforcement_frequency', '10'),
-            ('max_retry_tokens_var', 'max_retry_tokens', '16384'),
+            ('max_retry_tokens_var', 'max_retry_tokens', '65536'),
             ('duplicate_lookback_var', 'duplicate_lookback_chapters', '5'),
             ('glossary_min_frequency_var', 'glossary_min_frequency', '2'),
             ('glossary_max_names_var', 'glossary_max_names', '50'),
@@ -8444,7 +8444,7 @@ Important rules:
        val, ok = QInputDialog.getInt(
            self,
            "Set Max Output Token Limit",
-           "Enter max output tokens for API output (e.g., 16384, 32768, 65536):",
+           "Enter max output tokens for API output (e.g., 65536, 131072):",
            value=self.max_output_tokens,
            minValue=1,
            maxValue=2000000
@@ -8970,7 +8970,7 @@ Important rules:
 
                 # Retry settings
                 ('retry_truncated', ['retry_truncated_var'], False, bool),
-                ('max_retry_tokens', ['max_retry_tokens_var'], 16384, lambda v: safe_int(v, 16384)),
+                ('max_retry_tokens', ['max_retry_tokens_var'], 65536, lambda v: safe_int(v, 65536)),
                 ('retry_timeout', ['retry_timeout_var'], False, bool),
                 ('preserve_original_text_on_failure', ['preserve_original_text_var'], False, bool),
                 
@@ -9685,7 +9685,7 @@ Important rules:
 
                 # Retry/network controls
                 ('RETRY_TRUNCATED', '1' if getattr(self, 'retry_truncated_var', False) else '0'),
-                ('MAX_RETRY_TOKENS', str(getattr(self, 'max_retry_tokens_var', '16384'))),
+                ('MAX_RETRY_TOKENS', str(getattr(self, 'max_retry_tokens_var', '65536'))),
                 ('RETRY_DUPLICATE_BODIES', '1' if getattr(self, 'retry_duplicate_var', False) else '0'),
                 ('DUPLICATE_LOOKBACK_CHAPTERS', str(getattr(self, 'duplicate_lookback_var', '5'))),
                 ('RETRY_TIMEOUT', '1' if getattr(self, 'retry_timeout_var', True) else '0'),
@@ -9724,7 +9724,7 @@ Important rules:
                 ('WEBNOVEL_MIN_HEIGHT', str(getattr(self, 'webnovel_min_height_var', '1000'))),
                 ('MAX_IMAGES_PER_CHAPTER', str(getattr(self, 'max_images_per_chapter_var', '1'))),
                 ('IMAGE_CHUNK_HEIGHT', str(getattr(self, 'image_chunk_height_var', '1500'))),
-                ('MAX_OUTPUT_TOKENS', str(getattr(self, 'max_output_tokens', 32768))),
+                ('MAX_OUTPUT_TOKENS', str(getattr(self, 'max_output_tokens', 65536))),
                 ('HIDE_IMAGE_TRANSLATION_LABEL', '1' if getattr(self, 'hide_image_translation_label_var', True) else '0'),
                 ('DISABLE_EPUB_GALLERY', '1' if getattr(self, 'disable_epub_gallery_var', False) else '0'),
                 ('DISABLE_AUTOMATIC_COVER_CREATION', '1' if getattr(self, 'disable_automatic_cover_creation_var', False) else '0'),
