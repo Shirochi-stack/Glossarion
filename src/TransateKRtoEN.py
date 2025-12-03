@@ -3100,8 +3100,8 @@ class BatchTranslationProcessor:
                     self.update_progress_fn(idx, actual_num, content_hash, fname, status=chapter_status, ai_features=ai_features)
                     self.save_progress_fn()
                     # DO NOT increment chapters_completed for qa_failed
-                    # Return False to indicate failure
-                    return False, actual_num
+                    # Return False to indicate failure (return 5 values to match successful return)
+                    return False, actual_num, None, None, None
                 # Check for QA failures with comprehensive detection
                 elif is_qa_failed_response(cleaned):
                     chapter_status = "qa_failed"
@@ -3111,8 +3111,8 @@ class BatchTranslationProcessor:
                     self.update_progress_fn(idx, actual_num, content_hash, fname, status=chapter_status, ai_features=ai_features)
                     self.save_progress_fn()
                     # DO NOT increment chapters_completed for qa_failed
-                    # Return False to indicate failure
-                    return False, actual_num
+                    # Return False to indicate failure (return 5 values to match successful return)
+                    return False, actual_num, None, None, None
                 else:
                     chapter_status = "completed"
                     # Update progress to completed status
