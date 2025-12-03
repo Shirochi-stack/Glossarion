@@ -81,10 +81,11 @@ class TextFileProcessor:
                     # Generate filename for this chunk
                     chunk_filename = f"section_{int(chapter_data['num'])}_{chunk_idx - 1}.txt"
                     
-                    # Save original chunk content to word_count folder
+                    # Save original chunk content to word_count folder (only if it doesn't exist)
                     original_chunk_path = os.path.join(word_count_dir, chunk_filename)
-                    with open(original_chunk_path, 'w', encoding='utf-8') as f:
-                        f.write(chunk_content)
+                    if not os.path.exists(original_chunk_path):
+                        with open(original_chunk_path, 'w', encoding='utf-8') as f:
+                            f.write(chunk_content)
                     
                     final_chapters.append({
                         'num': chunk_num,
@@ -106,10 +107,11 @@ class TextFileProcessor:
                 # Chapter is small enough, add as-is
                 chapter_filename = f"section_{chapter_data['num']}.txt"
                 
-                # Save original content to word_count folder
+                # Save original content to word_count folder (only if it doesn't exist)
                 original_chunk_path = os.path.join(word_count_dir, chapter_filename)
-                with open(original_chunk_path, 'w', encoding='utf-8') as f:
-                    f.write(chapter_content)
+                if not os.path.exists(original_chunk_path):
+                    with open(original_chunk_path, 'w', encoding='utf-8') as f:
+                        f.write(chapter_content)
                 
                 final_chapters.append({
                     'num': chapter_data['num'],  # Keep as integer for non-split chapters
