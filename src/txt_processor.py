@@ -42,6 +42,10 @@ class TextFileProcessor:
         """Process chapters and split them if they exceed token limits"""
         final_chapters = []
         
+        # Create word_count folder for storing original chunks
+        word_count_dir = os.path.join(self.output_dir, 'word_count')
+        os.makedirs(word_count_dir, exist_ok=True)
+        
         # Calculate based on OUTPUT token limits
         max_output_tokens = int(os.getenv("MAX_OUTPUT_TOKENS", "8192"))
         compression_factor = float(os.getenv("COMPRESSION_FACTOR", "0.8"))
@@ -74,11 +78,19 @@ class TextFileProcessor:
                     # Create float chapter numbers for chunks: 1.0, 1.1, 1.2, etc.
                     chunk_num = round(chapter_data['num'] + (chunk_idx - 1) * 0.1, 1)
                     
+                    # Generate filename for this chunk
+                    chunk_filename = f"section_{int(chapter_data['num'])}_{chunk_idx - 1}.txt"
+                    
+                    # Save original chunk content to word_count folder
+                    original_chunk_path = os.path.join(word_count_dir, chunk_filename)
+                    with open(original_chunk_path, 'w', encoding='utf-8') as f:
+                        f.write(chunk_content)
+                    
                     final_chapters.append({
                         'num': chunk_num,
                         'title': chunk_title,
                         'body': chunk_content,
-                        'filename': f"section_{int(chapter_data['num'])}_part{chunk_idx}.txt",  # Changed to avoid using file_base
+                        'filename': chunk_filename,
                         # Don't set original_basename for chunks - let filename generation use decimal logic
                         'content_hash': self._generate_hash(chunk_content),
                         'file_size': len(chunk_content),
@@ -92,11 +104,18 @@ class TextFileProcessor:
                     })
             else:
                 # Chapter is small enough, add as-is
+                chapter_filename = f"section_{chapter_data['num']}.txt"
+                
+                # Save original content to word_count folder
+                original_chunk_path = os.path.join(word_count_dir, chapter_filename)
+                with open(original_chunk_path, 'w', encoding='utf-8') as f:
+                    f.write(chapter_content)
+                
                 final_chapters.append({
                     'num': chapter_data['num'],  # Keep as integer for non-split chapters
                     'title': chapter_data['title'],
                     'body': chapter_content,
-                    'filename': f"section_{chapter_data['num']}.txt",  # Changed to avoid using file_base
+                    'filename': chapter_filename,
                     'original_basename': os.path.basename(self.file_path),  # Add original filename for .csv/.json/.txt detection
                     'content_hash': self._generate_hash(chapter_content),
                     'file_size': len(chapter_content),

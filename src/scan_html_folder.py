@@ -4216,12 +4216,43 @@ def process_html_file_batch(args):
             def dummy_log(msg):
                 pass
             
-            # For text files, skip word count analysis on individual sections
-            # (sections are arbitrary splits and can't be meaningfully compared to the whole source)
-            if text_file_mode and 1 in original_word_counts:
-                # Skip word count check for text file sections
-                # Word count analysis only makes sense for the combined file
-                pass
+            # For text files, compare against corresponding chunk from word_count folder
+            if text_file_mode and original_word_counts:
+                # Strip response_ prefix and .txt extension from filename
+                clean_filename = filename
+                if clean_filename.lower().startswith('response_'):
+                    clean_filename = clean_filename[9:]  # Remove 'response_' prefix
+                
+                # Try to find matching original chunk
+                if clean_filename in original_word_counts:
+                    # Found matching chunk!
+                    translated_wc = len(raw_text.split())
+                    original_wc = original_word_counts[clean_filename]
+                    
+                    if original_wc > 0:
+                        ratio = translated_wc / original_wc
+                        # For text files, use same reasonable bounds as EPUB
+                        is_reasonable = 0.7 <= ratio <= 2.0
+                        is_typical = 0.8 <= ratio <= 1.5
+                        
+                        word_count_check = {
+                            'found_match': True,
+                            'chapter_num': clean_filename,
+                            'original_wc': original_wc,
+                            'translated_wc': translated_wc,
+                            'ratio': ratio,
+                            'percentage': ratio * 100,
+                            'is_reasonable': is_reasonable,
+                            'is_typical': is_typical,
+                            'original_file': clean_filename
+                        }
+                        
+                        # Only mark as issue if ratio is unreasonable
+                        if not is_reasonable:
+                            issues.append(f"word_count_mismatch_ratio_{ratio:.2f}")
+                elif '_total' in original_word_counts:
+                    # Fallback: old behavior with total count (skip analysis)
+                    pass
             else:
                 # Normal EPUB mode
                 wc_result = cross_reference_word_counts(
@@ -4386,18 +4417,40 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     
     if check_word_count:
         if text_file_mode:
-            # For text files, extract word count from the original source text file
+            # For text files, load word counts from individual chunks in word_count folder
             # The source is the epub_path parameter (which is actually a .txt file in this mode)
             if epub_path and os.path.exists(epub_path) and epub_path.lower().endswith('.txt'):
-                log(f"📝 Extracting word count from original text file: {os.path.basename(epub_path)}")
+                log(f"📝 Loading original text chunks for word count analysis")
                 try:
-                    with open(epub_path, 'r', encoding='utf-8') as f:
-                        source_text = f.read()
-                    source_word_count = len(source_text.split())
-                    # For text files, store word count under key 1 for all sections to reference
-                    original_word_counts = {1: source_word_count}
-                    log(f"   Source text word count: {source_word_count} words")
-                    log(f"   Will compare each section file against this total")
+                    # Check for word_count folder
+                    word_count_folder = os.path.join(folder_path, 'word_count')
+                    if os.path.exists(word_count_folder):
+                        # Load word counts from each chunk file
+                        chunk_files = [f for f in os.listdir(word_count_folder) if f.lower().endswith('.txt')]
+                        if chunk_files:
+                            # Store as {filename: word_count} for easy lookup
+                            original_word_counts = {}
+                            for chunk_file in chunk_files:
+                                chunk_path = os.path.join(word_count_folder, chunk_file)
+                                with open(chunk_path, 'r', encoding='utf-8') as f:
+                                    chunk_text = f.read()
+                                chunk_word_count = len(chunk_text.split())
+                                # Store with filename as key (without extension)
+                                original_word_counts[chunk_file] = chunk_word_count
+                            
+                            log(f"   Loaded {len(original_word_counts)} original chunk files from word_count folder")
+                            log(f"   Total source words: {sum(original_word_counts.values()):,}")
+                        else:
+                            log(f"   ⚠️ word_count folder exists but contains no .txt files")
+                            check_word_count = False
+                    else:
+                        # Fallback: use total source file word count (old behavior)
+                        log(f"   ⚠️ word_count folder not found, using total source file word count")
+                        with open(epub_path, 'r', encoding='utf-8') as f:
+                            source_text = f.read()
+                        source_word_count = len(source_text.split())
+                        original_word_counts = {'_total': source_word_count}
+                        log(f"   Source text word count: {source_word_count} words")
                     
                     # Find the combined translated file for additional reporting
                     # Look for *_translated.txt in the folder
@@ -4409,7 +4462,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                     except Exception:
                         pass
                 except Exception as e:
-                    log(f"   ⚠️ Could not extract word count from text file: {e}")
+                    log(f"   ⚠️ Could not load text chunk word counts: {e}")
                     check_word_count = False
             else:
                 log("⚠️ Word count cross-reference enabled but no valid text file provided - skipping this check")
@@ -4682,12 +4735,17 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                 with open(combined_path, 'r', encoding='utf-8') as f:
                     combined_text = f.read()
                 translated_word_count = len(combined_text.split())
-                original_wc = original_word_counts[1]  # We stored it under key 1
+                
+                # Calculate total original word count from all chunks
+                if '_total' in original_word_counts:
+                    original_wc = original_word_counts['_total']
+                else:
+                    original_wc = sum(original_word_counts.values())
                 
                 if original_wc > 0:
                     ratio = translated_word_count / original_wc
-                    log(f"   Original: {original_wc} words")
-                    log(f"   Translated: {translated_word_count} words")
+                    log(f"   Original: {original_wc:,} words")
+                    log(f"   Translated: {translated_word_count:,} words")
                     log(f"   Ratio: {ratio:.2f}")
                     
                     # Determine if ratio is reasonable (between 0.7 and 2.0)
