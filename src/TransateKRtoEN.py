@@ -1162,7 +1162,7 @@ class ProgressManager:
                 except:
                     pass
     
-    def update(self, idx, actual_num, content_hash, output_file, status="in_progress", ai_features=None, raw_num=None, chapter_obj=None, merged_chapters=None):
+    def update(self, idx, actual_num, content_hash, output_file, status="in_progress", ai_features=None, raw_num=None, chapter_obj=None, merged_chapters=None, qa_issues_found=None):
         """Update progress for a chapter"""
         # Use helper method to get consistent key
         chapter_key = self._get_chapter_key(actual_num, output_file, chapter_obj, content_hash)
@@ -1200,6 +1200,12 @@ class ProgressManager:
         # Add merged chapters list if provided (for parent chapters in request merging)
         if merged_chapters is not None:
             chapter_info["merged_chapters"] = merged_chapters
+        
+        # Add QA issues if provided (for qa_failed status)
+        if qa_issues_found is not None:
+            chapter_info["qa_issues"] = True
+            chapter_info["qa_timestamp"] = time.time()
+            chapter_info["qa_issues_found"] = qa_issues_found
         
         self.prog["chapters"][chapter_key] = chapter_info
     
@@ -3096,8 +3102,8 @@ class BatchTranslationProcessor:
                 if chapter_truncated:
                     chapter_status = "qa_failed"
                     print(f"⚠️ Batch: Chapter {actual_num} marked as qa_failed: Response was truncated")
-                    # Update progress to qa_failed status
-                    self.update_progress_fn(idx, actual_num, content_hash, fname, status=chapter_status, ai_features=ai_features)
+                    # Update progress to qa_failed status with TRUNCATED issue
+                    self.update_progress_fn(idx, actual_num, content_hash, fname, status=chapter_status, ai_features=ai_features, qa_issues_found=["TRUNCATED"])
                     self.save_progress_fn()
                     # DO NOT increment chapters_completed for qa_failed
                     # Return False to indicate failure (return 5 values to match successful return)
@@ -3294,7 +3300,7 @@ class BatchTranslationProcessor:
                 print(f"   ⚠️ Merged group marked as qa_failed: Response was truncated")
                 for actual_num, _, idx, chapter, content_hash in chapters_data:
                     with self.progress_lock:
-                        self.update_progress_fn(idx, actual_num, content_hash, fname if idx == parent_idx else None, status="qa_failed")
+                        self.update_progress_fn(idx, actual_num, content_hash, fname if idx == parent_idx else None, status="qa_failed", qa_issues_found=["TRUNCATED"])
                         self.save_progress_fn()
                     results.append((False, actual_num, None, None, None))
                 return results
@@ -7933,17 +7939,19 @@ def main(log_callback=None, stop_callback=None):
                     print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {actual_num}: {final_title}")
                 
                 # Determine status based on comprehensive failure detection
+                qa_issues = None
                 if is_qa_failed_response(cleaned):
                     chapter_status = "qa_failed"
                     failure_reason = get_failure_reason(cleaned)
                     print(f"⚠️ Chapter {actual_num} marked as qa_failed: {failure_reason}")
                 elif finish_reason in ["length", "max_tokens"]:
                     chapter_status = "qa_failed"
+                    qa_issues = ["TRUNCATED"]
                     print(f"⚠️ Chapter {actual_num} marked as qa_failed: truncated (finish_reason: {finish_reason})")
                 else:
                     chapter_status = "completed"
 
-                progress_manager.update(idx, actual_num, content_hash, fname_txt, status=chapter_status, chapter_obj=c)
+                progress_manager.update(idx, actual_num, content_hash, fname_txt, status=chapter_status, chapter_obj=c, qa_issues_found=qa_issues)
             else:
                 # For EPUB files, keep original HTML behavior
                 with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
@@ -7955,17 +7963,19 @@ def main(log_callback=None, stop_callback=None):
                     print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {actual_num}: {final_title}")
                 
                 # Determine status based on comprehensive failure detection
+                qa_issues = None
                 if is_qa_failed_response(cleaned):
                     chapter_status = "qa_failed"
                     failure_reason = get_failure_reason(cleaned)
                     print(f"⚠️ Chapter {actual_num} marked as qa_failed: {failure_reason}")
                 elif finish_reason in ["length", "max_tokens"]:
                     chapter_status = "qa_failed"
+                    qa_issues = ["TRUNCATED"]
                     print(f"⚠️ Chapter {actual_num} marked as qa_failed: truncated (finish_reason: {finish_reason})")
                 else:
                     chapter_status = "completed"
 
-                progress_manager.update(idx, actual_num, content_hash, fname, status=chapter_status, chapter_obj=c)
+                progress_manager.update(idx, actual_num, content_hash, fname, status=chapter_status, chapter_obj=c, qa_issues_found=qa_issues)
             progress_manager.save()
             
             # After completing this chapter, produce a rolling summary and store it for the NEXT chapter
