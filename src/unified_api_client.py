@@ -2810,13 +2810,16 @@ class UnifiedClient:
             info = dict(self._thread_chapter_info.get(thread_id, {}))
             if chapter is not None:
                 try:
+                    # Convert chapter to string, preserving decimal notation for floats
                     info['chapter'] = str(chapter)
                 except Exception:
-                    info['chapter'] = chapter
+                    info['chapter'] = str(chapter)
             if chunk is not None:
-                info['chunk'] = int(chunk)
+                # Ensure chunk is integer (convert float if necessary)
+                info['chunk'] = int(float(chunk)) if isinstance(chunk, (float, str)) else int(chunk)
             if total_chunks is not None:
-                info['total_chunks'] = int(total_chunks)
+                # Ensure total_chunks is integer (convert float if necessary)
+                info['total_chunks'] = int(float(total_chunks)) if isinstance(total_chunks, (float, str)) else int(total_chunks)
             self._thread_chapter_info[thread_id] = info
         except Exception as e:
             print(f"Failed to set chapter context: {e}")

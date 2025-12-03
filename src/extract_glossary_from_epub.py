@@ -874,8 +874,11 @@ def load_progress() -> Dict:
                 # Ensure all required keys exist
                 if "completed" not in data:
                     data["completed"] = []
-                if "glossary" not in data:
-                    data["glossary"] = []
+                # Glossary field is deprecated but may exist in old progress files
+                # We ignore it now since glossary is loaded from output file instead
+                if "glossary" in data:
+                    # Remove old glossary field to save space (will be ignored anyway)
+                    del data["glossary"]
                 if "merged_indices" not in data:
                     data["merged_indices"] = []  # Track which chapters were merged into others
                 
@@ -2322,7 +2325,19 @@ def main(log_callback=None, stop_callback=None):
 
     prog = load_progress()
     completed = prog['completed']
-    glossary = prog['glossary']
+    # Load existing glossary from output file (if it exists) instead of progress file
+    # This preserves manual edits to the glossary
+    output_glossary_path = os.path.join(glossary_dir, os.path.basename(args.output))
+    if os.path.exists(output_glossary_path):
+        try:
+            with open(output_glossary_path, 'r', encoding='utf-8') as f:
+                glossary = json.load(f)
+            print(f"📂 Loaded existing glossary: {len(glossary)} entries")
+        except Exception as e:
+            print(f"⚠️ Could not load existing glossary, starting fresh: {e}")
+            glossary = []
+    else:
+        glossary = []
     merged_indices = prog.get('merged_indices', [])
     
     # Request merging configuration
@@ -3457,15 +3472,20 @@ def main(log_callback=None, stop_callback=None):
         print(f"[Warning] Could not save CSV format: {e}")
 
 def save_progress(completed: List[int], glossary: List[Dict], merged_indices: List[int] = None):
-    """Save progress to JSON file (history is now managed separately)"""
+    """Save progress to JSON file (history is now managed separately)
+    
+    NOTE: We no longer save the glossary itself in the progress file to avoid
+    overwriting manual edits. The progress file only tracks which chapters are completed.
+    The actual glossary data is saved separately in the output JSON/CSV files.
+    """
     global _progress_lock
     
     # Acquire lock to prevent concurrent writes
     with _progress_lock:
         progress_data = {
             "completed": completed,
-            "glossary": glossary
-            # History is now managed separately by HistoryManager
+            # Glossary is saved separately to output files, not in progress
+            # This prevents the progress file from overwriting manual edits
         }
         
         # Add merged_indices if provided

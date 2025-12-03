@@ -897,8 +897,19 @@ class FileUtilities:
             return full_ext or '.html'
         
         if use_header_output and chapter.get('title'):
-            safe_title = make_safe_filename(chapter['title'], actual_num or chapter.get('num', 0))
-            if safe_title and safe_title != f"chapter_{actual_num or chapter.get('num', 0):03d}":
+            chapter_num_for_name = actual_num or chapter.get('num', 0)
+            safe_title = make_safe_filename(chapter['title'], chapter_num_for_name)
+            # For comparison, handle both int and float chapter numbers
+            if isinstance(chapter_num_for_name, float):
+                major = int(chapter_num_for_name)
+                minor = int(round((chapter_num_for_name - major) * 100))
+                if minor > 0:
+                    comparison_name = f"chapter_{major:03d}_{minor:02d}"
+                else:
+                    comparison_name = f"chapter_{major:03d}"
+            else:
+                comparison_name = f"chapter_{chapter_num_for_name:03d}"
+            if safe_title and safe_title != comparison_name:
                 if is_text_file:
                     return f"{safe_title}.txt" if retain else f"response_{safe_title}.txt"
                 else:
@@ -941,9 +952,9 @@ class FileUtilities:
                     decimal_part = second_part
                     # Create filename reflecting the decimal interpretation
                     if is_text_file:
-                        return f"{chapter_num:04d}_{decimal_part}.txt" if retain else f"response_{chapter_num:04d}_{decimal_part}.txt"
+                        return f"{chapter_num:03d}_{decimal_part}.txt" if retain else f"response_{chapter_num:03d}_{decimal_part}.txt"
                     else:
-                        return f"{chapter_num:04d}_{decimal_part}{_full_ext_from_original(chapter)}" if retain else f"response_{chapter_num:04d}_{decimal_part}.html"
+                        return f"{chapter_num:03d}_{decimal_part}{_full_ext_from_original(chapter)}" if retain else f"response_{chapter_num:03d}_{decimal_part}.html"
         
         # Standard EPUB handling - use original basename
         if 'original_basename' in chapter and chapter['original_basename']:
@@ -964,16 +975,17 @@ class FileUtilities:
             # Handle decimal chapter numbers from text file splitting
             if isinstance(actual_num, float):
                 major = int(actual_num)
-                minor = int(round((actual_num - major) * 10))
+                minor = int(round((actual_num - major) * 100))  # Changed from *10 to *100 for better precision
                 if is_text_file:
-                    return f"{major:04d}_{minor}.txt" if retain else f"response_{major:04d}_{minor}.txt"
+                    return f"{major:03d}_{minor:02d}.txt" if retain else f"response_{major:03d}_{minor:02d}.txt"
                 else:
-                    return f"{major:04d}_{minor}.html" if retain else f"response_{major:04d}_{minor}.html"
+                    return f"{major:03d}_{minor:02d}.html" if retain else f"response_{major:03d}_{minor:02d}.html"
             else:
+                # For integer chapter numbers, use standard formatting
                 if is_text_file:
-                    return f"{actual_num:04d}.txt" if retain else f"response_{actual_num:04d}.txt"
+                    return f"{actual_num:03d}.txt" if retain else f"response_{actual_num:03d}.txt"
                 else:
-                    return f"{actual_num:04d}.html" if retain else f"response_{actual_num:04d}.html"
+                    return f"{actual_num:03d}.html" if retain else f"response_{actual_num:03d}.html"
 
 # =====================================================
 # UNIFIED PROGRESS MANAGER
@@ -2300,12 +2312,22 @@ class TranslationProcessor:
 
                 # Determine file reference
                 if c.get('is_chunk', False):
-                    file_ref = f"Section_{c['num']}"
+                    # Handle float chapter numbers in file reference
+                    chapter_num_for_ref = c['num']
+                    if isinstance(chapter_num_for_ref, float):
+                        # Keep decimal notation for display (e.g., "Section_1.0")
+                        file_ref = f"Section_{chapter_num_for_ref}"
+                    else:
+                        file_ref = f"Section_{chapter_num_for_ref}"
                 else:
                     # Check if this is a text file - need to access from self
                     is_text_source = self.is_text_file or c.get('filename', '').endswith('.txt')
                     terminology = "Section" if is_text_source else "Chapter"
-                    file_ref = c.get('original_basename', f'{terminology}_{c["num"]}')
+                    chapter_num_for_ref = c['num']
+                    if isinstance(chapter_num_for_ref, float):
+                        file_ref = c.get('original_basename', f'{terminology}_{chapter_num_for_ref}')
+                    else:
+                        file_ref = c.get('original_basename', f'{terminology}_{chapter_num_for_ref}')
 
                 # When contextual translation is enabled and we have assistant-role
                 # context (memory, summaries, etc.), surface its token share explicitly.
@@ -2326,7 +2348,19 @@ class TranslationProcessor:
                 # Generate filename for chunks
                 if chunk_idx and total_chunks > 1:
                     # This is a chunk - use chunk naming format
-                    fname = f"response_{c['num']:03d}_chunk_{chunk_idx}.html"
+                    # Handle float chapter numbers (e.g., 1.0, 2.5) properly
+                    chapter_num = c['num']
+                    if isinstance(chapter_num, float):
+                        # For decimal chapters like 1.5, use format like "response_001_5_chunk_1.html"
+                        major = int(chapter_num)
+                        minor = int(round((chapter_num - major) * 100))  # 1.5 -> 50, 1.1 -> 10
+                        if minor > 0:
+                            fname = f"response_{major:03d}_{minor:02d}_chunk_{chunk_idx}.html"
+                        else:
+                            # It's like 1.0, just use the integer part
+                            fname = f"response_{major:03d}_chunk_{chunk_idx}.html"
+                    else:
+                        fname = f"response_{chapter_num:03d}_chunk_{chunk_idx}.html"
                 else:
                     # Not a chunk - use regular naming
                     fname = FileUtilities.create_chapter_filename(c, c.get('actual_chapter_num', c['num']))
@@ -2512,6 +2546,8 @@ class TranslationProcessor:
             
             except Exception as e:
                 print(f"❌ Unexpected error during API call: {e}")
+                import traceback
+                print(f"Full traceback:\n{traceback.format_exc()}")
                 raise
         
         self.config.MAX_OUTPUT_TOKENS = original_max_tokens
