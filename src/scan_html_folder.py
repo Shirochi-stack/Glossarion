@@ -4080,8 +4080,8 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
     }
 
 def process_html_file_batch(args):
-    """Process a batch of HTML files - MUST BE AT MODULE LEVEL"""
-    file_batch, folder_path, qa_settings, mode, original_word_counts, merge_info = args
+    """Process a batch of HTML or text files - MUST BE AT MODULE LEVEL"""
+    file_batch, folder_path, qa_settings, mode, original_word_counts, merge_info, text_file_mode = args
     batch_results = []
     
     # Import what we need inside the worker
@@ -4094,7 +4094,12 @@ def process_html_file_batch(args):
         full_path = os.path.join(folder_path, filename)
         
         try:
-            raw_text = extract_text_from_html(full_path)
+            if text_file_mode:
+                # For text files, read directly
+                with open(full_path, 'r', encoding='utf-8') as f:
+                    raw_text = f.read()
+            else:
+                raw_text = extract_text_from_html(full_path)
         except Exception as e:
             # Skip files that can't be read
             continue
@@ -4156,10 +4161,10 @@ def process_html_file_batch(args):
                     total_glossary_items = sum(g.get('count', 1) for g in glossary_issues)
                     issues.append(f"glossary_leakage_{total_glossary_items}_entries_found")
                     
-        # HTML tag check
+        # HTML tag check (skip for text files)
         check_missing_html_tag = qa_settings.get('check_missing_html_tag', True)
         check_body_tag = qa_settings.get('check_body_tag', False)
-        if check_missing_html_tag and filename.lower().endswith(('.html', '.xhtml', '.htm')):
+        if not text_file_mode and check_missing_html_tag and filename.lower().endswith(('.html', '.xhtml', '.htm')):
             # Create a dummy log function for the worker
             def dummy_log(msg):
                 pass
@@ -4210,23 +4215,52 @@ def process_html_file_batch(args):
             # Create dummy log for worker
             def dummy_log(msg):
                 pass
-                
-            wc_result = cross_reference_word_counts(
-                original_word_counts, 
-                filename, 
-                raw_text,
-                dummy_log,
-                merge_info
-            )
             
-            if wc_result['found_match']:
-                word_count_check = wc_result
-                # Only mark as issue if ratio is unreasonable (outside safe bounds)
-                if not wc_result['is_reasonable']:
-                    issues.append(f"word_count_mismatch_ratio_{wc_result['ratio']:.2f}")
+            # For text files, do simpler word count comparison
+            if text_file_mode and 1 in original_word_counts:
+                # Text file mode - compare against total source word count
+                translated_wc = len(raw_text.split())
+                original_wc = original_word_counts[1]
+                
+                if original_wc > 0:
+                    ratio = translated_wc / original_wc
+                    # For text files, use same reasonable bounds as EPUB
+                    is_reasonable = 0.7 <= ratio <= 2.0
+                    is_typical = 0.8 <= ratio <= 1.5
+                    
+                    word_count_check = {
+                        'found_match': True,
+                        'chapter_num': 1,
+                        'original_wc': original_wc,
+                        'translated_wc': translated_wc,
+                        'ratio': ratio,
+                        'percentage': ratio * 100,
+                        'is_reasonable': is_reasonable,
+                        'is_typical': is_typical,
+                        'original_file': 'source.txt'
+                    }
+                    
+                    # Only mark as issue if ratio is unreasonable
+                    if not is_reasonable:
+                        issues.append(f"word_count_mismatch_ratio_{ratio:.2f}")
             else:
-                word_count_check = wc_result
-                issues.append("word_count_no_match_found")
+                # Normal EPUB mode
+                wc_result = cross_reference_word_counts(
+                    original_word_counts, 
+                    filename, 
+                    raw_text,
+                    dummy_log,
+                    merge_info
+                )
+                
+                if wc_result['found_match']:
+                    word_count_check = wc_result
+                    # Only mark as issue if ratio is unreasonable (outside safe bounds)
+                    if not wc_result['is_reasonable']:
+                        issues.append(f"word_count_mismatch_ratio_{wc_result['ratio']:.2f}")
+                else:
+                    word_count_check = wc_result
+                    issues.append("word_count_no_match_found")
         
         # Create result dictionary
         result = {
@@ -4307,12 +4341,21 @@ def _init_worker_process():
         pass
 
 
-def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', qa_settings=None, epub_path=None, selected_files=None):
+def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', qa_settings=None, epub_path=None, selected_files=None, text_file_mode=None):
     """
     Scan HTML folder for QA issues - PROCESSPOOLEXECUTOR VERSION
+    Also supports text file scanning (auto-detected from epub_path extension)
     """
     global _stop_flag
     _stop_flag = False
+    
+    # Auto-detect text file mode from epub_path extension if not explicitly specified
+    if text_file_mode is None and epub_path:
+        text_file_mode = epub_path.lower().endswith('.txt')
+        if text_file_mode:
+            log(f"📄 Text file mode auto-detected from source file extension")
+    elif text_file_mode is None:
+        text_file_mode = False
     
     # Create a combined stop check function
     def should_stop():
@@ -4357,11 +4400,42 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     check_word_count = qa_settings.get('check_word_count_ratio', False)
     check_multiple_headers = qa_settings.get('check_multiple_headers', True)
     
-    # Extract word counts from original EPUB if needed
+    # Extract word counts from original EPUB/text file if needed
     original_word_counts = {}
     merge_info = {}  # For request merging support
+    combined_text_file = None  # For text file mode word count analysis
+    
     if check_word_count:
-        if epub_path and os.path.exists(epub_path):
+        if text_file_mode:
+            # For text files, extract word count from the original source text file
+            # The source is the epub_path parameter (which is actually a .txt file in this mode)
+            if epub_path and os.path.exists(epub_path) and epub_path.lower().endswith('.txt'):
+                log(f"📝 Extracting word count from original text file: {os.path.basename(epub_path)}")
+                try:
+                    with open(epub_path, 'r', encoding='utf-8') as f:
+                        source_text = f.read()
+                    source_word_count = len(source_text.split())
+                    # For text files, store word count under key 1 for all sections to reference
+                    original_word_counts = {1: source_word_count}
+                    log(f"   Source text word count: {source_word_count} words")
+                    log(f"   Will compare each section file against this total")
+                    
+                    # Find the combined translated file for additional reporting
+                    # Look for *_translated.txt in the folder
+                    try:
+                        txt_files = [f for f in os.listdir(folder_path) if f.lower().endswith('_translated.txt')]
+                        if txt_files:
+                            combined_text_file = txt_files[0]  # Use first match
+                            log(f"   Combined file found: {combined_text_file}")
+                    except Exception:
+                        pass
+                except Exception as e:
+                    log(f"   ⚠️ Could not extract word count from text file: {e}")
+                    check_word_count = False
+            else:
+                log("⚠️ Word count cross-reference enabled but no valid text file provided - skipping this check")
+                check_word_count = False
+        elif epub_path and os.path.exists(epub_path):
             log(f"📚 Extracting word counts from original EPUB: {os.path.basename(epub_path)}")
             min_length = qa_settings.get('min_file_length', 0)
             original_word_counts = extract_epub_word_counts(epub_path, log, min_file_length=min_length)
@@ -4447,8 +4521,15 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
         log("   🎯 Designed specifically for catching AI retranslations of the same content")
         log("   ⏱️ NOTE: AI Hunter mode checks EVERY file pair - but now with PARALLEL PROCESSING!")
     
-    # Get HTML files (including .xhtml)
-    html_files = sorted([f for f in os.listdir(folder_path) if f.lower().endswith((".html", ".xhtml", ".htm"))])
+    # Get files to scan (HTML or text based on mode)
+    if text_file_mode:
+        # For text files, scan section files (including response_ prefix versions)
+        all_txt_files = sorted([f for f in os.listdir(folder_path) if f.lower().endswith(".txt")])
+        # Filter out only combined files (_translated.txt)
+        html_files = [f for f in all_txt_files if not f.endswith('_translated.txt')]
+        log(f"📄 Text file mode enabled - scanning section files (response_ prefix ignored for comparison)")
+    else:
+        html_files = sorted([f for f in os.listdir(folder_path) if f.lower().endswith((".html", ".xhtml", ".htm"))])
     
     # If specific files were selected, filter to those (by basename)
     if selected_files:
@@ -4458,7 +4539,9 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             log(f"📄 Limited scan to {len(html_files)} selected file(s)")
         except Exception:
             pass
-    log(f"🔍 Found {len(html_files)} HTML files. Starting parallel scan...")
+    
+    file_type = "text" if text_file_mode else "HTML"
+    log(f"🔍 Found {len(html_files)} {file_type} files. Starting parallel scan...")
     
     # Determine number of workers
     cpu_count = multiprocessing.cpu_count()
@@ -4502,7 +4585,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     # Prepare worker data
     worker_args = []
     for batch in batches:
-        args = (batch, folder_path, qa_settings, mode, original_word_counts, merge_info)
+        args = (batch, folder_path, qa_settings, mode, original_word_counts, merge_info, text_file_mode)
         worker_args.append(args)
     
     # Process files in parallel
@@ -4610,6 +4693,32 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     
     dup_time = time.time() - dup_start_time
     log(f"✅ Duplicate detection completed in {dup_time:.1f} seconds")
+    
+    # For text file mode with word count enabled, check the combined file separately
+    if text_file_mode and check_word_count and combined_text_file and original_word_counts:
+        log("\n📊 Analyzing word count for combined text file...")
+        try:
+            combined_path = os.path.join(folder_path, combined_text_file)
+            if os.path.exists(combined_path):
+                with open(combined_path, 'r', encoding='utf-8') as f:
+                    combined_text = f.read()
+                translated_word_count = len(combined_text.split())
+                original_wc = original_word_counts[1]  # We stored it under key 1
+                
+                if original_wc > 0:
+                    ratio = translated_word_count / original_wc
+                    log(f"   Original: {original_wc} words")
+                    log(f"   Translated: {translated_word_count} words")
+                    log(f"   Ratio: {ratio:.2f}")
+                    
+                    # Determine if ratio is reasonable (between 0.7 and 2.0)
+                    is_reasonable = 0.7 <= ratio <= 2.0
+                    if is_reasonable:
+                        log(f"   ✅ Word count ratio is reasonable")
+                    else:
+                        log(f"   ⚠️ Word count ratio seems unusual (expected 0.7-2.0)")
+        except Exception as e:
+            log(f"   ⚠️ Could not analyze combined file word count: {e}")
     
     # Process results and check for additional issues
     log("\n📊 Checking for other issues...")

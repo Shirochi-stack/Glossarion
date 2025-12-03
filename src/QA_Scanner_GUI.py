@@ -1123,45 +1123,57 @@ class QAScannerMixin:
             if not settings_saved:
                 self.append_log("⚠️ QA scan canceled - no custom settings were saved.")
                 return
-        # Check if word count cross-reference is enabled but no EPUB is selected
+        # Check if word count cross-reference is enabled but no source file is selected
         check_word_count = qa_settings.get('check_word_count_ratio', False)
         epub_files_to_scan = []
         primary_epub_path = None
         
+        # Determine if text file mode is enabled
+        text_file_mode = self.config.get('qa_text_file_mode', False)
+        if hasattr(self, 'qa_text_file_mode_checkbox'):
+            try:
+                text_file_mode = bool(self.qa_text_file_mode_checkbox.isChecked())
+            except Exception:
+                pass
+        
         # ALWAYS populate epub_files_to_scan for auto-search, regardless of word count checking
-        # First check if current selection actually contains EPUBs
+        # First check if current selection actually contains source files (EPUB or TXT)
         current_epub_files = []
         if hasattr(self, 'selected_files') and self.selected_files:
-            current_epub_files = [f for f in self.selected_files if f.lower().endswith('.epub')]
-            print(f"[DEBUG] Current selection contains {len(current_epub_files)} EPUB files")
+            # Check for both EPUB and TXT files
+            current_epub_files = [f for f in self.selected_files if f.lower().endswith(('.epub', '.txt'))]
+            epub_count = len([f for f in current_epub_files if f.lower().endswith('.epub')])
+            txt_count = len([f for f in current_epub_files if f.lower().endswith('.txt')])
+            print(f"[DEBUG] Current selection contains {epub_count} EPUB files and {txt_count} TXT files")
         
         if current_epub_files:
-            # Use EPUBs from current selection
+            # Use source files from current selection
             epub_files_to_scan = current_epub_files
-            print(f"[DEBUG] Using {len(epub_files_to_scan)} EPUB files from current selection")
+            print(f"[DEBUG] Using {len(epub_files_to_scan)} source files from current selection")
         else:
-            # No EPUBs in current selection - check if we have stored EPUBs
+            # No source files in current selection - check if we have stored path
             primary_epub_path = self.get_current_epub_path()
             print(f"[DEBUG] get_current_epub_path returned: {primary_epub_path}")
             
             if primary_epub_path:
                 epub_files_to_scan = [primary_epub_path]
-                print(f"[DEBUG] Using stored EPUB file for auto-search")
+                print(f"[DEBUG] Using stored source file for auto-search")
         
         # Now handle word count specific logic if enabled
         if check_word_count:
             print("[DEBUG] Word count check is enabled, validating EPUB availability...")
             
-            # Check if we have EPUBs for word count analysis
+            # Check if we have source files for word count analysis
             if not epub_files_to_scan:
-                # No EPUBs available for word count analysis
+                # No source files available for word count analysis
+                file_type = "text" if text_file_mode else "EPUB"
                 msg = QMessageBox(self)
                 msg.setIcon(QMessageBox.Warning)
-                msg.setWindowTitle("No Source EPUB Selected")
-                msg.setText("Word count cross-reference is enabled but no source EPUB file is selected.")
+                msg.setWindowTitle(f"No Source {file_type.upper()} Selected")
+                msg.setText(f"Word count cross-reference is enabled but no source {file_type} file is selected.")
                 msg.setInformativeText("Would you like to:\n"
                                       "• YES - Continue scan without word count analysis\n"
-                                      "• NO - Select an EPUB file now\n"
+                                      f"• NO - Select a {file_type} file now\n"
                                       "• CANCEL - Cancel the scan")
                 msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel)
                 result = msg.exec()
@@ -1169,19 +1181,27 @@ class QAScannerMixin:
                 if result == QMessageBox.Cancel:
                     self.append_log("⚠️ QA scan canceled.")
                     return
-                elif result == QMessageBox.No:  # No - Select EPUB now
-                    epub_path, _ = QFileDialog.getOpenFileName(
-                        self,
-                        "Select Source EPUB File",
-                        "",
-                        "EPUB files (*.epub);;All files (*.*)"
-                    )
+                elif result == QMessageBox.No:  # No - Select source file now
+                    if text_file_mode:
+                        epub_path, _ = QFileDialog.getOpenFileName(
+                            self,
+                            "Select Source Text File",
+                            "",
+                            "Text files (*.txt);;All files (*.*)"
+                        )
+                    else:
+                        epub_path, _ = QFileDialog.getOpenFileName(
+                            self,
+                            "Select Source EPUB File",
+                            "",
+                            "EPUB files (*.epub);;All files (*.*)"
+                        )
                     
                     if not epub_path:
                         retry = QMessageBox.question(
                             self,
                             "No File Selected",
-                            "No EPUB file was selected.\n\n" +
+                            f"No {file_type} file was selected.\n\n" +
                             "Do you want to continue the scan without word count analysis?",
                             QMessageBox.Yes | QMessageBox.No
                         )
@@ -1198,7 +1218,7 @@ class QAScannerMixin:
                         self.selected_epub_path = epub_path
                         self.config['last_epub_path'] = epub_path
                         self.save_config(show_message=False)
-                        self.append_log(f"✅ Selected EPUB: {os.path.basename(epub_path)}")
+                        self.append_log(f"✅ Selected {file_type}: {os.path.basename(epub_path)}")
                         epub_files_to_scan = [epub_path]
                 else:  # Yes - Continue without word count
                     qa_settings = qa_settings.copy()
@@ -1244,17 +1264,31 @@ class QAScannerMixin:
                         self.append_log(f"  [{epub_base}] Checking candidate {i+1}: {candidate} - {'EXISTS' if exists else 'NOT FOUND'}")
                         
                         if exists:
-                            # Verify the folder actually contains HTML/XHTML files
+                            # Verify the folder actually contains appropriate files (HTML/XHTML or TXT)
                             try:
                                 files = os.listdir(candidate)
-                                html_files = [f for f in files if f.lower().endswith(('.html', '.xhtml', '.htm'))]
-                                if html_files:
+                                # Determine if text file mode is enabled
+                                text_file_mode = self.config.get('qa_text_file_mode', False)
+                                if hasattr(self, 'qa_text_file_mode_checkbox'):
+                                    try:
+                                        text_file_mode = bool(self.qa_text_file_mode_checkbox.isChecked())
+                                    except Exception:
+                                        pass
+                                
+                                if text_file_mode:
+                                    target_files = [f for f in files if f.lower().endswith('.txt')]
+                                    file_type = "TXT"
+                                else:
+                                    target_files = [f for f in files if f.lower().endswith(('.html', '.xhtml', '.htm'))]
+                                    file_type = "HTML/XHTML"
+                                
+                                if target_files:
                                     folder_found = candidate
                                     self.append_log(f"📁 Auto-selected output folder for {epub_base}: {folder_found}")
-                                    self.append_log(f"   Found {len(html_files)} HTML/XHTML files to scan")
+                                    self.append_log(f"   Found {len(target_files)} {file_type} files to scan")
                                     break
                                 else:
-                                    self.append_log(f"  [{epub_base}] Folder exists but contains no HTML/XHTML files: {candidate}")
+                                    self.append_log(f"  [{epub_base}] Folder exists but contains no {file_type} files: {candidate}")
                             except Exception as e:
                                 self.append_log(f"  [{epub_base}] Error checking files in {candidate}: {e}")
                     
@@ -1524,12 +1558,28 @@ class QAScannerMixin:
                                     self.append_log("⚠️ QA scan canceled due to EPUB/folder mismatch.")
                                     return
                                 elif result == QMessageBox.No:  # No - select different EPUB
-                                    new_epub_path, _ = QFileDialog.getOpenFileName(
-                                        self,
-                                        "Select Different Source EPUB File",
-                                        "",
-                                        "EPUB files (*.epub);;All files (*.*)"
-                                    )
+                                    # Determine if text file mode is enabled
+                                    text_file_mode = self.config.get('qa_text_file_mode', False)
+                                    if hasattr(self, 'qa_text_file_mode_checkbox'):
+                                        try:
+                                            text_file_mode = bool(self.qa_text_file_mode_checkbox.isChecked())
+                                        except Exception:
+                                            pass
+                                    
+                                    if text_file_mode:
+                                        new_epub_path, _ = QFileDialog.getOpenFileName(
+                                            self,
+                                            "Select Different Source Text File",
+                                            "",
+                                            "Text files (*.txt);;All files (*.*)"
+                                        )
+                                    else:
+                                        new_epub_path, _ = QFileDialog.getOpenFileName(
+                                            self,
+                                            "Select Different Source EPUB File",
+                                            "",
+                                            "EPUB files (*.epub);;All files (*.*)"
+                                        )
                                     
                                     if new_epub_path:
                                         current_epub_path = new_epub_path
@@ -1565,6 +1615,14 @@ class QAScannerMixin:
                             current_selected_files = global_selected_files
                         
                         # Pass the QA settings to scan_html_folder
+                        # Get text_file_mode setting
+                        text_file_mode = self.config.get('qa_text_file_mode', False)
+                        if hasattr(self, 'qa_text_file_mode_checkbox'):
+                            try:
+                                text_file_mode = bool(self.qa_text_file_mode_checkbox.isChecked())
+                            except Exception:
+                                pass
+                        
                         # Get scan_html_folder from translator_gui's global scope
                         import translator_gui
                         scan_func = translator_gui.scan_html_folder
@@ -1575,7 +1633,8 @@ class QAScannerMixin:
                             mode=mode,
                             qa_settings=current_qa_settings,
                             epub_path=current_epub_path,
-                            selected_files=current_selected_files
+                            selected_files=current_selected_files,
+                            text_file_mode=text_file_mode
                         )
                         
                         successful_scans += 1
@@ -1953,12 +2012,13 @@ class QAScannerMixin:
         wordcount_layout.setContentsMargins(20, 15, 20, 15)
         scroll_layout.addWidget(wordcount_group)
         
-        check_word_count_checkbox = self._create_styled_checkbox("Cross-reference word counts with original EPUB")
+        check_word_count_checkbox = self._create_styled_checkbox("Cross-reference word counts with original source file")
         check_word_count_checkbox.setChecked(qa_settings.get('check_word_count_ratio', False))
         wordcount_layout.addWidget(check_word_count_checkbox)
         
         wordcount_desc = QLabel("Compares word counts between original and translated files to detect missing content.\n" +
-                               "Accounts for typical expansion ratios when translating from CJK to English.")
+                               "For EPUB: accounts for typical expansion ratios when translating from CJK to English.\n" +
+                               "For Text: compares each section file against the total source .txt word count.")
         wordcount_desc.setFont(QFont('Arial', 9))
         wordcount_desc.setStyleSheet("color: gray;")
         wordcount_desc.setWordWrap(True)
@@ -1970,23 +2030,25 @@ class QAScannerMixin:
         epub_layout = QHBoxLayout(epub_widget)
         epub_layout.setContentsMargins(0, 10, 0, 5)
 
-        # Get EPUBs from actual current selection (not stored config)
+        # Get source files (EPUB or TXT) from actual current selection
         current_epub_files = []
         if hasattr(self, 'selected_files') and self.selected_files:
-            current_epub_files = [f for f in self.selected_files if f.lower().endswith('.epub')]
+            current_epub_files = [f for f in self.selected_files if f.lower().endswith(('.epub', '.txt'))]
         
         if len(current_epub_files) > 1:
-            # Multiple EPUBs in current selection
-            primary_epub = os.path.basename(current_epub_files[0])
-            status_text = f"📖 {len(current_epub_files)} EPUB files selected (Primary: {primary_epub})"
+            # Multiple source files in current selection
+            primary_file = os.path.basename(current_epub_files[0])
+            status_text = f"📖 {len(current_epub_files)} source files selected (Primary: {primary_file})"
             status_color = 'green'
         elif len(current_epub_files) == 1:
-            # Single EPUB in current selection
-            status_text = f"📖 Current EPUB: {os.path.basename(current_epub_files[0])}"
+            # Single source file in current selection
+            file_name = os.path.basename(current_epub_files[0])
+            file_type = "TXT" if current_epub_files[0].lower().endswith('.txt') else "EPUB"
+            status_text = f"📖 Current {file_type}: {file_name}"
             status_color = 'green'
         else:
-            # No EPUB files in current selection
-            status_text = "📖 No EPUB in current selection"
+            # No source files in current selection
+            status_text = "📖 No EPUB or TXT in current selection"
             status_color = 'orange'
 
         status_label = QLabel(status_text)
@@ -1995,26 +2057,29 @@ class QAScannerMixin:
         epub_layout.addWidget(status_label)
 
         def select_epub_for_qa():
+            # Allow selecting either EPUB or TXT files
             epub_path, _ = QFileDialog.getOpenFileName(
                 dialog,
-                "Select Source EPUB File",
+                "Select Source File",
                 "",
-                "EPUB files (*.epub);;All files (*.*)"
+                "Source files (*.epub *.txt);;EPUB files (*.epub);;Text files (*.txt);;All files (*.*)"
             )
+            
             if epub_path:
                 self.selected_epub_path = epub_path
                 self.config['last_epub_path'] = epub_path
                 self.save_config(show_message=False)
                 
-                # Clear multiple EPUB tracking when manually selecting a single EPUB
+                # Clear multiple EPUB tracking when manually selecting a single file
                 if hasattr(self, 'selected_epub_files'):
                     self.selected_epub_files = [epub_path]
                 
-                status_label.setText(f"📖 Current EPUB: {os.path.basename(epub_path)}")
+                file_type = "TXT" if epub_path.lower().endswith('.txt') else "EPUB"
+                status_label.setText(f"📖 Current {file_type}: {os.path.basename(epub_path)}")
                 status_label.setStyleSheet("color: green;")
-                self.append_log(f"✅ Selected EPUB for QA: {os.path.basename(epub_path)}")
+                self.append_log(f"✅ Selected {file_type} for QA: {os.path.basename(epub_path)}")
 
-        select_epub_btn = QPushButton("Select EPUB")
+        select_epub_btn = QPushButton("Select EPUB/TXT")
         select_epub_btn.setFont(QFont('Arial', 9))
         select_epub_btn.clicked.connect(select_epub_for_qa)
         epub_layout.addWidget(select_epub_btn)
