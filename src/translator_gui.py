@@ -4320,10 +4320,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # Post-translation scanning phase
                 # If scanning phase toggle is enabled, launch scanner after translation
                 # BUT only if translation completed successfully (not stopped by user)
-                # SKIP scanning for CSV/JSON files (they are plain text glossaries)
+                # SKIP scanning for CSV/JSON files (they are plain text glossaries, not translations)
                 try:
-                    # Check if any of the files are CSV/JSON/TXT
-                    csv_json_files = [f for f in self.selected_files if f.lower().endswith(('.csv', '.json', '.txt'))]
+                    # Check if any of the files are CSV/JSON (but NOT TXT - TXT files are valid translation sources)
+                    csv_json_files = [f for f in self.selected_files if f.lower().endswith(('.csv', '.json'))]
                     
                     if csv_json_files:
                         self.append_log("📑 Skipping post-translation scanning for CSV/JSON files")
