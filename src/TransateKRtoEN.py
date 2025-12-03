@@ -981,15 +981,15 @@ class FileUtilities:
             # Handle decimal chapter numbers from text file splitting
             if isinstance(actual_num, float):
                 major = int(actual_num)
-                minor = int(round((actual_num - major) * 100))  # Changed from *10 to *100 for better precision
+                minor = int(round((actual_num - major) * 10))  # Use *10 to get 0, 1, 2, etc. from 1.0, 1.1, 1.2
                 if is_text_file:
-                    return f"{major:03d}_{minor:02d}.txt" if retain else f"response_{major:03d}_{minor:02d}.txt"
+                    return f"section_{major}_{minor}.txt" if retain else f"response_section_{major}_{minor}.txt"
                 else:
                     return f"{major:03d}_{minor:02d}.html" if retain else f"response_{major:03d}_{minor:02d}.html"
             else:
                 # For integer chapter numbers, use standard formatting
                 if is_text_file:
-                    return f"{actual_num:03d}.txt" if retain else f"response_{actual_num:03d}.txt"
+                    return f"section_{actual_num}.txt" if retain else f"response_section_{actual_num}.txt"
                 else:
                     return f"{actual_num:03d}.html" if retain else f"response_{actual_num:03d}.html"
 
@@ -7705,8 +7705,11 @@ def main(log_callback=None, stop_callback=None):
             # For text file chunks, ensure we pass the decimal number
             if is_text_file and c.get('is_chunk', False) and isinstance(c.get('num'), float):
                 fname = FileUtilities.create_chapter_filename(c, c['num'])  # Use the decimal num directly
+                print(f"[DEBUG] Text file chunk - using decimal num {c['num']} -> filename: {fname}")
             else:
                 fname = FileUtilities.create_chapter_filename(c, actual_num)
+                if is_text_file:
+                    print(f"[DEBUG] Text file - using actual_num {actual_num} -> filename: {fname}")
 
             client.set_output_filename(fname)
             cleaned = re.sub(r"^```(?:html)?\s*\n?", "", merged_result, count=1, flags=re.MULTILINE)
@@ -7879,14 +7882,26 @@ def main(log_callback=None, stop_callback=None):
                 text_content = soup.get_text(strip=True)
                 
                 # Write plain text file
-                with open(os.path.join(out, fname_txt), 'w', encoding='utf-8') as f:
+                output_path = os.path.join(out, fname_txt)
+                with open(output_path, 'w', encoding='utf-8') as f:
                     f.write(text_content)
+                
+                print(f"💾 Saved text file: {fname_txt} (Chapter {actual_num})")
                 
                 final_title = c['title'] or make_safe_filename(c['title'], actual_num)
                 # Don't print individual "Processed" messages - these are redundant with the main progress display
                 if os.getenv('DEBUG_CHAPTER_SAVES', '0') == '1':
                     print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {actual_num}: {final_title}")
                 
+                # Determine status based on comprehensive failure detection
+                if is_qa_failed_response(cleaned):
+                    chapter_status = "qa_failed"
+                    failure_reason = get_failure_reason(cleaned)
+                    print(f"⚠️ Chapter {actual_num} marked as qa_failed: {failure_reason}")
+                else:
+                    chapter_status = "completed"
+
+                progress_manager.update(idx, actual_num, content_hash, fname_txt, status=chapter_status, chapter_obj=c)
             else:
                 # For EPUB files, keep original HTML behavior
                 with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
@@ -7897,15 +7912,15 @@ def main(log_callback=None, stop_callback=None):
                 if os.getenv('DEBUG_CHAPTER_SAVES', '0') == '1':
                     print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {actual_num}: {final_title}")
                 
-            # Determine status based on comprehensive failure detection
-            if is_qa_failed_response(cleaned):
-                chapter_status = "qa_failed"
-                failure_reason = get_failure_reason(cleaned)
-                print(f"⚠️ Chapter {actual_num} marked as qa_failed: {failure_reason}")
-            else:
-                chapter_status = "completed"
+                # Determine status based on comprehensive failure detection
+                if is_qa_failed_response(cleaned):
+                    chapter_status = "qa_failed"
+                    failure_reason = get_failure_reason(cleaned)
+                    print(f"⚠️ Chapter {actual_num} marked as qa_failed: {failure_reason}")
+                else:
+                    chapter_status = "completed"
 
-            progress_manager.update(idx, actual_num, content_hash, fname, status=chapter_status, chapter_obj=c)
+                progress_manager.update(idx, actual_num, content_hash, fname, status=chapter_status, chapter_obj=c)
             progress_manager.save()
             
             # After completing this chapter, produce a rolling summary and store it for the NEXT chapter

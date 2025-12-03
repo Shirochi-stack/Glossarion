@@ -79,7 +79,7 @@ class TextFileProcessor:
                         'title': chunk_title,
                         'body': chunk_content,
                         'filename': f"section_{int(chapter_data['num'])}_part{chunk_idx}.txt",  # Changed to avoid using file_base
-                        'original_basename': os.path.basename(self.file_path),  # Add original filename for .csv/.json/.txt detection
+                        # Don't set original_basename for chunks - let filename generation use decimal logic
                         'content_hash': self._generate_hash(chunk_content),
                         'file_size': len(chunk_content),
                         'has_images': False,

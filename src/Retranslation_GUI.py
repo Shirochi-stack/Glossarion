@@ -1840,9 +1840,12 @@ class RetranslationMixin:
                 original_file = info.get('original_filename', '')
                 opf_pos = info['opf_position'] + 1  # 1-based for display
                 
-                # Format: [OPF Position] Chapter Number | Status | Original File -> Response File
-                if isinstance(chapter_num, float) and chapter_num.is_integer():
-                    display = f"[{opf_pos:03d}] Ch.{int(chapter_num):03d} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_file}"
+            # Format: [OPF Position] Chapter Number | Status | Original File -> Response File
+                if isinstance(chapter_num, float):
+                    if chapter_num.is_integer():
+                        display = f"[{opf_pos:03d}] Ch.{int(chapter_num):03d} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_file}"
+                    else:
+                        display = f"[{opf_pos:03d}] Ch.{chapter_num:06.1f} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_file}"
                 else:
                     display = f"[{opf_pos:03d}] Ch.{chapter_num:03d} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_file}"
             else:
