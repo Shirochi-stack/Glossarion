@@ -181,11 +181,14 @@ class TranslationConfig:
         """
         effective = self.MAX_OUTPUT_TOKENS
 
-        # Collect per-key limits from multi-key pool
+        # Collect per-key limits from multi-key pool (only from enabled keys)
         per_key_limits = []
         try:
-            for key_data in self.multi_api_keys or []:
+            for idx, key_data in enumerate(self.multi_api_keys or []):
                 if not isinstance(key_data, dict):
+                    continue
+                # Skip disabled keys
+                if not key_data.get('enabled', True):
                     continue
                 raw = key_data.get('individual_output_token_limit')
                 if raw in (None, "", 0):
@@ -199,10 +202,13 @@ class TranslationConfig:
         except Exception:
             pass
 
-        # Collect per-key limits from fallback keys
+        # Collect per-key limits from fallback keys (only from enabled keys)
         try:
-            for fb in self.fallback_keys or []:
+            for idx, fb in enumerate(self.fallback_keys or []):
                 if not isinstance(fb, dict):
+                    continue
+                # Skip disabled keys
+                if not fb.get('enabled', True):
                     continue
                 raw = fb.get('individual_output_token_limit')
                 if raw in (None, "", 0):
