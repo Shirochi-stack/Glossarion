@@ -1672,6 +1672,88 @@ class RetranslationMixin:
             # Re-parse and update chapter status information
             self._update_chapter_status_info(data)
             
+            # Rebuild chapter_display_info to respect show_special_files toggle
+            # Get current show_special_files state from data
+            show_special = data.get('show_special_files_state', False)
+            
+            # Rebuild chapter_display_info with current filter
+            if data.get('spine_chapters'):
+                # OPF-based: filter spine_chapters
+                filtered_display_info = []
+                for info in data['chapter_display_info']:
+                    # Check if this is a special file
+                    original_file = info.get('original_filename', '')
+                    import re
+                    has_numbers = bool(re.search(r'\d', original_file))
+                    is_special = not has_numbers
+                    
+                    # Include if not special, or if showing special files
+                    if not is_special or show_special:
+                        filtered_display_info.append(info)
+                
+                data['chapter_display_info'] = filtered_display_info
+            else:
+                # Non-OPF: rebuild from progress data with filter
+                files_to_entries = {}
+                for chapter_key, chapter_info in data['prog'].get("chapters", {}).items():
+                    output_file = chapter_info.get("output_file", "")
+                    if output_file:
+                        if output_file not in files_to_entries:
+                            files_to_entries[output_file] = []
+                        files_to_entries[output_file].append((chapter_key, chapter_info))
+                
+                new_display_info = []
+                for output_file, entries in files_to_entries.items():
+                    chapter_key, chapter_info = entries[0]
+                    
+                    # Check if this is a special file
+                    original_basename = chapter_info.get("original_basename", "")
+                    filename_to_check = original_basename if original_basename else output_file
+                    import re
+                    has_numbers = bool(re.search(r'\d', filename_to_check))
+                    is_special = not has_numbers
+                    
+                    # Skip special files if toggle is off
+                    if is_special and not show_special:
+                        continue
+                    
+                    # Extract chapter number
+                    matches = re.findall(r'(\d+)', output_file)
+                    if matches:
+                        chapter_num = int(matches[-1])
+                    else:
+                        chapter_num = 999999
+                    
+                    # Override with stored values if available
+                    if 'actual_num' in chapter_info and chapter_info['actual_num'] is not None:
+                        chapter_num = chapter_info['actual_num']
+                    elif 'chapter_num' in chapter_info and chapter_info['chapter_num'] is not None:
+                        chapter_num = chapter_info['chapter_num']
+                    
+                    status = chapter_info.get("status", "unknown")
+                    if status == "completed_empty":
+                        status = "completed"
+                    
+                    # Check file existence
+                    if status == "completed":
+                        output_path = os.path.join(data['output_dir'], output_file)
+                        if not os.path.exists(output_path):
+                            status = "file_missing"
+                    
+                    new_display_info.append({
+                        'key': chapter_key,
+                        'num': chapter_num,
+                        'info': chapter_info,
+                        'output_file': output_file,
+                        'status': status,
+                        'duplicate_count': len(entries),
+                        'entries': entries
+                    })
+                
+                # Sort by chapter number
+                new_display_info.sort(key=lambda x: x['num'] if x['num'] is not None else 999999)
+                data['chapter_display_info'] = new_display_info
+            
             # Update the listbox display
             self._update_listbox_display(data)
             
