@@ -4369,13 +4369,18 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     global _stop_flag
     _stop_flag = False
     
-    # Auto-detect text file mode from epub_path extension if not explicitly specified
-    if text_file_mode is None and epub_path:
-        text_file_mode = epub_path.lower().endswith('.txt')
-        if text_file_mode:
-            log(f"📄 Text file mode auto-detected from source file extension")
-    elif text_file_mode is None:
-        text_file_mode = False
+    # Auto-detect text file mode from epub_path extension
+    # ONLY enable if epub_path actually ends with .txt AND text_file_mode wasn't explicitly set to False
+    if text_file_mode is None:
+        if epub_path and epub_path.lower().endswith('.txt'):
+            text_file_mode = True
+            log(f"📄 Text file mode auto-detected from source file extension (.txt)")
+        else:
+            text_file_mode = False
+    
+    # Debug logging
+    if epub_path:
+        log(f"📚 Source file: {os.path.basename(epub_path)} | Mode: {'TEXT' if text_file_mode else 'EPUB/HTML'}")
     
     # Create a combined stop check function
     def should_stop():

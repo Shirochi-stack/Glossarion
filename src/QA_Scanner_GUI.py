@@ -1615,13 +1615,7 @@ class QAScannerMixin:
                             current_selected_files = global_selected_files
                         
                         # Pass the QA settings to scan_html_folder
-                        # Get text_file_mode setting
-                        text_file_mode = self.config.get('qa_text_file_mode', False)
-                        if hasattr(self, 'qa_text_file_mode_checkbox'):
-                            try:
-                                text_file_mode = bool(self.qa_text_file_mode_checkbox.isChecked())
-                            except Exception:
-                                pass
+                        # Don't pass text_file_mode explicitly - let scan_html_folder auto-detect from epub_path
                         
                         # Get scan_html_folder from translator_gui's global scope
                         import translator_gui
@@ -1634,7 +1628,7 @@ class QAScannerMixin:
                             qa_settings=current_qa_settings,
                             epub_path=current_epub_path,
                             selected_files=current_selected_files,
-                            text_file_mode=text_file_mode
+                            text_file_mode=None  # Let it auto-detect from epub_path extension
                         )
                         
                         successful_scans += 1
