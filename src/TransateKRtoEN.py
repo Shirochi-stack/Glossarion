@@ -6450,8 +6450,8 @@ def main(log_callback=None, stop_callback=None):
     current_chunk_number = 0
 
     if config.BATCH_TRANSLATION:
-        # Check if request merging is enabled
-        use_request_merging = config.REQUEST_MERGING_ENABLED and config.REQUEST_MERGE_COUNT > 1
+        # Check if request merging is enabled (skip for .txt files)
+        use_request_merging = config.REQUEST_MERGING_ENABLED and config.REQUEST_MERGE_COUNT > 1 and not is_text_file
         
         if use_request_merging:
             print(f"\n🔗 REQUEST MERGING + BATCH MODE ENABLED")
@@ -6895,7 +6895,8 @@ def main(log_callback=None, stop_callback=None):
         merge_groups = {}  # Maps parent_idx -> list of child (idx, chapter) tuples
         merged_children = set()  # Set of idx that are merged into another chapter
         
-        if config.REQUEST_MERGING_ENABLED and config.REQUEST_MERGE_COUNT > 1:
+        # Skip request merging for .txt files
+        if config.REQUEST_MERGING_ENABLED and config.REQUEST_MERGE_COUNT > 1 and not is_text_file:
             print(f"\n🔗 REQUEST MERGING ENABLED: Combining up to {config.REQUEST_MERGE_COUNT} chapters per request")
             
             # Collect chapters that need translation
