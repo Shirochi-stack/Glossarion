@@ -1171,6 +1171,23 @@ class ProgressManager:
         if "_" in chapter_key and chapter_key != str(actual_num):
             print(f"📌 Using composite key for chapter {actual_num}: {chapter_key}")
         
+        # MERGED CHAPTERS FIX: If this chapter has merged children and status changes to failed/pending,
+        # clear the merged status from all child chapters so they can be retranslated
+        if status in ["qa_failed", "failed", "pending", "error"] and chapter_key in self.prog["chapters"]:
+            existing_info = self.prog["chapters"][chapter_key]
+            merged_child_nums = existing_info.get("merged_chapters", [])
+            
+            if merged_child_nums:
+                print(f"🔓 Clearing merged status from {len(merged_child_nums)} child chapters due to parent status: {status}")
+                
+                # Find and clear merged status from all child chapters
+                for child_chapter_key, child_info in list(self.prog["chapters"].items()):
+                    if child_info.get("status") == "merged" and child_info.get("merged_parent_chapter") == actual_num:
+                        child_actual_num = child_info.get("actual_num")
+                        print(f"   🔓 Clearing merged status for chapter {child_actual_num}")
+                        # Delete the merged child entry so it will be retranslated
+                        del self.prog["chapters"][child_chapter_key]
+        
         chapter_info = {
             "actual_num": actual_num,
             "content_hash": content_hash,

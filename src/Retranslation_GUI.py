@@ -1410,10 +1410,12 @@ class RetranslationMixin:
             deleted_count = 0
             marked_count = 0
             status_reset_count = 0
+            merged_cleared_count = 0
             progress_updated = False
 
             for ch_info in selected_chapters:
                 output_file = ch_info['output_file']
+                actual_num = ch_info['num']
                 
                 if ch_info['status'] != 'not_translated':
                     # Delete existing file
@@ -1463,6 +1465,16 @@ class RetranslationMixin:
                             progress_updated = True
                         else:
                             print(f"WARNING: Could not find chapter key for {old_status} output file: {target_output_file}")
+                    
+                    # MERGED CHILDREN FIX: Clear any merged children of this chapter
+                    # This applies to ALL statuses being retranslated, not just completed/qa_failed
+                    for child_key, child_data in list(data['prog']["chapters"].items()):
+                        if child_data.get("status") == "merged" and child_data.get("merged_parent_chapter") == actual_num:
+                            child_actual_num = child_data.get("actual_num")
+                            print(f"🔓 Clearing merged status for child chapter {child_actual_num} (parent {actual_num} being retranslated)")
+                            del data['prog']["chapters"][child_key]
+                            merged_cleared_count += 1
+                            progress_updated = True
                 else:
                     # Just marking for translation (no file to delete)
                     marked_count += 1
@@ -1487,11 +1499,14 @@ class RetranslationMixin:
                 success_parts.append(f"marked {marked_count} missing chapters for translation")
             if status_reset_count > 0:
                 success_parts.append(f"reset {status_reset_count} chapter statuses to pending")
+            if merged_cleared_count > 0:
+                success_parts.append(f"cleared {merged_cleared_count} merged child chapters")
             
             if success_parts:
                 success_msg = "Successfully " + ", ".join(success_parts) + "."
-                if deleted_count > 0 or marked_count > 0:
-                    success_msg += f"\n\nTotal {len(selected_indices)} chapters ready for translation."
+                if deleted_count > 0 or marked_count > 0 or merged_cleared_count > 0:
+                    total_to_translate = len(selected_indices) + merged_cleared_count
+                    success_msg += f"\n\nTotal {total_to_translate} chapters ready for translation."
                 QMessageBox.information(data.get('dialog', self), "Success", success_msg)
             else:
                 QMessageBox.information(data.get('dialog', self), "Info", "No changes made.")
