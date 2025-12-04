@@ -1833,7 +1833,7 @@ Recent translations to summarize:
         self.image_chunk_prompt = self.config.get('image_chunk_prompt', self.default_image_chunk_prompt)
         
         self.custom_glossary_fields = self.config.get('custom_glossary_fields', [])
-        self.token_limit_disabled = self.config.get('token_limit_disabled', False)
+        self.token_limit_disabled = self.config.get('token_limit_disabled', True)
         self.api_key_visible = False  # Default to hidden
         
         if 'glossary_duplicate_key_mode' not in self.config:
@@ -2600,11 +2600,16 @@ Recent translations to summarize:
         self.token_limit_entry = QLineEdit()
         self.token_limit_entry.setText(str(self.config.get('token_limit', 200000)))
         self.token_limit_entry.setMaximumWidth(80)
+        self.token_limit_entry.setEnabled(not self.token_limit_disabled)
         self.frame.addWidget(self.token_limit_entry, 6, 1, Qt.AlignLeft)
         
-        self.toggle_token_btn = QPushButton("Disable Input Token Limit")
+        # Set initial button text and style based on current state
+        btn_text = "Enable Input Token Limit" if self.token_limit_disabled else "Disable Input Token Limit"
+        btn_style = "background-color: #28a745; color: white; font-weight: bold;" if self.token_limit_disabled else "background-color: #dc3545; color: white; font-weight: bold;"
+        
+        self.toggle_token_btn = QPushButton(btn_text)
         self.toggle_token_btn.clicked.connect(self.toggle_token_limit)
-        self.toggle_token_btn.setStyleSheet("background-color: #dc3545; color: white; font-weight: bold;")
+        self.toggle_token_btn.setStyleSheet(btn_style)
         self.toggle_token_btn.setMinimumWidth(150)
         self.frame.addWidget(self.toggle_token_btn, 7, 1, Qt.AlignLeft)
         
