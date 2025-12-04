@@ -3489,6 +3489,16 @@ def update_new_format_progress(prog, faulty_chapters, log, folder_path):
             actual_num_being_updated = chapter_info.get("actual_num")
             log(f"      DEBUG: Updating chapter_key='{chapter_key}', actual_num={actual_num_being_updated}, old_status={old_status}")
             
+            # MERGED CHILDREN FIX: Clear any merged children of this chapter before marking as qa_failed
+            merged_child_nums = chapter_info.get("merged_chapters", [])
+            if merged_child_nums:
+                log(f"      🔓 Clearing merged status from {len(merged_child_nums)} child chapters due to parent QA failure")
+                for child_chapter_key, child_info in list(prog["chapters"].items()):
+                    if child_info.get("status") == "merged" and child_info.get("merged_parent_chapter") == actual_num_being_updated:
+                        child_actual_num = child_info.get("actual_num")
+                        log(f"         🔓 Clearing merged status for chapter {child_actual_num}")
+                        del prog["chapters"][child_chapter_key]
+            
             # Update status to qa_failed
             chapter_info["status"] = "qa_failed"
             chapter_info["qa_issues"] = True

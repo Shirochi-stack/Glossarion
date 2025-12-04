@@ -1316,9 +1316,10 @@ class ProgressManager:
         return True, None, None
         
     def cleanup_missing_files(self, output_dir):
-        """Remove missing files and duplicates - NO RESTORATION BULLSHIT"""
+        """Remove missing files and clear merged children of missing parents"""
         cleaned_count = 0
         deleted_parents = set()  # Track which parent chapters were deleted
+        parents_with_missing_files = set()  # Track parents with missing files (for merged children clearing)
         
         # First pass: Remove entries for missing files (except merged children)
         for chapter_key, chapter_info in list(self.prog["chapters"].items()):
@@ -1335,10 +1336,14 @@ class ProgressManager:
                 if not os.path.exists(output_path):
                     print(f"🗑️ Removing entry for missing file: {output_file}")
                     
-                    # Track if this was a parent of merged chapters
                     actual_num = chapter_info.get("actual_num")
                     if actual_num is not None:
+                        # Track if this was a parent of merged chapters
                         deleted_parents.add(actual_num)
+                        
+                        # Also track if this chapter has merged children (for later clearing)
+                        if chapter_info.get("merged_chapters"):
+                            parents_with_missing_files.add(actual_num)
                     
                     # Delete the entry
                     del self.prog["chapters"][chapter_key]
@@ -1349,14 +1354,15 @@ class ProgressManager:
                     
                     cleaned_count += 1
         
-        # Second pass: Invalidate merged children whose parents were deleted
-        if deleted_parents:
+        # Second pass: Clear merged children whose parents were deleted OR have missing files
+        if deleted_parents or parents_with_missing_files:
+            all_affected_parents = deleted_parents | parents_with_missing_files
             for chapter_key, chapter_info in list(self.prog["chapters"].items()):
                 if chapter_info.get("status") == "merged":
                     parent_num = chapter_info.get("merged_parent_chapter")
-                    if parent_num in deleted_parents:
+                    if parent_num in all_affected_parents:
                         actual_num = chapter_info.get("actual_num")
-                        print(f"🗑️ Removing merged child chapter {actual_num} (parent {parent_num} was deleted)")
+                        print(f"🔓 Clearing merged child chapter {actual_num} (parent {parent_num} file is missing)")
                         del self.prog["chapters"][chapter_key]
                         cleaned_count += 1
         
