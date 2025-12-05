@@ -298,10 +298,14 @@ class RequestMerger:
         # Find all headers (h1-h6)
         headers = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
         
-        # Check if there's substantial content before the first header
+        # First check: Do we have enough headers?
         has_content_before_first_header = False
-        if len(headers) > 0:
-            # Get content before first header
+        
+        if len(headers) >= expected_count:
+            # We have enough headers, no need for fallback
+            effective_section_count = len(headers)
+        elif len(headers) > 0 and len(headers) < expected_count:
+            # Fallback: Check if there's content before first header that could count as +1
             first_header = headers[0]
             content_before = []
             for elem in soup.descendants:
@@ -320,6 +324,7 @@ class RequestMerger:
             else:
                 effective_section_count = len(headers)
         else:
+            # No headers at all
             effective_section_count = 0
         
         if effective_section_count < expected_count:
