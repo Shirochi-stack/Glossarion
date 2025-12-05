@@ -4089,7 +4089,7 @@ def _create_processing_options_section(self, parent):
     split_merge_cb.setContentsMargins(20, 2, 0, 0)  # Indented to show it's a sub-option
     extraction_v.addWidget(split_merge_cb)
     
-    split_merge_desc = QLabel("Split merged translation output back into separate files based on headers.\nEach chapter gets its own file named after the original content.opf entry.\nOnly works if header count matches merged chapter count.")
+    split_merge_desc = QLabel("Split merged translation output back into separate files based on headers.\nEach chapter gets its own file named after the original content.opf entry.\nWorks if header count is at least the merged chapter count.")
     split_merge_desc.setStyleSheet("color: gray; font-size: 9pt;")
     split_merge_desc.setContentsMargins(40, 0, 0, 5)
     extraction_v.addWidget(split_merge_desc)

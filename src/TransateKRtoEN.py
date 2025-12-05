@@ -298,51 +298,33 @@ class RequestMerger:
         # Find all headers (h1-h6)
         headers = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
         
-        if len(headers) != expected_count:
-            print(f"   ⚠️ Split the Merge: Header count mismatch - found {len(headers)} headers but expected {expected_count} chapters")
-            # Show what headers were found for debugging
-            if headers:
-                print(f"   📋 Found headers:")
-                for i, h in enumerate(headers[:10], 1):  # Show first 10 headers
-                    header_text = h.get_text(strip=True)[:50]  # First 50 chars
-                    print(f"      {i}. <{h.name}> {header_text}")
-                if len(headers) > 10:
-                    print(f"      ... and {len(headers) - 10} more")
-            print(f"   💡 Tip: Check if there are extra headers (h1-h6) in the merged content")
+        if len(headers) < expected_count:
+            print(f"   ⚠️ Split the Merge: Header count ({len(headers)}) is less than chapter count ({expected_count}), using normal merged behavior")
             return None
+        
+        # If we have more headers than expected, use only the first expected_count headers
+        if len(headers) > expected_count:
+            print(f"   ℹ️ Split the Merge: Found {len(headers)} headers, using first {expected_count} to match chapter count")
+            headers = headers[:expected_count]
         
         if len(headers) == 0:
             return None
         
-        # Split content by headers while preserving HTML structure
+        # Split content by headers
         sections = []
         
-        # Extract the head section if it exists (to preserve for all sections)
-        head_section = ""
-        if soup.head:
-            head_section = str(soup.head)
+        # Get the string representation to work with
+        content_str = str(soup)
         
-        # Get body content or full content if no body tag
-        if soup.body:
-            body_content = soup.body
-            # Find headers within body only
-            body_headers = body_content.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
-        else:
-            body_content = soup
-            body_headers = headers
-        
-        # Convert body to string for position-based splitting
-        body_str = str(body_content)
-        
-        # Find positions of each header in the body content
+        # Find positions of each header in the content
         header_positions = []
-        for header in body_headers:
+        for header in headers:
             header_str = str(header)
-            pos = body_str.find(header_str)
+            pos = content_str.find(header_str)
             if pos != -1:
                 header_positions.append((pos, header_str))
         
-        # Sort by position
+        # Sort by position (should already be in order, but just to be safe)
         header_positions.sort(key=lambda x: x[0])
         
         # Extract content sections
@@ -350,26 +332,14 @@ class RequestMerger:
             if i < len(header_positions) - 1:
                 # Get content from this header to the next
                 next_pos = header_positions[i + 1][0]
-                section_body = body_str[pos:next_pos].strip()
+                section = content_str[pos:next_pos].strip()
             else:
                 # Last section - get from this header to end
-                section_body = body_str[pos:].strip()
+                section = content_str[pos:].strip()
             
-            # Reconstruct full HTML with head section for each split
-            if head_section:
-                # Build complete HTML document
-                if soup.body:
-                    # Had body tag - reconstruct with proper structure
-                    full_section = f"<html>\n{head_section}\n<body>\n{section_body}\n</body>\n</html>"
-                else:
-                    # No body tag - just add head before content
-                    full_section = f"<html>\n{head_section}\n{section_body}\n</html>"
-                sections.append(full_section)
-            else:
-                # No head section - just use the body content as-is
-                sections.append(section_body)
+            sections.append(section)
         
-        print(f"   ✅ Split the Merge: Successfully split into {len(sections)} sections (preserved HTML structure)")
+        print(f"   ✅ Split the Merge: Successfully split into {len(sections)} sections by headers")
         return sections
 
 
@@ -3241,25 +3211,8 @@ class BatchTranslationProcessor:
             merge_input = [(cn, content, ch) for cn, content, _, ch, _ in chapters_data]
             merged_content = RequestMerger.merge_chapters(merge_input)
             
-            # Count headers in source chapters to set proper expectations for split
-            from bs4 import BeautifulSoup
-            total_source_headers = 0
-            chapters_with_multiple_headers = []
-            for cn, content, _, ch, _ in chapters_data:
-                soup = BeautifulSoup(content, 'html.parser')
-                headers_in_chapter = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
-                header_count = len(headers_in_chapter)
-                total_source_headers += header_count
-                if header_count > 1:
-                    chapters_with_multiple_headers.append((cn, header_count))
-            
             expected_chapters = [cn for cn, _, _, _, _ in chapters_data]
             print(f"   📊 Merged {len(merge_group)} chapters ({len(merged_content):,} chars total)")
-            if chapters_with_multiple_headers:
-                print(f"   ⚠️ Source chapters with multiple headers detected:")
-                for cn, hcount in chapters_with_multiple_headers:
-                    print(f"      • Chapter {cn}: {hcount} headers")
-                print(f"   📐 Total headers in source: {total_source_headers} (expected in translated output)")
             
             # Build system prompt with glossary
             glossary_path = find_glossary_file(self.out_dir)
@@ -3400,34 +3353,16 @@ class BatchTranslationProcessor:
             split_sections = None
             
             if split_the_merge and len(chapters_data) > 1:
-                # Try to split by headers - use total source headers as expected count
-                split_sections = RequestMerger.split_by_headers(cleaned, total_source_headers)
+                # Try to split by headers
+                split_sections = RequestMerger.split_by_headers(cleaned, len(chapters_data))
             
-            if split_sections and len(split_sections) == total_source_headers:
-                # Split successful - now map sections back to original chapters
-                print(f"   ✂️ Split into {len(split_sections)} sections, mapping back to {len(chapters_data)} chapters")
-                
-                # Build a map: chapter_index -> list of section indices
-                section_idx = 0
-                chapter_to_sections = {}
-                for i, (cn, content, _, ch, _) in enumerate(chapters_data):
-                    soup = BeautifulSoup(content, 'html.parser')
-                    header_count = len(soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']))
-                    chapter_to_sections[i] = list(range(section_idx, section_idx + header_count))
-                    section_idx += header_count
+            if split_sections and len(split_sections) == len(chapters_data):
+                # Split successful - save each section as individual file
+                print(f"   ✂️ Splitting merged content into {len(split_sections)} individual files")
                 
                 saved_files = []
                 for i, (actual_num, content, idx, chapter, content_hash) in enumerate(chapters_data):
-                    # Get all sections that belong to this chapter
-                    section_indices = chapter_to_sections[i]
-                    if len(section_indices) == 1:
-                        # Single section - use as-is
-                        section_content = split_sections[section_indices[0]]
-                    else:
-                        # Multiple sections - combine them
-                        combined_sections = [split_sections[si] for si in section_indices]
-                        section_content = '\n'.join(combined_sections)
-                        print(f"      🔗 Combined {len(section_indices)} sections for Chapter {actual_num}")
+                    section_content = split_sections[i]
                     
                     # Generate filename for this chapter using content.opf naming
                     fname = FileUtilities.create_chapter_filename(chapter, actual_num)
