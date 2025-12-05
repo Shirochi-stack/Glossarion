@@ -303,6 +303,18 @@ class RetranslationMixin:
         with open(progress_file, 'r', encoding='utf-8') as f:
             prog = json.load(f)
         
+        # Clean up missing files and merged children when opening the GUI
+        # This handles the case where parent files were manually deleted
+        from TransateKRtoEN import ProgressManager
+        temp_progress = ProgressManager(os.path.dirname(progress_file))
+        temp_progress.prog = prog
+        temp_progress.cleanup_missing_files(output_dir)
+        prog = temp_progress.prog
+        
+        # Save the cleaned progress back to file
+        with open(progress_file, 'w', encoding='utf-8') as f:
+            json.dump(prog, f, ensure_ascii=False, indent=2)
+        
         # =====================================================
         # PARSE CONTENT.OPF FOR CHAPTER MANIFEST
         # =====================================================
@@ -1703,6 +1715,18 @@ class RetranslationMixin:
             
             with open(data['progress_file'], 'r', encoding='utf-8') as f:
                 data['prog'] = json.load(f)
+            
+            # Clean up missing files and merged children before display
+            # This handles the case where parent files were manually deleted
+            from TransateKRtoEN import ProgressManager
+            temp_progress = ProgressManager(os.path.dirname(data['progress_file']))
+            temp_progress.prog = data['prog']
+            temp_progress.cleanup_missing_files(data['output_dir'])
+            data['prog'] = temp_progress.prog
+            
+            # Save the cleaned progress back to file
+            with open(data['progress_file'], 'w', encoding='utf-8') as f:
+                json.dump(data['prog'], f, ensure_ascii=False, indent=2)
             
             # Check if we're using OPF-based display or fallback
             if data.get('spine_chapters'):
