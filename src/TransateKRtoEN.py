@@ -3241,8 +3241,25 @@ class BatchTranslationProcessor:
             merge_input = [(cn, content, ch) for cn, content, _, ch, _ in chapters_data]
             merged_content = RequestMerger.merge_chapters(merge_input)
             
+            # Count headers in source chapters to set proper expectations for split
+            from bs4 import BeautifulSoup
+            total_source_headers = 0
+            chapters_with_multiple_headers = []
+            for cn, content, _, ch, _ in chapters_data:
+                soup = BeautifulSoup(content, 'html.parser')
+                headers_in_chapter = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+                header_count = len(headers_in_chapter)
+                total_source_headers += header_count
+                if header_count > 1:
+                    chapters_with_multiple_headers.append((cn, header_count))
+            
             expected_chapters = [cn for cn, _, _, _, _ in chapters_data]
             print(f"   📊 Merged {len(merge_group)} chapters ({len(merged_content):,} chars total)")
+            if chapters_with_multiple_headers:
+                print(f"   ⚠️ Source chapters with multiple headers detected:")
+                for cn, hcount in chapters_with_multiple_headers:
+                    print(f"      • Chapter {cn}: {hcount} headers")
+                print(f"   📐 Total headers in source: {total_source_headers} (expected in translated output)")
             
             # Build system prompt with glossary
             glossary_path = find_glossary_file(self.out_dir)
@@ -3383,16 +3400,34 @@ class BatchTranslationProcessor:
             split_sections = None
             
             if split_the_merge and len(chapters_data) > 1:
-                # Try to split by headers
-                split_sections = RequestMerger.split_by_headers(cleaned, len(chapters_data))
+                # Try to split by headers - use total source headers as expected count
+                split_sections = RequestMerger.split_by_headers(cleaned, total_source_headers)
             
-            if split_sections and len(split_sections) == len(chapters_data):
-                # Split successful - save each section as individual file
-                print(f"   ✂️ Splitting merged content into {len(split_sections)} individual files")
+            if split_sections and len(split_sections) == total_source_headers:
+                # Split successful - now map sections back to original chapters
+                print(f"   ✂️ Split into {len(split_sections)} sections, mapping back to {len(chapters_data)} chapters")
+                
+                # Build a map: chapter_index -> list of section indices
+                section_idx = 0
+                chapter_to_sections = {}
+                for i, (cn, content, _, ch, _) in enumerate(chapters_data):
+                    soup = BeautifulSoup(content, 'html.parser')
+                    header_count = len(soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']))
+                    chapter_to_sections[i] = list(range(section_idx, section_idx + header_count))
+                    section_idx += header_count
                 
                 saved_files = []
                 for i, (actual_num, content, idx, chapter, content_hash) in enumerate(chapters_data):
-                    section_content = split_sections[i]
+                    # Get all sections that belong to this chapter
+                    section_indices = chapter_to_sections[i]
+                    if len(section_indices) == 1:
+                        # Single section - use as-is
+                        section_content = split_sections[section_indices[0]]
+                    else:
+                        # Multiple sections - combine them
+                        combined_sections = [split_sections[si] for si in section_indices]
+                        section_content = '\n'.join(combined_sections)
+                        print(f"      🔗 Combined {len(section_indices)} sections for Chapter {actual_num}")
                     
                     # Generate filename for this chapter using content.opf naming
                     fname = FileUtilities.create_chapter_filename(chapter, actual_num)
