@@ -298,16 +298,50 @@ class RequestMerger:
         # Find all headers (h1-h6)
         headers = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
         
-        if len(headers) < expected_count:
-            print(f"   ⚠️ Split the Merge: Header count ({len(headers)}) is less than chapter count ({expected_count}), using normal merged behavior")
+        # Check if there's substantial content before the first header
+        has_content_before_first_header = False
+        if len(headers) > 0:
+            # Get content before first header
+            first_header = headers[0]
+            content_before = []
+            for elem in soup.descendants:
+                if elem == first_header:
+                    break
+                if hasattr(elem, 'name') and elem.name == 'p':
+                    text = elem.get_text(strip=True)
+                    if text:
+                        content_before.append(text)
+            
+            # If there are paragraphs with content before first header, count it as +1
+            if len(content_before) > 0:
+                has_content_before_first_header = True
+                effective_section_count = len(headers) + 1
+                print(f"   ℹ️ Split the Merge: Found content before first header, treating as additional section ({effective_section_count} total sections)")
+            else:
+                effective_section_count = len(headers)
+        else:
+            effective_section_count = 0
+        
+        if effective_section_count < expected_count:
+            print(f"   ⚠️ Split the Merge: Section count ({effective_section_count}) is less than chapter count ({expected_count}), using normal merged behavior")
             return None
         
-        # If we have more headers than expected, use only the first expected_count headers
-        if len(headers) > expected_count:
-            print(f"   ℹ️ Split the Merge: Found {len(headers)} headers, using first {expected_count} to match chapter count")
-            headers = headers[:expected_count]
+        # If we have more headers than expected, adjust based on whether there's content before first header
+        headers_to_use = headers
+        if has_content_before_first_header:
+            # Need expected_count - 1 headers (since first section is before headers)
+            if len(headers) > expected_count - 1:
+                print(f"   ℹ️ Split the Merge: Found {len(headers)} headers with content before first, using first {expected_count - 1} headers")
+                headers_to_use = headers[:expected_count - 1]
+            else:
+                headers_to_use = headers
+        else:
+            # Need expected_count headers
+            if len(headers) > expected_count:
+                print(f"   ℹ️ Split the Merge: Found {len(headers)} headers, using first {expected_count} to match chapter count")
+                headers_to_use = headers[:expected_count]
         
-        if len(headers) == 0:
+        if len(headers_to_use) == 0 and not has_content_before_first_header:
             return None
         
         # Split content by headers
@@ -316,9 +350,19 @@ class RequestMerger:
         # Get the string representation to work with
         content_str = str(soup)
         
+        # If there's content before the first header, extract it as the first section
+        if has_content_before_first_header and len(headers_to_use) > 0:
+            first_header_str = str(headers_to_use[0])
+            first_header_pos = content_str.find(first_header_str)
+            if first_header_pos > 0:
+                # Extract everything before the first header as first section
+                first_section = content_str[:first_header_pos].strip()
+                if first_section:
+                    sections.append(first_section)
+        
         # Find positions of each header in the content
         header_positions = []
-        for header in headers:
+        for header in headers_to_use:
             header_str = str(header)
             pos = content_str.find(header_str)
             if pos != -1:
@@ -327,7 +371,7 @@ class RequestMerger:
         # Sort by position (should already be in order, but just to be safe)
         header_positions.sort(key=lambda x: x[0])
         
-        # Extract content sections
+        # Extract content sections from headers
         for i, (pos, header_str) in enumerate(header_positions):
             if i < len(header_positions) - 1:
                 # Get content from this header to the next
@@ -339,7 +383,7 @@ class RequestMerger:
             
             sections.append(section)
         
-        print(f"   ✅ Split the Merge: Successfully split into {len(sections)} sections by headers")
+        print(f"   ✅ Split the Merge: Successfully split into {len(sections)} sections")
         return sections
 
 
