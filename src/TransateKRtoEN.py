@@ -299,27 +299,50 @@ class RequestMerger:
         headers = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
         
         if len(headers) != expected_count:
-            print(f"   ⚠️ Split the Merge: Header count ({len(headers)}) doesn't match chapter count ({expected_count}), using normal merged behavior")
+            print(f"   ⚠️ Split the Merge: Header count mismatch - found {len(headers)} headers but expected {expected_count} chapters")
+            # Show what headers were found for debugging
+            if headers:
+                print(f"   📋 Found headers:")
+                for i, h in enumerate(headers[:10], 1):  # Show first 10 headers
+                    header_text = h.get_text(strip=True)[:50]  # First 50 chars
+                    print(f"      {i}. <{h.name}> {header_text}")
+                if len(headers) > 10:
+                    print(f"      ... and {len(headers) - 10} more")
+            print(f"   💡 Tip: Check if there are extra headers (h1-h6) in the merged content")
             return None
         
         if len(headers) == 0:
             return None
         
-        # Split content by headers
+        # Split content by headers while preserving HTML structure
         sections = []
         
-        # Get the string representation to work with
-        content_str = str(soup)
+        # Extract the head section if it exists (to preserve for all sections)
+        head_section = ""
+        if soup.head:
+            head_section = str(soup.head)
         
-        # Find positions of each header in the content
+        # Get body content or full content if no body tag
+        if soup.body:
+            body_content = soup.body
+            # Find headers within body only
+            body_headers = body_content.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+        else:
+            body_content = soup
+            body_headers = headers
+        
+        # Convert body to string for position-based splitting
+        body_str = str(body_content)
+        
+        # Find positions of each header in the body content
         header_positions = []
-        for header in headers:
+        for header in body_headers:
             header_str = str(header)
-            pos = content_str.find(header_str)
+            pos = body_str.find(header_str)
             if pos != -1:
                 header_positions.append((pos, header_str))
         
-        # Sort by position (should already be in order, but just to be safe)
+        # Sort by position
         header_positions.sort(key=lambda x: x[0])
         
         # Extract content sections
@@ -327,14 +350,26 @@ class RequestMerger:
             if i < len(header_positions) - 1:
                 # Get content from this header to the next
                 next_pos = header_positions[i + 1][0]
-                section = content_str[pos:next_pos].strip()
+                section_body = body_str[pos:next_pos].strip()
             else:
                 # Last section - get from this header to end
-                section = content_str[pos:].strip()
+                section_body = body_str[pos:].strip()
             
-            sections.append(section)
+            # Reconstruct full HTML with head section for each split
+            if head_section:
+                # Build complete HTML document
+                if soup.body:
+                    # Had body tag - reconstruct with proper structure
+                    full_section = f"<html>\n{head_section}\n<body>\n{section_body}\n</body>\n</html>"
+                else:
+                    # No body tag - just add head before content
+                    full_section = f"<html>\n{head_section}\n{section_body}\n</html>"
+                sections.append(full_section)
+            else:
+                # No head section - just use the body content as-is
+                sections.append(section_body)
         
-        print(f"   ✅ Split the Merge: Successfully split into {len(sections)} sections by headers")
+        print(f"   ✅ Split the Merge: Successfully split into {len(sections)} sections (preserved HTML structure)")
         return sections
 
 
