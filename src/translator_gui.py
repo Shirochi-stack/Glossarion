@@ -1936,7 +1936,7 @@ Recent translations to summarize:
         self.extraction_mode_var = self.config.get('extraction_mode', 'smart')
         
         self.book_title_prompt = self.config.get('book_title_prompt', 
-            "Translate this book title to English while retaining any acronyms:")
+            "Translate this book title to {target_lang} while retaining any acronyms:")
         # Initialize book title system prompt
         if 'book_title_system_prompt' not in self.config:
             self.config['book_title_system_prompt'] = "You are a translator. Respond with only the translated text, nothing else. Do not add any explanation or additional content."
@@ -7081,8 +7081,10 @@ Important rules:
             # Set book title translation settings
             os.environ['TRANSLATE_BOOK_TITLE'] = "1" if self.translate_book_title_var else "0"
             os.environ['BOOK_TITLE_PROMPT'] = self.book_title_prompt
-            os.environ['BOOK_TITLE_SYSTEM_PROMPT'] = self.config.get('book_title_system_prompt', 
-                "You are a translator. Respond with only the translated text, nothing else.")
+            os.environ['BOOK_TITLE_SYSTEM_PROMPT'] = self.config.get('book_title_system_prompt', '')
+            
+            # Set metadata system prompt
+            os.environ['METADATA_SYSTEM_PROMPT'] = self.config.get('metadata_system_prompt', '')
             
             # Set prompts
             os.environ['SYSTEM_PROMPT'] = self.prompt_text.toPlainText().strip()

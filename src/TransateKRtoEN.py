@@ -5680,11 +5680,9 @@ def main(log_callback=None, stop_callback=None):
                 print("="*50)
                 print(f"🌐 Translating {len(fields_to_translate)} metadata fields...")
                 
-                # Get ALL configuration from environment - NO DEFAULTS
-                system_prompt = os.getenv('BOOK_TITLE_SYSTEM_PROMPT', '')
-                if not system_prompt:
-                    print("❌ No system prompt configured, skipping metadata translation")
-                else:
+                # Get metadata system prompt from environment
+                system_prompt = os.getenv('METADATA_SYSTEM_PROMPT', '')
+                if system_prompt:
                     # Get field-specific prompts
                     field_prompts_str = os.getenv('METADATA_FIELD_PROMPTS', '{}')
                     try:

@@ -89,7 +89,13 @@ class MetadataBatchTranslatorUI:
     
     def _initialize_default_prompts(self):
         """Initialize all default prompts in config if not present"""
-        # Batch header system prompt (NEW)
+        # Book title prompt
+        if 'book_title_prompt' not in self.gui.config:
+            self.gui.config['book_title_prompt'] = (
+                "Translate this book title to {target_lang} while retaining any acronyms:"
+            )
+        
+        # Batch header system prompt
         if 'batch_header_system_prompt' not in self.gui.config:
             self.gui.config['batch_header_system_prompt'] = (
                 "You are a professional translator specializing in novel chapter titles. "
@@ -100,7 +106,7 @@ class MetadataBatchTranslatorUI:
         # Batch header user prompt (existing)
         if 'batch_header_prompt' not in self.gui.config:
             self.gui.config['batch_header_prompt'] = (
-                "Translate these chapter titles to English.\n"
+                "Translate these chapter titles to {target_lang}.\n"
                 "- For titles with parentheses containing Chinese/Japanese characters (like 終篇, 完結編, etc.), translate both the main title and the parenthetical text.\n"
                 "- Common markers: 終篇/終章 = 'Final Chapter', 完結編 = 'Final Arc/Volume', 後編 = 'Part 2', 前編 = 'Part 1'.\n"
                 "- Translate the meaning accurately - don't use overly dramatic words unless the original implies them.\n"
@@ -112,7 +118,7 @@ class MetadataBatchTranslatorUI:
         # Metadata batch prompt
         if 'metadata_batch_prompt' not in self.gui.config:
             self.gui.config['metadata_batch_prompt'] = (
-                "Translate the following metadata fields to English.\n"
+                "Translate the following metadata fields to {target_lang}.\n"
                 "Output ONLY a JSON object with the same field names as keys."
             )
         
@@ -121,10 +127,10 @@ class MetadataBatchTranslatorUI:
             self.gui.config['metadata_field_prompts'] = {
                 'creator': "Romanize this author name. Do not output anything other than the romanized text.",
                 'publisher': "Romanize this publisher name. Do not output anything other than the romanized text.",
-                'subject': "Translate this book genre/subject to English. Do not output anything other than the translated text:",
-                'description': "Translate this book description to English. Do not output anything other than the translated text:",
-                'series': "Translate this series name to English. Do not output anything other than the translated text:",
-                '_default': "Translate this text to English. Do not output anything other than the translated text:"
+                'subject': "Translate this book genre/subject to {target_lang}. Do not output anything other than the translated text:",
+                'description': "Translate this book description to {target_lang}. Do not output anything other than the translated text:",
+                'series': "Translate this series name to {target_lang}. Do not output anything other than the translated text:",
+                '_default': "Translate this text to {target_lang}. Do not output anything other than the translated text:"
             }
 
             
@@ -1263,7 +1269,7 @@ class MetadataBatchTranslatorUI:
         # Disable mousewheel scrolling
         self.output_lang_combo.wheelEvent = lambda event: None
         
-        output_note = QLabel("This will replace 'English' in all prompts with your chosen language")
+        output_note = QLabel("This will replace '{target_lang}' in all prompts with your chosen language")
         output_note.setStyleSheet("color: gray; font-size: 9pt;")
         output_note.setContentsMargins(0, 5, 0, 0)
         output_layout.addWidget(output_note)
@@ -1534,7 +1540,7 @@ class BatchHeaderTranslator:
         
         # Replace variables in prompt
         prompt_template = prompt_template.replace('{source_lang}', lang_str)
-        prompt_template = prompt_template.replace('English', output_lang)
+        prompt_template = prompt_template.replace('{target_lang}', output_lang)
         
         # Add the titles to translate
         user_prompt_template = prompt_template + "\n\nTitles to translate:\n"
