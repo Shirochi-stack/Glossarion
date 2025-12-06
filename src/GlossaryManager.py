@@ -2464,8 +2464,10 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                 return {}
             
             try:
-                temperature = float(os.getenv("TEMPERATURE", "0.3"))
-                max_tokens = int(os.getenv("MAX_OUTPUT_TOKENS", "4096"))
+                # Use glossary-specific temperature with fallback to global
+                temperature = float(os.getenv("GLOSSARY_TEMPERATURE", os.getenv("TEMPERATURE", "0.3")))
+                # Use glossary-specific max output tokens with fallback to global
+                max_tokens = int(os.getenv("GLOSSARY_MAX_OUTPUT_TOKENS", os.getenv("MAX_OUTPUT_TOKENS", "4096")))
                 
                 # Use send_with_interrupt for interruptible API call
                 # Respect RETRY_TIMEOUT toggle - if disabled, use None for infinite timeout
@@ -3800,8 +3802,10 @@ Provide translations in the same numbered format."""
             ]
             
             try:
-                temperature = float(os.getenv("TEMPERATURE", "0.3"))
-                max_tokens = int(os.getenv("MAX_OUTPUT_TOKENS", "4096"))
+                # Use glossary-specific temperature with fallback to global
+                temperature = float(os.getenv("GLOSSARY_TEMPERATURE", os.getenv("TEMPERATURE", "0.3")))
+                # Use glossary-specific max output tokens with fallback to global
+                max_tokens = int(os.getenv("GLOSSARY_MAX_OUTPUT_TOKENS", os.getenv("MAX_OUTPUT_TOKENS", "4096")))
                 
                 # Use send_with_interrupt for interruptible API call
                 print(f"📑 Sending translation request for batch {batch_num} (interruptible)...")

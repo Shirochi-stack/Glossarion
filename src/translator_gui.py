@@ -5882,6 +5882,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # Glossary-specific overrides
             'GLOSSARY_COMPRESSION_FACTOR': str(self.config.get('glossary_compression_factor', self.compression_factor_var)),
             'GLOSSARY_MAX_OUTPUT_TOKENS': str(self.config.get('glossary_max_output_tokens', current_max_tokens)),
+            'GLOSSARY_TEMPERATURE': str(self.config.get('manual_glossary_temperature', self.trans_temp.text())),
        }
         print(f"[DEBUG] DISABLE_CHAPTER_MERGING = '{os.getenv('DISABLE_CHAPTER_MERGING', '0')}'")
         
