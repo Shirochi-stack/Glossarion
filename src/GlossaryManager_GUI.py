@@ -1114,10 +1114,11 @@ class GlossaryManagerMixin:
         if not hasattr(self, 'manual_target_language_combo'):
             self.manual_target_language_combo = QComboBox()
             self.manual_target_language_combo.setMaximumWidth(200)
+            self.manual_target_language_combo.setEditable(True)
             languages = [
                 "English", "Spanish", "French", "German", "Italian", "Portuguese",
                 "Russian", "Arabic", "Hindi", "Chinese (Simplified)",
-                "Chinese (Traditional)", "Japanese", "Korean"
+                "Chinese (Traditional)", "Japanese", "Korean", "Turkish"
             ]
             self.manual_target_language_combo.addItems(languages)
             
@@ -1746,10 +1747,11 @@ Rules:
         if not hasattr(self, 'glossary_target_language_combo'):
             self.glossary_target_language_combo = QComboBox()
             self.glossary_target_language_combo.setMaximumWidth(100)
+            self.glossary_target_language_combo.setEditable(True)
             languages = [
                 "English", "Spanish", "French", "German", "Italian", "Portuguese",
                 "Russian", "Arabic", "Hindi", "Chinese (Simplified)",
-                "Chinese (Traditional)", "Japanese", "Korean"
+                "Chinese (Traditional)", "Japanese", "Korean", "Turkish"
             ]
             self.glossary_target_language_combo.addItems(languages)
             

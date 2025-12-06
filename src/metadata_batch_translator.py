@@ -1164,7 +1164,7 @@ class MetadataBatchTranslatorUI:
         output_layout.addWidget(output_desc)
         
         common_langs = ['English', 'Spanish', 'French', 'German', 'Italian', 'Portuguese', 
-                       'Russian', 'Japanese', 'Korean', 'Chinese (Simplified)', 'Chinese (Traditional)']
+                       'Russian', 'Japanese', 'Korean', 'Chinese (Simplified)', 'Chinese (Traditional)', 'Turkish']
         
         lang_label = QLabel("Target language:")
         output_layout.addWidget(lang_label)
