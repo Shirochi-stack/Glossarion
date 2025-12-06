@@ -1275,6 +1275,18 @@ Rules:
             h.addStretch()
             return cont
         
+        # Add icon to third column
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+        if os.path.exists(icon_path):
+            from PySide6.QtGui import QPixmap, QIcon
+            icon_label = QLabel()
+            icon_label.setMinimumSize(180, 180)
+            icon = QIcon(icon_path)
+            pixmap = icon.pixmap(140, 140)  # Smaller icon with padding
+            icon_label.setPixmap(pixmap)
+            icon_label.setAlignment(Qt.AlignCenter)
+            settings_grid.addWidget(icon_label, 0, 2, 4, 1)  # Span 4 rows
+        
         # Row 0: Temperature and Context Limit
         self.manual_temp_entry = QLineEdit(str(self.config.get('manual_glossary_temperature', 0.1)))
         self.manual_temp_entry.setFixedWidth(80)
