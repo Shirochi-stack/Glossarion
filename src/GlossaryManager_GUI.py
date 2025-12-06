@@ -1290,7 +1290,7 @@ Rules:
         self.glossary_history_rolling_checkbox.setChecked(self.config.get('glossary_history_rolling', False))
         settings_grid.addWidget(self.glossary_history_rolling_checkbox, 1, 0, 1, 4)
         
-        rolling_label = QLabel("When context limit is reached, keep recent chapters instead of clearing all history")
+        rolling_label = QLabel("Use recent history when context limit is reached")
         # rolling_label.setStyleSheet("color: gray; font-size: 10pt; margin-left: 20px;")
         settings_grid.addWidget(rolling_label, 2, 0, 1, 4)
         
@@ -1304,7 +1304,7 @@ Rules:
         self.glossary_request_merge_count_entry.setFixedWidth(80)
         settings_grid.addWidget(_m_pair("Merge Count:", self.glossary_request_merge_count_entry), 3, 2, 1, 2)
         
-        merge_label = QLabel("Combine multiple chapters into single API request for manual extraction")
+        merge_label = QLabel("Combine multiple chapters into single API request")
         # merge_label.setStyleSheet("color: gray; font-size: 10pt; margin-left: 20px;")
         settings_grid.addWidget(merge_label, 4, 0, 1, 4)
         
