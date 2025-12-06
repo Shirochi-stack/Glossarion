@@ -94,29 +94,59 @@ class ChapterSplitter:
             lines = chapter_html.split('\n')
             if max_elements:
                 print(f"📝 Total lines in file: {len(lines):,}")
+            
+            # Calculate tokens for all lines first for balanced splitting
+            line_tokens = [self.count_tokens(line) for line in lines]
+            
+            # Calculate how many chunks we need for balanced distribution
+            if max_elements:
+                # Element-based splitting
+                num_chunks = (len(lines) + max_elements - 1) // max_elements
+            else:
+                # Token-based splitting - calculate optimal number of chunks
+                num_chunks = (total_tokens + effective_max_tokens - 1) // effective_max_tokens
+            
+            if num_chunks == 1:
+                return [(chapter_html, 1, 1)]
+            
+            # Balanced splitting: distribute lines evenly across chunks
             chunks = []
+            target_tokens_per_chunk = total_tokens / num_chunks
             current_lines = []
             current_tokens = 0
             
-            for line in lines:
-                line_tokens = self.count_tokens(line)
+            for i, line in enumerate(lines):
+                line_tok = line_tokens[i]
                 
-                # Check if we should split
+                # Add line to current chunk
+                current_lines.append(line)
+                current_tokens += line_tok
+                
+                # Check if we should end this chunk
+                is_last_line = (i == len(lines) - 1)
+                chunks_remaining = num_chunks - len(chunks)
+                lines_remaining = len(lines) - i - 1
+                
+                # Split if:
+                # 1. We've reached target tokens AND there are enough lines left for remaining chunks
+                # 2. OR we've exceeded max tokens
+                # 3. OR this is the last line
                 should_split = False
-                if current_lines:
-                    if current_tokens + line_tokens > effective_max_tokens:
+                if current_tokens >= target_tokens_per_chunk and chunks_remaining > 1:
+                    # Make sure there are enough lines remaining for the remaining chunks
+                    if lines_remaining >= chunks_remaining - 1:
                         should_split = True
-                    elif max_elements and len(current_lines) >= max_elements:
-                        should_split = True
+                elif current_tokens > effective_max_tokens:
+                    should_split = True
+                elif is_last_line:
+                    should_split = True
                 
                 if should_split:
                     chunks.append('\n'.join(current_lines))
-                    current_lines = [line]
-                    current_tokens = line_tokens
-                else:
-                    current_lines.append(line)
-                    current_tokens += line_tokens
+                    current_lines = []
+                    current_tokens = 0
             
+            # Safety: add any remaining lines
             if current_lines:
                 chunks.append('\n'.join(current_lines))
             
@@ -126,74 +156,90 @@ class ChapterSplitter:
             total_chunks = len(chunks)
             return [(chunk, i+1, total_chunks) for i, chunk in enumerate(chunks)]
         
-        # HTML mode - split by element count
+        # HTML mode - balanced split by element tokens (with optional element cap)
         # Count total elements first if Break Split is enabled
         if max_elements:
             total_elements = sum(1 for elem in elements if not (isinstance(elem, str) and elem.strip() == ''))
             print(f"🏷️ Total HTML elements in file: {total_elements:,}")
         
+        # Pre-compute token counts for non-empty elements
+        elem_html_list = []
+        elem_tokens_list = []
+        for element in elements:
+            if isinstance(element, str) and element.strip() == '':
+                continue
+            element_html = str(element)
+            tokens = self.count_tokens(element_html)
+            elem_html_list.append(element_html)
+            elem_tokens_list.append(tokens)
+        
+        if not elem_html_list:
+            return [(chapter_html, 1, 1)]
+        
+        total_elem_tokens = sum(elem_tokens_list)
+        # Determine number of chunks
+        if max_elements:
+            num_chunks = (len(elem_html_list) + max_elements - 1) // max_elements
+        else:
+            num_chunks = (total_elem_tokens + effective_max_tokens - 1) // effective_max_tokens
+        num_chunks = max(1, num_chunks)
+        if num_chunks == 1:
+            return [(chapter_html, 1, 1)]
+        
+        target_tokens_per_chunk = total_elem_tokens / num_chunks
         chunks = []
         current_chunk_elements = []
         current_chunk_tokens = 0
-        element_count = 0
         
-        for element in elements:
-            # Skip empty text nodes
-            if isinstance(element, str) and element.strip() == '':
-                continue
+        for i, element_html in enumerate(elem_html_list):
+            element_tokens = elem_tokens_list[i]
             
-            element_html = str(element)
-            element_tokens = self.count_tokens(element_html)
-            element_count += 1
-            
-            # Special case: if a single element exceeds the limit
+            # Oversized single element: make it a standalone chunk
             if element_tokens > effective_max_tokens:
-                # Save current chunk if we have one
                 if current_chunk_elements:
                     chunks.append(self._create_chunk_html(current_chunk_elements))
                     current_chunk_elements = []
                     current_chunk_tokens = 0
-                    element_count = 0
-                
-                # Add the oversized element as its own chunk
                 chunks.append(element_html)
                 continue
             
-            # Check if we should split: EITHER token limit OR element count reached
+            current_chunk_elements.append(element_html)
+            current_chunk_tokens += element_tokens
+            
+            is_last = (i == len(elem_html_list) - 1)
+            chunks_remaining = num_chunks - len(chunks)
+            elems_remaining = len(elem_html_list) - i - 1
+            
             should_split = False
-            if current_chunk_elements:
-                if current_chunk_tokens + element_tokens > effective_max_tokens:
+            # Prefer splitting when we reach target and enough elements remain
+            if current_chunk_tokens >= target_tokens_per_chunk and chunks_remaining > 1:
+                if elems_remaining >= (chunks_remaining - 1):
                     should_split = True
-                elif max_elements and len(current_chunk_elements) >= max_elements:
-                    should_split = True
+            # Hard cap by tokens or element count
+            if current_chunk_tokens > effective_max_tokens:
+                should_split = True
+            if max_elements and len(current_chunk_elements) >= max_elements:
+                should_split = True
+            if is_last:
+                should_split = True
             
             if should_split:
-                # Save current chunk at element boundary
                 chunks.append(self._create_chunk_html(current_chunk_elements))
-                # Start new chunk with this element
-                current_chunk_elements = [element_html]
-                current_chunk_tokens = element_tokens
-            else:
-                # Add to current chunk
-                current_chunk_elements.append(element_html)
-                current_chunk_tokens += element_tokens
+                current_chunk_elements = []
+                current_chunk_tokens = 0
         
-        # Don't forget the last chunk
         if current_chunk_elements:
             chunks.append(self._create_chunk_html(current_chunk_elements))
         
-        # Fallback: if we somehow got 0 chunks, return the whole content
         if not chunks:
             chunks = [chapter_html]
         
-        # Debug output for chunk details
         if os.getenv('DEBUG_CHUNK_SPLITTING', '0') == '1':
             print(f"[CHUNK DEBUG] Created {len(chunks)} chunks")
             for idx, chunk in enumerate(chunks, 1):
                 chunk_tokens = self.count_tokens(chunk)
                 print(f"[CHUNK DEBUG]   Chunk {idx}: {chunk_tokens:,} tokens ({len(chunk):,} chars)")
         
-        # Return chunks with metadata
         total_chunks = len(chunks)
         return [(chunk, i+1, total_chunks) for i, chunk in enumerate(chunks)]
     

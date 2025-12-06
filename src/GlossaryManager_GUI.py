@@ -1297,7 +1297,7 @@ Rules:
         settings_grid.addWidget(_m_pair("Context Limit:", self.manual_context_entry), 0, 1)
         
         # Row 1: Compression Factor and Rolling window checkbox
-        self.glossary_compression_factor_entry = QLineEdit(str(self.config.get('glossary_compression_factor', 0.67)))
+        self.glossary_compression_factor_entry = QLineEdit(str(self.config.get('glossary_compression_factor', 0.88)))
         self.glossary_compression_factor_entry.setFixedWidth(80)
         settings_grid.addWidget(_m_pair("Compression Factor:", self.glossary_compression_factor_entry), 1, 0)
         
