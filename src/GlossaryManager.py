@@ -302,7 +302,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         if chapter_split_threshold == 0:
             print(f"⚠️ Text too large for single API call!")
             print(f"   Estimated tokens: {estimated_tokens:,}")
-            print(f"   Safe input limit: {safe_input_limit:,} (based on {compression_factor:.1f}x compression factor and {max_output_tokens:,} max output tokens)")
+            print(f"   Safe input limit: {safe_input_limit:,} (based on {compression_factor:.2f}x compression factor and {max_output_tokens:,} max output tokens)")
             print(f"   Will use ChapterSplitter for token-based chunking...")
         else:
             # Character-based threshold already set, just use it silently
