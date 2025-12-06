@@ -1746,7 +1746,7 @@ Rules:
         # Target language dropdown
         if not hasattr(self, 'glossary_target_language_combo'):
             self.glossary_target_language_combo = QComboBox()
-            self.glossary_target_language_combo.setMaximumWidth(100)
+            self.glossary_target_language_combo.setMaximumWidth(120)
             self.glossary_target_language_combo.setEditable(True)
             languages = [
                 "English", "Spanish", "French", "German", "Italian", "Portuguese",

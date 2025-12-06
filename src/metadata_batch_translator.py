@@ -513,19 +513,8 @@ class MetadataBatchTranslatorUI:
             main_layout.addLayout(button_layout)
             dialog.setLayout(main_layout)
             
-            # Run dialog in separate thread to avoid GIL conflicts
-            import threading
-            result = {'done': False}
-            
-            def run_dialog():
-                dialog.exec()
-                result['done'] = True
-            
-            thread = threading.Thread(target=run_dialog, daemon=True)
-            thread.start()
-            
-            # Keep the dialog reference to prevent garbage collection
-            self.gui._metadata_dialog = dialog
+            # Execute dialog directly in main thread
+            dialog.exec()
     
     def configure_translation_prompts(self):
         """Configure all translation prompts in one place"""
@@ -706,12 +695,8 @@ class MetadataBatchTranslatorUI:
                 self._reset_all_prompts_to_defaults()
                 dialog.close()
                 # Re-open dialog with defaults to refresh the UI
-                import threading
-                def reopen():
-                    import time
-                    time.sleep(0.1)  # Small delay to let dialog close cleanly
-                    self.configure_translation_prompts()
-                threading.Thread(target=reopen, daemon=True).start()
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(100, self.configure_translation_prompts)
         
         save_btn = QPushButton("💾 Save All")
         save_btn.setMinimumWidth(150)
@@ -777,19 +762,8 @@ class MetadataBatchTranslatorUI:
         main_layout.addLayout(button_layout)
         dialog.setLayout(main_layout)
         
-        # Run dialog in separate thread to avoid GIL conflicts
-        import threading
-        result = {'done': False}
-        
-        def run_dialog():
-            dialog.exec()
-            result['done'] = True
-        
-        thread = threading.Thread(target=run_dialog, daemon=True)
-        thread.start()
-        
-        # Keep the dialog reference to prevent garbage collection
-        self.gui._prompts_dialog = dialog
+        # Execute dialog directly in main thread
+        dialog.exec()
     
     def _create_title_prompts_tab(self, parent):
         """Create tab for book title prompts"""
@@ -936,8 +910,15 @@ class MetadataBatchTranslatorUI:
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
         scroll_area.setFrameShape(QFrame.NoFrame)
+        scroll_area.setStyleSheet("""
+            QScrollArea {
+                background-color: #2b2b2b;
+                border: none;
+            }
+        """)
         
         scroll_widget = QWidget()
+        scroll_widget.setStyleSheet("background-color: #2b2b2b;")
         tab_layout = QVBoxLayout(scroll_widget)
         tab_layout.setContentsMargins(20, 20, 20, 20)
         
@@ -965,6 +946,9 @@ class MetadataBatchTranslatorUI:
                 border-radius: 3px;
                 padding: 5px;
                 font-family: 'Consolas', 'Courier New', monospace;
+            }
+            QTextEdit:focus {
+                border: 1px solid #5a9fd4;
             }
         """)
         self.metadata_batch_text.setPlainText(self.gui.config.get('metadata_batch_prompt',
@@ -1026,6 +1010,9 @@ class MetadataBatchTranslatorUI:
                     border-radius: 3px;
                     padding: 5px;
                     font-family: 'Consolas', 'Courier New', monospace;
+                }
+                QTextEdit:focus {
+                    border: 1px solid #5a9fd4;
                 }
             """)
             
