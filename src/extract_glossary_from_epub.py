@@ -2813,15 +2813,18 @@ def main(log_callback=None, stop_callback=None):
                 
                 chapters_needing_processing.append((idx, chap))
             
-            # Create merge groups
+            # Create merge groups from consecutive unprocessed chapters
             for i in range(0, len(chapters_needing_processing), request_merge_count):
                 group = chapters_needing_processing[i:i + request_merge_count]
+                # Always create groups, even single-chapter ones (they'll just process normally)
+                parent_idx = group[0][0]
+                merge_groups[parent_idx] = group
+                
+                # Only mark children as merged if there's more than one chapter
                 if len(group) > 1:
-                    parent_idx = group[0][0]
-                    merge_groups[parent_idx] = group
                     child_indices = [g[0] for g in group[1:]]
                     print(f"   📎 Chapters {parent_idx+1} + {[c+1 for c in child_indices]} will be merged")
-                    # Mark child indices as merged
+                    # Mark child indices as merged so they'll be skipped
                     for child_idx in child_indices:
                         if child_idx not in merged_indices:
                             merged_indices.append(child_idx)
