@@ -830,7 +830,7 @@ class MetadataBatchTranslatorUI:
             }
         """)
         self.title_user_text.setPlainText(self.gui.config.get('book_title_prompt',
-            "Translate this book title to English while retaining any acronyms:"))
+            "Translate this book title to {target_lang} while retaining any acronyms:"))
         tab_layout.addWidget(self.title_user_text)
         
         tab_layout.addStretch()
@@ -898,12 +898,12 @@ class MetadataBatchTranslatorUI:
             }
         """)
         self.header_batch_text.setPlainText(self.gui.config.get('batch_header_prompt',
-            "Translate these chapter titles to English.\n"
+            "Translate these chapter titles to {target_lang}\n"
             "Return ONLY a JSON object with chapter numbers as keys.\n"
             "Format: {\"1\": \"translated title\", \"2\": \"translated title\"}"))
         tab_layout.addWidget(self.header_batch_text)
         
-        var_label = QLabel("Variables available: {source_lang} - detected source language")
+        var_label = QLabel("Variables available: {target_lang} - detected source language")
         var_label.setStyleSheet("color: blue; font-size: 10pt;")
         var_label.setContentsMargins(0, 10, 0, 0)
         tab_layout.addWidget(var_label)
@@ -958,7 +958,7 @@ class MetadataBatchTranslatorUI:
             }
         """)
         self.metadata_batch_text.setPlainText(self.gui.config.get('metadata_batch_prompt',
-            "Translate the following metadata fields to English.\n"
+            "Translate the following metadata fields to {target_lang}.\n"
             "Return ONLY a JSON object with the same field names as keys."))
         tab_layout.addWidget(self.metadata_batch_text)
         
@@ -1022,7 +1022,7 @@ class MetadataBatchTranslatorUI:
                 }
             """)
             
-            default_prompt = field_prompts.get(field_key, f"Translate this {field_label_text.lower()} to English:")
+            default_prompt = field_prompts.get(field_key, f"Translate this {field_label_text.lower()} to {{target_lang}}:")
             text_widget.setPlainText(default_prompt)
             
             self.field_prompt_widgets[field_key] = text_widget
@@ -1030,7 +1030,7 @@ class MetadataBatchTranslatorUI:
             
             tab_layout.addWidget(field_widget)
         
-        var_label = QLabel("Variables: {source_lang} - detected language, {field_value} - the text to translate")
+        var_label = QLabel("Variables: {target_lang} - detected language, {field_value} - the text to translate")
         var_label.setStyleSheet("color: blue; font-size: 10pt;")
         var_label.setContentsMargins(0, 10, 0, 0)
         tab_layout.addWidget(var_label)
@@ -1317,7 +1317,8 @@ class MetadataBatchTranslatorUI:
         # Remove prompt-related keys from config
         prompt_keys = [
             'book_title_system_prompt', 'book_title_prompt',
-            'batch_header_system_prompt',  # NEW
+            'metadata_system_prompt',
+            'batch_header_system_prompt',
             'batch_header_prompt', 'metadata_batch_prompt',
             'metadata_field_prompts', 'lang_prompt_behavior',
             'forced_source_lang', 'output_language'
@@ -1327,9 +1328,26 @@ class MetadataBatchTranslatorUI:
             if key in self.gui.config:
                 del self.gui.config[key]
         
-        # Re-initialize defaults
+        # Force set book title prompt to new default
+        self.gui.config['book_title_prompt'] = "Translate this book title to {target_lang} while retaining any acronyms:"
+        if hasattr(self.gui, 'book_title_prompt'):
+            self.gui.book_title_prompt = "Translate this book title to {target_lang} while retaining any acronyms:"
+        
+        # Re-initialize other defaults
         self._initialize_default_prompts()
+        
+        # Force save and reload to ensure fresh state
         self.gui.save_config(show_message=False)
+        
+        # Reload config from disk
+        try:
+            import json
+            from api_key_encryption import decrypt_config
+            with open('config.json', 'r', encoding='utf-8') as f:
+                self.gui.config = json.load(f)
+                self.gui.config = decrypt_config(self.gui.config)
+        except Exception as e:
+            print(f"Error reloading config: {e}")
     
     def _detect_all_metadata_fields(self) -> Dict[str, str]:
         """Detect ALL metadata fields in the current EPUB"""
@@ -1520,7 +1538,7 @@ class BatchHeaderTranslator:
         
         # Get configured prompt template
         prompt_template = self.config.get('batch_header_prompt',
-            "Translate these chapter titles to English.\n"
+            "Translate these chapter titles to {target_lang}.\n"
             "Return ONLY a JSON object with chapter numbers as keys.\n"
             "Format: {\"1\": \"translated title\", \"2\": \"translated title\"}")
         
@@ -1539,7 +1557,7 @@ class BatchHeaderTranslator:
         output_lang = self.config.get('output_language', 'English')
         
         # Replace variables in prompt
-        prompt_template = prompt_template.replace('{source_lang}', lang_str)
+        prompt_template = prompt_template.replace('{target_lang}', lang_str)
         prompt_template = prompt_template.replace('{target_lang}', output_lang)
         
         # Add the titles to translate
@@ -2208,7 +2226,7 @@ class MetadataTranslator:
         
         # Get configured prompt
         prompt_template = self.config.get('metadata_batch_prompt',
-            "Translate the following metadata fields to English.\n"
+            "Translate the following metadata fields to {target_lang}.\n"
             "Return ONLY a JSON object with the same field names as keys.")
         
         # Handle language behavior
@@ -2226,7 +2244,7 @@ class MetadataTranslator:
         output_lang = self.config.get('output_language', 'English')
         
         # Replace variables
-        prompt_template = prompt_template.replace('{source_lang}', lang_str)
+        prompt_template = prompt_template.replace('{target_lang}', lang_str)
         prompt_template = prompt_template.replace('English', output_lang)
         
         user_prompt = prompt_template + f"\n\nFields to translate:\n{json.dumps(fields_to_send, ensure_ascii=False, indent=2)}"
@@ -2349,7 +2367,7 @@ class MetadataTranslator:
         output_lang = self.config.get('output_language', 'English')
         
         # Replace variables
-        prompt = prompt_template.replace('{source_lang}', lang_str)
+        prompt = prompt_template.replace('{target_lang}', lang_str)
         prompt = prompt.replace('{field_value}', field_value)
         prompt = prompt.replace('English', output_lang)
         
