@@ -2072,6 +2072,19 @@ def _create_response_handling_section(self, parent):
     indefinite_desc.setContentsMargins(40, 2, 0, 5)
     section_v.addWidget(indefinite_desc)
     
+    # Add Halgakos icon at bottom
+    import os
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+    if os.path.exists(icon_path):
+        from PySide6.QtGui import QIcon
+        icon_label = QLabel()
+        icon_label.setMinimumSize(180, 180)
+        icon = QIcon(icon_path)
+        pixmap = icon.pixmap(140, 140)
+        icon_label.setPixmap(pixmap)
+        icon_label.setAlignment(Qt.AlignCenter)
+        section_v.addWidget(icon_label)
+    
     # Place the section at row 1, column 0 to match the original grid
     try:
         grid = parent.layout()
