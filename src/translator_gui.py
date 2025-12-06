@@ -6820,6 +6820,12 @@ Important rules:
                     'GLOSSARY_MAX_TEXT_SIZE': str(self.config.get('glossary_max_text_size', 50000)),
                     'GLOSSARY_FILTER_MODE': self.config.get('glossary_filter_mode', 'all'),
                     'COMPRESSION_FACTOR': str(getattr(self, 'compression_factor_var', self.config.get('compression_factor', 3.0))),
+                    
+                    # Glossary-specific overrides (with fallback to global settings)
+                    'GLOSSARY_REQUEST_MERGING_ENABLED': '1' if self.config.get('glossary_request_merging_enabled', False) else '0',
+                    'GLOSSARY_REQUEST_MERGE_COUNT': str(self.config.get('glossary_request_merge_count', 10)),
+                    'GLOSSARY_COMPRESSION_FACTOR': str(self.config.get('glossary_compression_factor', getattr(self, 'compression_factor_var', 0.67))),
+                    'GLOSSARY_MAX_OUTPUT_TOKENS': str(self.config.get('glossary_max_output_tokens', self.max_output_tokens)),
                 }
                 
                 # Add project ID for Vertex AI

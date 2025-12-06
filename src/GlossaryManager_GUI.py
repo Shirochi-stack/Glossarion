@@ -509,6 +509,12 @@ class GlossaryManagerMixin:
                     if hasattr(self, checkbox_name):
                         setattr(self, var_name, getattr(self, checkbox_name).isChecked())
                 
+                # Update glossary request merging checkbox
+                if hasattr(self, 'glossary_request_merging_checkbox'):
+                    glossary_request_merging = self.glossary_request_merging_checkbox.isChecked()
+                    self.config['glossary_request_merging_enabled'] = glossary_request_merging
+                    setattr(self, 'glossary_request_merging_enabled_var', glossary_request_merging)
+                
                 # Update text field variables from Targeted Extraction Settings
                 text_field_to_var_mapping = [
                     ('glossary_min_frequency_entry', 'glossary_min_frequency', 'glossary_min_frequency_var'),
@@ -518,6 +524,7 @@ class GlossaryManagerMixin:
                     ('glossary_max_text_size_entry', 'glossary_max_text_size', 'glossary_max_text_size_var'),
                     ('glossary_max_sentences_entry', 'glossary_max_sentences', 'glossary_max_sentences_var'),
                     ('glossary_chapter_split_threshold_entry', 'glossary_chapter_split_threshold', 'glossary_chapter_split_threshold_var'),
+                    ('glossary_request_merge_count_entry', 'glossary_request_merge_count', 'glossary_request_merge_count_var'),
                 ]
                 for field_name, config_key, var_name in text_field_to_var_mapping:
                     if hasattr(self, field_name):
@@ -528,6 +535,24 @@ class GlossaryManagerMixin:
                             setattr(self, var_name, str(value))
                         except ValueError:
                             pass  # Keep existing value if invalid
+                
+                # Update glossary-specific float fields (compression factor)
+                if hasattr(self, 'glossary_compression_factor_entry'):
+                    try:
+                        value = float(self.glossary_compression_factor_entry.text())
+                        self.config['glossary_compression_factor'] = value
+                        setattr(self, 'glossary_compression_factor_var', str(value))
+                    except ValueError:
+                        pass
+                
+                # Update glossary max output tokens
+                if hasattr(self, 'glossary_output_token_limit_entry'):
+                    try:
+                        value = int(self.glossary_output_token_limit_entry.text())
+                        self.config['glossary_max_output_tokens'] = value
+                        setattr(self, 'glossary_max_output_tokens_var', str(value))
+                    except ValueError:
+                        pass
                 
                 # Update target language from combo box (check both auto and manual)
                 if hasattr(self, 'glossary_target_language_combo'):
@@ -1268,6 +1293,39 @@ Rules:
         rolling_label = QLabel("When context limit is reached, keep recent chapters instead of clearing all history")
         # rolling_label.setStyleSheet("color: gray; font-size: 10pt; margin-left: 20px;")
         settings_grid.addWidget(rolling_label, 2, 0, 1, 4)
+        
+        # Glossary-specific overrides section
+        override_title = QLabel("Override Settings (Manual Extraction Only)")
+        override_title.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        settings_grid.addWidget(override_title, 3, 0, 1, 4)
+        
+        # Request Merging checkbox and count
+        if not hasattr(self, 'glossary_request_merging_checkbox'):
+            self.glossary_request_merging_checkbox = self._create_styled_checkbox("Glossary Request Merging")
+        self.glossary_request_merging_checkbox.setChecked(self.config.get('glossary_request_merging_enabled', False))
+        settings_grid.addWidget(self.glossary_request_merging_checkbox, 4, 0, 1, 2)
+        
+        self.glossary_request_merge_count_entry = QLineEdit(str(self.config.get('glossary_request_merge_count', 10)))
+        self.glossary_request_merge_count_entry.setFixedWidth(80)
+        settings_grid.addWidget(_m_pair("Merge Count:", self.glossary_request_merge_count_entry), 4, 2, 1, 2)
+        
+        merge_label = QLabel("Combine multiple chapters into single API request for manual extraction")
+        # merge_label.setStyleSheet("color: gray; font-size: 10pt; margin-left: 20px;")
+        settings_grid.addWidget(merge_label, 5, 0, 1, 4)
+        
+        # Compression Factor
+        self.glossary_compression_factor_entry = QLineEdit(str(self.config.get('glossary_compression_factor', 0.67)))
+        self.glossary_compression_factor_entry.setFixedWidth(80)
+        settings_grid.addWidget(_m_pair("Compression Factor:", self.glossary_compression_factor_entry), 6, 0, 1, 2)
+        
+        # Output Token Limit
+        self.glossary_output_token_limit_entry = QLineEdit(str(self.config.get('glossary_max_output_tokens', 65536)))
+        self.glossary_output_token_limit_entry.setFixedWidth(80)
+        settings_grid.addWidget(_m_pair("Output Token Limit:", self.glossary_output_token_limit_entry), 6, 2, 1, 2)
+        
+        override_desc = QLabel("Override global compression/token settings for glossary extraction only")
+        # override_desc.setStyleSheet("color: gray; font-size: 10pt; margin-left: 20px;")
+        settings_grid.addWidget(override_desc, 7, 0, 1, 4)
 
     def update_glossary_prompts(self):
         """Update glossary prompts from text widgets if they exist"""

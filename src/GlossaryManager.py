@@ -287,10 +287,12 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         # Fallback estimate: 1 token ≈ 3-4 characters for Asian languages
         estimated_tokens = effective_text_size // 3
     
-    max_output_tokens = int(os.getenv("MAX_OUTPUT_TOKENS", "65536"))
+    # Get output token limit (glossary-specific with fallback to global)
+    max_output_tokens = int(os.getenv("GLOSSARY_MAX_OUTPUT_TOKENS", os.getenv("MAX_OUTPUT_TOKENS", "65536")))
     
     # Use compression factor to determine safe input limit (from CJK→English compression ratio)
-    compression_factor = float(os.getenv("COMPRESSION_FACTOR", "1.0"))
+    # Use glossary-specific compression factor with fallback to global
+    compression_factor = float(os.getenv("GLOSSARY_COMPRESSION_FACTOR", os.getenv("COMPRESSION_FACTOR", "1.0")))
     # Safe input limit is max_output divided by compression factor
     # (e.g., if compression is 0.7, output will be 70% of input, so we can use 1/0.7 = 1.43x for safety)
     safe_input_limit = int(max_output_tokens / max(compression_factor, 0.1)) if compression_factor > 0 else int(max_output_tokens * 0.8)

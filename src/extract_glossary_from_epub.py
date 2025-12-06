@@ -2245,8 +2245,8 @@ def main(log_callback=None, stop_callback=None):
     api_delay = float(os.getenv("SEND_INTERVAL_SECONDS", "2"))
     print(f"⏱️  API call delay: {api_delay} seconds")
     
-    # Get compression factor from environment
-    compression_factor = float(os.getenv("COMPRESSION_FACTOR", "1.0"))
+    # Get compression factor from environment (glossary-specific with fallback)
+    compression_factor = float(os.getenv("GLOSSARY_COMPRESSION_FACTOR", os.getenv("COMPRESSION_FACTOR", "1.0")))
     print(f"📐 Compression Factor: {compression_factor}")
 
     # Initialize chapter splitter with compression factor
@@ -2255,7 +2255,8 @@ def main(log_callback=None, stop_callback=None):
     # Get temperature from environment or config
     temp = float(os.getenv("GLOSSARY_TEMPERATURE") or config.get('temperature', 0.1))
     
-    env_max_output = os.getenv("MAX_OUTPUT_TOKENS")
+    # Get output token limit (glossary-specific with fallback to global)
+    env_max_output = os.getenv("GLOSSARY_MAX_OUTPUT_TOKENS", os.getenv("MAX_OUTPUT_TOKENS"))
     if env_max_output and env_max_output.isdigit():
         mtoks = int(env_max_output)
         print(f"[DEBUG] Output Token Limit: {mtoks} (from GUI)")
@@ -2340,9 +2341,9 @@ def main(log_callback=None, stop_callback=None):
         glossary = []
     merged_indices = prog.get('merged_indices', [])
     
-    # Request merging configuration
-    request_merging_enabled = os.getenv('REQUEST_MERGING_ENABLED', '0') == '1'
-    request_merge_count = int(os.getenv('REQUEST_MERGE_COUNT', '3'))
+    # Request merging configuration (glossary-specific with fallback to global)
+    request_merging_enabled = os.getenv('GLOSSARY_REQUEST_MERGING_ENABLED', os.getenv('REQUEST_MERGING_ENABLED', '0')) == '1'
+    request_merge_count = int(os.getenv('GLOSSARY_REQUEST_MERGE_COUNT', os.getenv('REQUEST_MERGE_COUNT', '3')))
     
     if request_merging_enabled and request_merge_count > 1:
         print(f"\n🔗 REQUEST MERGING ENABLED: Combining up to {request_merge_count} chapters per request")
@@ -2442,7 +2443,8 @@ def main(log_callback=None, stop_callback=None):
             
             # Process batch in parallel BUT handle results as they complete
             temp = float(os.getenv("GLOSSARY_TEMPERATURE") or config.get('temperature', 0.1))
-            env_max_output = os.getenv("MAX_OUTPUT_TOKENS")
+            # Use glossary-specific token limit with fallback
+            env_max_output = os.getenv("GLOSSARY_MAX_OUTPUT_TOKENS", os.getenv("MAX_OUTPUT_TOKENS"))
             if env_max_output and env_max_output.isdigit():
                 mtoks = int(env_max_output)
             else:
