@@ -1294,38 +1294,29 @@ Rules:
         # rolling_label.setStyleSheet("color: gray; font-size: 10pt; margin-left: 20px;")
         settings_grid.addWidget(rolling_label, 2, 0, 1, 4)
         
-        # Glossary-specific overrides section
-        override_title = QLabel("Override Settings (Manual Extraction Only)")
-        override_title.setStyleSheet("font-weight: bold; margin-top: 10px;")
-        settings_grid.addWidget(override_title, 3, 0, 1, 4)
-        
         # Request Merging checkbox and count
         if not hasattr(self, 'glossary_request_merging_checkbox'):
             self.glossary_request_merging_checkbox = self._create_styled_checkbox("Glossary Request Merging")
         self.glossary_request_merging_checkbox.setChecked(self.config.get('glossary_request_merging_enabled', False))
-        settings_grid.addWidget(self.glossary_request_merging_checkbox, 4, 0, 1, 2)
+        settings_grid.addWidget(self.glossary_request_merging_checkbox, 3, 0, 1, 2)
         
         self.glossary_request_merge_count_entry = QLineEdit(str(self.config.get('glossary_request_merge_count', 10)))
         self.glossary_request_merge_count_entry.setFixedWidth(80)
-        settings_grid.addWidget(_m_pair("Merge Count:", self.glossary_request_merge_count_entry), 4, 2, 1, 2)
+        settings_grid.addWidget(_m_pair("Merge Count:", self.glossary_request_merge_count_entry), 3, 2, 1, 2)
         
         merge_label = QLabel("Combine multiple chapters into single API request for manual extraction")
         # merge_label.setStyleSheet("color: gray; font-size: 10pt; margin-left: 20px;")
-        settings_grid.addWidget(merge_label, 5, 0, 1, 4)
+        settings_grid.addWidget(merge_label, 4, 0, 1, 4)
         
         # Compression Factor
         self.glossary_compression_factor_entry = QLineEdit(str(self.config.get('glossary_compression_factor', 0.67)))
         self.glossary_compression_factor_entry.setFixedWidth(80)
-        settings_grid.addWidget(_m_pair("Compression Factor:", self.glossary_compression_factor_entry), 6, 0, 1, 2)
+        settings_grid.addWidget(_m_pair("Compression Factor:", self.glossary_compression_factor_entry), 5, 0, 1, 2)
         
         # Output Token Limit
         self.glossary_output_token_limit_entry = QLineEdit(str(self.config.get('glossary_max_output_tokens', 65536)))
         self.glossary_output_token_limit_entry.setFixedWidth(80)
-        settings_grid.addWidget(_m_pair("Output Token Limit:", self.glossary_output_token_limit_entry), 6, 2, 1, 2)
-        
-        override_desc = QLabel("Override global compression/token settings for glossary extraction only")
-        # override_desc.setStyleSheet("color: gray; font-size: 10pt; margin-left: 20px;")
-        settings_grid.addWidget(override_desc, 7, 0, 1, 4)
+        settings_grid.addWidget(_m_pair("Output Token Limit:", self.glossary_output_token_limit_entry), 5, 2, 1, 2)
 
     def update_glossary_prompts(self):
         """Update glossary prompts from text widgets if they exist"""
