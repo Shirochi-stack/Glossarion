@@ -5879,6 +5879,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'FORCE_KEY_ROTATION': '1' if self.config.get('force_key_rotation', True) else '0',
             'ROTATION_FREQUENCY': str(self.config.get('rotation_frequency', 1)),
            
+            # Glossary-specific overrides
+            'GLOSSARY_COMPRESSION_FACTOR': str(self.config.get('glossary_compression_factor', self.compression_factor_var)),
+            'GLOSSARY_MAX_OUTPUT_TOKENS': str(self.config.get('glossary_max_output_tokens', current_max_tokens)),
        }
         print(f"[DEBUG] DISABLE_CHAPTER_MERGING = '{os.getenv('DISABLE_CHAPTER_MERGING', '0')}'")
         
