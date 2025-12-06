@@ -751,6 +751,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.request_merging_enabled_var = self.config.get('request_merging_enabled', False)
         self.request_merge_count_var = str(self.config.get('request_merge_count', 3))
         self.split_the_merge_var = self.config.get('split_the_merge', True)
+        self.disable_merge_fallback_var = self.config.get('disable_merge_fallback', True)
         self.selected_files = []
         self.current_file_index = 0
         self.use_gemini_openai_endpoint_var = self.config.get('use_gemini_openai_endpoint', False)
@@ -8917,6 +8918,7 @@ Important rules:
                 ('request_merging_enabled', ['request_merging_enabled_var'], False, bool),
                 ('request_merge_count', ['request_merge_count_var'], 3, lambda v: safe_int(v, 3)),
                 ('split_the_merge', ['split_the_merge_var'], True, bool),
+                ('disable_merge_fallback', ['disable_merge_fallback_var'], True, bool),
                 ('use_gemini_openai_endpoint', ['use_gemini_openai_endpoint_var'], False, bool),
                 ('use_fallback_keys', ['use_fallback_keys_var'], False, bool),
                 ('auto_update_check', ['auto_update_check_var'], True, bool),
@@ -9760,6 +9762,7 @@ Important rules:
                 ('REQUEST_MERGING_ENABLED', '1' if getattr(self, 'request_merging_enabled_var', False) else '0'),
                 ('REQUEST_MERGE_COUNT', str(getattr(self, 'request_merge_count_var', '3'))),
                 ('SPLIT_THE_MERGE', '1' if getattr(self, 'split_the_merge_var', False) else '0'),
+                ('DISABLE_MERGE_FALLBACK', '1' if getattr(self, 'disable_merge_fallback_var', False) else '0'),
 
                 # Image translation controls
                 ('ENABLE_IMAGE_TRANSLATION', '1' if getattr(self, 'enable_image_translation_var', False) else '0'),

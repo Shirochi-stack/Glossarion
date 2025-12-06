@@ -3399,11 +3399,28 @@ class BatchTranslationProcessor:
             
             # Check if Split the Merge is enabled
             split_the_merge = os.getenv('SPLIT_THE_MERGE', '0') == '1'
+            disable_fallback = os.getenv('DISABLE_MERGE_FALLBACK', '0') == '1'
             split_sections = None
             
             if split_the_merge and len(chapters_data) > 1:
                 # Try to split by headers
                 split_sections = RequestMerger.split_by_headers(cleaned, len(chapters_data))
+            
+            # If disable fallback is enabled and split failed, mark as qa_failed
+            if split_the_merge and disable_fallback and (not split_sections or len(split_sections) != len(chapters_data)):
+                print(f"   ⚠️ Split failed and fallback disabled - marking merged group as qa_failed")
+                fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
+                try:
+                    with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
+                        f.write(cleaned)
+                except Exception:
+                    pass
+                for actual_num, _, idx, chapter, content_hash in chapters_data:
+                    with self.progress_lock:
+                        self.update_progress_fn(idx, actual_num, content_hash, fname if idx == parent_idx else None, status="qa_failed", qa_issues_found=["SPLIT_FAILED"])
+                        self.save_progress_fn()
+                    results.append((False, actual_num, None, None, None))
+                return results
             
             if split_sections and len(split_sections) == len(chapters_data):
                 # Split successful - save each section as individual file
@@ -7913,11 +7930,33 @@ def main(log_callback=None, stop_callback=None):
                 
                 # Check if Split the Merge is enabled
                 split_the_merge = os.getenv('SPLIT_THE_MERGE', '0') == '1'
+                disable_fallback = os.getenv('DISABLE_MERGE_FALLBACK', '0') == '1'
                 split_sections = None
                 
                 if split_the_merge and len(merge_info['group']) > 1:
                     # Try to split by headers
                     split_sections = RequestMerger.split_by_headers(cleaned, len(merge_info['group']))
+                
+                # If disable fallback is enabled and split failed, mark as qa_failed
+                if split_the_merge and disable_fallback and (not split_sections or len(split_sections) != len(merge_info['group'])):
+                    print(f"   ⚠️ Split failed and fallback disabled - marking merged group as qa_failed")
+                    parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
+                    try:
+                        with open(os.path.join(out, parent_fname), 'w', encoding='utf-8') as f:
+                            f.write(cleaned)
+                    except Exception:
+                        pass
+                    
+                    # Mark all as qa_failed
+                    progress_manager.update(
+                        parent_idx, parent_actual_num, parent_content_hash, parent_fname,
+                        status="qa_failed", chapter_obj=parent_chapter, qa_issues_found=["SPLIT_FAILED"]
+                    )
+                    for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group'][1:]:
+                        progress_manager.update(g_idx, g_actual_num, g_content_hash, None, status="qa_failed", chapter_obj=g_chapter, qa_issues_found=["SPLIT_FAILED"])
+                    progress_manager.save()
+                    print(f"   ⚠️ Merged group marked as qa_failed")
+                    continue
                 
                 if split_sections and len(split_sections) == len(merge_info['group']):
                     # Split successful - save each section as individual file

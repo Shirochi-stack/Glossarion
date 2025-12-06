@@ -4095,6 +4095,32 @@ def _create_processing_options_section(self, parent):
     extraction_v.addWidget(split_merge_desc)
     split_merge_widgets.append(split_merge_desc)
     
+    # Disable Fallback (mark as qa_failed if split fails)
+    if not hasattr(self, 'disable_merge_fallback_var'):
+        self.disable_merge_fallback_var = self.config.get('disable_merge_fallback', True)
+    
+    disable_fallback_cb = self._create_styled_checkbox("Disable Fallback")
+    try:
+        disable_fallback_cb.setChecked(bool(self.disable_merge_fallback_var))
+    except Exception:
+        pass
+    
+    def _on_disable_fallback_toggle(checked):
+        try:
+            self.disable_merge_fallback_var = bool(checked)
+        except Exception:
+            pass
+    disable_fallback_cb.toggled.connect(_on_disable_fallback_toggle)
+    disable_fallback_cb.setContentsMargins(40, 2, 0, 0)  # Double indented to show it's a sub-sub-option
+    extraction_v.addWidget(disable_fallback_cb)
+    split_merge_widgets.append(disable_fallback_cb)
+    
+    disable_fallback_desc = QLabel("Mark merged chapters as qa_failed if split fails (no fallback to merged file).\nUseful when you want to manually review failed splits.")
+    disable_fallback_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    disable_fallback_desc.setContentsMargins(60, 0, 0, 5)
+    extraction_v.addWidget(disable_fallback_desc)
+    split_merge_widgets.append(disable_fallback_desc)
+    
     # Set initial enabled state for split merge (depends on request merging)
     for widget in split_merge_widgets:
         widget.setEnabled(bool(self.request_merging_enabled_var))
