@@ -1064,11 +1064,11 @@ Text to analyze:
         self.default_image_chunk_prompt = "This is part {chunk_idx} of {total_chunks} of a longer image. You must maintain the narrative flow with the previous chunks while following all system prompt guidelines previously mentioned. {context}"
         self.default_prompts = {
             "Universal": (
-                "You are a professional novel translator. Translate the following text to {target_lang}.\\n"
-                "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.\\n"
-                "- If the text does not contain HTML tags, use line breaks for proper formatting as expected of a novel.\\n"
-                "- Maintain the original meaning, tone, and style.\\n"
-                "- Do not add any explanations or notes.\\n"
+                "You are a professional novel translator. Translate the following text to {target_lang}.\n"
+                "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.\n"
+                "- If the text does not contain HTML tags, use line breaks for proper formatting as expected of a novel.\n"
+                "- Maintain the original meaning, tone, and style.\n"
+                "- Output ONLY the translated text. Do not add any explanations, notes, or conversational filler.\n"
             ),
             "korean": (
                 "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
@@ -1949,6 +1949,15 @@ Recent translations to summarize:
         
         # Profiles
         self.prompt_profiles = self.config.get('prompt_profiles', self.default_prompts.copy())
+        
+        # Ensure Universal profile exists and is up to date (force add/update if missing or old)
+        if "Universal" in self.default_prompts:
+            if "Universal" not in self.prompt_profiles:
+                # Add if missing (inserted at start to be default)
+                new_profiles = {"Universal": self.default_prompts["Universal"]}
+                new_profiles.update(self.prompt_profiles)
+                self.prompt_profiles = new_profiles
+        
         active = self.config.get('active_profile', next(iter(self.prompt_profiles)))
         self.profile_var = active
         self.lang_var = self.profile_var
