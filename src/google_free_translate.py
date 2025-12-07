@@ -59,7 +59,16 @@ class GoogleFreeTranslateNew:
             "en": "en", 
             "zh": "zh-CN", 
             "ja": "ja", 
-            "ko": "ko"
+            "ko": "ko",
+            "es": "es",
+            "fr": "fr",
+            "de": "de",
+            "it": "it",
+            "pt": "pt",
+            "ru": "ru",
+            "ar": "ar",
+            "hi": "hi",
+            "tr": "tr"
         }
         return lang_map.get(self.target_language, self.target_language)
 
@@ -125,14 +134,20 @@ class GoogleFreeTranslateNew:
             # Ordered from most reliable to least reliable based on common usage
             endpoints_to_try = [
                 'https://translate.googleapis.com/translate_a/single',  # Most reliable public endpoint
-                'https://clients5.google.com/translate_a/t',  # Mobile client endpoint
                 'https://translate.google.com/translate_a/single',  # Direct web endpoint
+                'https://clients5.google.com/translate_a/t',  # Mobile client endpoint
                 'https://clients5.google.com/translate_a/single',  # Alternative client5
+                'https://clients1.google.com/translate_a/single',
+                'https://clients3.google.com/translate_a/t',
+                'https://translate.google.cn/translate_a/single',
             ]
             
             for endpoint_url in endpoints_to_try:
                 try:
-                    if 'clients5.google.com/translate_a/t' in endpoint_url:
+                    # Check if it's a mobile endpoint (t) or single api
+                    is_mobile = '/t' in endpoint_url
+                    
+                    if is_mobile:
                         # Use mobile client API format
                         result = self._translate_via_mobile_api(text, source_lang, target_lang, endpoint_url)
                     else:
@@ -168,6 +183,15 @@ class GoogleFreeTranslateNew:
                 'error': str(e)
             }
     
+    def _try_single_api_request(self, params: dict, endpoint_url: str, client_type: str) -> Optional[Dict[str, Any]]:
+                self.logger.warning(f"Chunk translation failed: {e}")
+                translated_parts.append(chunk)
+                
+        return {
+            'translatedText': "".join(translated_parts),
+            'detectedSourceLanguage': detected_lang
+        }
+
     def _translate_via_single_api(self, text: str, source_lang: str, target_lang: str, endpoint_url: str) -> Optional[Dict[str, Any]]:
         """Translate using the translate_a/single endpoint (older format)."""
         # Try multiple client types to avoid 403 errors
@@ -201,9 +225,10 @@ class GoogleFreeTranslateNew:
     
     def _try_single_api_request(self, params: dict, endpoint_url: str, client_type: str) -> Optional[Dict[str, Any]]:
         """Try a single API request with given parameters."""
-        response = requests.get(
+        # Use POST to avoid URI too long errors for all requests
+        response = requests.post(
             endpoint_url,
-            params=params,
+            data=params,
             headers=self.get_headers(),
             timeout=10
         )

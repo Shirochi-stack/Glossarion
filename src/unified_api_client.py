@@ -12133,6 +12133,8 @@ class UnifiedClient:
             
             target_lang = google_lang_map.get(output_lang_name, "en")
             
+            logger.debug(f"Google Free: Output lang '{output_lang_name}' -> Code '{target_lang}'")
+            
             # Extract only user messages, ignore system prompts completely
             for msg in messages:
                 if msg['role'] == 'user':
@@ -12183,6 +12185,12 @@ class UnifiedClient:
             # Check if there was an error
             if 'error' in result:
                 logger.warning(f"Google Translate Free warning: {result['error']}")
+                raise UnifiedClientError(f"Google Free Translate failed: {result['error']}")
+            
+            # Check if translation matches source (indication of failure for non-identical languages)
+            if translated_text == text_to_translate and len(text_to_translate) > 10 and source_lang != target_lang:
+                 logger.warning("Google Free Translate returned identical text (possible failure)")
+                 # We don't raise here because sometimes text IS identical, but it's suspicious
             
             # Create UnifiedResponse object
             response = UnifiedResponse(
