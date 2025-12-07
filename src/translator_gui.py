@@ -2874,6 +2874,66 @@ Recent translations to summarize:
         output_layout.setContentsMargins(0, 0, 0, 0)
         output_layout.addWidget(prompt_label)
         output_layout.addWidget(self.output_btn)
+        
+        # Target Language Dropdown (below output token limit)
+        lang_label = QLabel("Target Language:")
+        lang_label.setStyleSheet("margin-top: 10px;")
+        output_layout.addWidget(lang_label)
+        
+        self.target_lang_combo = QComboBox()
+        self.target_lang_combo.setEditable(True)
+        languages = [
+            "English", "Spanish", "French", "German", "Italian", "Portuguese",
+            "Russian", "Arabic", "Hindi", "Chinese (Simplified)",
+            "Chinese (Traditional)", "Japanese", "Korean", "Turkish"
+        ]
+        self.target_lang_combo.addItems(languages)
+        
+        # Set initial value from config
+        saved_lang = self.config.get('output_language', 'English')
+        index = self.target_lang_combo.findText(saved_lang)
+        if index >= 0:
+            self.target_lang_combo.setCurrentIndex(index)
+        else:
+            self.target_lang_combo.setCurrentText(saved_lang)
+            
+        # Connect to save config
+        def update_target_lang(text):
+            self.config['output_language'] = text
+            # Also update environment variable if needed
+            os.environ['OUTPUT_LANGUAGE'] = text
+            
+        self.target_lang_combo.currentTextChanged.connect(update_target_lang)
+        
+        # Use Halgakos icon in dropdown arrow (consistent with other dropdowns)
+        try:
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+            if os.path.exists(icon_path):
+                combo_style = """
+                    QComboBox {
+                        padding-right: 28px;
+                    }
+                    QComboBox::drop-down {
+                        subcontrol-origin: padding;
+                        subcontrol-position: top right;
+                        width: 24px;
+                        border-left: 1px solid #4a5568;
+                    }
+                    QComboBox::down-arrow {
+                        width: 16px;
+                        height: 16px;
+                        image: url(""" + icon_path.replace('\\', '/') + """);
+                    }
+                    QComboBox::down-arrow:on {
+                        top: 1px;
+                    }
+                """
+                self.target_lang_combo.setStyleSheet(combo_style)
+        except Exception:
+            pass
+            
+        output_layout.addWidget(self.target_lang_combo)
+        
         output_layout.addStretch()
         self.frame.addWidget(output_container, 9, 0, Qt.AlignTop)
         
