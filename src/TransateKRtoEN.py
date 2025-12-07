@@ -539,8 +539,79 @@ class RequestMerger:
         soup = BeautifulSoup(content, 'html.parser')
         
         # Find all headers (h1-h6)
-        headers = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
-        original_headers = headers[:]
+        headers = list(soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']))
+        
+        import re
+        
+        # Helper to check for markdown header pattern
+        def get_markdown_header_match(text):
+            return re.match(r'^\s*(#{1,6})\s+(.+?)\s*$', text, re.DOTALL)
+
+        # 1. Scan for <p> tags that contain ONLY a markdown header
+        for p in soup.find_all('p'):
+            text = p.get_text(strip=True)
+            match = get_markdown_header_match(text)
+            if match:
+                level = len(match.group(1))
+                h_text = match.group(2).strip()
+                new_h = soup.new_tag(f'h{level}')
+                new_h.string = h_text
+                new_h['data-markdown-converted'] = 'true'
+                p.replace_with(new_h)
+                headers.append(new_h)
+
+        # 2. Scan text nodes (for markdown headers not wrapped in p tags)
+        for node in soup.find_all(string=True):
+            if not node.strip():
+                continue
+            
+            # Skip if parent is already a header or the p-tag we just converted
+            if node.parent.name in ['h1','h2','h3','h4','h5','h6']:
+                continue
+            
+            text = str(node)
+            # Match lines starting with #
+            matches = list(re.finditer(r'(?:^|\n)\s*(#{1,6})\s+(.+?)(?:\n|$)', text))
+            
+            if matches:
+                # Case 1: The entire node is just the header
+                if len(matches) == 1 and matches[0].group(0).strip() == text.strip():
+                    level = len(matches[0].group(1))
+                    h_text = matches[0].group(2).strip()
+                    new_h = soup.new_tag(f'h{level}')
+                    new_h.string = h_text
+                    new_h['data-markdown-converted'] = 'true'
+                    
+                    # If parent is a <p> that we didn't catch earlier (maybe mixed with whitespace), replace it
+                    if node.parent.name == 'p' and node.parent.get_text(strip=True) == text.strip():
+                        node.parent.replace_with(new_h)
+                        headers.append(new_h)
+                    else:
+                        node.replace_with(new_h)
+                        headers.append(new_h)
+
+        # Re-sort headers by their position in the document
+        all_headers = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+        
+        # LOGIC REVISION: Prioritize H1 tags for splitting.
+        # If we have enough H1 tags to match expected_count, ignore H2-H6.
+        # This prevents accidental splitting on H2 item headers (e.g. "《Item》")
+        # when proper H1 chapter headers are present.
+        
+        h1_headers = [h for h in all_headers if h.name == 'h1']
+        
+        # Apply proximity merge logic to H1s first to see if they suffice
+        # (This is a simplified check; the full proximity loop below will handle the actual merging)
+        # But here we just decide which set of headers to use.
+        
+        if len(h1_headers) >= expected_count:
+            print(f"   ℹ️ Split the Merge: Found {len(h1_headers)} H1 tags (sufficient for {expected_count} chapters). Ignoring H2-H6.")
+            headers = h1_headers
+        else:
+            print(f"   ℹ️ Split the Merge: Found {len(h1_headers)} H1 tags (insufficient for {expected_count} chapters). Including H2-H6.")
+            headers = all_headers
+            
+        original_headers = list(headers)[:]
 
         # Treat multiple headers in very close proximity as a single logical
         # header if there is no real content between them. "Content" here is
@@ -565,19 +636,46 @@ class RequestMerger:
                         has_intervening_content = True
                         break
                 else:
-                    # Any <p> is content
-                    if getattr(node, 'name', None) == 'p':
-                        has_intervening_content = True
-                        break
-                    # Other tags: count as content if they have non-empty text
-                    # (e.g., <div>Some text</div>)
+                    # Treat specific structural/empty wrappers as ignorable
+                    # (e.g. <div id="linewrap">, empty <p>, or image wrappers)
+                    
+                    # 1. Empty/whitespace-only tags
                     try:
                         text = node.get_text(strip=True)
                     except Exception:
                         text = ''
+                        
+                    # If it has text content, check if it's just a duplicate header-like string
                     if text:
-                        has_intervening_content = True
-                        break
+                        # AGGRESSIVE MODE: Check if the text is very short/navigational
+                        # or looks like a cover image label ("커버보기", "Cover", etc.)
+                        # or is just a duplicate of the header text?
+                        # For the specific issue "커버보기" (View Cover) inside a cover wrapper
+                        # We will aggressively ignore short text nodes inside divs/p's 
+                        # if we are scanning between headers.
+                        
+                        # Heuristic: If text is short (< 20 chars) and not a full sentence, ignore it
+                        # as likely UI debris or labels.
+                        if len(text) < 30 and not any(punct in text for punct in '.!?'):
+                            # Log that we are skipping this short text
+                            # print(f"   ℹ️ Split the Merge: Ignoring short debris '{text}' between headers")
+                            pass
+                        else:
+                            has_intervening_content = True
+                            break
+                    
+                    # 2. If no text, check for meaningful media (images)
+                    # We treat images as "content" that should separate headers, unless
+                    # it's a cover image that might belong to the header block.
+                    # But typically an image means "stuff is happening".
+                    # However, user requested aggressive merge even with p tags/images.
+                    # The example shows <div class="cover-wrapper"><img ...></div>.
+                    # If we want to merge across this, we must ignore images too.
+                    
+                    # IGNORE images/divs if they are between two headers that look very similar
+                    # or if we are just being aggressive.
+                    pass
+
                 node = node.next_sibling
 
             if has_intervening_content:
