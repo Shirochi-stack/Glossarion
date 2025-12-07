@@ -3576,6 +3576,45 @@ class BatchTranslationProcessor:
             msgs = [{"role": "system", "content": chapter_system_prompt}] + memory_msgs + [
                 {"role": "user", "content": merged_content}
             ]
+
+            # Log combined prompt token count for merged request (treated as Chunk 1/1).
+            try:
+                # Count tokens for system+assistant(user/memory) messages
+                total_tokens = 0
+                assistant_tokens = 0
+                for m in msgs:
+                    content = m.get("content", "")
+                    tokens = chapter_splitter.count_tokens(content)
+                    total_tokens += tokens
+                    if m.get("role") == "assistant":
+                        assistant_tokens += tokens
+                non_assistant_tokens = total_tokens - assistant_tokens
+
+                # Determine a stable file reference based on parent chapter
+                parent_file_ref = (
+                    parent_chapter.get('original_basename')
+                    or parent_chapter.get('filename')
+                    or f"Chapter_{parent_actual_num}"
+                )
+
+                # Get budget string from MAX_INPUT_TOKENS
+                token_env = os.getenv("MAX_INPUT_TOKENS", "1000000").strip()
+                _, budget_str = parse_token_limit(token_env)
+
+                if self.config.CONTEXTUAL and assistant_tokens > 0:
+                    print(
+                        f"💬 Chunk 1/1 combined prompt: "
+                        f"{total_tokens:,} tokens (system + user: {non_assistant_tokens:,}, "
+                        f"assistant/memory: {assistant_tokens:,}) / {budget_str} [File: {parent_file_ref}]"
+                    )
+                else:
+                    print(
+                        f"💬 Chunk 1/1 combined prompt: "
+                        f"{total_tokens:,} tokens (system + user) / {budget_str} [File: {parent_file_ref}]"
+                    )
+            except Exception as e:
+                # Never break translation due to logging issues.
+                print(f"   ⚠️ Failed to log combined prompt tokens for merged group: {e}")
             
             # Get max output tokens
             env_max_output = os.getenv("MAX_OUTPUT_TOKENS", "")

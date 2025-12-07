@@ -22,6 +22,64 @@ import traceback
 scan_html_folder = None  # Will be lazy-loaded from translator_gui
 
 
+def _normalize_target_language(display_text):
+    """Normalize a human-facing target language label to a canonical value.
+
+    The QA pipeline expects simple lowercase identifiers like "english",
+    "korean", or "chinese". This helper maps common dropdown labels to
+    those canonical forms so detection logic stays stable even if the
+    UI wording changes (e.g. "Chinese (Simplified)").
+    """
+    if not display_text:
+        return "english"
+
+    s = display_text.strip().lower()
+
+    mapping = {
+        # Core languages
+        "english": "english",
+        "en": "english",
+        "spanish": "spanish",
+        "es": "spanish",
+        "french": "french",
+        "fr": "french",
+        "german": "german",
+        "de": "german",
+        "portuguese": "portuguese",
+        "pt": "portuguese",
+        "italian": "italian",
+        "it": "italian",
+        "russian": "russian",
+        "ru": "russian",
+        "japanese": "japanese",
+        "ja": "japanese",
+        "korean": "korean",
+        "ko": "korean",
+        # Chinese variants → single canonical "chinese"
+        "chinese": "chinese",
+        "chinese (simplified)": "chinese",
+        "chinese (traditional)": "chinese",
+        "zh": "chinese",
+        "zh-cn": "chinese",
+        "zh-tw": "chinese",
+        # RTL / other scripts
+        "arabic": "arabic",
+        "ar": "arabic",
+        "hebrew": "hebrew",
+        "he": "hebrew",
+        "thai": "thai",
+        "th": "thai",
+    }
+
+    if s in mapping:
+        return mapping[s]
+
+    # Fallback: use the first word (e.g. "english (us)" → "english")
+    first = s.split()[0]
+    return mapping.get(first, first)
+
+
+
 def check_epub_folder_match(epub_name, folder_name, custom_suffixes=''):
     """
     Check if EPUB name and folder name likely refer to the same content
@@ -211,6 +269,16 @@ class QAScannerMixin:
             'cache_structural_signature': 2000,
             'cache_translation_artifacts': 1000             
         })
+        # Keep QA target language aligned with the main target language.
+        # This ensures the scanner respects the same language the user
+        # selected for translation.
+        try:
+            main_lang = self.config.get('output_language') or os.getenv('OUTPUT_LANGUAGE', '')
+            if main_lang:
+                qa_settings['target_language'] = _normalize_target_language(main_lang)
+        except Exception:
+            pass
+
         # Debug: Print current settings
         print(f"[DEBUG] QA Settings: {qa_settings}")
         print(f"[DEBUG] Target language: {qa_settings.get('target_language', 'NOT SET')}")
@@ -1856,14 +1924,19 @@ class QAScannerMixin:
         stored_language = qa_settings.get('target_language', 'english')
         display_language = stored_language.capitalize()
         target_language_options = [
-            'English', 'Spanish', 'French', 'German', 'Portuguese', 
-            'Italian', 'Russian', 'Japanese', 'Korean', 'Chinese', 
-            'Arabic', 'Hebrew', 'Thai'
+            'English', 'Spanish', 'French', 'German', 'Italian', 'Portuguese',
+            'Russian', 'Arabic', 'Hindi', 'Chinese (Simplified)',
+            'Chinese (Traditional)', 'Japanese', 'Korean', 'Turkish',
+            'Chinese', 'Hebrew', 'Thai'
         ]
         
         target_language_combo = QComboBox()
+        target_language_combo.setEditable(True)
         target_language_combo.addItems(target_language_options)
-        target_language_combo.setCurrentText(display_language)
+
+        # Prefer the main GUI's target language for display if available
+        initial_display = self.config.get('output_language') or display_language
+        target_language_combo.setCurrentText(initial_display)
         target_language_combo.setMinimumWidth(150)
         disable_wheel_event(target_language_combo)
         target_lang_layout.addWidget(target_language_combo)
@@ -2567,7 +2640,7 @@ class QAScannerMixin:
                 core_settings_to_save = {
                     'foreign_char_threshold': (threshold_spinbox, lambda x: x.value()),
                     'excluded_characters': (excluded_text, lambda x: x.toPlainText().strip()),
-                    'target_language': (target_language_combo, lambda x: x.currentText().lower()),
+'target_language': (target_language_combo, lambda x: _normalize_target_language(x.currentText())),
                     'check_encoding_issues': (check_encoding_checkbox, lambda x: x.isChecked()),
                     'check_repetition': (check_repetition_checkbox, lambda x: x.isChecked()),
                     'check_translation_artifacts': (check_artifacts_checkbox, lambda x: x.isChecked()),
@@ -2730,6 +2803,16 @@ class QAScannerMixin:
                     if debug_mode:
                         self.append_log(f"❌ [DEBUG] Failed to update main config: {e}")
                 
+                # Sync target language with the main translation UI so all
+                # dropdowns stay in sync.
+                try:
+                    display_lang = target_language_combo.currentText().strip()
+                    if display_lang and hasattr(self, 'update_target_language'):
+                        self.update_target_language(display_lang)
+                except Exception as e:
+                    if debug_mode:
+                        self.append_log(f"⚠️ [DEBUG] Failed to sync target language with main UI: {e}")
+
                 # Environment variables setup for QA Scanner
                 if debug_mode:
                     self.append_log("🔍 [DEBUG] Setting QA Scanner environment variables...")
