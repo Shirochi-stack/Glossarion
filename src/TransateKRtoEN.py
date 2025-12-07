@@ -237,7 +237,7 @@ class RequestMerger:
     """Handles merging multiple chapters into a single request"""
     
     @classmethod
-    def merge_chapters(cls, chapters_data):
+    def merge_chapters(cls, chapters_data, log_injections=True):
         """Merge multiple chapters into a single content block.
 
         This is used both for request-size estimation and for the actual
@@ -259,6 +259,9 @@ class RequestMerger:
 
         Args:
             chapters_data: List of tuples (chapter_num, content, chapter_obj)
+            log_injections: If False, perform header injection silently
+                (no console logging). Used for size-estimation previews to
+                avoid duplicate log lines.
 
         Returns:
             Merged content string
@@ -333,10 +336,11 @@ class RequestMerger:
                 new_h1 = soup.new_tag('h1')
                 new_h1.string = heading_text
                 head_tag.replace_with(new_h1)
-                print(
-                    f"   ℹ️ Request Merging: Injected synthetic <h1> from <head> for "
-                    f"chapter {chapter_num}: '{heading_text[:80]}'"
-                )
+                if log_injections:
+                    print(
+                        f"   ℹ️ Request Merging: Injected synthetic <h1> from <head> for "
+                        f"chapter {chapter_num}: '{heading_text[:80]}'"
+                    )
                 merged_parts.append(str(soup))
                 continue
 
@@ -345,10 +349,11 @@ class RequestMerger:
                 new_h1 = soup.new_tag('h1')
                 new_h1.string = heading_text
                 title_tag.replace_with(new_h1)
-                print(
-                    f"   ℹ️ Request Merging: Injected synthetic <h1> from <title> for "
-                    f"chapter {chapter_num}: '{heading_text[:80]}'"
-                )
+                if log_injections:
+                    print(
+                        f"   ℹ️ Request Merging: Injected synthetic <h1> from <title> for "
+                        f"chapter {chapter_num}: '{heading_text[:80]}'"
+                    )
                 merged_parts.append(str(soup))
                 continue
 
@@ -370,10 +375,11 @@ class RequestMerger:
                     else:
                         soup.append(new_h1)
 
-            print(
-                f"   ℹ️ Request Merging: Prepended synthetic <h1> at document start for "
-                f"chapter {chapter_num}: '{heading_text[:80]}'"
-            )
+            if log_injections:
+                print(
+                    f"   ℹ️ Request Merging: Prepended synthetic <h1> at document start for "
+                    f"chapter {chapter_num}: '{heading_text[:80]}'"
+                )
 
             merged_parts.append(str(soup))
 
@@ -7034,7 +7040,7 @@ def main(log_callback=None, stop_callback=None):
                         (ch.get('actual_chapter_num', ch['num']), ch["body"], ch)
                         for (idx, ch) in working
                     ]
-                    merged_preview = RequestMerger.merge_chapters(merge_input)
+                    merged_preview = RequestMerger.merge_chapters(merge_input, log_injections=False)
                     merged_tokens = chapter_splitter.count_tokens(merged_preview)
 
                     if merged_tokens <= available_tokens:
@@ -7428,7 +7434,7 @@ def main(log_callback=None, stop_callback=None):
                         (g_actual_num, g_chapter["body"], g_chapter)
                         for (g_idx, g_chapter, g_actual_num, g_content_hash) in working
                     ]
-                    merged_preview = RequestMerger.merge_chapters(merge_input)
+                    merged_preview = RequestMerger.merge_chapters(merge_input, log_injections=False)
                     merged_tokens = chapter_splitter.count_tokens(merged_preview)
 
                     if merged_tokens <= available_tokens:
