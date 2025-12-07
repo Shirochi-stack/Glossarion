@@ -7069,7 +7069,47 @@ def main(log_callback=None, stop_callback=None):
                     # Update status to file_missing
                     progress_manager.update(idx, actual_num, content_hash, None, status="file_missing", chapter_obj=c)
                     progress_manager.save()
-                    
+            
+            # -------------------------------------------------------------------------
+            # BATCH PRE-PROCESSING: Remove unwanted clutter ("Cover View", etc.) BEFORE
+            # the chapter is queued for translation or merging. This mirrors the logic
+            # added to the sequential loop.
+            # -------------------------------------------------------------------------
+            if needs_translation and c.get("body"):
+                batch_translate_active = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
+                ignore_title_tag = os.getenv('IGNORE_TITLE', '0') == '1' and batch_translate_active
+                ignore_header_tags = os.getenv('IGNORE_HEADER', '0') == '1' and batch_translate_active
+                remove_cover_text = True  # Always enabled to fix the "View Cover" issue
+                
+                if (ignore_title_tag or ignore_header_tags or remove_cover_text):
+                    try:
+                        from bs4 import BeautifulSoup
+                        content_soup = BeautifulSoup(c["body"], 'html.parser')
+                        modified = False
+                        
+                        if remove_cover_text:
+                            # Remove elements with class 'cover-text'
+                            # This is the correct structural fix for "View Cover" overlays
+                            for cover_div in content_soup.find_all(class_='cover-text'):
+                                cover_div.decompose()
+                                modified = True
+                        
+                        if ignore_title_tag:
+                            for title_tag in content_soup.find_all('title'):
+                                title_tag.decompose()
+                                modified = True
+                        
+                        if ignore_header_tags:
+                            for header_tag in content_soup.find_all(['h1', 'h2', 'h3']):
+                                header_tag.decompose()
+                                modified = True
+                        
+                        if modified:
+                            c["body"] = str(content_soup)
+                    except Exception as e:
+                        print(f"⚠️ Failed to filter batch content for chapter {actual_num}: {e}")
+            # -------------------------------------------------------------------------
+            
             if not needs_translation:
                 # Track skips for summary instead of printing each one
                 if not hasattr(config, '_batch_skipped_chapters'):
@@ -7905,9 +7945,18 @@ def main(log_callback=None, stop_callback=None):
                 ignore_title_tag = os.getenv('IGNORE_TITLE', '0') == '1' and batch_translate_active
                 ignore_header_tags = os.getenv('IGNORE_HEADER', '0') == '1' and batch_translate_active
                 
-                if (ignore_title_tag or ignore_header_tags) and c["body"]:
+                # Check for and remove "View Cover" clutter
+                remove_cover_text = True
+                
+                if (ignore_title_tag or ignore_header_tags or remove_cover_text) and c["body"]:
                     from bs4 import BeautifulSoup
                     content_soup = BeautifulSoup(c["body"], 'html.parser')
+                    
+                    if remove_cover_text:
+                        # Remove elements with class 'cover-text'
+                        # This is the correct structural fix for "View Cover" overlays
+                        for cover_div in content_soup.find_all(class_='cover-text'):
+                            cover_div.decompose()
                     
                     # Remove title tags if ignored
                     if ignore_title_tag:
