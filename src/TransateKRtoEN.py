@@ -6850,6 +6850,7 @@ def main(log_callback=None, stop_callback=None):
                     continue
 
                 working = list(original_group)
+                dropped_chapters = []  # chapters we remove from this group but still need to translate
                 while len(working) > 1:
                     # Estimate tokens for the merged content of this group
                     merge_input = [
@@ -6864,6 +6865,7 @@ def main(log_callback=None, stop_callback=None):
 
                     # Too large for a single request – drop the last child and retry
                     dropped_idx, dropped_chapter = working.pop()
+                    dropped_chapters.append((dropped_idx, dropped_chapter))
                     dropped_num = dropped_chapter.get('actual_chapter_num', dropped_chapter['num'])
                     try:
                         parent_num_debug = working[0][1].get('actual_chapter_num', working[0][1]['num']) if working else dropped_num
@@ -6874,7 +6876,14 @@ def main(log_callback=None, stop_callback=None):
                         f"dropping chapter {dropped_num} (merged ~{merged_tokens:,} tokens exceeds limit {available_tokens:,})"
                     )
 
+                # Keep the (possibly reduced) merge group
                 adjusted_merge_groups.append(working)
+
+                # Any dropped chapters should still be translated, just not merged.
+                # Add them back as their own single-chapter groups, preserving
+                # original order (reverse the pop sequence).
+                for dropped_idx, dropped_chapter in reversed(dropped_chapters):
+                    adjusted_merge_groups.append([(dropped_idx, dropped_chapter)])
 
             merge_groups = adjusted_merge_groups
             print(f"🔗 Created {len(merge_groups)} merge groups from {total_to_process} chapters (after size adjustment)")
