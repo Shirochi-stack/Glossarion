@@ -4543,6 +4543,10 @@ def build_system_prompt(user_prompt, glossary_path=None, source_text=None):
     append_glossary = os.getenv("APPEND_GLOSSARY", "1") == "1"
     actual_glossary_path = glossary_path
     
+    # Replace {target_lang} placeholder if present
+    target_lang = os.getenv("OUTPUT_LANGUAGE", "English")
+    if user_prompt and "{target_lang}" in user_prompt:
+        user_prompt = user_prompt.replace("{target_lang}", target_lang)
     
     system = user_prompt if user_prompt else ""
     

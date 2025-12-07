@@ -1063,7 +1063,13 @@ Text to analyze:
         self.default_translation_chunk_prompt = "[This is part {chunk_idx}/{total_chunks}]. You must maintain the narrative flow with the previous chunks while following all system prompt guidelines previously mentioned.\n{chunk_html}"
         self.default_image_chunk_prompt = "This is part {chunk_idx} of {total_chunks} of a longer image. You must maintain the narrative flow with the previous chunks while following all system prompt guidelines previously mentioned. {context}"
         self.default_prompts = {
-
+            "Universal": (
+                "You are a professional novel translator. Translate the following text to {target_lang}.\\n"
+                "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.\\n"
+                "- If the text does not contain HTML tags, use line breaks for proper formatting as expected of a novel.\\n"
+                "- Maintain the original meaning, tone, and style.\\n"
+                "- Do not add any explanations or notes.\\n"
+            ),
             "korean": (
                 "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
                 "- Use a natural, comedy-friendly English translation style that captures both humor and readability without losing any original meaning.\n"
