@@ -7997,6 +7997,31 @@ def main(log_callback=None, stop_callback=None):
                 parent_idx, parent_chapter, parent_actual_num, parent_content_hash = merge_info['group'][0]
                 merged_child_nums = [g[2] for g in merge_info['group'][1:]]  # All except parent
                 
+                # If the underlying API response was truncated, treat the whole
+                # merged group as qa_failed, regardless of whether split succeeds.
+                if finish_reason in ["length", "max_tokens"]:
+                    print(f"   ⚠️ Merged response was TRUNCATED (finish_reason: {finish_reason}) - marking merged group as qa_failed")
+                    parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
+                    try:
+                        with open(os.path.join(out, parent_fname), 'w', encoding='utf-8') as f:
+                            f.write(cleaned)
+                    except Exception:
+                        pass
+                    
+                    # Mark parent as qa_failed with TRUNCATED issue
+                    progress_manager.update(
+                        parent_idx, parent_actual_num, parent_content_hash, parent_fname,
+                        status="qa_failed", chapter_obj=parent_chapter, qa_issues_found=["TRUNCATED"]
+                    )
+                    # Mark all children as qa_failed too
+                    for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group'][1:]:
+                        progress_manager.update(
+                            g_idx, g_actual_num, g_content_hash, None,
+                            status="qa_failed", chapter_obj=g_chapter, qa_issues_found=["TRUNCATED"]
+                        )
+                    progress_manager.save()
+                    continue
+                
                 # Check for QA failures first
                 if is_qa_failed_response(cleaned):
                     parent_status = "qa_failed"
