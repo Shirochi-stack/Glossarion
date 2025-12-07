@@ -159,14 +159,14 @@ class GoogleFreeTranslateNew:
                         return result
                         
                 except Exception as e:
-                    self.logger.warning(f"Failed with endpoint {endpoint_url}: {e}")
+                    self.logger.warning(f"⚠️ Failed with endpoint {endpoint_url}: {e}")
                     continue
             
             # If all endpoints failed
             raise Exception("All Google Translate endpoints failed")
             
         except Exception as e:
-            self.logger.error(f"Translation failed: {e}")
+            self.logger.error(f"❌ Translation failed: {e}")
             # Return original text as fallback
             return {
                 'translatedText': text,

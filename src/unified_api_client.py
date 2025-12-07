@@ -12162,9 +12162,9 @@ class UnifiedClient:
                 )
             
             # Log the translation request
-            logger.info(f"Google Translate Free: Translating {len(text_to_translate)} characters")
+            logger.info(f"🌐 Google Translate Free: Translating {len(text_to_translate)} characters")
             if source_lang != "auto":
-                logger.info(f"Google Translate Free: Detected source language: {source_lang}")
+                logger.info(f"🔍 Google Translate Free: Detected source language: {source_lang}")
             
             # Initialize the free translator
             translator = GoogleFreeTranslateNew(
@@ -12187,7 +12187,22 @@ class UnifiedClient:
             
             # Check if there was an error
             if 'error' in result:
-                logger.warning(f"Google Translate Free warning: {result['error']}")
+                # Check if we should preserve original text on failure
+                # By default (toggle OFF), we should return an error if translation failed
+                preserve_original = os.getenv('PRESERVE_ORIGINAL_TEXT_ON_FAILURE', '0') == '1'
+                
+                if not preserve_original and result['translatedText'] == text_to_translate:
+                    # If we're not preserving original text and the result IS the original text (fallback in google_free_translate.py),
+                    # treat this as a hard failure and return an error message
+                    return UnifiedResponse(
+                        content=f"[TRANSLATION FAILED: {result['error']}]",
+                        finish_reason='error',
+                        usage={
+                            'characters': len(text_to_translate),
+                            'detected_source_lang': detected_lang
+                        },
+                        raw_response=result
+                    )
             
             # Create UnifiedResponse object
             response = UnifiedResponse(
@@ -12200,7 +12215,7 @@ class UnifiedClient:
                 raw_response=result
             )
             
-            logger.info(f"Google Translate Free: Translation completed in {elapsed_time:.2f}s")
+            logger.info(f"✅ Google Translate Free: Translation completed in {elapsed_time:.2f}s")
             
             return response
             
