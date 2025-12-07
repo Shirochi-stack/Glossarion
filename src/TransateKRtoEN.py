@@ -3455,25 +3455,9 @@ class BatchTranslationProcessor:
                 except Exception:
                     pass
             
-            # Check for truncation first
+            # Check for truncation / QA failures first
             results = []
-            if merged_truncated:
-                # Save merged content for debugging, then mark all as qa_failed
-                fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
-                try:
-                    with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
-                        f.write(cleaned)
-                except Exception:
-                    pass
-                print(f"   ⚠️ Merged group marked as qa_failed: Response was truncated")
-                for actual_num, _, idx, chapter, content_hash in chapters_data:
-                    with self.progress_lock:
-                        self.update_progress_fn(idx, actual_num, content_hash, fname if idx == parent_idx else None, status="qa_failed", qa_issues_found=["TRUNCATED"])
-                        self.save_progress_fn()
-                    results.append((False, actual_num, None, None, None))
-                return results
-            # Check for QA failures on the merged content
-            elif is_qa_failed_response(cleaned):
+            if is_qa_failed_response(cleaned):
                 # Save merged content for debugging, then mark all as qa_failed
                 fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                 try:
@@ -3538,22 +3522,28 @@ class BatchTranslationProcessor:
                     saved_files.append((actual_num, fname, idx, chapter, content_hash))
                     print(f"      💾 Saved Chapter {actual_num}: {fname} ({len(section_content)} chars)")
                 
-                # Mark all chapters as completed (not merged)
+                # Mark all chapters as completed or qa_failed (for truncated)
                 with self.progress_lock:
                     for actual_num, fname, idx, chapter, content_hash in saved_files:
+                        chapter_status = "qa_failed" if merged_truncated else "completed"
+                        qa_issues = ["TRUNCATED"] if merged_truncated else None
                         self.update_progress_fn(
                             idx, actual_num, content_hash, fname,
-                            status="completed"
+                            status=chapter_status, qa_issues_found=qa_issues
                         )
                         self.chapters_completed += 1
                     
                     # Save once after all updates
                     self.save_progress_fn()
                 
-                # Build results - first chapter gets the history context
-                results.append((True, chapters_data[0][0], merged_content, merged_response, raw_obj))
-                for actual_num, _, idx, chapter, content_hash in chapters_data[1:]:
-                    results.append((True, actual_num, None, None, None))
+                # Build results - if truncated, treat as failure for all chapters
+                if merged_truncated:
+                    for actual_num, _, idx, chapter, content_hash in chapters_data:
+                        results.append((False, actual_num, None, None, None))
+                else:
+                    results.append((True, chapters_data[0][0], merged_content, merged_response, raw_obj))
+                    for actual_num, _, idx, chapter, content_hash in chapters_data[1:]:
+                        results.append((True, actual_num, None, None, None))
                 
                 print(f"   ✅ Split the Merge complete: {len(saved_files)} files created")
                 return results
@@ -3578,27 +3568,45 @@ class BatchTranslationProcessor:
             
             print(f"   💾 Saved merged content to Chapter {parent_actual_num}: {saved_name} ({len(cleaned)} chars)")
             
-            # Mark parent chapter as completed AND children as merged in single atomic operation
             with self.progress_lock:
-                # First mark parent as completed
-                self.update_progress_fn(
-                    parent_idx, parent_actual_num, parent_content_hash, saved_name,
-                    status="completed",
-                    merged_chapters=merged_child_nums
-                )
-                self.chapters_completed += 1
-                
-                # Then mark all child chapters as merged (only after parent is completed)
-                for actual_num, _, idx, chapter, content_hash in chapters_data[1:]:
-                    progress_manager.mark_as_merged(idx, actual_num, content_hash, parent_actual_num, chapter, parent_output_file=saved_name)
+                if merged_truncated:
+                    # Truncated merged response: mark ALL chapters as qa_failed
+                    qa_issues = ["TRUNCATED"]
+                    self.update_progress_fn(
+                        parent_idx, parent_actual_num, parent_content_hash, saved_name,
+                        status="qa_failed", qa_issues_found=qa_issues
+                    )
+                    for actual_num, _, idx, chapter, content_hash in chapters_data[1:]:
+                        self.update_progress_fn(
+                            idx, actual_num, content_hash, None,
+                            status="qa_failed", qa_issues_found=qa_issues
+                        )
+                    self.chapters_completed += len(chapters_data)
+                else:
+                    # Normal success path: parent completed, children merged
+                    self.update_progress_fn(
+                        parent_idx, parent_actual_num, parent_content_hash, saved_name,
+                        status="completed",
+                        merged_chapters=merged_child_nums
+                    )
                     self.chapters_completed += 1
+                    
+                    # Then mark all child chapters as merged (only after parent is completed)
+                    for actual_num, _, idx, chapter, content_hash in chapters_data[1:]:
+                        progress_manager.mark_as_merged(idx, actual_num, content_hash, parent_actual_num, chapter, parent_output_file=saved_name)
+                        self.chapters_completed += 1
                 
                 # Save once after all updates
                 self.save_progress_fn()
             
-            results.append((True, parent_actual_num, merged_content, merged_response, raw_obj))
-            for actual_num, _, idx, chapter, content_hash in chapters_data[1:]:
-                results.append((True, actual_num, None, None, None))
+            # Build results based on truncation status
+            if merged_truncated:
+                for actual_num, _, idx, chapter, content_hash in chapters_data:
+                    results.append((False, actual_num, None, None, None))
+            else:
+                results.append((True, parent_actual_num, merged_content, merged_response, raw_obj))
+                for actual_num, _, idx, chapter, content_hash in chapters_data[1:]:
+                    results.append((True, actual_num, None, None, None))
             
             return results
             
@@ -7997,32 +8005,13 @@ def main(log_callback=None, stop_callback=None):
                 parent_idx, parent_chapter, parent_actual_num, parent_content_hash = merge_info['group'][0]
                 merged_child_nums = [g[2] for g in merge_info['group'][1:]]  # All except parent
                 
-                # If the underlying API response was truncated, treat the whole
-                # merged group as qa_failed, regardless of whether split succeeds.
-                if finish_reason in ["length", "max_tokens"]:
-                    print(f"   ⚠️ Merged response was TRUNCATED (finish_reason: {finish_reason}) - marking merged group as qa_failed")
-                    parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
-                    try:
-                        with open(os.path.join(out, parent_fname), 'w', encoding='utf-8') as f:
-                            f.write(cleaned)
-                    except Exception:
-                        pass
-                    
-                    # Mark parent as qa_failed with TRUNCATED issue
-                    progress_manager.update(
-                        parent_idx, parent_actual_num, parent_content_hash, parent_fname,
-                        status="qa_failed", chapter_obj=parent_chapter, qa_issues_found=["TRUNCATED"]
-                    )
-                    # Mark all children as qa_failed too
-                    for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group'][1:]:
-                        progress_manager.update(
-                            g_idx, g_actual_num, g_content_hash, None,
-                            status="qa_failed", chapter_obj=g_chapter, qa_issues_found=["TRUNCATED"]
-                        )
-                    progress_manager.save()
-                    continue
+                # Track whether the underlying API response was truncated so we can
+                # still attempt Split the Merge but mark all chapters as qa_failed.
+                was_truncated = finish_reason in ["length", "max_tokens"]
+                if was_truncated:
+                    print(f"   ⚠️ Merged response was TRUNCATED (finish_reason: {finish_reason})")
                 
-                # Check for QA failures first
+                # Check for QA failures first (independent of truncation)
                 if is_qa_failed_response(cleaned):
                     parent_status = "qa_failed"
                     print(f"   ⚠️ Chapter {parent_actual_num} marked as qa_failed")
@@ -8101,11 +8090,13 @@ def main(log_callback=None, stop_callback=None):
                         saved_files.append((g_idx, g_chapter, g_actual_num, g_content_hash, split_fname))
                         print(f"      💾 Saved Chapter {g_actual_num}: {split_fname} ({len(section_content)} chars)")
                     
-                    # Mark all chapters as completed (not merged)
+                    # Mark all chapters as completed or qa_failed (for truncated)
                     for g_idx, g_chapter, g_actual_num, g_content_hash, split_fname in saved_files:
+                        chapter_status = "qa_failed" if was_truncated else "completed"
+                        qa_issues = ["TRUNCATED"] if was_truncated else None
                         progress_manager.update(
                             g_idx, g_actual_num, g_content_hash, split_fname,
-                            status="completed", chapter_obj=g_chapter
+                            status=chapter_status, chapter_obj=g_chapter, qa_issues_found=qa_issues
                         )
                         chapters_completed += 1
                     
@@ -8131,23 +8122,40 @@ def main(log_callback=None, stop_callback=None):
                 
                 print(f"   💾 Saved merged content to Chapter {parent_actual_num}: {parent_fname} ({len(cleaned)} chars)")
                 
-                # Update parent chapter with merged_chapters list
-                progress_manager.update(
-                    parent_idx, parent_actual_num, parent_content_hash, parent_fname,
-                    status="completed", chapter_obj=parent_chapter,
-                    merged_chapters=merged_child_nums
-                )
-                chapters_completed += 1
+                if was_truncated:
+                    # For truncated merged responses, mark ALL chapters as qa_failed
+                    qa_issues = ["TRUNCATED"]
+                    progress_manager.update(
+                        parent_idx, parent_actual_num, parent_content_hash, parent_fname,
+                        status="qa_failed", chapter_obj=parent_chapter, qa_issues_found=qa_issues
+                    )
+                    for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group'][1:]:
+                        progress_manager.update(
+                            g_idx, g_actual_num, g_content_hash, None,
+                            status="qa_failed", chapter_obj=g_chapter, qa_issues_found=qa_issues
+                        )
+                    chapters_completed += len(merge_info['group'])
                 
-                # Mark child chapters as merged (point to parent's output file) - atomically after parent
-                for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group'][1:]:
-                    progress_manager.mark_as_merged(g_idx, g_actual_num, g_content_hash, parent_actual_num, g_chapter, parent_output_file=parent_fname)
+                    # Save once after all updates
+                    progress_manager.save()
+                    print(f"   ⚠️ Merged group marked as qa_failed due to truncation")
+                else:
+                    # Normal success path: parent completed, children marked as merged
+                    progress_manager.update(
+                        parent_idx, parent_actual_num, parent_content_hash, parent_fname,
+                        status="completed", chapter_obj=parent_chapter,
+                        merged_chapters=merged_child_nums
+                    )
                     chapters_completed += 1
-                    print(f"   🔗 Marked chapter {g_actual_num} as merged into chapter {parent_actual_num}")
-                
-                # Save once after all updates
-                progress_manager.save()
-                print(f"   📊 Saved merged content for {len(merge_info['group'])} chapters")
+                    
+                    # Mark child chapters as merged (point to parent's output file) - atomically after parent
+                    for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group'][1:]:
+                        progress_manager.mark_as_merged(g_idx, g_actual_num, g_content_hash, parent_actual_num, g_chapter, parent_output_file=parent_fname)
+                        chapters_completed += 1
+                    
+                    # Save once after all updates
+                    progress_manager.save()
+                    print(f"   📊 Saved merged content for {len(merge_info['group'])} chapters")
                 
                 # Skip normal save since we handled it above
                 continue
