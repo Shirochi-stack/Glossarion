@@ -7179,28 +7179,18 @@ def main(log_callback=None, stop_callback=None):
                     progress_manager.save()
             
             # -------------------------------------------------------------------------
-            # BATCH PRE-PROCESSING: Remove unwanted clutter ("Cover View", etc.) BEFORE
-            # the chapter is queued for translation or merging. This mirrors the logic
-            # added to the sequential loop.
+            # BATCH PRE-PROCESSING
             # -------------------------------------------------------------------------
             if needs_translation and c.get("body"):
                 batch_translate_active = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
                 ignore_title_tag = os.getenv('IGNORE_TITLE', '0') == '1' and batch_translate_active
                 ignore_header_tags = os.getenv('IGNORE_HEADER', '0') == '1' and batch_translate_active
-                remove_cover_text = True  # Always enabled to fix the "View Cover" issue
                 
-                if (ignore_title_tag or ignore_header_tags or remove_cover_text):
+                if (ignore_title_tag or ignore_header_tags):
                     try:
                         from bs4 import BeautifulSoup
                         content_soup = BeautifulSoup(c["body"], 'html.parser')
                         modified = False
-                        
-                        if remove_cover_text:
-                            # Remove elements with class 'cover-text'
-                            # This is the correct structural fix for "View Cover" overlays
-                            for cover_div in content_soup.find_all(class_='cover-text'):
-                                cover_div.decompose()
-                                modified = True
                         
                         if ignore_title_tag:
                             for title_tag in content_soup.find_all('title'):
@@ -8053,18 +8043,9 @@ def main(log_callback=None, stop_callback=None):
                 ignore_title_tag = os.getenv('IGNORE_TITLE', '0') == '1' and batch_translate_active
                 ignore_header_tags = os.getenv('IGNORE_HEADER', '0') == '1' and batch_translate_active
                 
-                # Check for and remove "View Cover" clutter
-                remove_cover_text = True
-                
-                if (ignore_title_tag or ignore_header_tags or remove_cover_text) and c["body"]:
+                if (ignore_title_tag or ignore_header_tags) and c["body"]:
                     from bs4 import BeautifulSoup
                     content_soup = BeautifulSoup(c["body"], 'html.parser')
-                    
-                    if remove_cover_text:
-                        # Remove elements with class 'cover-text'
-                        # This is the correct structural fix for "View Cover" overlays
-                        for cover_div in content_soup.find_all(class_='cover-text'):
-                            cover_div.decompose()
                     
                     # Remove title tags if ignored
                     if ignore_title_tag:
