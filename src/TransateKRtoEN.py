@@ -256,25 +256,105 @@ class RequestMerger:
     
     @classmethod
     def create_merge_groups(cls, chapters_to_translate, merge_count):
-        """
-        Group chapters into merge groups.
-        
+        """Group chapters into merge groups, keeping only nearby chapters together.
+
+        This prevents cases like chapter 7 being merged with chapter 29 just
+        because chapters 8–28 were already translated or merged earlier.
+
         Args:
-            chapters_to_translate: List of (idx, chapter_obj) tuples
-            merge_count: Number of chapters to merge per request
-            
+            chapters_to_translate: List of tuples. Supported shapes:
+                - (idx, chapter_obj)
+                - (idx, chapter_obj, actual_num, ...)
+            merge_count: Maximum number of chapters to merge per request.
+
         Returns:
-            List of merge groups, each group is a list of (idx, chapter_obj) tuples
+            List of merge groups, each group is a list of chapter tuples taken
+            from ``chapters_to_translate`` in order.
         """
-        if merge_count <= 1:
+        if merge_count <= 1 or not chapters_to_translate:
             # No merging, return each chapter as its own group
             return [[ch] for ch in chapters_to_translate]
-        
+
+        def _get_actual_num(item):
+            """Best-effort extraction of the logical chapter number for grouping.
+
+            We try, in order:
+            1. Explicit ``actual_num`` in position 2 (non-text merge path).
+            2. ``chapter_obj['actual_chapter_num']`` if present.
+            3. ``chapter_obj['num']``.
+            4. Fallback to idx (position 0).
+            """
+            # Shape: (idx, chapter_obj, actual_num, ...)
+            try:
+                if len(item) >= 3 and isinstance(item[2], (int, float)):
+                    return item[2]
+            except Exception:
+                pass
+
+            # Shape: (idx, chapter_obj)
+            try:
+                chapter_obj = item[1]
+                if isinstance(chapter_obj, dict):
+                    if 'actual_chapter_num' in chapter_obj:
+                        return chapter_obj.get('actual_chapter_num')
+                    return chapter_obj.get('num')
+            except Exception:
+                pass
+
+            # Fallback: idx
+            try:
+                return item[0]
+            except Exception:
+                return None
+
         groups = []
-        for i in range(0, len(chapters_to_translate), merge_count):
-            group = chapters_to_translate[i:i + merge_count]
-            groups.append(group)
-        
+        current_group = []
+        prev_num = None
+
+        for ch in chapters_to_translate:
+            current_num = _get_actual_num(ch)
+
+            if not current_group:
+                # Start the first group
+                current_group = [ch]
+                prev_num = current_num
+                continue
+
+            # If we've hit the per-request limit, start a new group
+            if len(current_group) >= merge_count:
+                groups.append(current_group)
+                current_group = [ch]
+                prev_num = current_num
+                continue
+
+            # If we can't safely determine chapter numbers, be conservative and
+            # start a new group so we never merge far‑apart chapters by accident.
+            if current_num is None or prev_num is None:
+                groups.append(current_group)
+                current_group = [ch]
+                prev_num = current_num
+                continue
+
+            # Only merge if chapters are numerically adjacent (or effectively so).
+            # This means sequences like 1→2→3 will merge, but 1→4 will not.
+            try:
+                gap = abs(float(current_num) - float(prev_num))
+            except Exception:
+                gap = None
+
+            if gap is not None and gap <= 1:
+                # Close enough in chapter numbering, keep in same group
+                current_group.append(ch)
+            else:
+                # Too far apart (e.g. 7 then 29) → start a new group
+                groups.append(current_group)
+                current_group = [ch]
+
+            prev_num = current_num
+
+        if current_group:
+            groups.append(current_group)
+
         return groups
     
     @classmethod
