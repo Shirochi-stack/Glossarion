@@ -285,6 +285,37 @@ class RequestMerger:
             # logic, fall back to the original content rather than breaking
             # the whole merge.
             try:
+                # 0) Pre-check: If content looks like it starts with a Markdown header
+                # (common in enhanced extraction), convert it to an HTML header string
+                # right away. This ensures BeautifulSoup sees a header tag.
+                if isinstance(content, str):
+                    lines = content.split('\n')
+                    # Check first non-empty line to see if it's a markdown header
+                    for i, line in enumerate(lines[:20]): # Check first 20 lines max
+                        if not line.strip():
+                            continue
+                        
+                        # Match markdown header line (e.g. "# Title")
+                        # Must be at start of line (ignoring whitespace)
+                        m = re.match(r'^\s*(#{1,6})\s+(.+)$', line)
+                        if m:
+                            level = len(m.group(1))
+                            h_text = m.group(2).strip()
+                            # Replace the line with HTML header
+                            lines[i] = f'<h{level}>{h_text}</h{level}>'
+                            content = '\n'.join(lines)
+                            if log_injections:
+                                print(
+                                    f"   ℹ️ Request Merging: Converted markdown header to <h{level}> for "
+                                    f"chapter {chapter_num}:\n"
+                                    f"      Before: '{line.strip()[:80]}'\n"
+                                    f"      After:  '<h{level}>{h_text[:80]}</h{level}>'"
+                                )
+                        # Whether we found a header or not, stop after the first 
+                        # non-empty line so we don't accidentally convert headers
+                        # in the middle of the text (unless they are the very first thing).
+                        break
+
                 soup = BeautifulSoup(content, 'html.parser') if isinstance(content, str) else None
             except Exception:
                 soup = None
@@ -293,7 +324,8 @@ class RequestMerger:
                 merged_parts.append(content)
                 continue
 
-            # If the chapter already has any heading tags, use as‑is.
+            # If the chapter already has any heading tags (including those we may
+            # have just converted from markdown), use as‑is.
             if soup.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
                 merged_parts.append(str(soup))
                 continue
