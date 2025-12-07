@@ -2903,6 +2903,25 @@ Recent translations to summarize:
             # Also update environment variable if needed
             os.environ['OUTPUT_LANGUAGE'] = text
             
+            # Sync with glossary manager dropdowns if they exist
+            self.config['glossary_target_language'] = text
+            
+            if hasattr(self, 'manual_target_language_combo') and self.manual_target_language_combo:
+                if self.manual_target_language_combo.currentText() != text:
+                    index = self.manual_target_language_combo.findText(text)
+                    if index >= 0:
+                        self.manual_target_language_combo.setCurrentIndex(index)
+                    else:
+                        self.manual_target_language_combo.setCurrentText(text)
+                        
+            if hasattr(self, 'glossary_target_language_combo') and self.glossary_target_language_combo:
+                if self.glossary_target_language_combo.currentText() != text:
+                    index = self.glossary_target_language_combo.findText(text)
+                    if index >= 0:
+                        self.glossary_target_language_combo.setCurrentIndex(index)
+                    else:
+                        self.glossary_target_language_combo.setCurrentText(text)
+            
         self.target_lang_combo.currentTextChanged.connect(update_target_lang)
         
         # Use Halgakos icon in dropdown arrow (consistent with other dropdowns)

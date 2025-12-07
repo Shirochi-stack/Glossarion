@@ -1152,19 +1152,39 @@ class GlossaryManagerMixin:
             except Exception:
                 pass
         
-        saved_language = self.config.get('glossary_target_language', 'English')
+        saved_language = self.config.get('glossary_target_language', self.config.get('output_language', 'English'))
         index = self.manual_target_language_combo.findText(saved_language)
         if index >= 0:
             self.manual_target_language_combo.setCurrentIndex(index)
+        else:
+            self.manual_target_language_combo.setCurrentText(saved_language)
         
-        # Sync with auto glossary language dropdown
+        # Sync with auto glossary language dropdown and main GUI
         def sync_manual_to_auto(text):
+            # Sync with auto glossary dropdown
             if hasattr(self, 'glossary_target_language_combo'):
                 auto_index = self.glossary_target_language_combo.findText(text)
                 if auto_index >= 0:
                     self.glossary_target_language_combo.blockSignals(True)
                     self.glossary_target_language_combo.setCurrentIndex(auto_index)
                     self.glossary_target_language_combo.blockSignals(False)
+            
+            # Sync with main GUI dropdown
+            if hasattr(self, 'target_lang_combo'):
+                main_index = self.target_lang_combo.findText(text)
+                if main_index >= 0:
+                    self.target_lang_combo.blockSignals(True)
+                    self.target_lang_combo.setCurrentIndex(main_index)
+                    self.target_lang_combo.blockSignals(False)
+                else:
+                    self.target_lang_combo.blockSignals(True)
+                    self.target_lang_combo.setCurrentText(text)
+                    self.target_lang_combo.blockSignals(False)
+            
+            # Update configs
+            self.config['glossary_target_language'] = text
+            self.config['output_language'] = text
+            os.environ['OUTPUT_LANGUAGE'] = text
         
         self.manual_target_language_combo.currentTextChanged.connect(sync_manual_to_auto)
         
@@ -1785,19 +1805,39 @@ Rules:
             except Exception:
                 pass
         
-        saved_language = self.config.get('glossary_target_language', 'English')
+        saved_language = self.config.get('glossary_target_language', self.config.get('output_language', 'English'))
         index = self.glossary_target_language_combo.findText(saved_language)
         if index >= 0:
             self.glossary_target_language_combo.setCurrentIndex(index)
+        else:
+            self.glossary_target_language_combo.setCurrentText(saved_language)
         
-        # Sync with manual glossary language dropdown
+        # Sync with manual glossary language dropdown and main GUI
         def sync_auto_to_manual(text):
+            # Sync with manual glossary dropdown
             if hasattr(self, 'manual_target_language_combo'):
                 manual_index = self.manual_target_language_combo.findText(text)
                 if manual_index >= 0:
                     self.manual_target_language_combo.blockSignals(True)
                     self.manual_target_language_combo.setCurrentIndex(manual_index)
                     self.manual_target_language_combo.blockSignals(False)
+            
+            # Sync with main GUI dropdown
+            if hasattr(self, 'target_lang_combo'):
+                main_index = self.target_lang_combo.findText(text)
+                if main_index >= 0:
+                    self.target_lang_combo.blockSignals(True)
+                    self.target_lang_combo.setCurrentIndex(main_index)
+                    self.target_lang_combo.blockSignals(False)
+                else:
+                    self.target_lang_combo.blockSignals(True)
+                    self.target_lang_combo.setCurrentText(text)
+                    self.target_lang_combo.blockSignals(False)
+            
+            # Update configs
+            self.config['glossary_target_language'] = text
+            self.config['output_language'] = text
+            os.environ['OUTPUT_LANGUAGE'] = text
         
         self.glossary_target_language_combo.currentTextChanged.connect(sync_auto_to_manual)
         
