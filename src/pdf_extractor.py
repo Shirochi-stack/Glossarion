@@ -8,6 +8,7 @@ import tempfile
 import sys
 import time
 import concurrent.futures
+import re
 
 def _extract_chunk(args):
     """
@@ -240,10 +241,22 @@ def create_pdf_from_text(text, output_path):
     """
     Create a simple PDF from text using PyMuPDF (fitz).
     Returns True if successful, False otherwise.
+    
+    Also strips artificial "# Page X" markers that may have been inserted
+    when concatenating multiple page texts.
     """
     try:
         import fitz
         import textwrap
+
+        # Remove "# Page X" markers from the source text (one per line)
+        cleaned_lines = []
+        for line in text.splitlines():
+            if re.match(r"^\s*#\s*Page\s+\d+\s*$", line):
+                # Skip this marker line entirely
+                continue
+            cleaned_lines.append(line)
+        text = "\n".join(cleaned_lines)
 
         doc = fitz.open()
         font_size = 11
@@ -282,7 +295,8 @@ def create_pdf_from_text(text, output_path):
             try:
                 page.insert_text((margin, y), line, fontsize=font_size)
             except Exception:
-                pass # Skip problematic lines if any
+                # Skip problematic lines if any
+                pass
                 
             y += line_height
             
