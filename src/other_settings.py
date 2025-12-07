@@ -3693,6 +3693,29 @@ def _create_processing_options_section(self, parent):
     emergency_desc.setContentsMargins(20, 0, 0, 5)
     left_v.addWidget(emergency_desc)
     
+    # Emergency Image Restoration (Add below Paragraph Restoration)
+    img_restore_cb = self._create_styled_checkbox("Emergency Image Restoration")
+    try:
+        # Default to False if not present
+        if not hasattr(self, 'emergency_image_restore_var'):
+            self.emergency_image_restore_var = False
+        img_restore_cb.setChecked(bool(self.emergency_image_restore_var))
+    except Exception:
+        pass
+    def _on_img_restore_toggle(checked):
+        try:
+            self.emergency_image_restore_var = bool(checked)
+        except Exception:
+            pass
+    img_restore_cb.toggled.connect(_on_img_restore_toggle)
+    img_restore_cb.setContentsMargins(0, 2, 0, 0)
+    left_v.addWidget(img_restore_cb)
+    
+    img_restore_desc = QLabel("Restore <img> tags if missing in translation\\n(Matches source images to output)")
+    img_restore_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    img_restore_desc.setContentsMargins(20, 0, 0, 5)
+    left_v.addWidget(img_restore_desc)
+    
     # Enable Decimal Chapter Detection
     decimal_cb = self._create_styled_checkbox("Enable Decimal Chapter Detection (EPUBs)")
     try:

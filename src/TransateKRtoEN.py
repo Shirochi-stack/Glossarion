@@ -144,6 +144,7 @@ class TranslationConfig:
         self.CHAPTER_NUMBER_OFFSET = int(os.getenv("CHAPTER_NUMBER_OFFSET", "0"))
         self.ENABLE_WATERMARK_REMOVAL = os.getenv("ENABLE_WATERMARK_REMOVAL", "1") == "1"
         self.SAVE_CLEANED_IMAGES = os.getenv("SAVE_CLEANED_IMAGES", "1") == "1"
+        self.EMERGENCY_IMAGE_RESTORE = os.getenv("EMERGENCY_IMAGE_RESTORE", "0") == "1"
         self.WATERMARK_PATTERN_THRESHOLD = int(os.getenv("WATERMARK_PATTERN_THRESHOLD", "10"))
         self.WATERMARK_CLAHE_LIMIT = float(os.getenv("WATERMARK_CLAHE_LIMIT", "3.0"))
         self.COMPRESSION_FACTOR = float(os.getenv("COMPRESSION_FACTOR", "2.0"))
@@ -2208,6 +2209,103 @@ class ContentProcessor:
         return text
     
     @staticmethod
+    def emergency_restore_images(text, original_html=None, verbose=True):
+        """Emergency restoration of images lost during translation"""
+        if not original_html or not text:
+            return text
+            
+        def log(message):
+            if verbose:
+                print(message)
+                
+        try:
+            # Parse both documents
+            soup_orig = BeautifulSoup(original_html, 'html.parser')
+            soup_text = BeautifulSoup(text, 'html.parser')
+            
+            # Extract images from source
+            orig_images = soup_orig.find_all('img')
+            if not orig_images:
+                return text
+                
+            # Extract images from translation
+            text_images = soup_text.find_all('img')
+            
+            # If counts match, nothing to do
+            if len(orig_images) == len(text_images):
+                return text
+                
+            # If translation has fewer images, try to restore them
+            if len(text_images) < len(orig_images):
+                log(f"🖼️ Image mismatch! Source: {len(orig_images)}, Translation: {len(text_images)}")
+                log("🔧 Attempting emergency image restoration...")
+                
+                # Get the set of image sources present in translation
+                present_srcs = set()
+                for img in text_images:
+                    src = img.get('src')
+                    if src:
+                        present_srcs.add(src)
+                
+                # Find missing images and their relative positions in source
+                missing_images = []
+                orig_elements = list(soup_orig.body.descendants if soup_orig.body else soup_orig.descendants)
+                total_elements = len(orig_elements)
+                
+                for i, elem in enumerate(orig_elements):
+                    if elem.name == 'img':
+                        src = elem.get('src')
+                        if src and src not in present_srcs:
+                            # Calculate relative position (0.0 to 1.0)
+                            rel_pos = i / max(1, total_elements)
+                            missing_images.append((elem, rel_pos))
+                            
+                if not missing_images:
+                    return text
+                    
+                # Insert missing images into translated text at approximate positions
+                # We count paragraphs/blocks in translated text to approximate position
+                trans_elements = list(soup_text.body.children if soup_text.body else soup_text.children)
+                trans_elements = [e for e in trans_elements if e.name] # Filter out empty text nodes for cleaner count
+                total_trans = len(trans_elements)
+                
+                inserted_count = 0
+                for img_tag, rel_pos in missing_images:
+                    # Calculate target index in translated elements
+                    target_idx = int(rel_pos * total_trans)
+                    # Clamp to valid range
+                    target_idx = max(0, min(target_idx, len(trans_elements)))
+                    
+                    # Create a wrapper paragraph for the image if it was wrapped in source
+                    # or just insert as is. Let's wrap in <p> to be safe for layout.
+                    new_p = soup_text.new_tag('p')
+                    new_img = soup_text.new_tag('img', src=img_tag.get('src'))
+                    
+                    # Copy other attributes
+                    for attr, val in img_tag.attrs.items():
+                        if attr != 'src':
+                            new_img[attr] = val
+                            
+                    new_p.append(new_img)
+                    
+                    # Insert at target position
+                    if target_idx < len(trans_elements):
+                        trans_elements[target_idx].insert_before(new_p)
+                    else:
+                        soup_text.append(new_p)
+                        
+                    inserted_count += 1
+                    
+                log(f"✅ Restored {inserted_count} missing images at approximate positions")
+                return str(soup_text)
+                
+        except Exception as e:
+            log(f"⚠️ Failed to restore images: {e}")
+            return text
+            
+        return text
+
+    @staticmethod
     def get_content_hash(html_content):
         """Create a stable hash of content"""
         try:
@@ -2884,6 +2982,7 @@ class TranslationProcessor:
                     context='translation',
                     chapter_context=chapter_ctx,
                 )
+                
                 # Enhanced mode workflow:
                 # 1. Original HTML -> html2text -> Markdown/plain text (during extraction)
                 # 2. Markdown sent to translation API (better for translation quality)
@@ -2891,6 +2990,11 @@ class TranslationProcessor:
                 if result and c.get("enhanced_extraction", False):
                     print(f"🔄 Converting translated markdown back to HTML...")
                     result = convert_enhanced_text_to_html(result, c)
+                
+                # Emergency Image Restoration (if enabled)
+                if result and self.config.EMERGENCY_IMAGE_RESTORE:
+                    result = ContentProcessor.emergency_restore_images(result, chunk_html)
+                    
                 retry_needed = False
                 retry_reason = ""
                 is_duplicate_retry = False
@@ -3795,6 +3899,10 @@ class BatchTranslationProcessor:
             cleaned = ContentProcessor.clean_memory_artifacts(cleaned)
             cleaned = re.sub(r"^```(?:html)?\s*\n?", "", cleaned, count=1, flags=re.MULTILINE)
             cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
+            
+            # Emergency Image Restoration (if enabled)
+            if self.config.EMERGENCY_IMAGE_RESTORE:
+                cleaned = ContentProcessor.emergency_restore_images(cleaned, merged_content)
             
             # Get parent chapter info
             parent_actual_num, parent_content, parent_idx, parent_chapter, parent_content_hash = chapters_data[0]
