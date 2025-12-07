@@ -639,10 +639,42 @@ class RetranslationMixin:
                 # Keep original extension (html/xhtml/htm) as written on disk
                 
                 # Verify file actually exists for completed status
+                # IMPORTANT: some older progress files still point to legacy
+                # "response_"-prefixed filenames, even though the translated
+                # files on disk were later renamed to drop the prefix.
+                #
+                # In that case we want to:
+                #   1. Treat the chapter as completed (not file_missing) if the
+                #      non-prefixed file actually exists on disk, and
+                #   2. Gently self-heal the progress JSON so future runs stay
+                #      in sync.
                 if spine_ch['status'] == 'completed':
                     output_path = os.path.join(output_dir, spine_ch['output_file'])
                     if not os.path.exists(output_path):
-                        spine_ch['status'] = 'file_missing'
+                        # If the expected_response file exists, prefer that and
+                        # transparently update the progress entry.
+                        if file_exists and expected_response:
+                            fixed_output_path = os.path.join(output_dir, expected_response)
+                            if os.path.exists(fixed_output_path):
+                                spine_ch['output_file'] = expected_response
+
+                                # If this spine chapter is tied to a concrete
+                                # progress entry, keep it consistent.
+                                if 'progress_entry' in spine_ch and spine_ch['progress_entry'] is not None:
+                                    spine_ch['progress_entry']['output_file'] = expected_response
+
+                                    # Also update the master prog dict so the
+                                    # corrected value is written back later.
+                                    for ch_key, ch_info in prog.get('chapters', {}).items():
+                                        if ch_info is spine_ch['progress_entry']:
+                                            prog['chapters'][ch_key]['output_file'] = expected_response
+                                            break
+                            else:
+                                # No matching file anywhere – mark as missing.
+                                spine_ch['status'] = 'file_missing'
+                        else:
+                            # Legacy behaviour: nothing on disk for this entry.
+                            spine_ch['status'] = 'file_missing'
             
             elif file_exists:
                 # File exists but no progress tracking - mark as completed
