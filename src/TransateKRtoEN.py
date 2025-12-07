@@ -236,22 +236,123 @@ class RequestMerger:
     
     @classmethod
     def merge_chapters(cls, chapters_data):
-        """
-        Merge multiple chapters into a single content block.
-        
+        """Merge multiple chapters into a single content block.
+
+        This is used both for request-size estimation and for the actual
+        merged request that is sent to the API.
+
+        Before concatenating, we ensure that each chapter has at least one
+        visible heading (h1–h6). This greatly improves the reliability of
+        Split‑the‑Merge, because the model sees clear structural boundaries
+        between chapters.
+
+        Heuristic per chapter (only if no existing h1–h6):
+
+        1. If there is a <head> tag, replace it with an <h1> whose text comes
+           from <title> if available, otherwise from the chapter title or
+           filename.
+        2. Else, if there is a <title> tag, replace it with an <h1>.
+        3. Else, prepend an <h1> at the start of the document (inside <body>
+           if present) whose text is derived from the filename.
+
         Args:
             chapters_data: List of tuples (chapter_num, content, chapter_obj)
-            
+
         Returns:
             Merged content string
         """
         if not chapters_data:
             return ""
-        
+
         merged_parts = []
+
         for chapter_num, content, chapter_obj in chapters_data:
-            merged_parts.append(content)
-        
+            # Defensive: if something goes wrong in the header injection
+            # logic, fall back to the original content rather than breaking
+            # the whole merge.
+            try:
+                soup = BeautifulSoup(content, 'html.parser') if isinstance(content, str) else None
+            except Exception:
+                soup = None
+
+            if soup is None:
+                merged_parts.append(content)
+                continue
+
+            # If the chapter already has any heading tags, use as‑is.
+            if soup.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
+                merged_parts.append(str(soup))
+                continue
+
+            # Derive a reasonable heading text.
+            title_tag = soup.find('title')
+            heading_text = None
+            if title_tag:
+                heading_text = title_tag.get_text(strip=True) or None
+
+            if not heading_text:
+                # Prefer chapter_obj['title'], then original_basename/filename,
+                # finally fall back to the numeric chapter number.
+                try:
+                    heading_text = (
+                        (chapter_obj.get('title') or '').strip()
+                        if isinstance(chapter_obj, dict) else None
+                    ) or None
+                except Exception:
+                    heading_text = None
+
+            if not heading_text and isinstance(chapter_obj, dict):
+                try:
+                    raw_name = (
+                        chapter_obj.get('original_basename')
+                        or chapter_obj.get('filename')
+                        or ''
+                    )
+                    base = os.path.splitext(os.path.basename(raw_name))[0]
+                    heading_text = base or None
+                except Exception:
+                    heading_text = None
+
+            if not heading_text:
+                heading_text = f"Chapter {chapter_num}"
+
+            # 1) If there is a <head> tag, replace it entirely with <h1>.
+            head_tag = soup.find('head')
+            if head_tag is not None:
+                new_h1 = soup.new_tag('h1')
+                new_h1.string = heading_text
+                head_tag.replace_with(new_h1)
+                merged_parts.append(str(soup))
+                continue
+
+            # 2) Else, if there is a <title> tag, replace it with <h1>.
+            if title_tag is not None:
+                new_h1 = soup.new_tag('h1')
+                new_h1.string = heading_text
+                title_tag.replace_with(new_h1)
+                merged_parts.append(str(soup))
+                continue
+
+            # 3) Final fallback: insert an <h1> at the beginning of the body
+            # (or document) so the splitter has at least one clear boundary.
+            new_h1 = soup.new_tag('h1')
+            new_h1.string = heading_text
+
+            if soup.body is not None:
+                soup.body.insert(0, new_h1)
+            else:
+                html_tag = soup.find('html')
+                if html_tag is not None:
+                    html_tag.insert(0, new_h1)
+                else:
+                    # No explicit <html>/<body>; just put it at the start.
+                    if soup.contents:
+                        soup.insert(0, new_h1)
+                    else:
+                        soup.append(new_h1)
+
+            merged_parts.append(str(soup))
+
         return "\n\n".join(merged_parts)
     
     @classmethod
