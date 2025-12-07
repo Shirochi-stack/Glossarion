@@ -175,7 +175,7 @@ class TextFileProcessor:
             json.dump(metadata, f, ensure_ascii=False, indent=2)
     
     def create_output_structure(self, translated_chapters: List[Tuple[str, str]]) -> str:
-        """Create output text file from translated chapters"""
+        """Create output text file (or PDF) from translated chapters"""
         # Sort chapters by filename to ensure correct order
         sorted_chapters = sorted(translated_chapters, key=lambda x: x[0])
         
@@ -191,14 +191,29 @@ class TextFileProcessor:
             
             all_content.append(text_content)
         
+        full_text = "".join(all_content)
+        
         # Create output filename
-        # If input was PDF, output is still TXT for now
+        if self.file_path.lower().endswith('.pdf'):
+            output_filename = f"{self.file_base}_translated.pdf"
+            output_path = os.path.join(self.output_dir, output_filename)
+            try:
+                from pdf_extractor import create_pdf_from_text
+                if create_pdf_from_text(full_text, output_path):
+                    print(f"✅ Created translated PDF file: {output_filename}")
+                    return output_path
+                else:
+                    print(f"⚠️ Failed to create PDF, falling back to text file")
+            except Exception as e:
+                print(f"⚠️ Error creating PDF: {e}")
+        
+        # Fallback or default to text
         output_filename = f"{self.file_base}_translated.txt"
         output_path = os.path.join(self.output_dir, output_filename)
         
         # Write the translated text
         with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(''.join(all_content))
+            f.write(full_text)
         
         print(f"✅ Created translated text file: {output_filename}")
         return output_path

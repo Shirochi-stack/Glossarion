@@ -8153,44 +8153,88 @@ def main(log_callback=None, stop_callback=None):
                 print(f"   • Section {chapter_data['num']}: {chapter_data['title']}")
             
             # Create a combined file with proper section structure
-            combined_path = os.path.join(out, f"{txt_processor.file_base}_translated.txt")
-            with open(combined_path, 'w', encoding='utf-8') as combined:
+            if input_path.lower().endswith('.pdf'):
+                combined_path = os.path.join(out, f"{txt_processor.file_base}_translated.pdf")
+                print(f"📄 Creating PDF output: {combined_path}")
+                
+                # Build full text content first
+                full_text_parts = []
                 current_main_chapter = None
                 
                 for i, chapter_data in enumerate(sorted(translated_chapters, key=lambda x: x['num'])):
                     content = chapter_data['content']
                     
-                    # Check if this is a chunk of a larger chapter
                     if chapter_data.get('is_chunk'):
                         chunk_info = chapter_data.get('chunk_info', {})
                         original_chapter = chunk_info.get('original_chapter')
                         chunk_idx = chunk_info.get('chunk_idx', 1)
                         total_chunks = chunk_info.get('total_chunks', 1)
                         
-                        # Only add the chapter header for the first chunk
                         if original_chapter != current_main_chapter:
                             current_main_chapter = original_chapter
+                            if i > 0:
+                                full_text_parts.append(f"\n\n{'='*50}\n\n")
+                        
+                        full_text_parts.append(content)
+                        if chunk_idx < total_chunks:
+                            full_text_parts.append("\n")
+                    else:
+                        current_main_chapter = chapter_data['num']
+                        if i > 0:
+                            full_text_parts.append(f"\n\n{'='*50}\n\n")
+                        full_text_parts.append(content)
+                
+                full_text = "".join(full_text_parts)
+                
+                from pdf_extractor import create_pdf_from_text
+                if create_pdf_from_text(full_text, combined_path):
+                    print(f"   • Created translated PDF file: {combined_path}")
+                else:
+                    print("⚠️ Failed to create PDF, falling back to text output")
+                    combined_path = os.path.join(out, f"{txt_processor.file_base}_translated.txt")
+                    with open(combined_path, 'w', encoding='utf-8') as f:
+                        f.write(full_text)
+                    print(f"   • Created fallback text file: {combined_path}")
+            
+            else:
+                combined_path = os.path.join(out, f"{txt_processor.file_base}_translated.txt")
+                with open(combined_path, 'w', encoding='utf-8') as combined:
+                    current_main_chapter = None
+                    
+                    for i, chapter_data in enumerate(sorted(translated_chapters, key=lambda x: x['num'])):
+                        content = chapter_data['content']
+                        
+                        # Check if this is a chunk of a larger chapter
+                        if chapter_data.get('is_chunk'):
+                            chunk_info = chapter_data.get('chunk_info', {})
+                            original_chapter = chunk_info.get('original_chapter')
+                            chunk_idx = chunk_info.get('chunk_idx', 1)
+                            total_chunks = chunk_info.get('total_chunks', 1)
+                            
+                            # Only add the chapter header for the first chunk
+                            if original_chapter != current_main_chapter:
+                                current_main_chapter = original_chapter
+                                
+                                # Add separator if not first chapter
+                                if i > 0:
+                                    combined.write(f"\n\n{'='*50}\n\n")
+                            
+                            # Add the chunk content
+                            combined.write(content)
+                            
+                            # Add spacing between chunks of the same chapter
+                            if chunk_idx < total_chunks:
+                                combined.write("\n")
+                        else:
+                            # This is a standalone chapter
+                            current_main_chapter = chapter_data['num']
                             
                             # Add separator if not first chapter
                             if i > 0:
                                 combined.write(f"\n\n{'='*50}\n\n")
-                        
-                        # Add the chunk content
-                        combined.write(content)
-                        
-                        # Add spacing between chunks of the same chapter
-                        if chunk_idx < total_chunks:
-                            combined.write("\n")
-                    else:
-                        # This is a standalone chapter
-                        current_main_chapter = chapter_data['num']
-                        
-                        # Add separator if not first chapter
-                        if i > 0:
-                            combined.write(f"\n\n{'='*50}\n\n")
-                        
-                        # Add the content
-                        combined.write(content)
+                            
+                            # Add the content
+                            combined.write(content)
             
             print(f"   • Combined file with preserved sections: {combined_path}")
             

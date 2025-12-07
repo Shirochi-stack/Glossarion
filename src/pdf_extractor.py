@@ -132,3 +132,62 @@ def is_pdf_library_available():
         pass
     
     return False
+
+
+def create_pdf_from_text(text, output_path):
+    """
+    Create a simple PDF from text using PyMuPDF (fitz).
+    Returns True if successful, False otherwise.
+    """
+    try:
+        import fitz
+        import textwrap
+
+        doc = fitz.open()
+        font_size = 11
+        line_height = 14
+        margin = 50
+        
+        # Default A4 size
+        page_width, page_height = fitz.paper_size("a4")
+        
+        # Estimate chars per line for wrapping
+        # A4 width 595 - 100 margin = 495 pts
+        # font size 11 -> avg char width ~5-6 pts
+        # 495 / 6 ~= 82 chars. Let's use 85 to be safe/dense.
+        wrap_width = 85
+        
+        lines = []
+        for paragraph in text.split('\n'):
+            # Handle empty lines (paragraph breaks)
+            if not paragraph.strip():
+                lines.append("")
+                continue
+                
+            # Wrap paragraph
+            lines.extend(textwrap.wrap(paragraph, width=wrap_width))
+        
+        y = margin
+        page = doc.new_page()
+        
+        # Insert text line by line
+        for line in lines:
+            if y > page_height - margin:
+                page = doc.new_page()
+                y = margin
+            
+            # Insert text
+            try:
+                page.insert_text((margin, y), line, fontsize=font_size)
+            except Exception:
+                pass # Skip problematic lines if any
+                
+            y += line_height
+            
+        doc.save(output_path)
+        doc.close()
+        return True
+        
+    except Exception as e:
+        print(f"Error creating PDF: {e}")
+        return False
