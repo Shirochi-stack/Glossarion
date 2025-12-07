@@ -2898,31 +2898,7 @@ Recent translations to summarize:
             self.target_lang_combo.setCurrentText(saved_lang)
             
         # Connect to save config
-        def update_target_lang(text):
-            self.config['output_language'] = text
-            # Also update environment variable if needed
-            os.environ['OUTPUT_LANGUAGE'] = text
-            
-            # Sync with glossary manager dropdowns if they exist
-            self.config['glossary_target_language'] = text
-            
-            if hasattr(self, 'manual_target_language_combo') and self.manual_target_language_combo:
-                if self.manual_target_language_combo.currentText() != text:
-                    index = self.manual_target_language_combo.findText(text)
-                    if index >= 0:
-                        self.manual_target_language_combo.setCurrentIndex(index)
-                    else:
-                        self.manual_target_language_combo.setCurrentText(text)
-                        
-            if hasattr(self, 'glossary_target_language_combo') and self.glossary_target_language_combo:
-                if self.glossary_target_language_combo.currentText() != text:
-                    index = self.glossary_target_language_combo.findText(text)
-                    if index >= 0:
-                        self.glossary_target_language_combo.setCurrentIndex(index)
-                    else:
-                        self.glossary_target_language_combo.setCurrentText(text)
-            
-        self.target_lang_combo.currentTextChanged.connect(update_target_lang)
+        self.target_lang_combo.currentTextChanged.connect(self.update_target_language)
         
         # Use Halgakos icon in dropdown arrow (consistent with other dropdowns)
         try:
@@ -3071,6 +3047,62 @@ Recent translations to summarize:
         self.run_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.frame.addWidget(self.run_button, 9, 4)
     
+    def update_target_language(self, text):
+        """Update target language and sync across all UI components"""
+        self.config['output_language'] = text
+        # Also update environment variable if needed
+        os.environ['OUTPUT_LANGUAGE'] = text
+        
+        # Sync with main dropdown if called externally
+        if hasattr(self, 'target_lang_combo') and self.target_lang_combo.currentText() != text:
+            self.target_lang_combo.blockSignals(True)
+            index = self.target_lang_combo.findText(text)
+            if index >= 0:
+                self.target_lang_combo.setCurrentIndex(index)
+            else:
+                self.target_lang_combo.setCurrentText(text)
+            self.target_lang_combo.blockSignals(False)
+        
+        # Sync with glossary manager dropdowns if they exist
+        self.config['glossary_target_language'] = text
+        
+        if hasattr(self, 'manual_target_language_combo') and self.manual_target_language_combo:
+            if self.manual_target_language_combo.currentText() != text:
+                self.manual_target_language_combo.blockSignals(True)
+                index = self.manual_target_language_combo.findText(text)
+                if index >= 0:
+                    self.manual_target_language_combo.setCurrentIndex(index)
+                else:
+                    self.manual_target_language_combo.setCurrentText(text)
+                self.manual_target_language_combo.blockSignals(False)
+                    
+        if hasattr(self, 'glossary_target_language_combo') and self.glossary_target_language_combo:
+            if self.glossary_target_language_combo.currentText() != text:
+                self.glossary_target_language_combo.blockSignals(True)
+                index = self.glossary_target_language_combo.findText(text)
+                if index >= 0:
+                    self.glossary_target_language_combo.setCurrentIndex(index)
+                else:
+                    self.glossary_target_language_combo.setCurrentText(text)
+                self.glossary_target_language_combo.blockSignals(False)
+                
+        # Sync with metadata batch UI if dialog is open
+        if hasattr(self, 'metadata_batch_ui') and hasattr(self.metadata_batch_ui, 'output_lang_combo'):
+            try:
+                # Check if widget is valid (not deleted)
+                if self.metadata_batch_ui.output_lang_combo.isVisible():
+                    if self.metadata_batch_ui.output_lang_combo.currentText() != text:
+                        self.metadata_batch_ui.output_lang_combo.blockSignals(True)
+                        index = self.metadata_batch_ui.output_lang_combo.findText(text)
+                        if index >= 0:
+                            self.metadata_batch_ui.output_lang_combo.setCurrentIndex(index)
+                        else:
+                            self.metadata_batch_ui.output_lang_combo.setCurrentText(text)
+                        self.metadata_batch_ui.output_lang_combo.blockSignals(False)
+            except RuntimeError:
+                # Widget might be deleted if dialog was closed
+                pass
+
     def _create_log_section(self):
         """Create log text area"""
         # Log Text Edit (row 10, spans all 5 columns)

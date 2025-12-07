@@ -1264,7 +1264,11 @@ class MetadataBatchTranslatorUI:
         print(f"Parent layout widget enabled: {output_group.parent().isEnabled() if output_group.parent() else 'No parent'}")
         
         # Add proper signal connections like the working model dropdown
-        self.output_lang_combo.currentIndexChanged.connect(lambda: None)  # Basic signal connection
+        def sync_to_main(text):
+            if hasattr(self.gui, 'update_target_language'):
+                self.gui.update_target_language(text)
+                
+        self.output_lang_combo.currentTextChanged.connect(sync_to_main)
         
         # Disable mousewheel scrolling
         self.output_lang_combo.wheelEvent = lambda event: None
