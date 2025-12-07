@@ -1321,12 +1321,26 @@ class QAScannerMixin:
                 # Verify the selected folder contains scannable files
                 try:
                     files = os.listdir(selected_folder)
-                    html_files = [f for f in files if f.lower().endswith(('.html', '.xhtml', '.htm'))]
-                    if html_files:
-                        folders_to_scan.append(selected_folder)
-                        self.append_log(f"✓ Manual selection: {os.path.basename(selected_folder)} ({len(html_files)} HTML/XHTML files)")
+                    # Respect text file mode when validating manual selection
+                    text_file_mode = self.config.get('qa_text_file_mode', False)
+                    if hasattr(self, 'qa_text_file_mode_checkbox'):
+                        try:
+                            text_file_mode = bool(self.qa_text_file_mode_checkbox.isChecked())
+                        except Exception:
+                            pass
+                    
+                    if text_file_mode:
+                        target_files = [f for f in files if f.lower().endswith('.txt')]
+                        file_type = "TXT"
                     else:
-                        self.append_log(f"❌ Selected folder contains no HTML/XHTML files: {selected_folder}")
+                        target_files = [f for f in files if f.lower().endswith(('.html', '.xhtml', '.htm'))]
+                        file_type = "HTML/XHTML"
+                    
+                    if target_files:
+                        folders_to_scan.append(selected_folder)
+                        self.append_log(f"✓ Manual selection: {os.path.basename(selected_folder)} ({len(target_files)} {file_type} files)")
+                    else:
+                        self.append_log(f"❌ Selected folder contains no {file_type} files: {selected_folder}")
                         return
                 except Exception as e:
                     self.append_log(f"❌ Error checking selected folder: {e}")
@@ -1362,9 +1376,18 @@ class QAScannerMixin:
             folders_to_scan = []
             
             # Simply select one folder - clean and simple
+            # Adjust caption to reflect current file mode
+            text_file_mode = self.config.get('qa_text_file_mode', False)
+            if hasattr(self, 'qa_text_file_mode_checkbox'):
+                try:
+                    text_file_mode = bool(self.qa_text_file_mode_checkbox.isChecked())
+                except Exception:
+                    pass
+            caption = "Select Folder with TXT Files" if text_file_mode else "Select Folder with HTML Files"
+
             selected_folder = QFileDialog.getExistingDirectory(
                 self,
-                "Select Folder with HTML Files"
+                caption
             )
             if not selected_folder:
                 self.append_log("⚠️ QA scan canceled - no folder selected.")
@@ -1569,9 +1592,9 @@ class QAScannerMixin:
                                     if text_file_mode:
                                         new_epub_path, _ = QFileDialog.getOpenFileName(
                                             self,
-                                            "Select Different Source Text File",
+                                            "Select Different Source Text/PDF File",
                                             "",
-                                            "Text files (*.txt);;All files (*.*)"
+                                            "Source files (*.txt *.pdf);;Text files (*.txt);;PDF files (*.pdf);;All files (*.*)"
                                         )
                                     else:
                                         new_epub_path, _ = QFileDialog.getOpenFileName(
@@ -2024,10 +2047,13 @@ class QAScannerMixin:
         epub_layout = QHBoxLayout(epub_widget)
         epub_layout.setContentsMargins(0, 10, 0, 5)
 
-        # Get source files (EPUB or TXT) from actual current selection
+        # Get source files (EPUB, TXT, or PDF) from actual current selection
         current_epub_files = []
         if hasattr(self, 'selected_files') and self.selected_files:
-            current_epub_files = [f for f in self.selected_files if f.lower().endswith(('.epub', '.txt'))]
+            current_epub_files = [
+                f for f in self.selected_files
+                if f.lower().endswith(('.epub', '.txt', '.pdf'))
+            ]
         
         if len(current_epub_files) > 1:
             # Multiple source files in current selection
@@ -2037,12 +2063,18 @@ class QAScannerMixin:
         elif len(current_epub_files) == 1:
             # Single source file in current selection
             file_name = os.path.basename(current_epub_files[0])
-            file_type = "TXT" if current_epub_files[0].lower().endswith('.txt') else "EPUB"
+            lower_name = current_epub_files[0].lower()
+            if lower_name.endswith('.txt'):
+                file_type = "TXT"
+            elif lower_name.endswith('.pdf'):
+                file_type = "PDF"
+            else:
+                file_type = "EPUB"
             status_text = f"📖 Current {file_type}: {file_name}"
             status_color = 'green'
         else:
             # No source files in current selection
-            status_text = "📖 No EPUB or TXT in current selection"
+            status_text = "📖 No EPUB/TXT/PDF in current selection"
             status_color = 'orange'
 
         status_label = QLabel(status_text)
@@ -2051,12 +2083,12 @@ class QAScannerMixin:
         epub_layout.addWidget(status_label)
 
         def select_epub_for_qa():
-            # Allow selecting either EPUB or TXT files
+            # Allow selecting EPUB, TXT, or PDF files as source
             epub_path, _ = QFileDialog.getOpenFileName(
                 dialog,
                 "Select Source File",
                 "",
-                "Source files (*.epub *.txt);;EPUB files (*.epub);;Text files (*.txt);;All files (*.*)"
+                "Source files (*.epub *.txt *.pdf);;EPUB files (*.epub);;Text files (*.txt);;PDF files (*.pdf);;All files (*.*)"
             )
             
             if epub_path:
@@ -2068,7 +2100,13 @@ class QAScannerMixin:
                 if hasattr(self, 'selected_epub_files'):
                     self.selected_epub_files = [epub_path]
                 
-                file_type = "TXT" if epub_path.lower().endswith('.txt') else "EPUB"
+                lower_name = epub_path.lower()
+                if lower_name.endswith('.txt'):
+                    file_type = "TXT"
+                elif lower_name.endswith('.pdf'):
+                    file_type = "PDF"
+                else:
+                    file_type = "EPUB"
                 status_label.setText(f"📖 Current {file_type}: {os.path.basename(epub_path)}")
                 status_label.setStyleSheet("color: green;")
                 self.append_log(f"✅ Selected {file_type} for QA: {os.path.basename(epub_path)}")

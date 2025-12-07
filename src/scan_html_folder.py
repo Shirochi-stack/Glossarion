@@ -4369,12 +4369,12 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     global _stop_flag
     _stop_flag = False
     
-    # Auto-detect text file mode from epub_path extension
-    # ONLY enable if epub_path actually ends with .txt AND text_file_mode wasn't explicitly set to False
+    # Auto-detect text file mode from source extension when not explicitly set
+    # Enable for .txt or .pdf sources so PDFs are treated like text-mode inputs
     if text_file_mode is None:
-        if epub_path and epub_path.lower().endswith('.txt'):
+        if epub_path and epub_path.lower().endswith(('.txt', '.pdf')):
             text_file_mode = True
-            log(f"📄 Text file mode auto-detected from source file extension (.txt)")
+            log(f"📄 Text file mode auto-detected from source file extension ({os.path.splitext(epub_path)[1].lower()})")
         else:
             text_file_mode = False
     
@@ -4432,9 +4432,9 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     
     if check_word_count:
         if text_file_mode:
-            # For text files, load word counts from individual chunks in word_count folder
-            # The source is the epub_path parameter (which is actually a .txt file in this mode)
-            if epub_path and os.path.exists(epub_path) and epub_path.lower().endswith('.txt'):
+            # For text-type sources, load word counts from individual chunks in word_count folder
+            # The source is the epub_path parameter (which may be .txt or .pdf in this mode)
+            if epub_path and os.path.exists(epub_path) and epub_path.lower().endswith(('.txt', '.pdf')):
                 log(f"📝 Loading original text chunks for word count analysis")
                 try:
                     # Check for word_count folder
@@ -4450,7 +4450,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                                 with open(chunk_path, 'r', encoding='utf-8') as f:
                                     chunk_text = f.read()
                                 chunk_word_count = len(chunk_text.split())
-                                # Store with filename as key (without extension)
+                                # Store with filename as key
                                 original_word_counts[chunk_file] = chunk_word_count
                             
                             log(f"   Loaded {len(original_word_counts)} original chunk files from word_count folder")
@@ -4461,9 +4461,18 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                     else:
                         # Fallback: use total source file word count (old behavior)
                         log(f"   ⚠️ word_count folder not found, using total source file word count")
-                        with open(epub_path, 'r', encoding='utf-8') as f:
-                            source_text = f.read()
-                        source_word_count = len(source_text.split())
+                        try:
+                            if epub_path.lower().endswith('.pdf'):
+                                # Use the same PDF extraction logic as text translation
+                                from pdf_extractor import extract_text_from_pdf
+                                source_text = extract_text_from_pdf(epub_path)
+                            else:
+                                with open(epub_path, 'r', encoding='utf-8') as f:
+                                    source_text = f.read()
+                        except Exception as e:
+                            log(f"   ⚠️ Failed to read source text for word count: {e}")
+                            source_text = ""
+                        source_word_count = len(source_text.split()) if source_text else 0
                         original_word_counts = {'_total': source_word_count}
                         log(f"   Source text word count: {source_word_count} words")
                     
@@ -4480,7 +4489,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                     log(f"   ⚠️ Could not load text chunk word counts: {e}")
                     check_word_count = False
             else:
-                log("⚠️ Word count cross-reference enabled but no valid text file provided - skipping this check")
+                log("⚠️ Word count cross-reference enabled but no valid text/PDF file provided - skipping this check")
                 check_word_count = False
         elif epub_path and os.path.exists(epub_path):
             log(f"📚 Extracting word counts from original EPUB: {os.path.basename(epub_path)}")
