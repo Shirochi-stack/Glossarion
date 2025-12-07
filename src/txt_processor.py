@@ -7,6 +7,7 @@ from bs4 import BeautifulSoup
 from chapter_splitter import ChapterSplitter
 from decimal import Decimal
 import hashlib
+from pdf_extractor import extract_text_from_pdf
 
 class TextFileProcessor:
     """Process plain text files for translation"""
@@ -21,9 +22,19 @@ class TextFileProcessor:
         self.chapter_splitter = ChapterSplitter(model_name=model_name)
         
     def extract_chapters(self) -> List[Dict]:
-        """Extract chapters from text file"""
-        with open(self.file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
+        """Extract chapters from text file or PDF"""
+        content = ""
+        
+        if self.file_path.lower().endswith('.pdf'):
+            try:
+                print(f"📄 Extracting text from PDF: {os.path.basename(self.file_path)}")
+                content = extract_text_from_pdf(self.file_path)
+            except Exception as e:
+                print(f"❌ Failed to extract text from PDF: {e}")
+                content = "" # Handle empty content gracefully
+        else:
+            with open(self.file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
         
         # Treat entire file as single document - no chapter detection
         raw_chapters = [{
@@ -181,6 +192,7 @@ class TextFileProcessor:
             all_content.append(text_content)
         
         # Create output filename
+        # If input was PDF, output is still TXT for now
         output_filename = f"{self.file_base}_translated.txt"
         output_path = os.path.join(self.output_dir, output_filename)
         

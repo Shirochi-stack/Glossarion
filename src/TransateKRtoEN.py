@@ -5229,7 +5229,7 @@ def main(log_callback=None, stop_callback=None):
     if not input_path and len(sys.argv) > 1:
         input_path = sys.argv[1]
     
-    is_text_file = input_path.lower().endswith(('.txt', '.csv', '.json'))
+    is_text_file = input_path.lower().endswith(('.txt', '.csv', '.json', '.pdf'))
     
     if is_text_file:
         os.environ["IS_TEXT_FILE_TRANSLATION"] = "1"
@@ -5267,14 +5267,14 @@ def main(log_callback=None, stop_callback=None):
     else:
         print("✅ AI artifact removal is DISABLED - preserving all content as-is")
        
-    if '--epub' in sys.argv or (len(sys.argv) > 1 and sys.argv[1].endswith(('.epub', '.txt', '.csv', '.json'))):
+    if '--epub' in sys.argv or (len(sys.argv) > 1 and sys.argv[1].endswith(('.epub', '.txt', '.csv', '.json', '.pdf'))):
         import argparse
         parser = argparse.ArgumentParser()
         parser.add_argument('epub', help='Input EPUB or text file')
         args = parser.parse_args()
         input_path = args.epub
     
-    is_text_file = input_path.lower().endswith(('.txt', '.csv', '.json'))
+    is_text_file = input_path.lower().endswith(('.txt', '.csv', '.json', '.pdf'))
     
     # Disable Break Split Count for EPUB files (only works with plain text files)
     if input_path.lower().endswith('.epub'):

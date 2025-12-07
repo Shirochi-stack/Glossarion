@@ -4656,8 +4656,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                             successful += 1
                         else:
                             failed += 1
-                    elif ext in {'.epub', '.txt', '.csv', '.json'}:
-                        # Process as EPUB/TXT/CSV/JSON
+                    elif ext in {'.epub', '.txt', '.csv', '.json', '.pdf'}:
+                        # Process as EPUB/TXT/CSV/JSON/PDF
                         if self._process_text_file(file_path):
                             successful += 1
                         else:
@@ -5664,7 +5664,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     self.append_log(f"📑 No manual glossary loaded")
                 
                 # IMPORTANT: Set IS_TEXT_FILE_TRANSLATION flag for text files
-                if file_path.lower().endswith(('.txt', '.csv', '.json')):
+                if file_path.lower().endswith(('.txt', '.csv', '.json', '.pdf')):
                     os.environ['IS_TEXT_FILE_TRANSLATION'] = '1'
                     self.append_log("📄 Processing as text file")
                 
@@ -8249,21 +8249,8 @@ Important rules:
         for path in paths:
             lower = path.lower()
             if lower.endswith('.pdf'):
-                # Convert PDF to text
-                try:
-                    from pdf_extractor import convert_pdf_to_temp_txt, is_pdf_library_available
-                    
-                    if not is_pdf_library_available():
-                        self.append_log(f"❌ No PDF library available. Install with: pip install PyMuPDF")
-                        self.append_log(f"   Skipping: {os.path.basename(path)}")
-                        continue
-                    
-                    txt_path = convert_pdf_to_temp_txt(path)
-                    self.pdf_conversions[txt_path] = path
-                    processed_paths.append(txt_path)
-                    self.append_log(f"📄 Converted PDF to text: {os.path.basename(path)}")
-                except Exception as e:
-                    self.append_log(f"❌ Failed to convert PDF: {os.path.basename(path)} - {e}")
+                # Direct PDF processing
+                processed_paths.append(path)
             elif lower.endswith('.cbz'):
                 # Extract images from CBZ (ZIP) to a temp folder and add them
                 try:
@@ -8332,7 +8319,7 @@ Important rules:
             epubs = [p for p in processed_paths if p.lower().endswith('.epub')]
             txts = [p for p in processed_paths if p.lower().endswith('.txt') and p not in self.json_conversions and p not in self.pdf_conversions]
             jsons = [p for p in self.json_conversions.values()]  # Count original JSON files
-            pdfs = [p for p in self.pdf_conversions.values()]  # Count original PDF files
+            pdfs = [p for p in processed_paths if p.lower().endswith('.pdf')]  # Count PDF files
             
             summary_parts = []
             if epubs:
