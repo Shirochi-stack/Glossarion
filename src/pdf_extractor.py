@@ -26,9 +26,9 @@ def _extract_chunk(args):
                 page = doc[i]
                 text = page.get_text()
                 if text.strip():
-                    text_parts.append((i, f"# Page {i + 1}\n\n{text}"))
+                    text_parts.append((i, text))
             except Exception as e:
-                text_parts.append((i, f"# Page {i + 1}\n\n[Extraction Error: {e}]"))
+                text_parts.append((i, f"[Extraction Error: {e}]"))
                 
         doc.close()
     except Exception as e:
@@ -124,7 +124,7 @@ def extract_text_from_pdf(pdf_path):
                 page = doc[page_num]
                 text = page.get_text()
                 if text.strip():
-                    text_parts.append(f"# Page {page_num + 1}\n\n{text}")
+                    text_parts.append(text)
             
             doc.close()
             print(f"    Extraction complete! {total_pages} pages processed.      ")
@@ -150,7 +150,7 @@ def extract_text_from_pdf(pdf_path):
         for page_num, page in enumerate(reader.pages):
             text = page.extract_text()
             if text.strip():
-                text_parts.append(f"# Page {page_num + 1}\n\n{text}")
+                text_parts.append(text)
         
         return "\n\n".join(text_parts)
     
@@ -166,7 +166,7 @@ def extract_text_from_pdf(pdf_path):
             for page_num, page in enumerate(pdf.pages):
                 text = page.extract_text()
                 if text and text.strip():
-                    text_parts.append(f"# Page {page_num + 1}\n\n{text}")
+                    text_parts.append(text)
         
         return "\n\n".join(text_parts)
     
