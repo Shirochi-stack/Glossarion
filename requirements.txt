@@ -55,6 +55,7 @@ olefile
 html2text
 markdown2
 rapidfuzz
+pymupdf
 
 # Image processing
 opencv-python-headless
