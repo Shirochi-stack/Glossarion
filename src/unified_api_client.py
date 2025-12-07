@@ -9334,8 +9334,10 @@ class UnifiedClient:
                     # Try the simple .text property first (most common)
                     if hasattr(response, 'text'):
                         try:
-                            text_content = response.text
-                            if text_content:
+                            # Safe assignment - handle if .text returns None
+                            extracted_text = response.text
+                            if extracted_text:
+                                text_content = extracted_text
                                 print(f"   ✅ Extracted {len(text_content)} chars from response.text")
                         except Exception as e:
                             print(f"   ⚠️ Could not access response.text: {e}")
@@ -9345,6 +9347,9 @@ class UnifiedClient:
                         # CRITICAL FIX: Check if candidates exists AND is not None before iterating
                         if hasattr(response, 'candidates') and response.candidates is not None:
                             print(f"   🔍 Extracting from candidates...")
+                            # Ensure text_content is a string before appending
+                            if text_content is None:
+                                text_content = ""
                             try:
                                 for candidate in response.candidates:
                                     if hasattr(candidate, 'content'):

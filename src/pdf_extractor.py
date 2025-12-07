@@ -5,6 +5,37 @@ Extracts text from PDF files and converts them to a format suitable for translat
 
 import os
 import tempfile
+import sys
+import time
+import concurrent.futures
+
+def _extract_chunk(args):
+    """
+    Worker function to extract text from a range of pages.
+    args: (pdf_path, start_page, end_page)
+    """
+    pdf_path, start_page, end_page = args
+    text_parts = []
+    
+    try:
+        import fitz
+        doc = fitz.open(pdf_path)
+        
+        for i in range(start_page, end_page):
+            try:
+                page = doc[i]
+                text = page.get_text()
+                if text.strip():
+                    text_parts.append((i, f"# Page {i + 1}\n\n{text}"))
+            except Exception as e:
+                text_parts.append((i, f"# Page {i + 1}\n\n[Extraction Error: {e}]"))
+                
+        doc.close()
+    except Exception as e:
+        # Return empty list or error indicator
+        pass
+        
+    return text_parts
 
 def extract_text_from_pdf(pdf_path):
     """
@@ -17,23 +48,94 @@ def extract_text_from_pdf(pdf_path):
     3. pdfplumber - another fallback option
     """
     
+    print(f"📄 Analyzing PDF: {os.path.basename(pdf_path)}")
+    
     # Try PyMuPDF first (best quality)
     try:
         import fitz  # PyMuPDF
+        
+        # Check page count first
         doc = fitz.open(pdf_path)
-        text_parts = []
-        
-        for page_num in range(len(doc)):
-            page = doc[page_num]
-            text = page.get_text()
-            if text.strip():
-                text_parts.append(f"# Page {page_num + 1}\n\n{text}")
-        
+        total_pages = len(doc)
         doc.close()
-        return "\n\n".join(text_parts)
+        
+        print(f"📄 Found {total_pages} pages. Starting extraction...")
+        
+        # Use parallel processing for larger files (> 50 pages)
+        # This significantly speeds up extraction for large PDFs
+        if total_pages > 50:
+            # Determine optimal worker count
+            max_workers = min(os.cpu_count() or 4, 8)
+            
+            # Divide pages into chunks
+            chunk_size = (total_pages + max_workers - 1) // max_workers
+            ranges = []
+            for i in range(0, total_pages, chunk_size):
+                end = min(i + chunk_size, total_pages)
+                ranges.append((pdf_path, i, end))
+            
+            print(f"🚀 Using {len(ranges)} parallel workers for extraction...")
+            
+            all_parts = []
+            completed_pages = 0
+            
+            with concurrent.futures.ProcessPoolExecutor(max_workers=len(ranges)) as executor:
+                # Submit all tasks
+                futures = [executor.submit(_extract_chunk, r) for r in ranges]
+                
+                # Process results as they complete
+                for future in concurrent.futures.as_completed(futures):
+                    try:
+                        chunk_results = future.result()
+                        all_parts.extend(chunk_results)
+                        
+                        # Update progress
+                        # Note: chunk_results contains tuples of (page_index, text)
+                        # We count how many pages were in this chunk range
+                        # (approximate progress update based on chunks completed)
+                        completed_pages += len(chunk_results)
+                        
+                        # Simple progress bar
+                        percent = min(100, (completed_pages / total_pages) * 100)
+                        bar_len = 30
+                        filled = int(bar_len * percent / 100)
+                        bar = '█' * filled + '░' * (bar_len - filled)
+                        print(f"    Extraction: [{bar}] {percent:.1f}%", end='\r')
+                        
+                    except Exception as e:
+                        print(f"    Worker failed: {e}")
+            
+            print(f"    Extraction complete! Processing results...          ")
+            
+            # Sort by page index to ensure correct order
+            all_parts.sort(key=lambda x: x[0])
+            return "\n\n".join([p[1] for p in all_parts])
+            
+        else:
+            # Sequential extraction for small files
+            doc = fitz.open(pdf_path)
+            text_parts = []
+            
+            for page_num in range(total_pages):
+                # Update progress every 10 pages
+                if page_num % 10 == 0:
+                    print(f"    Extracting page {page_num + 1}/{total_pages}...", end='\r')
+                
+                page = doc[page_num]
+                text = page.get_text()
+                if text.strip():
+                    text_parts.append(f"# Page {page_num + 1}\n\n{text}")
+            
+            doc.close()
+            print(f"    Extraction complete! {total_pages} pages processed.      ")
+            return "\n\n".join(text_parts)
     
     except ImportError:
         pass  # Try next method
+    except Exception as e:
+        print(f"⚠️ PyMuPDF extraction failed: {e}. Trying fallbacks...")
+    
+    # Try pypdf/PyPDF2
     
     # Try pypdf/PyPDF2
     try:
