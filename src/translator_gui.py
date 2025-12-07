@@ -2370,10 +2370,6 @@ Recent translations to summarize:
             self.gcloud_button.setStyleSheet(self.gcloud_button_disabled_style)  # Apply disabled style
             self.vertex_location_entry.hide()
             self.gcloud_status_label.setText("")
-            
-        # Re-check prompt placeholder status based on new model
-        if hasattr(self, '_check_prompt_placeholder'):
-            self._check_prompt_placeholder()
 
     def _show_model_info_dialog(self):
         """Show information dialog about API provider shortcuts"""
@@ -2791,9 +2787,6 @@ Recent translations to summarize:
     def _auto_save_system_prompt(self):
         """Auto-save system prompt to current profile as user types (in-memory only)"""
         try:
-            # Check prompt for placeholder and update UI state
-            self._check_prompt_placeholder()
-            
             # Get current profile name
             if not hasattr(self, 'profile_menu'):
                 return
@@ -2831,41 +2824,6 @@ Recent translations to summarize:
             # The profile will only be persisted when Save Profile is clicked
         except Exception as e:
             # Silently fail to avoid disrupting user's typing
-            pass
-            
-    def _check_prompt_placeholder(self):
-        """Check if {target_lang} placeholder is present in prompt text"""
-        try:
-            if not hasattr(self, 'prompt_text') or not hasattr(self, 'target_lang_combo'):
-                return
-            
-            # Check if current model is a non-LLM translation service
-            current_model = self.model_var.lower() if hasattr(self, 'model_var') else ""
-            is_service = any(x in current_model for x in ['google-translate', 'deepl'])
-            
-            # If using a service, always enable target language (prompt is ignored)
-            if is_service:
-                self.target_lang_combo.setEnabled(True)
-                if hasattr(self, 'target_lang_warning'):
-                    self.target_lang_warning.hide()
-                return
-
-            content = self.prompt_text.toPlainText()
-            has_placeholder = "{target_lang}" in content
-            
-            # Update combobox state
-            self.target_lang_combo.setEnabled(has_placeholder)
-            
-            # Update warning label
-            if hasattr(self, 'target_lang_warning'):
-                if has_placeholder:
-                    self.target_lang_warning.hide()
-                    self.target_lang_combo.setToolTip("Select target language for translation")
-                else:
-                    self.target_lang_warning.show()
-                    self.target_lang_combo.setToolTip("Disabled: System prompt must contain {target_lang} placeholder")
-                    
-        except Exception:
             pass
     
     def _create_api_section(self):
@@ -2957,13 +2915,6 @@ Recent translations to summarize:
         # Connect to save config
         self.target_lang_combo.currentTextChanged.connect(self.update_target_language)
         
-        # Warning label for missing placeholder
-        self.target_lang_warning = QLabel("⚠️ Prompt missing {target_lang}")
-        self.target_lang_warning.setStyleSheet("color: #ffc107; font-size: 8pt; margin-top: 2px;")
-        self.target_lang_warning.setWordWrap(True)
-        self.target_lang_warning.hide()
-        output_layout.addWidget(self.target_lang_warning)
-        
         # Use Halgakos icon in dropdown arrow (consistent with other dropdowns)
         try:
             icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
@@ -2986,20 +2937,12 @@ Recent translations to summarize:
                     QComboBox::down-arrow:on {
                         top: 1px;
                     }
-                    QComboBox:disabled {
-                        background-color: #2d2d2d;
-                        color: #666666;
-                        border: 1px solid #444;
-                    }
                 """
                 self.target_lang_combo.setStyleSheet(combo_style)
         except Exception:
             pass
             
         output_layout.addWidget(self.target_lang_combo)
-        
-        # Initial check for placeholder
-        self._check_prompt_placeholder()
         
         output_layout.addStretch()
         self.frame.addWidget(output_container, 9, 0, Qt.AlignTop)

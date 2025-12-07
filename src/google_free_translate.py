@@ -59,16 +59,7 @@ class GoogleFreeTranslateNew:
             "en": "en", 
             "zh": "zh-CN", 
             "ja": "ja", 
-            "ko": "ko",
-            "es": "es",
-            "fr": "fr",
-            "de": "de",
-            "it": "it",
-            "pt": "pt",
-            "ru": "ru",
-            "ar": "ar",
-            "hi": "hi",
-            "tr": "tr"
+            "ko": "ko"
         }
         return lang_map.get(self.target_language, self.target_language)
 
@@ -183,15 +174,6 @@ class GoogleFreeTranslateNew:
                 'error': str(e)
             }
     
-    def _try_single_api_request(self, params: dict, endpoint_url: str, client_type: str) -> Optional[Dict[str, Any]]:
-                self.logger.warning(f"Chunk translation failed: {e}")
-                translated_parts.append(chunk)
-                
-        return {
-            'translatedText': "".join(translated_parts),
-            'detectedSourceLanguage': detected_lang
-        }
-
     def _translate_via_single_api(self, text: str, source_lang: str, target_lang: str, endpoint_url: str) -> Optional[Dict[str, Any]]:
         """Translate using the translate_a/single endpoint (older format)."""
         # Try multiple client types to avoid 403 errors
@@ -225,7 +207,7 @@ class GoogleFreeTranslateNew:
     
     def _try_single_api_request(self, params: dict, endpoint_url: str, client_type: str) -> Optional[Dict[str, Any]]:
         """Try a single API request with given parameters."""
-        # Use POST to avoid URI too long errors for all requests
+        # Use POST to avoid URI too long errors
         response = requests.post(
             endpoint_url,
             data=params,
