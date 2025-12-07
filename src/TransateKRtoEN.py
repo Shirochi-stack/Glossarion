@@ -2993,7 +2993,18 @@ class BatchTranslationProcessor:
                 # Generate filename before API call
                 if chunk_idx < total_chunks:
                     # This is a chunk - use chunk naming format
-                    fname = f"response_{actual_num:03d}_chunk_{chunk_idx}.html"
+                    # Handle float chapter numbers (e.g., 1.0, 2.5) properly
+                    if isinstance(actual_num, float):
+                        # For decimal chapters like 1.5, use format like "response_001_5_chunk_1.html"
+                        major = int(actual_num)
+                        minor = int(round((actual_num - major) * 100))  # 1.5 -> 50, 1.1 -> 10
+                        if minor > 0:
+                            fname = f"response_{major:03d}_{minor:02d}_chunk_{chunk_idx}.html"
+                        else:
+                            # It's like 1.0, just use the integer part
+                            fname = f"response_{major:03d}_chunk_{chunk_idx}.html"
+                    else:
+                        fname = f"response_{actual_num:03d}_chunk_{chunk_idx}.html"
                 else:
                     # Last chunk or single chunk - use regular naming
                     fname = FileUtilities.create_chapter_filename(chapter, actual_num)
