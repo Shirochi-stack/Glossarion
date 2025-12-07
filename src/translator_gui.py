@@ -2318,6 +2318,9 @@ Recent translations to summarize:
         # Get the current model value (from dropdown or manually typed)
         model = self.model_var
         
+        # Update target language dropdown state
+        self._update_target_lang_state()
+        
         # Show Google Cloud Credentials button for Vertex AI models AND Google Translate (paid)
         needs_google_creds = False
         
@@ -2875,6 +2878,7 @@ Recent translations to summarize:
         
         # Auto-save system prompt as user types
         self.prompt_text.textChanged.connect(self._auto_save_system_prompt)
+        self.prompt_text.textChanged.connect(self._update_target_lang_state)
         
         self.frame.addWidget(self.prompt_text, 9, 1, 1, 3)  # row, col, rowspan, colspan
         
@@ -2914,6 +2918,14 @@ Recent translations to summarize:
             
         # Connect to save config
         self.target_lang_combo.currentTextChanged.connect(self.update_target_language)
+        
+        # Add warning label for missing placeholder
+        self.target_lang_warning = QLabel()
+        self.target_lang_warning.setStyleSheet("color: orange; font-size: 9pt; margin-top: 5px;")
+        self.target_lang_warning.setTextInteractionFlags(Qt.TextSelectableByMouse)  # Allow copy-paste
+        self.target_lang_warning.setWordWrap(True)
+        self.target_lang_warning.hide()
+        output_layout.addWidget(self.target_lang_warning)
         
         # Use Halgakos icon in dropdown arrow (consistent with other dropdowns)
         try:
@@ -3117,6 +3129,40 @@ Recent translations to summarize:
             except RuntimeError:
                 # Widget might be deleted if dialog was closed
                 pass
+
+    def _update_target_lang_state(self):
+        """Update target language dropdown state based on prompt and model"""
+        try:
+            # Safely get prompt text
+            if not hasattr(self, 'prompt_text'):
+                return
+            prompt = self.prompt_text.toPlainText()
+            
+            # Safely get model
+            model = getattr(self, 'model_var', '')
+            
+            # Check conditions
+            has_placeholder = '{target_lang}' in prompt
+            is_traditional = is_traditional_translation_api(model)
+            
+            # Condition: Disable if placeholder missing AND not traditional API
+            # If traditional API, we always enable because it handles language internally
+            should_disable = not has_placeholder and not is_traditional
+            
+            # Update combobox
+            if hasattr(self, 'target_lang_combo'):
+                self.target_lang_combo.setEnabled(not should_disable)
+            
+            # Update warning label
+            if hasattr(self, 'target_lang_warning'):
+                if should_disable:
+                    self.target_lang_warning.setText("⚠️ {target_lang} missing")
+                    self.target_lang_warning.show()
+                else:
+                    self.target_lang_warning.hide()
+                    
+        except Exception as e:
+            print(f"Error updating target lang state: {e}")
 
     def _create_log_section(self):
         """Create log text area"""
