@@ -3579,6 +3579,10 @@ class BatchTranslationProcessor:
 
             # Log combined prompt token count for merged request (treated as Chunk 1/1).
             try:
+                # Use the same token counter as regular batch splitting.
+                # Instantiate a lightweight ChapterSplitter here for counting only.
+                chapter_splitter = ChapterSplitter(model_name=self.config.MODEL)
+                
                 # Count tokens for system+assistant(user/memory) messages
                 total_tokens = 0
                 assistant_tokens = 0
