@@ -377,6 +377,7 @@ class RequestMerger:
         
         # Find all headers (h1-h6)
         headers = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+        original_headers = headers[:]
 
         # Treat multiple headers in very close proximity as a single logical
         # header if there is no real content between them. "Content" here is
@@ -428,8 +429,16 @@ class RequestMerger:
                     f"as continuation of '{prev_text}'"
                 )
 
-        # Use the logical header list for splitting logic from this point on
-        headers = logical_headers
+        # Decide which header list to use for splitting.
+        # If proximity-based collapsing produced fewer headers than the
+        # expected chapter count, but the raw header list was sufficient,
+        # fall back to the raw headers to avoid under-splitting.
+        if len(logical_headers) < expected_count and len(original_headers) >= expected_count:
+            print("   ℹ️ Split the Merge: Proximity header merge reduced boundary count below expected; using raw headers instead")
+            headers = original_headers
+        else:
+            # Use the logical header list for splitting logic from this point on
+            headers = logical_headers
         
         # First check: Do we have enough headers?
         has_content_before_first_header = False
