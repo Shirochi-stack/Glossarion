@@ -11737,7 +11737,32 @@ class UnifiedClient:
             # Extract ONLY user content to translate - ignore AI system prompts
             text_to_translate = ""
             source_lang = None
-            target_lang = "EN-US"  # Default to US English
+            # Determine target language from environment
+            output_lang_name = os.getenv("OUTPUT_LANGUAGE", "English").lower()
+            
+            # DeepL language code mapping
+            deepl_lang_map = {
+                "english": "EN-US",
+                "spanish": "ES",
+                "french": "FR",
+                "german": "DE",
+                "italian": "IT",
+                "portuguese": "PT-BR",  # Default to Brazilian Portuguese
+                "russian": "RU",
+                "arabic": "AR",
+                "hindi": "HI",  # DeepL supports Hindi now
+                "chinese (simplified)": "ZH",
+                "chinese": "ZH",
+                "japanese": "JA",
+                "korean": "KO",
+                "turkish": "TR"
+            }
+            
+            # Default to EN-US if not found or if Traditional Chinese (not supported by DeepL yet?)
+            target_lang = deepl_lang_map.get(output_lang_name, "EN-US")
+            if "traditional" in output_lang_name:
+                print(f"⚠️ DeepL may not support Traditional Chinese directly, using Simplified (ZH)")
+                target_lang = "ZH"
             
             # Extract only user messages, ignore system prompts completely
             for msg in messages:
@@ -11883,7 +11908,29 @@ class UnifiedClient:
             # Extract ONLY user content to translate - ignore AI system prompts
             text_to_translate = ""
             source_lang = None
-            target_lang = 'en'  # Default to English
+            # Determine target language from environment
+            output_lang_name = os.getenv("OUTPUT_LANGUAGE", "English").lower()
+            
+            # Google Translate language code mapping
+            google_lang_map = {
+                "english": "en",
+                "spanish": "es",
+                "french": "fr",
+                "german": "de",
+                "italian": "it",
+                "portuguese": "pt",
+                "russian": "ru",
+                "arabic": "ar",
+                "hindi": "hi",
+                "chinese (simplified)": "zh-CN",
+                "chinese": "zh-CN",
+                "chinese (traditional)": "zh-TW",
+                "japanese": "ja",
+                "korean": "ko",
+                "turkish": "tr"
+            }
+            
+            target_lang = google_lang_map.get(output_lang_name, "en")
             
             # Extract only user messages, ignore system prompts completely
             for msg in messages:
@@ -12062,7 +12109,29 @@ class UnifiedClient:
             # Extract ONLY user content to translate - ignore AI system prompts
             text_to_translate = ""
             source_lang = "auto"  # Auto-detect by default
-            target_lang = "en"    # Default to English
+            # Determine target language from environment
+            output_lang_name = os.getenv("OUTPUT_LANGUAGE", "English").lower()
+            
+            # Google Translate language code mapping
+            google_lang_map = {
+                "english": "en",
+                "spanish": "es",
+                "french": "fr",
+                "german": "de",
+                "italian": "it",
+                "portuguese": "pt",
+                "russian": "ru",
+                "arabic": "ar",
+                "hindi": "hi",
+                "chinese (simplified)": "zh-CN",
+                "chinese": "zh-CN",
+                "chinese (traditional)": "zh-TW",
+                "japanese": "ja",
+                "korean": "ko",
+                "turkish": "tr"
+            }
+            
+            target_lang = google_lang_map.get(output_lang_name, "en")
             
             # Extract only user messages, ignore system prompts completely
             for msg in messages:
