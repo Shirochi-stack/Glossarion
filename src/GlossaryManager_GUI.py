@@ -2065,7 +2065,7 @@ Rules:
         glossary_prompt_frame_layout.addWidget(self.auto_prompt_text)
         
         # Default unified prompt (combines system + extraction instructions)
-        default_unified_prompt = """You are a glossary extraction assistant for Korean / Japanese / Chinese novels.
+        default_unified_prompt = """You are a novel glossary extraction assistant.
 
 You must strictly return ONLY CSV format with 3-5 columns in this exact order: type,raw_name,translated_name,gender,description.
 For character entries, determine gender from context, leave empty if context is insufficient.

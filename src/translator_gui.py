@@ -856,7 +856,7 @@ For terms use: term,raw_name,translated_name,""")
         # Note: Ignoring old 'auto_glossary_prompt' key to force update to new prompt
         # Also treat empty strings as missing to ensure users get the new default
         unified_prompt_from_config = self.config.get('unified_auto_glossary_prompt',
-            """You are a glossary extraction assistant for Korean / Japanese / Chinese novels.
+            """You are a novel glossary extraction assistant.
 
 You must strictly return ONLY CSV format with 3-5 columns in this exact order: type,raw_name,translated_name,gender,description.
 For character entries, determine gender from context, leave empty if context is insufficient.
@@ -891,7 +891,7 @@ Prioritize names that appear with honorifics or in important contexts.""")
         
         # If the config value is empty, use the default
         if not unified_prompt_from_config or not unified_prompt_from_config.strip():
-            self.unified_auto_glossary_prompt = """You are a glossary extraction assistant for Korean / Japanese / Chinese novels.
+            self.unified_auto_glossary_prompt = """You are a novel glossary extraction assistant.
 
 You must strictly return ONLY CSV format with 3-5 columns in this exact order: type,raw_name,translated_name,gender,description.
 For character entries, determine gender from context, leave empty if context is insufficient.
@@ -1749,7 +1749,7 @@ Rules:
 - For all fields except 'raw_name', use {language} translation
 """
         
-        self.default_unified_auto_glossary_prompt = """You are a glossary extraction assistant for Korean / Japanese / Chinese novels.
+        self.default_unified_auto_glossary_prompt = """You are a novel glossary extraction assistant.
 
 You must strictly return ONLY CSV format with 3-5 columns in this exact order: type,raw_name,translated_name,gender,description.
 For character entries, determine gender from context, leave empty if context is insufficient.
