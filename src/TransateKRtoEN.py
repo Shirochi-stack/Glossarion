@@ -370,13 +370,66 @@ class RequestMerger:
             List of content sections if header count matches expected_count,
             or None if header count doesn't match (fallback to normal merged behavior)
         """
-        from bs4 import BeautifulSoup
+        from bs4 import BeautifulSoup, NavigableString
         
         # Parse the HTML
         soup = BeautifulSoup(content, 'html.parser')
         
         # Find all headers (h1-h6)
         headers = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+
+        # Treat multiple headers in very close proximity as a single logical
+        # header if there is no real content between them. "Content" here is
+        # defined as either a <p> tag or non-whitespace text (plain text), so
+        # sequences like <h2>Title</h2><h3>Subtitle</h3> with only whitespace
+        # between them will be treated as one boundary.
+        logical_headers = []
+        for h in headers:
+            if not logical_headers:
+                logical_headers.append(h)
+                continue
+
+            prev = logical_headers[-1]
+            node = prev.next_sibling
+            has_intervening_content = False
+
+            # Scan siblings between prev and current header
+            while node is not None and node is not h:
+                # Skip pure whitespace text nodes
+                if isinstance(node, NavigableString):
+                    if node.strip():  # non-empty text = content
+                        has_intervening_content = True
+                        break
+                else:
+                    # Any <p> is content
+                    if getattr(node, 'name', None) == 'p':
+                        has_intervening_content = True
+                        break
+                    # Other tags: count as content if they have non-empty text
+                    # (e.g., <div>Some text</div>)
+                    try:
+                        text = node.get_text(strip=True)
+                    except Exception:
+                        text = ''
+                    if text:
+                        has_intervening_content = True
+                        break
+                node = node.next_sibling
+
+            if has_intervening_content:
+                logical_headers.append(h)
+            else:
+                # No content between prev and this header; treat as part of the
+                # same logical header region and do NOT add another split point.
+                header_text = h.get_text(strip=True)[:60]
+                prev_text = prev.get_text(strip=True)[:60]
+                print(
+                    f"   ℹ️ Split the Merge: Treating adjacent header '{header_text}' "
+                    f"as continuation of '{prev_text}'"
+                )
+
+        # Use the logical header list for splitting logic from this point on
+        headers = logical_headers
         
         # First check: Do we have enough headers?
         has_content_before_first_header = False
