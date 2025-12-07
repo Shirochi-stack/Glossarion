@@ -58,7 +58,11 @@ def get_model_options() -> List[str]:
 
         # Chute AI
         "chutes/openai/gpt-oss-120b",
+        "chutes/deepseek-ai/DeepSeek-V3.2",
         "chutes/deepseek-ai/DeepSeek-V3.1",
+        "chutes/deepseek-ai/DeepSeek-V3-0324",
+        "chutes/deepseek-ai/DeepSeek-R1-0528",
+        "chutes/moonshotai/Kimi-K2-Thinking",
         
         # DeepSeek Models
         "deepseek-chat", "deepseek-coder", "deepseek-coder-33b-instruct",

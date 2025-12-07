@@ -4134,6 +4134,42 @@ def _create_processing_options_section(self, parent):
     extraction_v.addWidget(disable_fallback_desc)
     split_merge_widgets.append(disable_fallback_desc)
     
+    # Synthetic header injection for merged requests
+    # This adds an <h1> per chapter when none exists, which greatly improves
+    # Split‑the‑Merge reliability. Enabled by default.
+    if not hasattr(self, 'synthetic_merge_headers_var'):
+        self.synthetic_merge_headers_var = self.config.get('synthetic_merge_headers', True)
+    
+    synthetic_headers_cb = self._create_styled_checkbox("Inject Synthetic Headers for Merged Requests (recommended)")
+    try:
+        synthetic_headers_cb.setChecked(bool(self.synthetic_merge_headers_var))
+    except Exception:
+        pass
+    
+    def _on_synthetic_headers_toggle(checked):
+        try:
+            self.synthetic_merge_headers_var = bool(checked)
+        except Exception:
+            pass
+    synthetic_headers_cb.toggled.connect(_on_synthetic_headers_toggle)
+    synthetic_headers_cb.setContentsMargins(40, 2, 0, 0)
+    extraction_v.addWidget(synthetic_headers_cb)
+    split_merge_widgets.append(synthetic_headers_cb)
+    
+    # NOTE: Use plain text; if we include "<h1>" literally, Qt will
+    # auto-detect rich text and render it as a giant HTML heading. To
+    # avoid that, describe it without angle brackets.
+    synthetic_headers_desc = QLabel(
+        "Ensure each merged chapter has at least one visible h1 heading before sending to the API.\n"
+        "Improves header-based splitting and reduces Split-the-Merge failures."
+    )
+    from PySide6.QtCore import Qt as _Qt
+    synthetic_headers_desc.setTextFormat(_Qt.PlainText)
+    synthetic_headers_desc.setStyleSheet("color: gray; font-size: 9pt;")
+    synthetic_headers_desc.setContentsMargins(60, 0, 0, 5)
+    extraction_v.addWidget(synthetic_headers_desc)
+    split_merge_widgets.append(synthetic_headers_desc)
+    
     # Set initial enabled state for split merge (depends on request merging)
     for widget in split_merge_widgets:
         widget.setEnabled(bool(self.request_merging_enabled_var))

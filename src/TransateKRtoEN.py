@@ -114,6 +114,8 @@ class TranslationConfig:
         self.BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10"))
         self.REQUEST_MERGING_ENABLED = os.getenv("REQUEST_MERGING_ENABLED", "0") == "1"
         self.REQUEST_MERGE_COUNT = int(os.getenv("REQUEST_MERGE_COUNT", "3"))
+        # Synthetic header injection for merged requests (Split-the-Merge helper)
+        self.SYNTHETIC_MERGE_HEADERS = os.getenv("SYNTHETIC_MERGE_HEADERS", "1") == "1"
         self.ENABLE_IMAGE_TRANSLATION = os.getenv("ENABLE_IMAGE_TRANSLATION", "1") == "1"
         self.TRANSLATE_BOOK_TITLE = os.getenv("TRANSLATE_BOOK_TITLE", "1") == "1"
         self.DISABLE_ZERO_DETECTION = os.getenv("DISABLE_ZERO_DETECTION", "0") == "1"
@@ -264,9 +266,18 @@ class RequestMerger:
         if not chapters_data:
             return ""
 
+        # Check whether synthetic header injection is enabled. This is
+        # controlled via the SYNTHETIC_MERGE_HEADERS env var and surfaced in
+        # the Other Settings dialog. Enabled by default.
+        synthetic_headers_enabled = os.getenv('SYNTHETIC_MERGE_HEADERS', '1') == '1'
+
         merged_parts = []
 
         for chapter_num, content, chapter_obj in chapters_data:
+            # If disabled, keep content exactly as-is.
+            if not synthetic_headers_enabled:
+                merged_parts.append(content)
+                continue
             # Defensive: if something goes wrong in the header injection
             # logic, fall back to the original content rather than breaking
             # the whole merge.
@@ -322,6 +333,10 @@ class RequestMerger:
                 new_h1 = soup.new_tag('h1')
                 new_h1.string = heading_text
                 head_tag.replace_with(new_h1)
+                print(
+                    f"   ℹ️ Request Merging: Injected synthetic <h1> from <head> for "
+                    f"chapter {chapter_num}: '{heading_text[:80]}'"
+                )
                 merged_parts.append(str(soup))
                 continue
 
@@ -330,6 +345,10 @@ class RequestMerger:
                 new_h1 = soup.new_tag('h1')
                 new_h1.string = heading_text
                 title_tag.replace_with(new_h1)
+                print(
+                    f"   ℹ️ Request Merging: Injected synthetic <h1> from <title> for "
+                    f"chapter {chapter_num}: '{heading_text[:80]}'"
+                )
                 merged_parts.append(str(soup))
                 continue
 
@@ -350,6 +369,11 @@ class RequestMerger:
                         soup.insert(0, new_h1)
                     else:
                         soup.append(new_h1)
+
+            print(
+                f"   ℹ️ Request Merging: Prepended synthetic <h1> at document start for "
+                f"chapter {chapter_num}: '{heading_text[:80]}'"
+            )
 
             merged_parts.append(str(soup))
 
