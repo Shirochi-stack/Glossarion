@@ -3694,11 +3694,11 @@ def _create_processing_options_section(self, parent):
     left_v.addWidget(emergency_desc)
     
     # Emergency Image Restoration (Add below Paragraph Restoration)
-    img_restore_cb = self._create_styled_checkbox("Emergency Image Restoration")
+    img_restore_cb = self._create_styled_checkbox("Emergency Image Restoration (Recommended)")
     try:
-        # Default to False if not present
+        # Default to True if not present
         if not hasattr(self, 'emergency_image_restore_var'):
-            self.emergency_image_restore_var = False
+            self.emergency_image_restore_var = True
         img_restore_cb.setChecked(bool(self.emergency_image_restore_var))
     except Exception:
         pass
@@ -3711,9 +3711,10 @@ def _create_processing_options_section(self, parent):
     img_restore_cb.setContentsMargins(0, 2, 0, 0)
     left_v.addWidget(img_restore_cb)
     
-    img_restore_desc = QLabel("Restore <img> tags if missing in translation\\n(Matches source images to output)")
+    img_restore_desc = QLabel("Restores &lt;img&gt; tags if missing in translation<br>(Matches source images to output)")
     img_restore_desc.setStyleSheet("color: gray; font-size: 10pt;")
     img_restore_desc.setContentsMargins(20, 0, 0, 5)
+    img_restore_desc.setTextFormat(Qt.RichText)
     left_v.addWidget(img_restore_desc)
     
     # Enable Decimal Chapter Detection
