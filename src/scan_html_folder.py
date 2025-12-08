@@ -3993,7 +3993,49 @@ def extract_epub_word_counts(epub_path, log=print, min_file_length=0):
                         log(f"   Traceback: {traceback.format_exc()}")
                         continue
             else:
+                # Fallback: No spine found, scan all HTML files directly
                 log("⚠️ Could not read spine order, falling back to file extraction")
+                
+                html_files = [f for f in zf.namelist() 
+                             if f.lower().endswith(('.html', '.xhtml', '.htm')) 
+                             and not f.startswith('__MACOSX')
+                             and 'cover' not in f.lower()]
+                
+                html_files.sort()
+                
+                for idx, file_path in enumerate(html_files, start=1):
+                    try:
+                        content = zf.read(file_path).decode('utf-8', errors='ignore')
+                        soup = BeautifulSoup(content, 'html.parser')
+                        text = soup.get_text(strip=True)
+                        
+                        # Skip files shorter than minimum length setting
+                        if len(text) < min_file_length:
+                            continue
+                        
+                        # Check if text contains CJK characters
+                        has_cjk = any('\u4e00' <= char <= '\u9fff' or  # Chinese
+                                      '\u3040' <= char <= '\u309f' or  # Hiragana
+                                      '\u30a0' <= char <= '\u30ff' or  # Katakana
+                                      '\uac00' <= char <= '\ud7af'     # Korean
+                                      for char in text)
+                        
+                        if has_cjk:
+                            word_count = count_cjk_words(text)
+                        else:
+                            word_count = len(text.split())
+                        
+                        word_counts[idx] = {
+                            'word_count': word_count,
+                            'filename': os.path.basename(file_path),
+                            'full_path': file_path,
+                            'is_cjk': has_cjk
+                        }
+                    except Exception as e:
+                        continue
+                
+                if word_counts:
+                    log(f"   Found word counts for {len(word_counts)} chapters (fallback mode)")
             
             if spine_files and extracted_count == 0:
                 log(f"⚠️ Failed to extract any word counts from {len(spine_files)} spine items")
@@ -4391,18 +4433,39 @@ def process_html_file_batch(args):
         
         # Check for missing images (skip for text files)
         check_missing_imgs = qa_settings.get('check_missing_images', True)
+        
+        # DEBUG: Show the condition check
+        print(f"[DEBUG] File {filename}: text_mode={text_file_mode}, check_imgs={check_missing_imgs}, is_html={filename.lower().endswith(('.html', '.xhtml', '.htm'))}, has_img_info={bool(original_image_info)}")
+        
         if not text_file_mode and check_missing_imgs and filename.lower().endswith(('.html', '.xhtml', '.htm')) and original_image_info:
             # Read the translated HTML content
             try:
                 with open(full_path, 'r', encoding='utf-8') as f:
                     translated_html = f.read()
                 
-                # DEBUG: Print what we're checking
-                print(f"[IMAGE DEBUG] Checking file: {filename}, chapter_num: {chapter_num}")
-                print(f"[IMAGE DEBUG] Available spine indices in original_image_info: {list(original_image_info.keys())}")
+                # Try to match by chapter number first, then by sequential index
+                # Remove response_ prefix from filename for matching
+                search_filename = filename.lower()
+                if search_filename.startswith('response_'):
+                    search_filename = search_filename[9:]  # Remove 'response_'
                 
-                # Use chapter number to look up original images
-                has_missing_imgs, img_issues = detect_missing_images(translated_html, chapter_num, original_image_info)
+                # Try chapter_num match first
+                has_missing_imgs = False
+                img_issues = []
+                
+                if chapter_num in original_image_info:
+                    has_missing_imgs, img_issues = detect_missing_images(translated_html, chapter_num, original_image_info)
+                else:
+                    # Fallback: Try matching by filename to spine info
+                    for spine_idx, img_info in original_image_info.items():
+                        orig_filename = img_info.get('filename', '').lower()
+                        # Match if filenames are similar (ignoring extensions and response_ prefix)
+                        if orig_filename and (search_filename.startswith(orig_filename.split('.')[0]) or 
+                                            orig_filename.split('.')[0] in search_filename):
+                            has_missing_imgs, img_issues = detect_missing_images(translated_html, spine_idx, original_image_info)
+                            break
+                
+                print(f"[IMAGE DEBUG] Checked {filename} (chapter {chapter_num}): found_match={has_missing_imgs}")
                 
                 if has_missing_imgs:
                     print(f"[IMAGE DEBUG] Found missing images! Issues: {img_issues}")
