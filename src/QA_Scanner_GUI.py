@@ -1210,11 +1210,12 @@ class QAScannerMixin:
         # First check if current selection actually contains source files (EPUB or TXT)
         current_epub_files = []
         if hasattr(self, 'selected_files') and self.selected_files:
-            # Check for both EPUB and TXT files
-            current_epub_files = [f for f in self.selected_files if f.lower().endswith(('.epub', '.txt'))]
+            # Check for EPUB, TXT, and MD files
+            current_epub_files = [f for f in self.selected_files if f.lower().endswith(('.epub', '.txt', '.md'))]
             epub_count = len([f for f in current_epub_files if f.lower().endswith('.epub')])
             txt_count = len([f for f in current_epub_files if f.lower().endswith('.txt')])
-            print(f"[DEBUG] Current selection contains {epub_count} EPUB files and {txt_count} TXT files")
+            md_count = len([f for f in current_epub_files if f.lower().endswith('.md')])
+            print(f"[DEBUG] Current selection contains {epub_count} EPUB files, {txt_count} TXT files, and {md_count} MD files")
         
         if current_epub_files:
             # Use source files from current selection
@@ -2122,12 +2123,12 @@ class QAScannerMixin:
         epub_layout = QHBoxLayout(epub_widget)
         epub_layout.setContentsMargins(0, 10, 0, 5)
 
-        # Get source files (EPUB, TXT, or PDF) from actual current selection
+        # Get source files (EPUB, TXT, PDF, or MD) from actual current selection
         current_epub_files = []
         if hasattr(self, 'selected_files') and self.selected_files:
             current_epub_files = [
                 f for f in self.selected_files
-                if f.lower().endswith(('.epub', '.txt', '.pdf'))
+                if f.lower().endswith(('.epub', '.txt', '.pdf', '.md'))
             ]
         
         if len(current_epub_files) > 1:
@@ -2143,13 +2144,15 @@ class QAScannerMixin:
                 file_type = "TXT"
             elif lower_name.endswith('.pdf'):
                 file_type = "PDF"
+            elif lower_name.endswith('.md'):
+                file_type = "MD"
             else:
                 file_type = "EPUB"
             status_text = f"📖 Current {file_type}: {file_name}"
             status_color = 'green'
         else:
             # No source files in current selection
-            status_text = "📖 No EPUB/TXT/PDF in current selection"
+            status_text = "📖 No EPUB/TXT/PDF/MD in current selection"
             status_color = 'orange'
 
         status_label = QLabel(status_text)
@@ -2158,12 +2161,12 @@ class QAScannerMixin:
         epub_layout.addWidget(status_label)
 
         def select_epub_for_qa():
-            # Allow selecting EPUB, TXT, or PDF files as source
+            # Allow selecting EPUB, TXT, PDF, or MD files as source
             epub_path, _ = QFileDialog.getOpenFileName(
                 dialog,
                 "Select Source File",
                 "",
-                "Source files (*.epub *.txt *.pdf);;EPUB files (*.epub);;Text files (*.txt);;PDF files (*.pdf);;All files (*.*)"
+                "Source files (*.epub *.txt *.pdf *.md);;EPUB files (*.epub);;Text files (*.txt);;PDF files (*.pdf);;Markdown files (*.md);;All files (*.*)"
             )
             
             if epub_path:
@@ -2180,13 +2183,15 @@ class QAScannerMixin:
                     file_type = "TXT"
                 elif lower_name.endswith('.pdf'):
                     file_type = "PDF"
+                elif lower_name.endswith('.md'):
+                    file_type = "MD"
                 else:
                     file_type = "EPUB"
                 status_label.setText(f"📖 Current {file_type}: {os.path.basename(epub_path)}")
                 status_label.setStyleSheet("color: green;")
                 self.append_log(f"✅ Selected {file_type} for QA: {os.path.basename(epub_path)}")
 
-        select_epub_btn = QPushButton("Select EPUB/TXT")
+        select_epub_btn = QPushButton("Select Source File")
         select_epub_btn.setFont(QFont('Arial', 9))
         select_epub_btn.clicked.connect(select_epub_for_qa)
         epub_layout.addWidget(select_epub_btn)

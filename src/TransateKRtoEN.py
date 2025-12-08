@@ -6574,9 +6574,11 @@ def main(log_callback=None, stop_callback=None):
 
         if config.MANUAL_GLOSSARY and os.path.isfile(config.MANUAL_GLOSSARY):
             ext = os.path.splitext(config.MANUAL_GLOSSARY)[1].lower()
-            # Treat .txt files as CSV format
+            # Treat .txt and .md files as CSV format (keep original extension)
             if ext in [".csv", ".txt"]:
                 target_name = "glossary.csv"
+            elif ext == ".md":
+                target_name = "glossary.md"
             elif ext == ".json":
                 target_name = "glossary.json"
             else:

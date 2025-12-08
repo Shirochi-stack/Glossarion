@@ -1381,7 +1381,7 @@ Rules:
             None,
             "Select Additional Glossary File",
             "",
-            "Glossary Files (*.csv *.txt *.json *.pdf);;CSV Files (*.csv);;Text Files (*.txt);;JSON Files (*.json);;PDF Files (*.pdf);;All Files (*.*)"
+            "Glossary Files (*.csv *.txt *.json *.pdf *.md);;CSV Files (*.csv);;Text Files (*.txt);;JSON Files (*.json);;PDF Files (*.pdf);;Markdown Files (*.md);;All Files (*.*)"
         )
         
         if not file_path:
@@ -1410,6 +1410,12 @@ Rules:
                     content = f.read()
                     content_preview = f"Text file ({len(content)} chars)\nFirst 100 chars: {content[:100]}"
             
+            elif file_ext == '.md':
+                # Read markdown file (treat same as text)
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    content_preview = f"Markdown file ({len(content)} chars)\nFirst 100 chars: {content[:100]}"
+            
             elif file_ext == '.json':
                 # Read and validate JSON
                 with open(file_path, 'r', encoding='utf-8') as f:
@@ -1422,7 +1428,7 @@ Rules:
                 content_preview = f"PDF file ({file_size} bytes)"
             
             else:
-                QMessageBox.warning(None, "Unsupported Format", f"Unsupported file format: {file_ext}\nSupported formats: .csv, .txt, .json, .pdf")
+                QMessageBox.warning(None, "Unsupported Format", f"Unsupported file format: {file_ext}\nSupported formats: .csv, .txt, .json, .pdf, .md")
                 return
             
             # Save to config

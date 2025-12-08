@@ -8706,7 +8706,7 @@ Important rules:
             self,
             "Select glossary file",
             "",
-            "Supported files (*.json *.csv *.txt);;JSON files (*.json);;CSV files (*.csv);;Text files (*.txt);;All files (*.*)"
+            "Supported files (*.json *.csv *.txt *.md);;JSON files (*.json);;CSV files (*.csv);;Text files (*.txt);;Markdown files (*.md);;All files (*.*)"
         )
         if not path:
             return
@@ -8722,6 +8722,16 @@ Important rules:
         elif file_extension == '.txt':
             # Handle TXT file - just pass it through as-is
             # The translation system will handle the text file format
+            pass
+        
+        elif file_extension == '.md':
+            # Handle MD (Markdown) file - just pass it through as-is
+            # The translation system will handle the markdown file format
+            pass
+                
+        elif file_extension == '.json':
+            # Handle MD (Markdown) file - just pass it through as-is
+            # The translation system will handle the markdown file format
             pass
                 
         elif file_extension == '.json':
@@ -8852,7 +8862,7 @@ Important rules:
                 self,
                 "Error", 
                 f"Unsupported file type: {file_extension}\n"
-                "Please select a JSON, CSV, or TXT file."
+                "Please select a JSON, CSV, TXT, or MD file."
             )
             return
         
