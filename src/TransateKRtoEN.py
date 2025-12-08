@@ -3843,14 +3843,18 @@ class BatchTranslationProcessor:
             Original HTML content string, or None if extraction fails
         """
         try:
-            # Get the EPUB path
-            epub_path = getattr(self, 'epub_path', None)
+            # Get the EPUB path from environment variable (set by translator_gui)
+            epub_path = os.getenv('EPUB_PATH')
+            print(f"   [DEBUG] epub_path from env: {epub_path}")
             if not epub_path or not os.path.exists(epub_path):
+                print(f"   [DEBUG] EPUB path invalid or doesn't exist")
                 return None
             
             # Get the original filename from chapter
             filename = chapter.get('original_basename') or chapter.get('filename')
+            print(f"   [DEBUG] Looking for filename: {filename}")
             if not filename:
+                print(f"   [DEBUG] No filename in chapter: {list(chapter.keys())}")
                 return None
             
             # Extract from EPUB
@@ -3864,16 +3868,22 @@ class BatchTranslationProcessor:
                     f"EPUB/{filename}",
                 ]
                 
+                print(f"   [DEBUG] Trying paths: {possible_paths}")
                 for path in possible_paths:
                     try:
                         content = zf.read(path).decode('utf-8', errors='ignore')
+                        print(f"   [DEBUG] Successfully read from: {path}")
                         return content
                     except KeyError:
                         continue
+                
+                print(f"   [DEBUG] None of the paths worked")
             
             return None
         except Exception as e:
             print(f"   ⚠️ Failed to extract original chapter content: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def process_merged_group(self, merge_group, progress_manager):
@@ -3905,7 +3915,9 @@ class BatchTranslationProcessor:
         for idx, chapter in merge_group:
             actual_num = chapter.get('actual_chapter_num', chapter['num'])
             content_hash = chapter.get("content_hash") or ContentProcessor.get_content_hash(chapter["body"])
-            chapters_data.append((actual_num, chapter["body"], idx, chapter, content_hash))
+            # Use original_body if available (contains images), fallback to body
+            original_content = chapter.get('original_body', chapter["body"])
+            chapters_data.append((actual_num, original_content, idx, chapter, content_hash))
         
         try:
             # Mark all chapters as in_progress
@@ -4123,22 +4135,36 @@ class BatchTranslationProcessor:
                 for i, (actual_num, content, idx, chapter, content_hash) in enumerate(chapters_data):
                     section_content = split_sections[i]
                     
-                    # Restore images for this section using its original source content
-                    # Use the chapter's original filename from content.opf to get the correct source
+                    # Restore images by extracting directly from source EPUB
                     if self.config.EMERGENCY_IMAGE_RESTORE:
-                        # Get the original chapter content from EPUB by matching filename
-                        original_content = self._get_original_chapter_content(chapter)
-                        if original_content is None:
-                            # Fallback to merged chapter body if we can't extract from EPUB
-                            original_content = content
-                        
                         from bs4 import BeautifulSoup
-                        orig_soup = BeautifulSoup(original_content, 'html.parser')
-                        orig_img_count = len(orig_soup.find_all('img'))
-                        print(f"   [Ch {actual_num}] Source has {orig_img_count} images (source length: {len(original_content)} chars), restoring...")
-                        if orig_img_count > 0:
-                            print(f"   [Ch {actual_num}] First image src: {orig_soup.find('img').get('src') if orig_soup.find('img') else 'N/A'}")
-                        section_content = ContentProcessor.emergency_restore_images(section_content, original_content, verbose=True)
+                        # Extract original chapter HTML from EPUB to get images
+                        original_html = self._get_original_chapter_content(chapter)
+                        if original_html:
+                            orig_soup = BeautifulSoup(original_html, 'html.parser')
+                            img_tags = orig_soup.find_all('img')
+                            if img_tags:
+                                print(f"   [Ch {actual_num}] Found {len(img_tags)} images in source, injecting into translation...")
+                                # Inject images into the translated section
+                                section_soup = BeautifulSoup(section_content, 'html.parser')
+                                # Append images at the end of the body
+                                body = section_soup.body or section_soup
+                                for img in img_tags:
+                                    # Create paragraph wrapper for image
+                                    p = section_soup.new_tag('p')
+                                    new_img = section_soup.new_tag('img', src=img.get('src'))
+                                    # Copy all attributes
+                                    for attr, val in img.attrs.items():
+                                        if attr != 'src':
+                                            new_img[attr] = val
+                                    p.append(new_img)
+                                    body.append(p)
+                                section_content = str(section_soup)
+                                print(f"   [Ch {actual_num}] ✅ Injected {len(img_tags)} images")
+                            else:
+                                print(f"   [Ch {actual_num}] No images in source")
+                        else:
+                            print(f"   [Ch {actual_num}] ⚠️ Could not extract original HTML")
                     
                     # Generate filename for this chapter using content.opf naming
                     fname = FileUtilities.create_chapter_filename(chapter, actual_num)
