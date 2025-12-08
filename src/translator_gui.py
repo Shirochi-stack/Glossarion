@@ -1067,7 +1067,8 @@ Text to analyze:
         self.default_prompts = {
             "Universal": (
                 "You are a professional novel translator. Translate the following text to {target_lang}.\n"
-                "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.\n"
+                "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, <img>, etc.\n"
+                "- Preserve any Markdown formatting (headers, bold, italic, lists, etc.) if present.\n"
                 "- If the text does not contain HTML tags, use line breaks for proper formatting as expected of a novel.\n"
                 "- Maintain the original meaning, tone, and style.\n"
                 "- Output ONLY the translated text. Do not add any explanations, notes, or conversational filler.\n"
