@@ -24,7 +24,7 @@ Supported models and their prefixes (Updated July 2025):
 - Baichuan: baichuan*
 - Zhipu AI: glm*, chatglm*
 - Moonshot: moonshot*, kimi*
-- Groq: groq*, llama-groq*, mixtral-groq*
+- Groq: groq*, llama-groq*, mixtral-groq*, groq/* (e.g., groq/llama-3.1-8b-instant)
 - Baidu: ernie*
 - Tencent: hunyuan*
 - iFLYTEK: spark*
@@ -45,6 +45,7 @@ Supported models and their prefixes (Updated July 2025):
 - Poe: poe/* (e.g., poe/claude-4-opus, poe/gpt-4.5, poe/Assistant)
 - OpenRouter: or/*, openrouter/* (e.g., or/anthropic/claude-4-opus, or/openai/gpt-4.5)
 - Fireworks AI: fireworks/* (e.g., fireworks/llama-v3-70b)
+- Groq: groq/* (e.g., groq/llama-3.1-8b-instant)
 
 ELECTRONHUB SUPPORT:
 ElectronHub is an API aggregator that provides access to multiple models.
@@ -877,7 +878,10 @@ class UnifiedClient:
         'aya': 'cohere',
         'j2': 'ai21',
         'jurassic': 'ai21',
-        'llama': 'together',
+        'llama-groq': 'groq',  # Check Groq-specific models first
+        'mixtral-groq': 'groq',
+        'groq': 'groq',
+        'llama': 'together',  # Then check generic llama models
         'together': 'together',
         'perplexity': 'perplexity',
         'pplx': 'perplexity',
@@ -890,9 +894,6 @@ class UnifiedClient:
         'chatglm': 'zhipu',
         'moonshot': 'moonshot',
         'kimi': 'moonshot',
-        'groq': 'groq',
-        'llama-groq': 'groq',
-        'mixtral-groq': 'groq',
         'ernie': 'baidu',
         'hunyuan': 'tencent',
         'spark': 'iflytek',
@@ -931,6 +932,7 @@ class UnifiedClient:
         'or': 'openrouter',
         'openrouter': 'openrouter',
         'fireworks': 'fireworks',
+        'groq/': 'groq',  # Prefix for explicit Groq routing
         'eh/': 'electronhub',
         'electronhub/': 'electronhub',
         'electron/': 'electronhub',
@@ -9897,6 +9899,10 @@ class UnifiedClient:
                 effective_model = effective_model[len('fireworks/') :]
             if not effective_model.startswith('accounts/'):
                 effective_model = f"accounts/fireworks/models/{effective_model}"
+        elif provider == 'groq':
+            # Strip the 'groq/' prefix from the model name if present
+            if effective_model.startswith('groq/'):
+                effective_model = effective_model[5:]  # Remove 'groq/' prefix
         elif provider == 'chutes':
             # Strip the 'chutes/' prefix from the model name if present
             if effective_model.startswith('chutes/'):
@@ -10188,9 +10194,9 @@ class UnifiedClient:
                     if disable_safety and provider in ["groq", "fireworks"]:
                         extra_body["moderation"] = False
                         logger.info(f"🔓 Safety moderation disabled for {provider}")
-                    elif disable_safety and provider == "together":
-                        # Together AI handles safety differently - no moderation parameter
-                        logger.info(f"🔓 Safety settings note: {provider} doesn't support moderation parameter")
+                    # elif disable_safety and provider == "together":
+                    #     # Together AI handles safety differently - no moderation parameter
+                    #     logger.info(f"🔓 Safety settings note: {provider} doesn't support moderation parameter")
                     
                     # Check if image output mode is enabled
                     enable_image_output = os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"

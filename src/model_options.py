@@ -90,8 +90,16 @@ def get_model_options() -> List[str]:
         # Perplexity Models
         "perplexity-70b-online", "perplexity-7b-online", "pplx-70b-online", "pplx-7b-online",
         
-        # Groq Models (usually with suffix)
-        "llama-3-70b-groq", "llama-3-8b-groq", "mixtral-8x7b-groq",
+        # Groq Models
+        "groq/llama-3.1-8b-instant", "groq/llama-3.3-70b-versatile",
+        "groq/meta-llama/llama-4-maverick-17b-128e-instruct", "groq/meta-llama/llama-4-scout-17b-16e-instruct",
+        "groq/meta-llama/llama-prompt-guard-2-22m", "groq/meta-llama/llama-prompt-guard-2-86m",
+        "groq/meta-llama/llama-guard-4-12b",
+        "groq/moonshotai/kimi-k2-instruct-0905",
+        "groq/openai/gpt-oss-120b", "groq/openai/gpt-oss-20b", "groq/openai/gpt-oss-safeguard-20b",
+        "groq/qwen/qwen3-32b",
+        "groq/playai-tts", "groq/playai-tts-arabic",
+        "groq/whisper-large-v3", "groq/whisper-large-v3-turbo",
         
         # Chinese Models
         "glm-4", "glm-3-turbo", "chatglm-6b", "chatglm2-6b", "chatglm3-6b",

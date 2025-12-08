@@ -2421,6 +2421,14 @@ Recent translations to summarize:
             <li><b>claude-3-7-sonnet@20250219</b> - Models with @ use Vertex AI</li>
         </ul>
         
+        <h4>Groq (groq/)</h4>
+        <p>Access fast inference models through Groq API</p>
+        <ul>
+            <li><b>groq/llama-3.1-8b-instant</b> - Llama 3.1 8B (fast inference)</li>
+            <li><b>groq/llama-3.3-70b-versatile</b> - Llama 3.3 70B</li>
+            <li><b>groq/openai/gpt-oss-120b</b> - GPT OSS 120B via Groq</li>
+        </ul>
+        
         <h4>POE (poe/)</h4>
         <p>Access models through Poe platform <span style="color: #d9534f;">(likely not functional)</span></p>
         <ul>
