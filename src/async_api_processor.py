@@ -2863,11 +2863,14 @@ class AsyncProcessingDialog:
         else:
             env_vars['TOKEN_LIMIT'] = '200000'
         
-        # Book title translation
+        # Book title translation - replace {target_lang} with output language
         env_vars['TRANSLATE_BOOK_TITLE'] = "1" if self.gui.translate_book_title_var.get() else "0"
-        env_vars['BOOK_TITLE_PROMPT'] = self.gui.book_title_prompt if hasattr(self.gui, 'book_title_prompt') else ''
-        env_vars['BOOK_TITLE_SYSTEM_PROMPT'] = self.gui.config.get('book_title_system_prompt', 
+        output_lang = self.gui.config.get('output_language', 'English')
+        book_title_prompt = self.gui.book_title_prompt if hasattr(self.gui, 'book_title_prompt') else ''
+        book_title_system_prompt = self.gui.config.get('book_title_system_prompt', 
             "You are a translator. Respond with only the translated text, nothing else. Do not add any explanation or additional content.")
+        env_vars['BOOK_TITLE_PROMPT'] = book_title_prompt.replace('{target_lang}', output_lang)
+        env_vars['BOOK_TITLE_SYSTEM_PROMPT'] = book_title_system_prompt.replace('{target_lang}', output_lang)
         
         # Processing options
         env_vars['CHAPTER_RANGE'] = self.gui.chapter_range_entry.get().strip() if hasattr(self.gui, 'chapter_range_entry') else ''

@@ -5346,6 +5346,11 @@ def translate_title(title, client, system_prompt, user_prompt, temperature=0.3):
             book_title_system_prompt = os.getenv("BOOK_TITLE_SYSTEM_PROMPT", 
                 "You are a translator. Respond with only the translated text, nothing else. Do not add any explanation or additional content.")
             
+            # Replace {target_lang} variable with output language
+            output_lang = os.getenv("OUTPUT_LANGUAGE", "English")
+            book_title_prompt = book_title_prompt.replace("{target_lang}", output_lang)
+            book_title_system_prompt = book_title_system_prompt.replace("{target_lang}", output_lang)
+            
             messages = [
                 {"role": "system", "content": book_title_system_prompt},
                 {"role": "user", "content": f"{book_title_prompt}\n\n{title}"}

@@ -7491,15 +7491,21 @@ class UnifiedClient:
                     
                     # Try multiple patterns to extract the max token limit
                     # Pattern 1: "supports at most X completion tokens" (standard)
-                    match = re.search(r'supports at most (\\d+) completion tokens', resp.text)
+                    match = re.search(r'supports at most (\d+) completion tokens', resp.text)
                     if match:
                         supported_max = int(match.group(1))
                     
                     # Pattern 2: "must be less than or equal to X" (Groq format)
                     if not match:
-                        match = re.search(r'must be less than or equal to.*?(\d+)', resp.text)
-                        if match:
-                            supported_max = int(match.group(1))
+                        # Extract all numbers and look for one that appears after "must be less than or equal to"
+                        if 'must be less than or equal to' in resp.text:
+                            # Find the position and extract numbers after it
+                            pos = resp.text.find('must be less than or equal to')
+                            after_text = resp.text[pos:pos+100]  # Look at next 100 chars
+                            numbers = re.findall(r'\d+', after_text)
+                            if numbers:
+                                # Take the first number found (should be the limit)
+                                supported_max = int(numbers[0])
                     
                     if supported_max:
                         # Try to find current max_tokens in the request body
@@ -10129,6 +10135,8 @@ class UnifiedClient:
         
         if openai and provider in sdk_compatible and not (provider == 'openrouter' and openrouter_http_only):
             # Use OpenAI SDK with custom base URL
+            # Track if we've already auto-adjusted max_tokens to prevent infinite loops
+            max_tokens_adjusted = False
             for attempt in range(max_retries):
                 try:
                     if self._cancelled:
@@ -10452,38 +10460,52 @@ class UnifiedClient:
                     if ("max_tokens is too large" in str(e) or 
                         "supports at most" in str(e) or
                         "must be less than or equal to" in str(e)):
-                        import re
-                        supported_max = None
                         
-                        # Try multiple patterns to extract the max token limit
-                        # Pattern 1: "supports at most X completion tokens" (standard)
-                        match = re.search(r'supports at most (\\d+) completion tokens', str(e))
-                        if match:
-                            supported_max = int(match.group(1))
-                        
-                        # Pattern 2: "must be less than or equal to X" (Groq format)
-                        if not match:
-                            match = re.search(r'must be less than or equal to.*?(\d+)', str(e))
+                        # Prevent infinite adjustment loop
+                        if max_tokens_adjusted:
+                            print(f"    ⚠️ max_tokens already adjusted once, not retrying again to prevent loop")
+                        else:
+                            import re
+                            supported_max = None
+                            
+                            # Try multiple patterns to extract the max token limit
+                            error_text = str(e)
+                            
+                            # Pattern 1: "supports at most X completion tokens" (standard)
+                            match = re.search(r'supports at most (\d+) completion tokens', error_text)
                             if match:
                                 supported_max = int(match.group(1))
-                        
-                        if supported_max:
-                            current_max = max_tokens or norm_max_tokens or 8192
                             
-                            if supported_max < current_max:
-                                print(f"    🔧 AUTO-ADJUSTING: max_tokens too large ({current_max:,}) - model supports {supported_max:,}")
-                                print(f"    🔄 Retrying with supported limit: {supported_max:,} tokens")
+                            # Pattern 2: "must be less than or equal to X" (Groq format)
+                            if not match:
+                                # Extract all numbers and look for one that appears after "must be less than or equal to"
+                                if 'must be less than or equal to' in error_text:
+                                    # Find the position and extract numbers after it
+                                    pos = error_text.find('must be less than or equal to')
+                                    after_text = error_text[pos:pos+100]  # Look at next 100 chars
+                                    numbers = re.findall(r'\d+', after_text)
+                                    if numbers:
+                                        # Take the first number found (should be the limit)
+                                        supported_max = int(numbers[0])
+                            
+                            if supported_max:
+                                current_max = max_tokens or norm_max_tokens or 8192
                                 
-                                # Update max_tokens for the retry
-                                max_tokens = supported_max
-                                
-                                # Retry immediately
-                                time.sleep(1)
-                                continue
+                                if supported_max < current_max:
+                                    print(f"    🔧 AUTO-ADJUSTING: max_tokens too large ({current_max:,}) - model supports {supported_max:,}")
+                                    print(f"    🔄 Retrying with supported limit: {supported_max:,} tokens")
+                                    
+                                    # Update max_tokens for the retry
+                                    max_tokens = supported_max
+                                    max_tokens_adjusted = True
+                                    
+                                    # Retry immediately
+                                    time.sleep(1)
+                                    continue
+                                else:
+                                    print(f"    ⚠️ max_tokens error but config ({current_max:,}) <= supported ({supported_max:,})")
                             else:
-                                print(f"    ⚠️ max_tokens error but config ({current_max:,}) <= supported ({supported_max:,})")
-                        else:
-                            print(f"    ⚠️ Could not extract supported max_tokens from error: {str(e)}")
+                                print(f"    ⚠️ Could not extract supported max_tokens from error: {str(e)}")
                     
                     if "rate limit" in error_str or "429" in error_str or "quota" in error_str:
                         # Preserve the full error message from OpenRouter/ElectronHub
