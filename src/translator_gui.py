@@ -5547,9 +5547,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     
                     # Translate the image filename/title
                     self.append_log(f"📝 Translating image title...")
+                    
+                    # Replace {target_lang} variable in book title prompt with output language
+                    output_lang = self.config.get('output_language', 'English')
+                    book_title_prompt_formatted = book_title_prompt.replace('{target_lang}', output_lang)
+                    
                     title_messages = [
                         {"role": "system", "content": book_title_system_prompt},
-                        {"role": "user", "content": f"{book_title_prompt}\n\n{base_name}" if book_title_prompt != system_prompt else base_name}
+                        {"role": "user", "content": f"{book_title_prompt_formatted}\n\n{base_name}" if book_title_prompt != system_prompt else base_name}
                     ]
                     
                     try:

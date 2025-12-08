@@ -1540,28 +1540,16 @@ class BatchHeaderTranslator:
                 # Fallback: estimate ~4 characters per token
                 return max(1, len(text) // 4)
         
-        # Get configured prompt template
+        # Get configured prompt template from user's config (this is the user prompt)
         prompt_template = self.config.get('batch_header_prompt',
             "Translate these chapter titles to {target_lang}.\n"
             "Return ONLY a JSON object with chapter numbers as keys.\n"
             "Format: {\"1\": \"translated title\", \"2\": \"translated title\"}")
         
-        # Handle language in prompt
-        source_lang = _get_source_language()
-        lang_behavior = self.config.get('lang_prompt_behavior', 'auto')
-        
-        if lang_behavior == 'never':
-            lang_str = ""
-        elif lang_behavior == 'always':
-            lang_str = self.config.get('forced_source_lang', 'Korean')
-        else:  # auto
-            lang_str = source_lang if source_lang else ""
-        
-        # Handle output language
+        # Handle output language - this is what {target_lang} should be replaced with
         output_lang = self.config.get('output_language', 'English')
         
-        # Replace variables in prompt
-        prompt_template = prompt_template.replace('{target_lang}', lang_str)
+        # Replace {target_lang} variable in the user prompt with the output language
         prompt_template = prompt_template.replace('{target_lang}', output_lang)
         
         # Add the titles to translate
