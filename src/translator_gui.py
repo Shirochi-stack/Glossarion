@@ -1172,6 +1172,7 @@ Text to analyze:
                 "- Keep original Korean quotation marks (" ", ' ', 「」, 『』) as-is without converting to English quotes.\n"
                 "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 생 means 'life/living', 활 means 'active', 관 means 'hall/building' - together 생활관 means Dormitory. When you see [생활관], write [Dormitory]. Do not write [생활관] anywhere in your output - this is forbidden. Apply this rule to every single Asian character - convert them all to English.\n"
                 "- Use line breaks for proper formatting as expected of a novel.\n"
+                "- Preserve all <h1> tags or Markdown present.\n"
                 "- Preserve any image tags.\n"
             ),
             "japanese_TXT": (
@@ -1187,6 +1188,7 @@ Text to analyze:
                 "- Keep original Japanese quotation marks (「」 and 『』) as-is without converting to English quotes.\n"
                 "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory.\n"
                 "- Use line breaks for proper formatting as expected of a novel.\n"
+                "- Preserve all <h1> tags or Markdown present.\n"
                 "- Preserve any image tags.\n"
             ),
             "chinese_TXT": (
@@ -1202,6 +1204,7 @@ Text to analyze:
                 "- Keep original Chinese quotation marks (「」 for dialogue, 《》 for titles) as-is without converting to English quotes.\n"
                 "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory.\n"
                 "- Use line breaks for proper formatting as expected of a novel.\n"
+                "- Preserve all <h1> tags or Markdown present.\n"
                 "- Preserve any image tags.\n"
             ),
             "Manga_JP": (
