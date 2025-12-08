@@ -6690,23 +6690,23 @@ class UnifiedClient:
                     role = msg.get('role', 'user')
                     content = msg.get('content', '')
                     
-                    # Debug logging
-                    if not self._is_stop_requested():
-                        print(f"   Debug: Message {msg_idx}: role={role}, content type={type(content).__name__}")
-                        if isinstance(content, list):
-                            print(f"   Debug: Content list has {len(content)} parts")
-                            for part_idx, part in enumerate(content):
-                                print(f"   Debug:   Part {part_idx}: type={type(part).__name__}, keys={list(part.keys()) if isinstance(part, dict) else 'N/A'}")
-                                if isinstance(part, dict) and part.get('type') in ['image', 'image_url']:
-                                    # Show what's in the image field
-                                    if 'image' in part:
-                                        img_data = part['image']
-                                        print(f"   Debug:     'image' key contains: type={type(img_data).__name__}, is_str={isinstance(img_data, str)}, starts_with_data={str(img_data).startswith('data:') if isinstance(img_data, str) else 'N/A'}, length={len(str(img_data)) if img_data else 0}")
-                                        if isinstance(img_data, dict):
-                                            print(f"   Debug:     'image' dict keys: {list(img_data.keys())}")
-                                    if 'image_url' in part:
-                                        img_url_data = part['image_url']
-                                        print(f"   Debug:     'image_url' key contains: type={type(img_url_data).__name__}")
+                    # Debug logging (commented out)
+                    # if not self._is_stop_requested():
+                    #     print(f"   Debug: Message {msg_idx}: role={role}, content type={type(content).__name__}")
+                    #     if isinstance(content, list):
+                    #         print(f"   Debug: Content list has {len(content)} parts")
+                    #         for part_idx, part in enumerate(content):
+                    #             print(f"   Debug:   Part {part_idx}: type={type(part).__name__}, keys={list(part.keys()) if isinstance(part, dict) else 'N/A'}")
+                    #             if isinstance(part, dict) and part.get('type') in ['image', 'image_url']:
+                    #                 # Show what's in the image field
+                    #                 if 'image' in part:
+                    #                     img_data = part['image']
+                    #                     print(f"   Debug:     'image' key contains: type={type(img_data).__name__}, is_str={isinstance(img_data, str)}, starts_with_data={str(img_data).startswith('data:') if isinstance(img_data, str) else 'N/A'}, length={len(str(img_data)) if img_data else 0}")
+                    #                     if isinstance(img_data, dict):
+                    #                         print(f"   Debug:     'image' dict keys: {list(img_data.keys())}")
+                    #                 if 'image_url' in part:
+                    #                     img_url_data = part['image_url']
+                    #                     print(f"   Debug:     'image_url' key contains: type={type(img_url_data).__name__}")
                     
                     if role == 'system':
                         # System messages become user messages with INSTRUCTIONS prefix
@@ -6909,7 +6909,7 @@ class UnifiedClient:
                     if hasattr(response, 'candidates') and response.candidates:
                         for candidate in response.candidates:
                             if hasattr(candidate, 'content') and candidate.content:
-                                if hasattr(candidate.content, 'parts'):
+                                if hasattr(candidate.content, 'parts') and candidate.content.parts is not None:
                                     for part in candidate.content.parts:
                                         # Extract text
                                         if hasattr(part, 'text') and part.text:
