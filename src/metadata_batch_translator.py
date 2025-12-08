@@ -1555,7 +1555,8 @@ class BatchHeaderTranslator:
             "Format: {\"1\": \"translated title\", \"2\": \"translated title\"}")
         
         # Handle output language - this is what {target_lang} should be replaced with
-        output_lang = self.config.get('output_language', 'English')
+        # Check environment variable first (set by GUI), then config, then fallback to English
+        output_lang = os.getenv('OUTPUT_LANGUAGE', self.config.get('output_language', 'English'))
         
         # Replace {target_lang} variable in both system prompt and user prompt with the output language
         system_prompt = self.system_prompt.replace('{target_lang}', output_lang)
@@ -2241,12 +2242,11 @@ class MetadataTranslator:
         else:  # auto
             lang_str = source_lang if source_lang else ""
         
-        # Handle output language
-        output_lang = self.config.get('output_language', 'English')
+        # Handle output language - check env first (set by GUI), then config
+        output_lang = os.getenv('OUTPUT_LANGUAGE', self.config.get('output_language', 'English'))
         
         # Replace variables
-        prompt_template = prompt_template.replace('{target_lang}', lang_str)
-        prompt_template = prompt_template.replace('English', output_lang)
+        prompt_template = prompt_template.replace('{target_lang}', output_lang)
         
         user_prompt = prompt_template + f"\n\nFields to translate:\n{json.dumps(fields_to_send, ensure_ascii=False, indent=2)}"
         
@@ -2364,13 +2364,12 @@ class MetadataTranslator:
         else:  # auto
             lang_str = source_lang if source_lang else ""
         
-        # Handle output language
-        output_lang = self.config.get('output_language', 'English')
+        # Handle output language - check env first (set by GUI), then config
+        output_lang = os.getenv('OUTPUT_LANGUAGE', self.config.get('output_language', 'English'))
         
         # Replace variables
-        prompt = prompt_template.replace('{target_lang}', lang_str)
+        prompt = prompt_template.replace('{target_lang}', output_lang)
         prompt = prompt.replace('{field_value}', field_value)
-        prompt = prompt.replace('English', output_lang)
         
         # Clean up double spaces
         prompt = ' '.join(prompt.split())
