@@ -2247,55 +2247,75 @@ class ContentProcessor:
                     if src:
                         present_srcs.add(src)
                 
-                # --- Step 1: Track missing images by their position relative to siblings ---
-                # Block-level tags that we consider as positioning anchors
+                # --- Step 1: Build positional map of source document ---
+                # Strategy: Map source document as sequence of text blocks and images,
+                # then replicate that structure in translation using index positions
+                
                 block_tags = {'p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'section', 'article', 'header', 'footer', 'ul', 'ol', 'li', 'blockquote', 'pre'}
                 
-                image_positions = []  # (img_tag, position_info)
+                # Build ordered structure map from source
+                source_structure = []  # List of ('text', block_index) or ('image', img_tag)
+                text_block_counter = 0
                 
-                for img in orig_images:
-                    src = img.get('src')
-                    if not src or src in present_srcs:
-                        continue  # Skip images that are already present
-                    
-                    # Find positioning info for this image
-                    # Strategy: find the nearest block-level sibling or parent
-                    position_info = None
-                    
-                    # Check if image is wrapped in a paragraph or similar
-                    parent = img.parent
-                    if parent and parent.name in block_tags:
-                        # Image is inside a block - try to find previous sibling blocks
-                        prev_sibling = parent.find_previous_sibling()
-                        if prev_sibling and hasattr(prev_sibling, 'name'):
-                            position_info = ('after_sibling', prev_sibling.name, prev_sibling.get_text(strip=True)[:100])
-                        else:
-                            # No previous sibling - it's at the start
-                            position_info = ('at_start', parent.name, '')
-                    else:
-                        # Image not in a block - look for previous block in document order
-                        current = img
-                        while current:
-                            prev = current.find_previous(block_tags)
-                            if prev:
-                                position_info = ('after_element', prev.name, prev.get_text(strip=True)[:100])
-                                break
-                            current = current.parent
+                # Walk through body in document order
+                body = soup_orig.find('body')
+                if not body:
+                    body = soup_orig
+                
+                for elem in body.descendants:
+                    # Check if this is a block with meaningful text (not just images)
+                    if hasattr(elem, 'name') and elem.name in block_tags:
+                        text = elem.get_text(strip=True)
+                        # Check if block has actual text content
+                        has_text = bool(text)
+                        has_only_images = bool(elem.find('img', recursive=False)) and not any(
+                            child.string and child.string.strip() 
+                            for child in elem.children 
+                            if hasattr(child, 'string')
+                        )
                         
-                        if not position_info:
-                            position_info = ('at_start', 'body', '')
+                        if has_text and not has_only_images:
+                            source_structure.append(('text', text_block_counter))
+                            text_block_counter += 1
                     
-                    image_positions.append((img, position_info))
+                    # Check if this is an image (not already processed)
+                    elif hasattr(elem, 'name') and elem.name == 'img':
+                        src = elem.get('src')
+                        if src and src not in present_srcs:
+                            source_structure.append(('image', elem))
+                
+                # Build list of images to restore with their position info
+                image_positions = []  # (img_tag, insert_after_text_block_index or -1 for start)
+                
+                for i, (elem_type, elem_data) in enumerate(source_structure):
+                    if elem_type == 'image':
+                        # Find the most recent text block before this image
+                        prev_text_idx = -1
+                        for j in range(i - 1, -1, -1):
+                            if source_structure[j][0] == 'text':
+                                prev_text_idx = source_structure[j][1]
+                                break
+                        
+                        image_positions.append((elem_data, prev_text_idx))
                 
                 if not image_positions:
                     return text
                 
-                # --- Step 2: Insert images in translation based on sibling positions ---
+                # --- Step 2: Insert images in translation using index positions ---
                 inserted_count = 0
                 
-                for img_tag, position_info in image_positions:
-                    pos_type, tag_name, text_snippet = position_info
+                # Get all text blocks from translation in order
+                trans_text_blocks = []
+                trans_body = soup_text.find('body')
+                if not trans_body:
+                    trans_body = soup_text
                     
+                for block in trans_body.find_all(block_tags):
+                    text = block.get_text(strip=True)
+                    if text:
+                        trans_text_blocks.append(block)
+                
+                for img_tag, text_block_idx in image_positions:
                     # Create new image wrapped in paragraph
                     new_p = soup_text.new_tag('p')
                     new_img = soup_text.new_tag('img', src=img_tag.get('src'))
@@ -2306,65 +2326,31 @@ class ContentProcessor:
                     
                     inserted = False
                     
-                    if pos_type == 'at_start':
-                        # Insert at the very beginning of the document
-                        body = soup_text.find('body')
-                        if body:
-                            first_child = body.find()
-                            if first_child:
-                                first_child.insert_before(new_p)
-                                inserted = True
-                            else:
-                                body.append(new_p)
-                                inserted = True
+                    if text_block_idx == -1:
+                        # Insert at document start (after h1 if present)
+                        h1 = soup_text.find('h1')
+                        if h1:
+                            h1.insert_after(new_p)
+                            inserted = True
                         else:
-                            # No body tag - insert at document start
-                            first_elem = soup_text.find()
-                            if first_elem:
-                                first_elem.insert_before(new_p)
+                            body = soup_text.find('body')
+                            if body and body.contents:
+                                body.contents[0].insert_before(new_p)
                                 inserted = True
-                    
-                    elif pos_type == 'after_sibling':
-                        # Find matching sibling in translation by tag name and text
-                        candidates = soup_text.find_all(tag_name)
-                        best_match = None
-                        best_score = 0
-                        
-                        for candidate in candidates:
-                            candidate_text = candidate.get_text(strip=True)[:100]
-                            # Simple similarity: count matching characters
-                            if text_snippet and candidate_text:
-                                matches = sum(1 for a, b in zip(text_snippet.lower(), candidate_text.lower()) if a == b)
-                                score = matches / max(len(text_snippet), len(candidate_text))
-                                if score > best_score:
-                                    best_score = score
-                                    best_match = candidate
-                        
-                        if best_match and best_score > 0.3:  # 30% similarity threshold
-                            # Insert after this sibling
-                            best_match.insert_after(new_p)
+                            elif body:
+                                body.insert(0, new_p)
+                                inserted = True
+                    else:
+                        # Insert after the corresponding text block in translation
+                        if 0 <= text_block_idx < len(trans_text_blocks):
+                            trans_text_blocks[text_block_idx].insert_after(new_p)
+                            inserted = True
+                        elif trans_text_blocks:
+                            # Index out of range - insert after last block
+                            trans_text_blocks[-1].insert_after(new_p)
                             inserted = True
                     
-                    elif pos_type == 'after_element':
-                        # Find matching element in translation
-                        candidates = soup_text.find_all(tag_name)
-                        best_match = None
-                        best_score = 0
-                        
-                        for candidate in candidates:
-                            candidate_text = candidate.get_text(strip=True)[:100]
-                            if text_snippet and candidate_text:
-                                matches = sum(1 for a, b in zip(text_snippet.lower(), candidate_text.lower()) if a == b)
-                                score = matches / max(len(text_snippet), len(candidate_text))
-                                if score > best_score:
-                                    best_score = score
-                                    best_match = candidate
-                        
-                        if best_match and best_score > 0.3:
-                            best_match.insert_after(new_p)
-                            inserted = True
-                    
-                    # Fallback: append to end if we couldn't find a good position
+                    # Fallback: append to end
                     if not inserted:
                         body = soup_text.find('body')
                         if body:
