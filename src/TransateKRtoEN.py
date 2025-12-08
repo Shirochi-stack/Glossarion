@@ -6404,7 +6404,7 @@ def main(log_callback=None, stop_callback=None):
                                     # Replace variables in prompt
                                     field_prompt = prompt_template.replace('{source_lang}', lang_str)
                                     field_prompt = field_prompt.replace('{output_lang}', output_language)
-                                    field_prompt = field_prompt.replace('English', output_language)
+                                    field_prompt = field_prompt.replace('{target_lang}', output_language)
                                     field_prompt = field_prompt.replace('{field_value}', str(original_value))
                                     
                                     # Check if we're using a translation service (not AI)
@@ -6503,7 +6503,7 @@ def main(log_callback=None, stop_callback=None):
                                     # Replace variables in prompt
                                     field_prompt = prompt_template.replace('{source_lang}', lang_str)
                                     field_prompt = field_prompt.replace('{output_lang}', output_language)
-                                    field_prompt = field_prompt.replace('English', output_language)
+                                    field_prompt = field_prompt.replace('{target_lang}', output_language)
                                     field_prompt = field_prompt.replace('{field_value}', str(original_value))
                                     
                                     # Check if we're using a translation service (not AI)

@@ -703,9 +703,9 @@ def run_translation(
             'headers_per_batch': int(os.getenv('HEADERS_PER_BATCH', '350')),
             'temperature': float(os.getenv('TRANSLATION_TEMPERATURE', '0.3')),
             'max_tokens': int(os.getenv('MAX_OUTPUT_TOKENS', '12000')),
-            # Add Chapter Headers prompts from environment variables
-            'batch_header_system_prompt': os.getenv('BATCH_HEADER_SYSTEM_PROMPT', ''),
-            'batch_header_prompt': os.getenv('BATCH_HEADER_PROMPT', ''),
+            # Add Chapter Headers prompts from environment variables - use None if not set so fallback works
+            'batch_header_system_prompt': os.getenv('BATCH_HEADER_SYSTEM_PROMPT') or None,
+            'batch_header_prompt': os.getenv('BATCH_HEADER_PROMPT') or None,
         }
         
         # Get options from environment

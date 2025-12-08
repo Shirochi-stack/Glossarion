@@ -7290,9 +7290,24 @@ Important rules:
             os.environ['HEADERS_PER_BATCH'] = str(self.headers_per_batch_var)
             os.environ['UPDATE_HTML_HEADERS'] = "1" if self.update_html_headers_var else "0"
             os.environ['SAVE_HEADER_TRANSLATIONS'] = "1" if self.save_header_translations_var else "0"
-            # Set Chapter Headers prompts from config
-            os.environ['BATCH_HEADER_SYSTEM_PROMPT'] = self.config.get('batch_header_system_prompt', '')
-            os.environ['BATCH_HEADER_PROMPT'] = self.config.get('batch_header_prompt', '')
+            # Set Chapter Headers prompts from config - replace {target_lang} with output language
+            output_lang = self.config.get('output_language', 'English')
+            batch_header_system_prompt = self.config.get('batch_header_system_prompt',
+                "You are a professional translator specializing in novel chapter titles. "
+                "You must translate chapter titles to {target_lang}. "
+                "Respond with only the translated JSON, nothing else. "
+                "Maintain the original tone and style while making titles natural in the target language."
+            ).replace('{target_lang}', output_lang)
+            batch_header_prompt = self.config.get('batch_header_prompt',
+                "Translate these chapter titles to {target_lang}.\n"
+                "- For titles with parenthetical text, translate both the main title and the parenthetical content.\n"
+                "- Translate the meaning accurately - don't use overly dramatic words unless the original implies them.\n"
+                "- Preserve the chapter number format exactly as shown.\n"
+                "Return ONLY a JSON object with chapter numbers as keys.\n"
+                "Format: {\"1\": \"translated title\", \"2\": \"translated title\"}"
+            ).replace('{target_lang}', output_lang)
+            os.environ['BATCH_HEADER_SYSTEM_PROMPT'] = batch_header_system_prompt
+            os.environ['BATCH_HEADER_PROMPT'] = batch_header_prompt
             
             # Set metadata translation settings
             os.environ['TRANSLATE_METADATA_FIELDS'] = json.dumps(self.translate_metadata_fields)
