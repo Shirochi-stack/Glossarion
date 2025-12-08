@@ -2272,6 +2272,13 @@ class ContentProcessor:
                             if has_text_content:
                                 source_text_blocks.append(block)
                 
+                # Build a complete ordered list of all blocks and images to find positions
+                body = soup_orig.find('body') or soup_orig
+                all_elements = list(body.find_all(list(block_tags) + ['img']))
+                
+                # Create a mapping of text blocks to their indices
+                text_block_to_idx = {id(block): idx for idx, block in enumerate(source_text_blocks)}
+                
                 # For each missing image, find which text block it comes after
                 image_positions = []  # (img_tag, text_block_index or -1)
                 
@@ -2283,22 +2290,18 @@ class ContentProcessor:
                     # Find the index of the most recent text block before this image
                     prev_text_idx = -1
                     
-                    # Get all text blocks that come before this image in document order
-                    for idx, text_block in enumerate(source_text_blocks):
-                        # Use BeautifulSoup's comparison - if text_block comes before img
-                        try:
-                            # Find all elements in body
-                            body = soup_orig.find('body') or soup_orig
-                            all_elems = list(body.find_all(block_tags + ('img',)))
-                            
-                            # Find positions
-                            img_pos = all_elems.index(img) if img in all_elems else -1
-                            block_pos = all_elems.index(text_block) if text_block in all_elems else -1
-                            
-                            if block_pos != -1 and img_pos != -1 and block_pos < img_pos:
-                                prev_text_idx = idx
-                        except (ValueError, AttributeError):
-                            pass
+                    try:
+                        img_pos = all_elements.index(img)
+                        
+                        # Walk backwards from img_pos to find the most recent text block
+                        for i in range(img_pos - 1, -1, -1):
+                            elem = all_elements[i]
+                            elem_id = id(elem)
+                            if elem_id in text_block_to_idx:
+                                prev_text_idx = text_block_to_idx[elem_id]
+                                break
+                    except (ValueError, AttributeError):
+                        pass
                     
                     image_positions.append((img, prev_text_idx))
                 
