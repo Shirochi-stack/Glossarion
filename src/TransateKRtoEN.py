@@ -8122,9 +8122,15 @@ def main(log_callback=None, stop_callback=None):
                         print(f"   📊 Merged content: {merged_char_count:,} characters")
 
                 # Apply ignore filtering to the content before chunk splitting
+                # IMPORTANT: Skip header removal if request merging is active, because
+                # synthetic merge headers are critical for split-the-merge functionality
                 batch_translate_active = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
                 ignore_title_tag = os.getenv('IGNORE_TITLE', '0') == '1' and batch_translate_active
                 ignore_header_tags = os.getenv('IGNORE_HEADER', '0') == '1' and batch_translate_active
+                
+                # Don't remove headers if this is a merged request
+                if merge_info is not None:
+                    ignore_header_tags = False
                 
                 if (ignore_title_tag or ignore_header_tags) and c["body"]:
                     from bs4 import BeautifulSoup
