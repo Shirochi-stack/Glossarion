@@ -3833,6 +3833,49 @@ class BatchTranslationProcessor:
             # No history for failed chapters
             return False, actual_num, None, None, None
     
+    def _get_original_chapter_content(self, chapter):
+        """Extract original chapter content directly from EPUB by filename.
+        
+        Args:
+            chapter: Chapter dict with filename/original_basename
+            
+        Returns:
+            Original HTML content string, or None if extraction fails
+        """
+        try:
+            # Get the EPUB path
+            epub_path = getattr(self, 'epub_path', None)
+            if not epub_path or not os.path.exists(epub_path):
+                return None
+            
+            # Get the original filename from chapter
+            filename = chapter.get('original_basename') or chapter.get('filename')
+            if not filename:
+                return None
+            
+            # Extract from EPUB
+            import zipfile
+            with zipfile.ZipFile(epub_path, 'r') as zf:
+                # Try multiple path variations
+                possible_paths = [
+                    filename,
+                    f"OEBPS/{filename}",
+                    f"OPS/{filename}",
+                    f"EPUB/{filename}",
+                ]
+                
+                for path in possible_paths:
+                    try:
+                        content = zf.read(path).decode('utf-8', errors='ignore')
+                        return content
+                    except KeyError:
+                        continue
+            
+            return None
+        except Exception as e:
+            print(f"   ⚠️ Failed to extract original chapter content: {e}")
+            return None
+    
     def process_merged_group(self, merge_group, progress_manager):
         """
         Process a merge group (multiple chapters merged into a single API request).
@@ -4081,12 +4124,20 @@ class BatchTranslationProcessor:
                     section_content = split_sections[i]
                     
                     # Restore images for this section using its original source content
+                    # Use the chapter's original filename from content.opf to get the correct source
                     if self.config.EMERGENCY_IMAGE_RESTORE:
-                        original_content = content  # This is the original HTML for this chapter
+                        # Get the original chapter content from EPUB by matching filename
+                        original_content = self._get_original_chapter_content(chapter)
+                        if original_content is None:
+                            # Fallback to merged chapter body if we can't extract from EPUB
+                            original_content = content
+                        
                         from bs4 import BeautifulSoup
                         orig_soup = BeautifulSoup(original_content, 'html.parser')
                         orig_img_count = len(orig_soup.find_all('img'))
-                        print(f"   [Ch {actual_num}] Source has {orig_img_count} images, restoring...")
+                        print(f"   [Ch {actual_num}] Source has {orig_img_count} images (source length: {len(original_content)} chars), restoring...")
+                        if orig_img_count > 0:
+                            print(f"   [Ch {actual_num}] First image src: {orig_soup.find('img').get('src') if orig_soup.find('img') else 'N/A'}")
                         section_content = ContentProcessor.emergency_restore_images(section_content, original_content, verbose=True)
                     
                     # Generate filename for this chapter using content.opf naming
