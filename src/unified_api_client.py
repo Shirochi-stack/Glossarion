@@ -10200,8 +10200,8 @@ class UnifiedClient:
                             pass
                     
                     # Add safety parameters for providers that support them
-                    # Note: Together AI doesn't support the 'moderation' parameter
-                    if disable_safety and provider in ["groq", "fireworks"]:
+                    # Note: Together AI and Groq don't support the 'moderation' parameter
+                    if disable_safety and provider in ["fireworks"]:
                         extra_body["moderation"] = False
                         logger.info(f"🔓 Safety moderation disabled for {provider}")
                     # elif disable_safety and provider == "together":
