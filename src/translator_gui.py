@@ -3148,6 +3148,26 @@ Recent translations to summarize:
             except RuntimeError:
                 # Widget might be deleted if dialog was closed
                 pass
+        
+        # Sync with manga settings dialog if open
+        if hasattr(self, 'manga_settings_dialog') and self.manga_settings_dialog:
+            try:
+                # Check if widget is valid (not deleted)
+                if hasattr(self.manga_settings_dialog, 'manual_translate_language'):
+                    if self.manga_settings_dialog.manual_translate_language.text() != text:
+                        self.manga_settings_dialog.manual_translate_language.blockSignals(True)
+                        self.manga_settings_dialog.manual_translate_language.setText(text)
+                        self.manga_settings_dialog.manual_translate_language.blockSignals(False)
+            except RuntimeError:
+                # Widget might be deleted if dialog was closed
+                pass
+        
+        # Update manga settings in config as well
+        if 'manga_settings' not in self.config:
+            self.config['manga_settings'] = {}
+        if 'manual_edit' not in self.config['manga_settings']:
+            self.config['manga_settings']['manual_edit'] = {}
+        self.config['manga_settings']['manual_edit']['translate_target_language'] = text
 
     def _update_target_lang_state(self):
         """Update target language dropdown state based on prompt and model"""

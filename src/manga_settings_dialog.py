@@ -2192,10 +2192,16 @@ class MangaSettingsDialog(QDialog):
         translate_layout.addWidget(lang_label)
         
         self.manual_translate_language = QLineEdit()
-        self.manual_translate_language.setText(
-            self.settings.get('manual_edit', {}).get('translate_target_language', 'English')
-        )
+        # Get target language from main GUI first, fallback to saved settings, then default
+        target_lang = 'English'  # default
+        if hasattr(self.main_gui, 'config') and 'output_language' in self.main_gui.config:
+            target_lang = self.main_gui.config['output_language']
+        elif 'manual_edit' in self.settings and 'translate_target_language' in self.settings['manual_edit']:
+            target_lang = self.settings['manual_edit']['translate_target_language']
+        self.manual_translate_language.setText(target_lang)
         self.manual_translate_language.setToolTip("The language to translate text into (e.g., 'English', 'Spanish', 'French')")
+        # Connect to sync with main GUI when changed
+        self.manual_translate_language.textChanged.connect(self._on_manual_target_language_changed)
         translate_layout.addWidget(self.manual_translate_language)
         
         lang_help = QLabel(
@@ -2209,6 +2215,18 @@ class MangaSettingsDialog(QDialog):
         
         # Add stretch at end
         content_layout.addStretch()
+    
+    def _on_manual_target_language_changed(self, text):
+        """Handle manual target language change and sync with main GUI"""
+        if self._initializing:
+            return
+        
+        # Update main GUI's target language if available
+        if hasattr(self.main_gui, 'update_target_language'):
+            try:
+                self.main_gui.update_target_language(text)
+            except Exception as e:
+                print(f"Error syncing target language to main GUI: {e}")
     
     def _on_cloud_model_change(self, model):
         """Handle cloud model selection change"""
@@ -5039,3 +5057,10 @@ class MangaSettingsDialog(QDialog):
     def _cancel(self):
         """Cancel without saving"""
         self.reject()
+    
+    def closeEvent(self, event):
+        """Clean up reference when dialog closes"""
+        # Clear the reference in main_gui so syncing doesn't try to access a closed dialog
+        if hasattr(self.main_gui, 'manga_settings_dialog'):
+            self.main_gui.manga_settings_dialog = None
+        super().closeEvent(event)

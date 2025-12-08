@@ -5314,7 +5314,7 @@ class MangaTranslationTab(QObject):
             
             # Open the settings dialog
             # MangaSettingsDialog is PySide6-based, so pass the manga integration dialog as parent
-            MangaSettingsDialog(
+            self.main_gui.manga_settings_dialog = MangaSettingsDialog(
                 parent=self.dialog,  # Use PySide6 manga integration dialog as parent
                 main_gui=self.main_gui,
                 config=self.main_gui.config,
