@@ -7591,8 +7591,8 @@ class UnifiedClient:
         """Apply safety flags for providers that support them (avoid unsupported params)."""
         if not disable_safety:
             return
-        # Do NOT send 'moderation' to OpenAI; it's unsupported and causes 400 Unknown parameter
-        if provider in ["groq", "fireworks"]:
+        # Do NOT send 'moderation' to OpenAI, Together AI, or Groq; it's unsupported and causes 400 Unknown parameter
+        if provider in ["fireworks"]:
             payload["moderation"] = False
         elif provider == "poe":
             payload["safe_mode"] = False
