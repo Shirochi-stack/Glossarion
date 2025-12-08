@@ -5868,7 +5868,7 @@ def main(log_callback=None, stop_callback=None):
     if not input_path and len(sys.argv) > 1:
         input_path = sys.argv[1]
     
-    is_text_file = input_path.lower().endswith(('.txt', '.csv', '.json', '.pdf'))
+    is_text_file = input_path.lower().endswith(('.txt', '.csv', '.json', '.pdf', '.md'))
     
     if is_text_file:
         os.environ["IS_TEXT_FILE_TRANSLATION"] = "1"
@@ -5906,14 +5906,14 @@ def main(log_callback=None, stop_callback=None):
     else:
         print("✅ AI artifact removal is DISABLED - preserving all content as-is")
        
-    if '--epub' in sys.argv or (len(sys.argv) > 1 and sys.argv[1].endswith(('.epub', '.txt', '.csv', '.json', '.pdf'))):
+    if '--epub' in sys.argv or (len(sys.argv) > 1 and sys.argv[1].endswith(('.epub', '.txt', '.csv', '.json', '.pdf', '.md'))):
         import argparse
         parser = argparse.ArgumentParser()
         parser.add_argument('epub', help='Input EPUB or text file')
         args = parser.parse_args()
         input_path = args.epub
     
-    is_text_file = input_path.lower().endswith(('.txt', '.csv', '.json', '.pdf'))
+    is_text_file = input_path.lower().endswith(('.txt', '.csv', '.json', '.pdf', '.md'))
     
     # Disable Break Split Count for EPUB files (only works with plain text files)
     if input_path.lower().endswith('.epub'):
@@ -6550,10 +6550,10 @@ def main(log_callback=None, stop_callback=None):
     print("📑 GLOSSARY GENERATION PHASE")
     print("="*50)
     
-    # Skip glossary generation for CSV/JSON files (they are typically glossaries themselves)
-    if input_path.lower().endswith(('.csv', '.json')):
-        print("📑 Skipping glossary generation for CSV/JSON file")
-        print("   CSV/JSON files are treated as plain text and typically don't need glossaries")
+    # Skip glossary generation for CSV/JSON/MD files (they are typically glossaries themselves)
+    if input_path.lower().endswith(('.csv', '.json', '.md')):
+        print("📑 Skipping glossary generation for CSV/JSON/MD file")
+        print("   CSV/JSON/MD files are treated as plain text and typically don't need glossaries")
     else:
         print(f"📑 DEBUG: ENABLE_AUTO_GLOSSARY = '{os.getenv('ENABLE_AUTO_GLOSSARY', 'NOT SET')}'")
         print(f"📑 DEBUG: MANUAL_GLOSSARY = '{config.MANUAL_GLOSSARY}'")

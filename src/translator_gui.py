@@ -4713,8 +4713,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                             successful += 1
                         else:
                             failed += 1
-                    elif ext in {'.epub', '.txt', '.csv', '.json', '.pdf'}:
-                        # Process as EPUB/TXT/CSV/JSON/PDF
+                    elif ext in {'.epub', '.txt', '.csv', '.json', '.pdf', '.md'}:
+                        # Process as EPUB/TXT/CSV/JSON/PDF/MD
                         if self._process_text_file(file_path):
                             successful += 1
                         else:
