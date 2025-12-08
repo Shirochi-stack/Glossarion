@@ -89,7 +89,13 @@ class MetadataBatchTranslatorUI:
     
     def _initialize_default_prompts(self):
         """Initialize all default prompts in config if not present"""
-        # Book title prompt
+        # Book title system prompt
+        if 'book_title_system_prompt' not in self.gui.config:
+            self.gui.config['book_title_system_prompt'] = (
+                "You are a translator. Translate to {target_lang}. Respond with only the translated text, nothing else."
+            )
+        
+        # Book title user prompt
         if 'book_title_prompt' not in self.gui.config:
             self.gui.config['book_title_prompt'] = (
                 "Translate this book title to {target_lang} while retaining any acronyms:"
@@ -805,7 +811,7 @@ class MetadataBatchTranslatorUI:
             }
         """)
         self.title_system_text.setPlainText(self.gui.config.get('book_title_system_prompt', 
-            "You are a translator. Respond with only the translated text, nothing else."))
+            "You are a translator. Translate to {target_lang}. Respond with only the translated text, nothing else."))
         tab_layout.addWidget(self.title_system_text)
         
         # User prompt

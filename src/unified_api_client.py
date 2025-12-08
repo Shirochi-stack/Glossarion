@@ -7479,15 +7479,29 @@ class UnifiedClient:
                 snippet = _sanitize_for_log(resp.text, 300)
                 
                 # Check for "max_tokens is too large" error before logging
-                if status == 400 and ("max_tokens is too large" in resp.text or "supports at most" in resp.text):
+                # Handle both standard and Groq-specific error messages
+                if status == 400 and ("max_tokens is too large" in resp.text or 
+                                     "supports at most" in resp.text or
+                                     "must be less than or equal to" in resp.text):
                     # Log the original error first
                     print(f"{provider} API error: {status} - {snippet} (attempt {attempt + 1}/{max_retries})")
                     
                     import re
-                    # Extract the supported max tokens from error message
-                    match = re.search(r'supports at most (\d+) completion tokens', resp.text)
+                    supported_max = None
+                    
+                    # Try multiple patterns to extract the max token limit
+                    # Pattern 1: "supports at most X completion tokens" (standard)
+                    match = re.search(r'supports at most (\\d+) completion tokens', resp.text)
                     if match:
                         supported_max = int(match.group(1))
+                    
+                    # Pattern 2: "must be less than or equal to X" (Groq format)
+                    if not match:
+                        match = re.search(r'must be less than or equal to.*?(\d+)', resp.text)
+                        if match:
+                            supported_max = int(match.group(1))
+                    
+                    if supported_max:
                         # Try to find current max_tokens in the request body
                         current_max = json.get('max_tokens') or json.get('max_completion_tokens') if json else None
                         
@@ -7513,6 +7527,8 @@ class UnifiedClient:
                             continue
                         else:
                             print(f"    ⚠️ max_tokens error but cannot adjust: current={current_max}, supported={supported_max}")
+                    else:
+                        print(f"    ⚠️ max_tokens error but couldn't parse limit from error message")
                 else:
                     # Normal error logging for non-max_tokens errors
                     print(f"{provider} API error: {status} - {snippet} (attempt {attempt + 1})")
@@ -10432,13 +10448,26 @@ class UnifiedClient:
                     error_str = str(e).lower()
                     
                     # Handle "max_tokens is too large" error - auto-adjust and retry
-                    if "max_tokens is too large" in str(e) or "supports at most" in str(e):
+                    # Handle both standard and Groq-specific error messages
+                    if ("max_tokens is too large" in str(e) or 
+                        "supports at most" in str(e) or
+                        "must be less than or equal to" in str(e)):
                         import re
-                        # Extract the supported max tokens from error message
-                        # Example: "This model supports at most 32768 completion tokens, whereas you provided 36000."
-                        match = re.search(r'supports at most (\d+) completion tokens', str(e))
+                        supported_max = None
+                        
+                        # Try multiple patterns to extract the max token limit
+                        # Pattern 1: "supports at most X completion tokens" (standard)
+                        match = re.search(r'supports at most (\\d+) completion tokens', str(e))
                         if match:
                             supported_max = int(match.group(1))
+                        
+                        # Pattern 2: "must be less than or equal to X" (Groq format)
+                        if not match:
+                            match = re.search(r'must be less than or equal to.*?(\d+)', str(e))
+                            if match:
+                                supported_max = int(match.group(1))
+                        
+                        if supported_max:
                             current_max = max_tokens or norm_max_tokens or 8192
                             
                             if supported_max < current_max:

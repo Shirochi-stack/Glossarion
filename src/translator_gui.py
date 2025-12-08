@@ -5548,12 +5548,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     # Translate the image filename/title
                     self.append_log(f"📝 Translating image title...")
                     
-                    # Replace {target_lang} variable in book title prompt with output language
+                    # Replace {target_lang} variable in both system and user prompts with output language
                     output_lang = self.config.get('output_language', 'English')
+                    book_title_system_prompt_formatted = book_title_system_prompt.replace('{target_lang}', output_lang)
                     book_title_prompt_formatted = book_title_prompt.replace('{target_lang}', output_lang)
                     
                     title_messages = [
-                        {"role": "system", "content": book_title_system_prompt},
+                        {"role": "system", "content": book_title_system_prompt_formatted},
                         {"role": "user", "content": f"{book_title_prompt_formatted}\n\n{base_name}" if book_title_prompt != system_prompt else base_name}
                     ]
                     
@@ -7283,8 +7284,16 @@ Important rules:
             
             # Set book title translation settings
             os.environ['TRANSLATE_BOOK_TITLE'] = "1" if self.translate_book_title_var else "0"
-            os.environ['BOOK_TITLE_PROMPT'] = self.book_title_prompt
-            os.environ['BOOK_TITLE_SYSTEM_PROMPT'] = self.config.get('book_title_system_prompt', '')
+            # Replace {target_lang} variable in book title prompts with output language
+            output_lang = self.config.get('output_language', 'English')
+            self.append_log(f"[DEBUG] output_language from config: '{output_lang}'")
+            self.append_log(f"[DEBUG] book_title_prompt before: '{self.book_title_prompt}'")
+            book_title_prompt_formatted = self.book_title_prompt.replace('{target_lang}', output_lang)
+            book_title_system_prompt_formatted = self.config.get('book_title_system_prompt', '').replace('{target_lang}', output_lang)
+            self.append_log(f"[DEBUG] book_title_prompt after: '{book_title_prompt_formatted}'")
+            self.append_log(f"[DEBUG] book_title_system_prompt after: '{book_title_system_prompt_formatted}'")
+            os.environ['BOOK_TITLE_PROMPT'] = book_title_prompt_formatted
+            os.environ['BOOK_TITLE_SYSTEM_PROMPT'] = book_title_system_prompt_formatted
             
             # Set metadata system prompt
             os.environ['METADATA_SYSTEM_PROMPT'] = self.config.get('metadata_system_prompt', '')
