@@ -6902,6 +6902,29 @@ class UnifiedClient:
                         config=generation_config
                     )
                     
+                    # Check for blocked content in response
+                    finish_reason = 'stop'
+                    if hasattr(response, 'candidates') and response.candidates:
+                        for candidate in response.candidates:
+                            if hasattr(candidate, 'finish_reason'):
+                                finish_reason_str = str(candidate.finish_reason)
+                                if 'SAFETY' in finish_reason_str or 'PROHIBITED' in finish_reason_str or 'BLOCKED' in finish_reason_str:
+                                    raise UnifiedClientError(
+                                        "Content blocked by Vertex AI Gemini safety filter",
+                                        error_type="prohibited_content"
+                                    )
+                                elif 'MAX_TOKENS' in finish_reason_str or 'LENGTH' in finish_reason_str:
+                                    finish_reason = 'length'
+                    
+                    # Check prompt_feedback for blocks
+                    if hasattr(response, 'prompt_feedback'):
+                        feedback = response.prompt_feedback
+                        if hasattr(feedback, 'block_reason') and feedback.block_reason:
+                            raise UnifiedClientError(
+                                f"Content blocked by Vertex AI: {feedback.block_reason}",
+                                error_type="prohibited_content"
+                            )
+                    
                     # Extract text and image from response
                     result_text = ""
                     image_data = None
@@ -6920,6 +6943,19 @@ class UnifiedClient:
                                                 image_data = part.inline_data.data
                                                 mime_type = getattr(part.inline_data, 'mime_type', 'image/png')
                                                 print(f"   🖼️ Extracted image from Vertex AI response (mime_type: {mime_type})")
+                    
+                    # Check for empty response - might be safety filter
+                    if not result_text and not image_data:
+                        # Log more details about the empty response
+                        if hasattr(response, 'candidates') and response.candidates:
+                            print(f"   ⚠️ Empty response - candidates: {len(response.candidates)}")
+                            for idx, candidate in enumerate(response.candidates):
+                                if hasattr(candidate, 'finish_reason'):
+                                    print(f"   ⚠️ Candidate {idx} finish_reason: {candidate.finish_reason}")
+                        raise UnifiedClientError(
+                            "Empty response from Vertex AI Gemini - likely safety filter",
+                            error_type="prohibited_content"
+                        )
                     
                     # Save image if present
                     if image_data and enable_image_output:

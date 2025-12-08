@@ -4541,12 +4541,19 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # If scanning phase toggle is enabled, launch scanner after translation
                 # BUT only if translation completed successfully (not stopped by user)
                 # SKIP scanning for CSV/JSON files (they are plain text glossaries, not translations)
+                # SKIP scanning for image files (they are image translations, not text documents)
                 try:
                     # Check if any of the files are CSV/JSON (but NOT TXT - TXT files are valid translation sources)
                     csv_json_files = [f for f in self.selected_files if f.lower().endswith(('.csv', '.json'))]
                     
+                    # Check if any files are images
+                    image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
+                    image_files = [f for f in self.selected_files if os.path.splitext(f)[1].lower() in image_extensions]
+                    
                     if csv_json_files:
                         self.append_log("📑 Skipping post-translation scanning for CSV/JSON files")
+                    elif image_files:
+                        self.append_log("🖼️ Skipping post-translation scanning for image files")
                     elif (hasattr(self, 'scan_phase_enabled_var') and self.scan_phase_enabled_var and 
                         translation_completed and not self.stop_requested):
                         mode = self.scan_phase_mode_var if hasattr(self, 'scan_phase_mode_var') else 'quick-scan'
