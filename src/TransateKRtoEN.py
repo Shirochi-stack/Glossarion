@@ -546,7 +546,8 @@ class RequestMerger:
         
         # Helper to check for markdown header pattern
         def get_markdown_header_match(text):
-            return re.match(r'^\s*(#{1,6})\s+(.+?)\s*$', text, re.DOTALL)
+            # Match markdown headers with optional trailing backslashes/newlines
+            return re.match(r'^\s*(#{1,6})\s+(.+?)(?:\\n\\|\s)*$', text, re.DOTALL)
 
         # 1. Scan for <p> tags that contain ONLY a markdown header
         for p in soup.find_all('p'):
@@ -2231,11 +2232,14 @@ class ContentProcessor:
             # Extract images from translation
             text_images = soup_text.find_all('img')
             
-            # If counts match, nothing to do
-            if len(orig_images) == len(text_images):
+            # Check if we need to restore images
+            # Case 1: Translation has fewer images
+            # Case 2: Translation has images but they might be in wrong positions (always restore for merged content)
+            if len(text_images) >= len(orig_images):
+                # Counts match or exceed - assume correct, skip restoration
                 return text
                 
-            # If translation has fewer images, try to restore them
+            # Translation has fewer images, try to restore them
             if len(text_images) < len(orig_images):
                 log(f"🖼️ Image mismatch! Source: {len(orig_images)}, Translation: {len(text_images)}")
                 log("🔧 Attempting emergency image restoration (text-ratio method)...")
@@ -2298,7 +2302,8 @@ class ContentProcessor:
                 trans_elements = flatten_blocks(soup_text)
                 
                 if not trans_elements:
-                    # Target is empty or weird? Just append all missing images
+                    # Target is empty or weird? Just append all missing images at the end
+                    log(f"⚠️ No content blocks found in translation, appending {len(image_positions)} images to end")
                     for img, _ in image_positions:
                         new_p = soup_text.new_tag('p')
                         new_img = soup_text.new_tag('img', src=img.get('src'))
@@ -2307,6 +2312,7 @@ class ContentProcessor:
                         new_p.append(new_img)
                         if soup_text.body: soup_text.body.append(new_p)
                         else: soup_text.append(new_p)
+                    log(f"✅ Appended {len(image_positions)} missing images to end of document")
                     return str(soup_text)
 
                 # Calculate cumulative text lengths of target blocks
@@ -4008,10 +4014,7 @@ class BatchTranslationProcessor:
                 except Exception as conv_err:
                     print(f"   ⚠️ Enhanced HTML conversion failed: {conv_err} — saving raw content")
             
-            # Emergency Image Restoration (if enabled)
-            # MOVED: Run AFTER markdown->HTML conversion to avoid losing tags
-            if self.config.EMERGENCY_IMAGE_RESTORE:
-                cleaned = ContentProcessor.emergency_restore_images(cleaned, merged_content)
+            # NOTE: Image restoration moved to after split (per-section basis)
             
             # Optionally restore paragraphs if the output lacks structure
             if getattr(self.config, 'EMERGENCY_RESTORE', False):
@@ -4067,9 +4070,24 @@ class BatchTranslationProcessor:
                 # Split successful - save each section as individual file
                 print(f"   ✂️ Splitting merged content into {len(split_sections)} individual files")
                 
+                # DEBUG: Check images before split
+                from bs4 import BeautifulSoup
+                pre_split_soup = BeautifulSoup(cleaned, 'html.parser')
+                pre_split_imgs = len(pre_split_soup.find_all('img'))
+                print(f"[DEBUG] Before split: {pre_split_imgs} images in merged content")
+                
                 saved_files = []
                 for i, (actual_num, content, idx, chapter, content_hash) in enumerate(chapters_data):
                     section_content = split_sections[i]
+                    
+                    # Restore images for this section using its original source content
+                    if self.config.EMERGENCY_IMAGE_RESTORE:
+                        original_content = content  # This is the original HTML for this chapter
+                        from bs4 import BeautifulSoup
+                        orig_soup = BeautifulSoup(original_content, 'html.parser')
+                        orig_img_count = len(orig_soup.find_all('img'))
+                        print(f"   [Ch {actual_num}] Source has {orig_img_count} images, restoring...")
+                        section_content = ContentProcessor.emergency_restore_images(section_content, original_content, verbose=True)
                     
                     # Generate filename for this chapter using content.opf naming
                     fname = FileUtilities.create_chapter_filename(chapter, actual_num)
