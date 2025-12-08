@@ -2106,7 +2106,7 @@ class QAScannerMixin:
         scroll_layout.addWidget(wordcount_group)
         
         check_word_count_checkbox = self._create_styled_checkbox("Cross-reference word counts with original source file")
-        check_word_count_checkbox.setChecked(qa_settings.get('check_word_count_ratio', False))
+        check_word_count_checkbox.setChecked(qa_settings.get('check_word_count_ratio', True))
         wordcount_layout.addWidget(check_word_count_checkbox)
         
         wordcount_desc = QLabel("Compares word counts between original and translated files to detect missing content.\n" +

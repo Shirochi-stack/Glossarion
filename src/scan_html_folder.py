@@ -4799,7 +4799,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'check_paragraph_structure': True,
             'check_invalid_nesting': False,
             'paragraph_threshold': 0.3,
-            'check_word_count_ratio': False,
+            'check_word_count_ratio': True,
             'check_multiple_headers': True,
             'warn_name_mismatch': True
         }
