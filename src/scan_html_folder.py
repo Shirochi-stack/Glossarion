@@ -645,31 +645,62 @@ def detect_non_english_content(text, qa_settings=None):
     if target_language in latin_languages and len(filtered_text.strip()) > 50:
         # Try to detect the actual language of the text
         try:
+            from langdetect import detect_langs
             # Use full text for language detection to catch issues anywhere in file
             # Set recursion limit temporarily to catch issues
             import sys
             old_limit = sys.getrecursionlimit()
             try:
                 sys.setrecursionlimit(1000)  # Reasonable limit to catch recursion early
-                detected_lang = detect(filtered_text)
+                # Use detect_langs to get confidence scores
+                lang_probabilities = detect_langs(filtered_text)
             finally:
                 sys.setrecursionlimit(old_limit)  # Restore original limit
             
-            detected_name = lang_code_mapping.get(detected_lang, detected_lang.upper())
-            
-            # Map target language to expected code
+            # Map target language to expected code and acceptable variants
             target_code_mapping = {
                 'english': 'en', 'spanish': 'es', 'french': 'fr', 'german': 'de',
                 'portuguese': 'pt', 'italian': 'it'
             }
             expected_code = target_code_mapping.get(target_language, 'en')
             
-            # If detected language doesn't match target
-            if detected_lang != expected_code:
-                # Add language mismatch as an issue
-                issues.append(f"Language_mismatch_detected_{detected_name}_expected_{target_language.capitalize()}")
-                # Return early since we found a language mismatch
-                return len(issues) > 0, issues
+            # Define acceptable language variants (closely related languages)
+            # These won't be flagged as mismatches
+            acceptable_variants = {
+                'es': ['ca', 'gl'],  # Spanish accepts Catalan and Galician
+                'pt': ['gl'],        # Portuguese accepts Galician
+                'en': ['cy'],        # English accepts Welsh (rare but possible)
+            }
+            
+            # Get top detected language and its confidence
+            if lang_probabilities:
+                top_detection = lang_probabilities[0]
+                detected_lang = top_detection.lang
+                confidence = top_detection.prob
+                
+                detected_name = lang_code_mapping.get(detected_lang, detected_lang.upper())
+                
+                # Only flag as mismatch if:
+                # 1. Detected language is different from target
+                # 2. Confidence is reasonably high (>= 0.7)
+                # 3. The detected language is not an acceptable variant
+                # 4. The expected language is not in top 2 detections with reasonable probability
+                if detected_lang != expected_code and confidence >= 0.7:
+                    # Check if detected language is an acceptable variant
+                    is_acceptable_variant = detected_lang in acceptable_variants.get(expected_code, [])
+                    
+                    if not is_acceptable_variant:
+                        # Check if expected language is in top detections with decent probability
+                        expected_in_top = any(
+                            det.lang == expected_code and det.prob >= 0.3 
+                            for det in lang_probabilities[:2]
+                        )
+                        
+                        if not expected_in_top:
+                            # Add language mismatch as an issue
+                            issues.append(f"Language_mismatch_detected_{detected_name}_expected_{target_language.capitalize()}")
+                            # Return early since we found a language mismatch
+                            return len(issues) > 0, issues
         except (LangDetectException, RecursionError, RuntimeError) as e:
             # Language detection failed (not enough text, ambiguous, or recursion error)
             # Fall through to script-based detection
