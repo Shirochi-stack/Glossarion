@@ -2248,55 +2248,59 @@ class ContentProcessor:
                         present_srcs.add(src)
                 
                 # --- Step 1: Build positional map of source document ---
-                # Strategy: Map source document as sequence of text blocks and images,
-                # then replicate that structure in translation using index positions
+                # Strategy: Find all text blocks and images in order, track text block indices
                 
                 block_tags = {'p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'section', 'article', 'header', 'footer', 'ul', 'ol', 'li', 'blockquote', 'pre'}
                 
-                # Build ordered structure map from source
-                source_structure = []  # List of ('text', block_index) or ('image', img_tag)
-                text_block_counter = 0
+                # Get all text blocks (blocks with actual text content)
+                source_text_blocks = []
+                for block in soup_orig.find_all(block_tags):
+                    text = block.get_text(strip=True)
+                    if text:
+                        # Check if this is a real text block, not just an image container
+                        direct_imgs = block.find_all('img', recursive=False)
+                        if not direct_imgs:
+                            # No direct images - definitely a text block
+                            source_text_blocks.append(block)
+                        else:
+                            # Has images - check if there's also text
+                            has_text_content = any(
+                                (isinstance(child, str) and child.strip()) or
+                                (hasattr(child, 'name') and child.name not in ['img'] and child.get_text(strip=True))
+                                for child in block.children
+                            )
+                            if has_text_content:
+                                source_text_blocks.append(block)
                 
-                # Walk through body in document order
-                body = soup_orig.find('body')
-                if not body:
-                    body = soup_orig
+                # For each missing image, find which text block it comes after
+                image_positions = []  # (img_tag, text_block_index or -1)
                 
-                for elem in body.descendants:
-                    # Check if this is a block with meaningful text (not just images)
-                    if hasattr(elem, 'name') and elem.name in block_tags:
-                        text = elem.get_text(strip=True)
-                        # Check if block has actual text content
-                        has_text = bool(text)
-                        has_only_images = bool(elem.find('img', recursive=False)) and not any(
-                            child.string and child.string.strip() 
-                            for child in elem.children 
-                            if hasattr(child, 'string')
-                        )
-                        
-                        if has_text and not has_only_images:
-                            source_structure.append(('text', text_block_counter))
-                            text_block_counter += 1
+                for img in orig_images:
+                    src = img.get('src')
+                    if not src or src in present_srcs:
+                        continue
                     
-                    # Check if this is an image (not already processed)
-                    elif hasattr(elem, 'name') and elem.name == 'img':
-                        src = elem.get('src')
-                        if src and src not in present_srcs:
-                            source_structure.append(('image', elem))
-                
-                # Build list of images to restore with their position info
-                image_positions = []  # (img_tag, insert_after_text_block_index or -1 for start)
-                
-                for i, (elem_type, elem_data) in enumerate(source_structure):
-                    if elem_type == 'image':
-                        # Find the most recent text block before this image
-                        prev_text_idx = -1
-                        for j in range(i - 1, -1, -1):
-                            if source_structure[j][0] == 'text':
-                                prev_text_idx = source_structure[j][1]
-                                break
-                        
-                        image_positions.append((elem_data, prev_text_idx))
+                    # Find the index of the most recent text block before this image
+                    prev_text_idx = -1
+                    
+                    # Get all text blocks that come before this image in document order
+                    for idx, text_block in enumerate(source_text_blocks):
+                        # Use BeautifulSoup's comparison - if text_block comes before img
+                        try:
+                            # Find all elements in body
+                            body = soup_orig.find('body') or soup_orig
+                            all_elems = list(body.find_all(block_tags + ('img',)))
+                            
+                            # Find positions
+                            img_pos = all_elems.index(img) if img in all_elems else -1
+                            block_pos = all_elems.index(text_block) if text_block in all_elems else -1
+                            
+                            if block_pos != -1 and img_pos != -1 and block_pos < img_pos:
+                                prev_text_idx = idx
+                        except (ValueError, AttributeError):
+                            pass
+                    
+                    image_positions.append((img, prev_text_idx))
                 
                 if not image_positions:
                     return text
