@@ -1448,7 +1448,9 @@ Rules:
             msg_box = QMessageBox(None)
             msg_box.setWindowTitle("Additional Glossary Loaded")
             msg_box.setIcon(QMessageBox.Information)
-            msg_box.setText(f"Successfully loaded additional glossary:\n\n{os.path.basename(file_path)}\n\n{content_preview}\n\nThis will be copied as 'glossary_extension.csv' alongside the main glossary and sent to the API.")
+            # Use the actual file extension in the message
+            target_filename = f"glossary_extension{file_ext}"
+            msg_box.setText(f"Successfully loaded additional glossary:\n\n{os.path.basename(file_path)}\n\n{content_preview}\n\nThis will be copied as '{target_filename}' alongside the main glossary and sent to the API.")
             
             # Set window icon
             try:
