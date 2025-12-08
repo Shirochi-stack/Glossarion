@@ -4069,7 +4069,7 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
     """Cross-reference word counts between original and translated files.
     
     Matches translated files to original EPUB chapters by filename.
-    Handles response_ prefix and ignores file extensions.
+    Handles response_ prefix and ignores file extensions (including double extensions).
     
     Args:
         original_counts: Dict of chapter word counts from original EPUB
@@ -4079,9 +4079,19 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
         merge_info: Dict with merged_chapters info from translation_progress.json
                    Format: {parent_chapter_num: [list of merged child chapter nums]}
     """
+    def strip_all_extensions(filename):
+        """Remove all extensions from filename, handling double extensions like .htm.xhtml"""
+        base = filename
+        while True:
+            new_base, ext = os.path.splitext(base)
+            if not ext or new_base == base:
+                break
+            base = new_base
+        return base
+    
     basename = os.path.basename(translated_file)
-    # Remove extension for matching (don't consider .html, .xhtml, .htm, etc.)
-    basename_no_ext = os.path.splitext(basename)[0]
+    # Remove ALL extensions for matching (handles .html, .htm.xhtml, etc.)
+    basename_no_ext = strip_all_extensions(basename)
     
     # Remove response_ prefix if present
     search_name = basename_no_ext
@@ -4117,7 +4127,7 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
     # This allows us to find child chapter word counts by their filenames
     filename_to_spine_idx = {}
     for sidx, cinfo in original_counts.items():
-        fname = os.path.splitext(cinfo['filename'])[0].lower()
+        fname = strip_all_extensions(cinfo['filename']).lower()
         filename_to_spine_idx[fname] = sidx
         # Also extract chapter number from filename for fallback matching
         fname_num_match = re.search(r'(\d+)', fname)
@@ -4129,7 +4139,7 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
     
     # Try to find matching filename in original_counts
     for spine_idx, count_info in original_counts.items():
-        epub_filename = os.path.splitext(count_info['filename'])[0]  # Remove extension from EPUB filename
+        epub_filename = strip_all_extensions(count_info['filename'])  # Remove ALL extensions from EPUB filename
         
         # Direct filename match (case-insensitive)
         if search_name.lower() == epub_filename.lower():
