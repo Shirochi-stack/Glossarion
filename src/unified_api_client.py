@@ -10360,7 +10360,6 @@ class UnifiedClient:
                                 filename = f"{clean_name}.png"
                             else:
                                 # Fallback to timestamp if no response_name
-                                from datetime import datetime
                                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                                 filename = f"{timestamp}.png"
                             
