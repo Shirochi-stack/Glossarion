@@ -6664,7 +6664,8 @@ class UnifiedClient:
                 )
             
             else:
-                # For Gemini models on Vertex AI, we need to use Vertex AI SDK
+                # For Gemini models on Vertex AI, use the new google-genai SDK with vertexai=True
+                # This supports image generation unlike the old vertexai SDK
                 location = os.getenv('VERTEX_AI_LOCATION', 'global')
                 
                 # Check stop flag before Gemini call
@@ -6672,30 +6673,62 @@ class UnifiedClient:
                     logger.info("Stop requested, cancelling Vertex AI Gemini request")
                     raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
                 
-                # Initialize Vertex AI
-                vertexai.init(project=project_id, location=location, credentials=credentials)
+                # Import google-genai SDK
+                from google import genai
+                from google.genai import types
                 
-                # Import GenerativeModel from vertexai
-                from vertexai.generative_models import GenerativeModel, GenerationConfig, HarmCategory, HarmBlockThreshold
+                # Create Vertex AI client using google-genai SDK
+                vertex_genai_client = genai.Client(
+                    vertexai=True,
+                    project=project_id,
+                    location=location
+                )
                 
-                # Create model instance
-                vertex_model = GenerativeModel(model_name)
-                
-                # Format messages for Vertex AI Gemini
-                # If messages contain _raw_content_object (with thought signatures), use Content objects
-                # Otherwise fall back to string formatting
-                formatted_prompt = self._build_vertex_content_list(messages)
-                
-                # NOTE: No need to re-save payload here - it was already saved before this function
-                # and the serialized thought_signature is already in messages[]['_raw_content_object']
+                # Format messages - convert to google-genai format
+                contents = []
+                for msg in messages:
+                    role = msg.get('role', 'user')
+                    content = msg.get('content', '')
+                    
+                    if role == 'system':
+                        # System messages become user messages with INSTRUCTIONS prefix
+                        contents.append(types.Content(role='user', parts=[types.Part(text=f"INSTRUCTIONS: {content}")]))
+                    elif role == 'user':
+                        if isinstance(content, list):
+                            # Multi-part content (text + images)
+                            parts = []
+                            for part in content:
+                                if isinstance(part, dict):
+                                    if part.get('type') == 'text':
+                                        text_value = part.get('text', '')
+                                        if isinstance(text_value, str):
+                                            parts.append(types.Part(text=text_value))
+                                    elif part.get('type') == 'image_url':
+                                        # Handle image
+                                        image_url = part.get('image_url', {})
+                                        url = image_url.get('url', '') if isinstance(image_url, dict) else image_url
+                                        if url and isinstance(url, str) and url.startswith('data:'):
+                                            import base64
+                                            mime_and_data = url.split(',', 1)
+                                            if len(mime_and_data) == 2:
+                                                base64_data = mime_and_data[1]
+                                                mime_type = 'image/jpeg'
+                                                if 'image/png' in mime_and_data[0]:
+                                                    mime_type = 'image/png'
+                                                elif 'image/webp' in mime_and_data[0]:
+                                                    mime_type = 'image/webp'
+                                                image_bytes = base64.b64decode(base64_data)
+                                                parts.append(types.Part(inline_data=types.Blob(mime_type=mime_type, data=image_bytes)))
+                            if parts:
+                                contents.append(types.Content(role='user', parts=parts))
+                        elif isinstance(content, str):
+                            contents.append(types.Content(role='user', parts=[types.Part(text=content)]))
+                    elif role == 'assistant':
+                        contents.append(types.Content(role='model', parts=[types.Part(text=content)]))
                 
                 # Check if safety settings are disabled via config (from GUI)
                 disable_safety_env = os.getenv("DISABLE_GEMINI_SAFETY", "0")
                 disable_safety = disable_safety_env in ("1", "true", "True", "TRUE")
-                
-                # Get thinking budget from environment (though Vertex AI may not support it)
-                thinking_budget = int(os.getenv("THINKING_BUDGET", "-1"))
-                enable_thinking = os.getenv("ENABLE_GEMINI_THINKING", "0") == "1"
                 
                 # Check if image output mode is enabled
                 enable_image_output = os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
@@ -6708,114 +6741,81 @@ class UnifiedClient:
                     print(f"🎨 Image output mode enabled for {model_name}")
                 
                 # Log configuration
-                print(f"\n🔧 Vertex AI Gemini Configuration:")
+                print(f"\n🔧 Vertex AI Gemini Configuration (google-genai SDK):")
                 print(f"   Model: {model_name}")
                 print(f"   Region: {location}")
                 print(f"   Project: {project_id}")
                 
-                # Configure generation parameters using passed parameters
-                generation_config_dict = {
+                # Build generation config using google-genai SDK types
+                config_params = {
                     "temperature": temperature,
                     "max_output_tokens": max_tokens or 8192,
                 }
                 
-                # Add user-configured anti-duplicate parameters if enabled
-                if os.getenv("ENABLE_ANTI_DUPLICATE", "0") == "1":
-                    # Get all anti-duplicate parameters from environment
-                    if os.getenv("TOP_P"):
-                        top_p = float(os.getenv("TOP_P", "1.0"))
-                        if top_p < 1.0:  # Only add if not default
-                            generation_config_dict["top_p"] = top_p
-                    
-                    if os.getenv("TOP_K"):
-                        top_k = int(os.getenv("TOP_K", "0"))
-                        if top_k > 0:  # Only add if not default
-                            generation_config_dict["top_k"] = top_k
-                    
-                    # Note: Vertex AI Gemini may not support all parameters like frequency_penalty
-                    # Add only supported parameters
-                    if os.getenv("CANDIDATE_COUNT"):
-                        candidate_count = int(os.getenv("CANDIDATE_COUNT", "1"))
-                        if candidate_count > 1:
-                            generation_config_dict["candidate_count"] = candidate_count
-                    
-                    # Add custom stop sequences if provided
-                    custom_stops = os.getenv("CUSTOM_STOP_SEQUENCES", "").strip()
-                    if custom_stops:
-                        additional_stops = [s.strip() for s in custom_stops.split(",") if s.strip()]
-                        if stop_sequences:
-                            stop_sequences.extend(additional_stops)
-                        else:
-                            stop_sequences = additional_stops
-                
-                if stop_sequences:
-                    generation_config_dict["stop_sequences"] = stop_sequences
-                
-                # Handle image output config separately (not part of GenerationConfig)
-                image_config_dict = None
+                # Add response modalities for image generation
                 if enable_image_output:
-                    # Configure response modalities for image output
-                    generation_config_dict["response_modalities"] = ['IMAGE', 'TEXT']
+                    config_params["response_modalities"] = [types.Modality.IMAGE, types.Modality.TEXT]
                     
-                    # Get resolution from environment variable
+                    # Get image config parameters
                     image_resolution = os.getenv("IMAGE_OUTPUT_RESOLUTION", "1K")
-                    # Validate resolution (must be 1K, 2K, or 4K)
-                    if image_resolution not in ["1K", "2K", "4K"]:
-                        image_resolution = "1K"  # Fallback to default
-                    
-                    # Get aspect ratio from environment variable (optional)
                     aspect_ratio = os.getenv("IMAGE_OUTPUT_ASPECT_RATIO", "auto")
                     
-                    # Create image config dict - only include aspect_ratio if explicitly set
-                    image_config_dict = {"image_size": image_resolution}
                     if aspect_ratio != "auto":
-                        image_config_dict["aspect_ratio"] = aspect_ratio
+                        config_params["image_config"] = types.ImageConfig(
+                            aspect_ratio=aspect_ratio,
+                            image_size=image_resolution
+                        )
                         if not self._is_stop_requested():
                             print(f"   🖼️ Image config: aspect_ratio={aspect_ratio}, resolution={image_resolution}")
                     else:
-                        # Don't specify aspect ratio - let Gemini auto-detect
+                        config_params["image_config"] = types.ImageConfig(image_size=image_resolution)
                         if not self._is_stop_requested():
                             print(f"   🖼️ Image config: aspect_ratio=auto, resolution={image_resolution}")
                 
-                # Create generation config (without image_generation_config)
-                generation_config = GenerationConfig(**generation_config_dict)
+                # Add anti-duplicate parameters if enabled
+                if os.getenv("ENABLE_ANTI_DUPLICATE", "0") == "1":
+                    if os.getenv("TOP_P"):
+                        top_p = float(os.getenv("TOP_P", "1.0"))
+                        if top_p < 1.0:
+                            config_params["top_p"] = top_p
+                    if os.getenv("TOP_K"):
+                        top_k = int(os.getenv("TOP_K", "0"))
+                        if top_k > 0:
+                            config_params["top_k"] = top_k
                 
-                # Configure safety settings based on GUI toggle
+                generation_config = types.GenerateContentConfig(**config_params)
+                
+                # Configure safety settings using google-genai SDK
                 safety_settings = None
                 if disable_safety:
-                    # Import SafetySetting from vertexai
-                    from vertexai.generative_models import SafetySetting
-                    
-                    # Create list of SafetySetting objects (same format as regular Gemini)
                     safety_settings = [
-                        SafetySetting(
-                            category=HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-                            threshold=HarmBlockThreshold.BLOCK_NONE
+                        types.SafetySetting(
+                            category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+                            threshold=types.HarmBlockThreshold.BLOCK_NONE
                         ),
-                        SafetySetting(
-                            category=HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-                            threshold=HarmBlockThreshold.BLOCK_NONE
+                        types.SafetySetting(
+                            category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                            threshold=types.HarmBlockThreshold.BLOCK_NONE
                         ),
-                        SafetySetting(
-                            category=HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-                            threshold=HarmBlockThreshold.BLOCK_NONE
+                        types.SafetySetting(
+                            category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+                            threshold=types.HarmBlockThreshold.BLOCK_NONE
                         ),
-                        SafetySetting(
-                            category=HarmCategory.HARM_CATEGORY_HARASSMENT,
-                            threshold=HarmBlockThreshold.BLOCK_NONE
+                        types.SafetySetting(
+                            category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+                            threshold=types.HarmBlockThreshold.BLOCK_NONE
                         ),
-                        SafetySetting(
-                            category=HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
-                            threshold=HarmBlockThreshold.BLOCK_NONE
+                        types.SafetySetting(
+                            category=types.HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
+                            threshold=types.HarmBlockThreshold.BLOCK_NONE
                         ),
                     ]
-                    # Only log if not stopping
+                    generation_config.safety_settings = safety_settings
                     if not self._is_stop_requested():
-                        print(f"🔒 Vertex AI Gemini Safety Status: DISABLED - All categories set to BLOCK_NONE")
+                        print(f"🔒 Vertex AI Gemini Safety Status: DISABLED")
                 else:
-                    # Only log if not stopping
                     if not self._is_stop_requested():
-                        print(f"🔒 Vertex AI Gemini Safety Status: ENABLED - Using default Gemini safety settings")
+                        print(f"🔒 Vertex AI Gemini Safety Status: ENABLED (default)")
                     
                 # SAVE SAFETY CONFIGURATION FOR VERIFICATION
                 if safety_settings:
@@ -6854,42 +6854,29 @@ class UnifiedClient:
                 # Save configuration to file with thread isolation
                 self._save_gemini_safety_config(config_data, response_name)
             
-                # Retry logic
-                attempts = self._get_max_retries()
-                attempt = 0
-                result_text = ""
+                # Only log if not stopping
+                if not self._is_stop_requested():
+                    print(f"   📊 Temperature: {temperature}, Max tokens: {max_tokens or 8192}")
                 
-                while attempt < attempts and not result_text:
-                    try:
-                        # Update max_output_tokens for this attempt
-                        generation_config_dict["max_output_tokens"] = max_tokens or 8192
-                        generation_config = GenerationConfig(**generation_config_dict)
-                        
-                        # Only log if not stopping
-                        if not self._is_stop_requested():
-                            print(f"   📊 Temperature: {temperature}, Max tokens: {max_tokens or 8192}")
-                        
-                        # Generate content with optional safety settings
-                        if safety_settings:
-                            response = vertex_model.generate_content(
-                                formatted_prompt,
-                                generation_config=generation_config,
-                                safety_settings=safety_settings
-                            )
-                        else:
-                            response = vertex_model.generate_content(
-                                formatted_prompt,
-                                generation_config=generation_config
-                            )
-                        
-                        # Extract text and image from response
-                        image_data = None  # Store extracted image data
-                        if response.candidates:
-                            for candidate in response.candidates:
-                                if candidate.content and candidate.content.parts:
+                try:
+                    # Make API call using google-genai SDK
+                    response = vertex_genai_client.models.generate_content(
+                        model=model_name,
+                        contents=contents,
+                        config=generation_config
+                    )
+                    
+                    # Extract text and image from response
+                    result_text = ""
+                    image_data = None
+                    
+                    if hasattr(response, 'candidates') and response.candidates:
+                        for candidate in response.candidates:
+                            if hasattr(candidate, 'content') and candidate.content:
+                                if hasattr(candidate.content, 'parts'):
                                     for part in candidate.content.parts:
                                         # Extract text
-                                        if hasattr(part, 'text'):
+                                        if hasattr(part, 'text') and part.text:
                                             result_text += part.text
                                         # Extract image data if present
                                         elif hasattr(part, 'inline_data') and part.inline_data:
@@ -6897,112 +6884,54 @@ class UnifiedClient:
                                                 image_data = part.inline_data.data
                                                 mime_type = getattr(part.inline_data, 'mime_type', 'image/png')
                                                 print(f"   🖼️ Extracted image from Vertex AI response (mime_type: {mime_type})")
-                        
-                        # Save image if present
-                        if image_data and enable_image_output:
-                            try:
-                                # Get output directory - save directly to output folder
-                                output_dir = getattr(self, 'output_dir', None) or '.'
-                                os.makedirs(output_dir, exist_ok=True)
-                                
-                                # Use response_name as filename (no prefix)
-                                # Extract clean filename from response_name if it contains path separators
-                                if response_name:
-                                    clean_name = os.path.basename(response_name)
-                                    # Remove file extension if present
-                                    clean_name = os.path.splitext(clean_name)[0]
-                                    # Remove hash and counter suffix if present (e.g., _865a1e39_imgA0)
-                                    import re
-                                    clean_name = re.sub(r'_[a-f0-9]{8}_img[A-Z0-9]+$', '', clean_name)
-                                    filename = f"{clean_name}.png"
-                                else:
-                                    # Fallback to timestamp if no response_name
-                                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                                    filename = f"{timestamp}.png"
-                                
-                                filepath = os.path.join(output_dir, filename)
-                                
-                                # Write image data to file
-                                with open(filepath, 'wb') as f:
-                                    f.write(image_data)
-                                
-                                print(f"   💾 Saved generated image to: {filepath}")
-                                
-                                # Include image path marker in text content for GUI to detect
-                                result_text = f"[GENERATED_IMAGE:{filepath}]"
-                            except Exception as e:
-                                print(f"   ⚠️ Failed to save generated image: {e}")
-                        
-                        # Check if we got content
-                        if result_text and result_text.strip():
-                            break
-                        elif image_data:
-                            # We got an image but no text - still valid
-                            break
-                        else:
-                            raise Exception("Empty response from Vertex AI")
-                            
-                    except Exception as e:
-                        print(f"Vertex AI Gemini attempt {attempt+1} failed: {e}")
-                        
-                        # Check for quota errors
-                        error_str = str(e)
-                        if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-                            raise UnifiedClientError(
-                                f"Quota exceeded for Vertex AI Gemini model: {model_name}\n\n"
-                                "Request quota increase in Google Cloud Console."
-                            )
-                        elif "404" in error_str or "NOT_FOUND" in error_str:
-                            raise UnifiedClientError(
-                                f"Model {model_name} not found in region {location}.\n\n"
-                                "Available Gemini models on Vertex AI:\n"
-                                "• gemini-1.5-flash-002\n"
-                                "• gemini-1.5-pro-002\n"
-                                "• gemini-1.0-pro-002"
-                            )
-                        
-                        # No automatic retry - let higher level handle retries
-                        #attempt += 1
-                        #if attempt < attempts:
-                        #    print(f"❌ Gemini attempt {attempt} failed, no automatic retry")
-                        #    break  # Exit the retry loop
                     
-                # Check stop flag after response
-                if is_stop_requested():
-                    logger.info("Stop requested after Vertex AI Gemini response")
-                    raise UnifiedClientError("Operation cancelled by user", error_type="cancelled")
-                
-                if not result_text:
-                    raise UnifiedClientError("All Vertex AI Gemini attempts failed to produce content")
-                
-                # Store the Vertex AI content object for thought signatures
-                # According to Google docs: "The `content` object automatically attaches 
-                # the required thought_signature behind the scenes"
-                # We must pass the actual Content object, not a serialized version
-                raw_content_obj = None
-                if response and hasattr(response, 'candidates') and response.candidates:
-                    for candidate in response.candidates:
-                        if candidate.content:
-                            # Pass the actual Content object from Vertex AI
-                            # This is required for proper thought signature handling
-                            raw_content_obj = candidate.content
+                    # Save image if present
+                    if image_data and enable_image_output:
+                        try:
+                            output_dir = getattr(self, 'output_dir', None) or '.'
+                            os.makedirs(output_dir, exist_ok=True)
                             
-                            # Check if it has thinking tags or thought signatures
-                            if hasattr(candidate.content, 'parts'):
-                                for part in candidate.content.parts:
-                                    if hasattr(part, 'text') and part.text:
-                                        if '<thinking>' in part.text or '<thought>' in part.text:
-                                            print("🧠 Found thinking tags in Vertex AI Gemini response")
-                                    if hasattr(part, 'thought_signature') and part.thought_signature:
-                                        print("📌 Found thought_signature in Vertex AI Gemini response")
-                            break  # Just use the first candidate
-                
-                return UnifiedResponse(
-                    content=result_text,
-                    finish_reason='stop',
-                    raw_response=response,
-                    raw_content_object=raw_content_obj  # Include raw content object for thought signatures
-                )
+                            if response_name:
+                                clean_name = os.path.basename(response_name)
+                                clean_name = os.path.splitext(clean_name)[0]
+                                import re
+                                clean_name = re.sub(r'_[a-f0-9]{8}_img[A-Z0-9]+$', '', clean_name)
+                                filename = f"{clean_name}.png"
+                            else:
+                                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                filename = f"{timestamp}.png"
+                            
+                            filepath = os.path.join(output_dir, filename)
+                            with open(filepath, 'wb') as f:
+                                f.write(image_data)
+                            
+                            print(f"   💾 Saved generated image to: {filepath}")
+                            result_text = f"[GENERATED_IMAGE:{filepath}]"
+                        except Exception as e:
+                            print(f"   ⚠️ Failed to save generated image: {e}")
+                    
+                    if not result_text and not image_data:
+                        raise UnifiedClientError("Empty response from Vertex AI Gemini")
+                    
+                    return UnifiedResponse(
+                        content=result_text,
+                        finish_reason='stop',
+                        raw_response=response
+                    )
+                    
+                except Exception as e:
+                    error_str = str(e)
+                    if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                        raise UnifiedClientError(
+                            f"Quota exceeded for Vertex AI Gemini model: {model_name}\n\n"
+                            "Request quota increase in Google Cloud Console."
+                        )
+                    elif "404" in error_str or "NOT_FOUND" in error_str:
+                        raise UnifiedClientError(
+                            f"Model {model_name} not found in region {location}\n"
+                            "Try: gemini-1.5-flash-002, gemini-1.5-pro-002"
+                        )
+                    raise UnifiedClientError(f"Vertex AI Gemini error: {str(e)[:200]}")
                 
         except UnifiedClientError:
             # Re-raise our own errors without modification
