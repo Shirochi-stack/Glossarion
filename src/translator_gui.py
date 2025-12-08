@@ -3164,17 +3164,16 @@ Recent translations to summarize:
             has_placeholder = '{target_lang}' in prompt
             is_traditional = is_traditional_translation_api(model)
             
-            # Condition: Disable if placeholder missing AND not traditional API
-            # If traditional API, we always enable because it handles language internally
-            should_disable = not has_placeholder and not is_traditional
+            # Condition: Show warning if placeholder missing AND not traditional API
+            # If traditional API, we don't show warning because it handles language internally
+            should_warn = not has_placeholder and not is_traditional
             
-            # Update combobox
-            if hasattr(self, 'target_lang_combo'):
-                self.target_lang_combo.setEnabled(not should_disable)
+            # Keep combobox always enabled - just show warning
+            # (Disabling was causing issues, so we just warn the user instead)
             
             # Update warning label
             if hasattr(self, 'target_lang_warning'):
-                if should_disable:
+                if should_warn:
                     self.target_lang_warning.setText("⚠️ {target_lang} missing")
                     self.target_lang_warning.show()
                 else:

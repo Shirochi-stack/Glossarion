@@ -18,15 +18,23 @@ from bs4 import BeautifulSoup
 
 def get_basename_without_ext(filename: str) -> str:
     """
-    Get filename without extension
+    Get filename without extension(s) - handles double extensions like .htm.xhtml
     
     Args:
         filename: The filename
         
     Returns:
-        Filename without extension
+        Filename without extension(s)
     """
-    return os.path.splitext(filename)[0]
+    # Strip all extensions (handles .htm.xhtml, .html, etc.)
+    name = filename
+    while True:
+        name_without_ext, ext = os.path.splitext(name)
+        if ext and ext.lower() in ['.html', '.xhtml', '.htm', '.xml']:
+            name = name_without_ext
+        else:
+            break
+    return name
 
 
 def extract_source_chapters_with_opf_mapping(
@@ -245,14 +253,17 @@ def match_output_to_source_chapters(
     skipped_count = 0
     
     for output_file in output_files:
-        # Get output filename without extension
+        # Get output filename without extension and response_ prefix
         output_no_ext = get_basename_without_ext(output_file)
+        # Strip response_ prefix if present
+        if output_no_ext.startswith('response_'):
+            output_no_ext = output_no_ext[9:]  # len('response_') = 9
         
         # Try to match with each source chapter
         matched = False
         for source_basename, source_title in source_mapping.items():
-            # Check if source basename appears in output filename (handles response_ prefix)
-            if source_basename in output_no_ext:
+            # Check if filenames match (both stripped of extensions and prefixes)
+            if source_basename == output_no_ext:
                 # Read current title from output file
                 try:
                     output_path = os.path.join(output_dir, output_file)
