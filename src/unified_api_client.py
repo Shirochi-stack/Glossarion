@@ -85,7 +85,7 @@ Environment Variables:
 - OPENROUTER_REFERER: HTTP referer for OpenRouter (default: https://github.com/Shirochi-stack/Glossarion)
 - OPENROUTER_APP_NAME: App name for OpenRouter (default: Glossarion Translation)
 - POE_API_KEY: API key for Poe platform
-- GROQ_API_URL: Custom Groq endpoint (default: https://api.groq.com/openai/v1)
+- GROQ_API_URL: Custom Groq endpoint (default: https://api.groq.com/openai/v1) - Do NOT include /chat/completions
 - FIREWORKS_API_URL: Custom Fireworks AI endpoint (default: https://api.fireworks.ai/inference/v1)
 - DISABLE_GEMINI_SAFETY: Set to "true" to disable Gemini safety filters (respects GUI toggle)
 - XAI_API_URL: Custom xAI endpoint (default: https://api.x.ai/v1)
@@ -9903,6 +9903,9 @@ class UnifiedClient:
             # Strip the 'groq/' prefix from the model name if present
             if effective_model.startswith('groq/'):
                 effective_model = effective_model[5:]  # Remove 'groq/' prefix
+            # Strip /chat/completions from base_url if present (SDK adds it automatically)
+            if base_url and '/chat/completions' in base_url:
+                base_url = base_url.replace('/chat/completions', '')
         elif provider == 'chutes':
             # Strip the 'chutes/' prefix from the model name if present
             if effective_model.startswith('chutes/'):
