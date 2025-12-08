@@ -4443,29 +4443,35 @@ def process_html_file_batch(args):
                 with open(full_path, 'r', encoding='utf-8') as f:
                     translated_html = f.read()
                 
-                # Try to match by chapter number first, then by sequential index
-                # Remove response_ prefix from filename for matching
+                # Match by EXACT filename from spine ONLY
+                # Remove response_ prefix and extension for matching
                 search_filename = filename.lower()
                 if search_filename.startswith('response_'):
                     search_filename = search_filename[9:]  # Remove 'response_'
+                search_basename = os.path.splitext(search_filename)[0]  # Remove extension
                 
-                # Try chapter_num match first
                 has_missing_imgs = False
                 img_issues = []
+                matched_spine_idx = None
                 
-                if chapter_num in original_image_info:
-                    has_missing_imgs, img_issues = detect_missing_images(translated_html, chapter_num, original_image_info)
+                for spine_idx, img_info in original_image_info.items():
+                    orig_filename = img_info.get('filename', '').lower()
+                    orig_basename = os.path.splitext(orig_filename)[0]  # Remove extension
+                    
+                    # EXACT match only - no fuzzy logic, no position-based matching
+                    if orig_basename == search_basename:
+                        has_missing_imgs, img_issues = detect_missing_images(translated_html, spine_idx, original_image_info)
+                        matched_spine_idx = spine_idx
+                        print(f"[IMAGE DEBUG] Matched {filename} to spine file '{orig_filename}' at spine_idx={spine_idx}")
+                        break
                 else:
-                    # Fallback: Try matching by filename to spine info
-                    for spine_idx, img_info in original_image_info.items():
-                        orig_filename = img_info.get('filename', '').lower()
-                        # Match if filenames are similar (ignoring extensions and response_ prefix)
-                        if orig_filename and (search_filename.startswith(orig_filename.split('.')[0]) or 
-                                            orig_filename.split('.')[0] in search_filename):
-                            has_missing_imgs, img_issues = detect_missing_images(translated_html, spine_idx, original_image_info)
-                            break
+                    print(f"[IMAGE DEBUG] No exact match found for {filename} (searched for basename: '{search_basename}')")
                 
-                print(f"[IMAGE DEBUG] Checked {filename} (chapter {chapter_num}): found_match={has_missing_imgs}")
+                if matched_spine_idx:
+                    print(f"[IMAGE DEBUG] Checked {filename}: found_match={has_missing_imgs}")
+                    if has_missing_imgs:
+                        orig_info = original_image_info.get(matched_spine_idx, {})
+                        print(f"[IMAGE DEBUG]   Original has {orig_info.get('image_count', 0)} images")
                 
                 if has_missing_imgs:
                     print(f"[IMAGE DEBUG] Found missing images! Issues: {img_issues}")
