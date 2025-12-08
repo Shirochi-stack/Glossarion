@@ -2938,6 +2938,9 @@ Recent translations to summarize:
         # Connect to save config
         self.target_lang_combo.currentTextChanged.connect(self.update_target_language)
         
+        # Initialize the target language on startup (signal doesn't fire when setting initial value)
+        self.update_target_language(saved_lang)
+        
         # Add warning label for missing placeholder
         self.target_lang_warning = QLabel()
         self.target_lang_warning.setStyleSheet("color: orange; font-size: 9pt; margin-top: 5px;")
