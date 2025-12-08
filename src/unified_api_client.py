@@ -854,6 +854,10 @@ class UnifiedClient:
     _displayed_messages = set()
     _message_lock = threading.Lock()
     
+    # Cache discovered model token limits to avoid repeated adjustments
+    _model_token_limits = {}  # model_name -> max_tokens
+    _model_limits_lock = threading.Lock()
+    
     # Your existing MODEL_PROVIDERS and other class variables
     MODEL_PROVIDERS = {
         'vertex/': 'vertex_model_garden',
@@ -10162,6 +10166,12 @@ class UnifiedClient:
                     except Exception:
                         pass
 
+                    # Apply cached model limit if we've discovered it before
+                    with self.__class__._model_limits_lock:
+                        cached_limit = self.__class__._model_token_limits.get(effective_model)
+                        if cached_limit and (max_tokens is None or max_tokens > cached_limit):
+                            max_tokens = cached_limit
+                    
                     norm_max_tokens, norm_max_completion_tokens = self._normalize_token_params(max_tokens, None)
                     # Targeted preflight for OpenRouter free Gemma variant only
                     try:
@@ -10494,6 +10504,10 @@ class UnifiedClient:
                                 if supported_max < current_max:
                                     print(f"    🔧 AUTO-ADJUSTING: max_tokens too large ({current_max:,}) - model supports {supported_max:,}")
                                     print(f"    🔄 Retrying with supported limit: {supported_max:,} tokens")
+                                    
+                                    # Cache this limit for future requests to this model
+                                    with self.__class__._model_limits_lock:
+                                        self.__class__._model_token_limits[effective_model] = supported_max
                                     
                                     # Update max_tokens for the retry
                                     max_tokens = supported_max
