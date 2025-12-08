@@ -3857,27 +3857,28 @@ class BatchTranslationProcessor:
                 print(f"   [DEBUG] No filename in chapter: {list(chapter.keys())}")
                 return None
             
-            # Extract from EPUB
+            # Extract from EPUB - match by basename without extension
             import zipfile
             with zipfile.ZipFile(epub_path, 'r') as zf:
-                # Try multiple path variations
-                possible_paths = [
-                    filename,
-                    f"OEBPS/{filename}",
-                    f"OPS/{filename}",
-                    f"EPUB/{filename}",
-                ]
+                # Get all files in the EPUB
+                all_files = zf.namelist()
                 
-                print(f"   [DEBUG] Trying paths: {possible_paths}")
-                for path in possible_paths:
-                    try:
-                        content = zf.read(path).decode('utf-8', errors='ignore')
-                        print(f"   [DEBUG] Successfully read from: {path}")
-                        return content
-                    except KeyError:
-                        continue
+                # Find files that match the basename (without extension)
+                target_basename = os.path.splitext(filename)[0]
+                print(f"   [DEBUG] Searching for basename: {target_basename}")
                 
-                print(f"   [DEBUG] None of the paths worked")
+                for epub_file in all_files:
+                    epub_basename = os.path.splitext(os.path.basename(epub_file))[0]
+                    if epub_basename == target_basename:
+                        try:
+                            content = zf.read(epub_file).decode('utf-8', errors='ignore')
+                            print(f"   [DEBUG] Successfully read from: {epub_file}")
+                            return content
+                        except Exception as e:
+                            print(f"   [DEBUG] Failed to read {epub_file}: {e}")
+                            continue
+                
+                print(f"   [DEBUG] No matching file found for basename: {target_basename}")
             
             return None
         except Exception as e:
