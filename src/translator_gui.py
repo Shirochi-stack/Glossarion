@@ -1892,7 +1892,7 @@ Recent translations to summarize:
             ('disable_zero_detection_var', 'disable_zero_detection', True),
             ('use_header_as_output_var', 'use_header_as_output', False),
             ('emergency_restore_var', 'emergency_paragraph_restore', False),
-            ('emergency_image_restore_var', 'emergency_image_restore', True),
+            ('emergency_image_restore_var', 'emergency_image_restore', False),
             ('contextual_var', 'contextual', False),
             ('REMOVE_AI_ARTIFACTS_var', 'REMOVE_AI_ARTIFACTS', False),
             ('enable_watermark_removal_var', 'enable_watermark_removal', True),

@@ -852,7 +852,225 @@ def detect_glossary_leakage(text, threshold=2):
     
     has_leakage = len(issues_found) > 0
     
-    return has_leakage, issues_found    
+    return has_leakage, issues_found
+
+def extract_epub_image_info(epub_path, log=print):
+    """Extract image information for each chapter from the original EPUB using spine order.
+    
+    Key: Uses content.opf SPINE ORDER (reading order) as the authoritative chapter sequence.
+    This matches the word count reference logic exactly.
+    
+    Returns a dict mapping spine index to image info:
+    {
+        spine_index: {
+            'image_count': int,
+            'image_srcs': [list of img src attributes],
+            'filename': str
+        }
+    }
+    """
+    try:
+        import zipfile
+        from bs4 import BeautifulSoup
+        import os
+        
+        image_info = {}
+        spine_files = {}  # Maps spine index to file info
+        
+        with zipfile.ZipFile(epub_path, 'r') as zf:
+            # Step 1: Read and parse content.opf to get SPINE ORDER
+            content_opf_data = None
+            content_opf_path = None
+            manifest_map = {}  # Maps item id to href
+            
+            try:
+                for fname in zf.namelist():
+                    if 'content.opf' in fname.lower():
+                        content_opf_data = zf.read(fname).decode('utf-8', errors='ignore')
+                        content_opf_path = fname
+                        break
+            except Exception as e:
+                log(f"⚠️ Could not read content.opf: {e}")
+            
+            # Parse manifest and spine from content.opf
+            if content_opf_data:
+                try:
+                    soup_opf = BeautifulSoup(content_opf_data, 'xml')
+                    
+                    # Build manifest map (id -> href)
+                    manifest = soup_opf.find('manifest')
+                    if manifest:
+                        for item in manifest.find_all('item'):
+                            item_id = item.get('id')
+                            href = item.get('href')
+                            if item_id and href:
+                                manifest_map[item_id] = href
+                    
+                    # Process spine in order
+                    spine = soup_opf.find('spine')
+                    if spine:
+                        spine_index = 1  # Start from 1 for chapter numbering
+                        for itemref in spine.find_all('itemref'):
+                            idref = itemref.get('idref')
+                            if idref and idref in manifest_map:
+                                href = manifest_map[idref]
+                                spine_files[spine_index] = {
+                                    'href': href,
+                                    'idref': idref
+                                }
+                                spine_index += 1
+                        
+                        if spine_files:
+                            log(f"📚 Found {len(spine_files)} chapters in EPUB spine order.")
+                except Exception as e:
+                    log(f"⚠️ Could not parse content.opf: {e}")
+            
+            # Step 2: Process files in spine order
+            if spine_files:
+                # Determine the base directory from content.opf location
+                base_dir = ''
+                if content_opf_path:
+                    # content.opf is often in OEBPS/ or similar
+                    base_dir = os.path.dirname(content_opf_path)
+                    if base_dir:
+                        base_dir = base_dir + '/'
+                
+                extracted_count = 0
+                for spine_index, file_info in sorted(spine_files.items()):
+                    try:
+                        file_path = file_info['href']
+                        
+                        # Try multiple path resolutions
+                        possible_paths = [
+                            file_path,                          # As-is from manifest
+                            base_dir + file_path,               # Relative to content.opf
+                            'OEBPS/' + file_path,               # Common EPUB structure
+                            'OPS/' + file_path,                 # Alternative structure
+                        ]
+                        
+                        content = None
+                        for try_path in possible_paths:
+                            try:
+                                content = zf.read(try_path).decode('utf-8', errors='ignore')
+                                break
+                            except KeyError:
+                                continue
+                        
+                        if content is None:
+                            continue
+                        
+                        # Parse HTML and extract images
+                        soup = BeautifulSoup(content, 'html.parser')
+                        images = soup.find_all('img')
+                        
+                        if images:  # Only store if chapter has images
+                            image_info[spine_index] = {
+                                'image_count': len(images),
+                                'image_srcs': [img.get('src', '') for img in images],
+                                'filename': os.path.basename(file_path),
+                                'spine_index': spine_index
+                            }
+                            extracted_count += 1
+                        
+                    except Exception as e:
+                        continue
+                
+                if extracted_count > 0:
+                    log(f"   Found images in {extracted_count} chapters")
+            else:
+                # Fallback: No spine found, scan all HTML files
+                log("⚠️ Could not read spine order, falling back to file extraction")
+                
+                html_files = [f for f in zf.namelist() 
+                             if f.lower().endswith(('.html', '.xhtml', '.htm')) 
+                             and not f.startswith('__MACOSX')
+                             and 'cover' not in f.lower()]
+                
+                html_files.sort()
+                
+                for idx, file_path in enumerate(html_files, start=1):
+                    try:
+                        content = zf.read(file_path).decode('utf-8', errors='ignore')
+                        soup = BeautifulSoup(content, 'html.parser')
+                        images = soup.find_all('img')
+                        
+                        if images:
+                            image_info[idx] = {
+                                'image_count': len(images),
+                                'image_srcs': [img.get('src', '') for img in images],
+                                'filename': os.path.basename(file_path)
+                            }
+                    except Exception as e:
+                        continue
+                
+                if image_info:
+                    log(f"   Found images in {len(image_info)} chapters (fallback mode)")
+        
+        return image_info
+        
+    except Exception as e:
+        log(f"❌ Error extracting image info from EPUB: {e}")
+        return {}
+
+def detect_missing_images(translated_html, chapter_num, original_image_info):
+    """
+    Detect missing images by comparing translated HTML with original EPUB image info.
+    
+    Args:
+        translated_html: The translated HTML content (string)
+        chapter_num: The chapter number to check
+        original_image_info: Dict from extract_epub_image_info()
+    
+    Returns:
+        tuple: (has_missing_images, details)
+    """
+    try:
+        from bs4 import BeautifulSoup
+        
+        # If no original image info for this chapter, skip check
+        if chapter_num not in original_image_info:
+            return False, []
+        
+        orig_info = original_image_info[chapter_num]
+        orig_img_count = orig_info['image_count']
+        
+        # If no images in original, nothing to check
+        if orig_img_count == 0:
+            return False, []
+        
+        # Parse translated HTML
+        soup_trans = BeautifulSoup(translated_html, 'html.parser')
+        trans_images = soup_trans.find_all('img')
+        trans_img_count = len(trans_images)
+        
+        # Check if translated has fewer images than original
+        if trans_img_count < orig_img_count:
+            missing_count = orig_img_count - trans_img_count
+            
+            # Get list of missing image sources
+            trans_srcs = set(img.get('src', '') for img in trans_images)
+            missing_srcs = []
+            for src in orig_info['image_srcs']:
+                if src and src not in trans_srcs:
+                    missing_srcs.append(src)
+            
+            details = [{
+                'type': 'missing_images',
+                'severity': 'high',
+                'count': missing_count,
+                'original_count': orig_img_count,
+                'translated_count': trans_img_count,
+                'missing_srcs': missing_srcs[:5],  # First 5 missing images
+                'description': f'Translation has {missing_count} fewer images than original ({trans_img_count}/{orig_img_count})'
+            }]
+            
+            return True, details
+        
+        return False, []
+        
+    except Exception as e:
+        # Silent failure - if we can't check, don't report false positives
+        return False, []
     
 def extract_semantic_fingerprint(text):
     """Extract semantic fingerprint and signature from text - CACHED VERSION"""
@@ -4091,7 +4309,7 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
 
 def process_html_file_batch(args):
     """Process a batch of HTML or text files - MUST BE AT MODULE LEVEL"""
-    file_batch, folder_path, qa_settings, mode, original_word_counts, merge_info, text_file_mode = args
+    file_batch, folder_path, qa_settings, mode, original_word_counts, merge_info, text_file_mode, original_image_info = args
     batch_results = []
     
     # Import what we need inside the worker
@@ -4170,6 +4388,45 @@ def process_html_file_batch(args):
                 else:
                     total_glossary_items = sum(g.get('count', 1) for g in glossary_issues)
                     issues.append(f"glossary_leakage_{total_glossary_items}_entries_found")
+        
+        # Check for missing images (skip for text files)
+        check_missing_imgs = qa_settings.get('check_missing_images', True)
+        if not text_file_mode and check_missing_imgs and filename.lower().endswith(('.html', '.xhtml', '.htm')) and original_image_info:
+            # Read the translated HTML content
+            try:
+                with open(full_path, 'r', encoding='utf-8') as f:
+                    translated_html = f.read()
+                
+                # DEBUG: Print what we're checking
+                print(f"[IMAGE DEBUG] Checking file: {filename}, chapter_num: {chapter_num}")
+                print(f"[IMAGE DEBUG] Available spine indices in original_image_info: {list(original_image_info.keys())}")
+                
+                # Use chapter number to look up original images
+                has_missing_imgs, img_issues = detect_missing_images(translated_html, chapter_num, original_image_info)
+                
+                if has_missing_imgs:
+                    print(f"[IMAGE DEBUG] Found missing images! Issues: {img_issues}")
+                    # Add to translation artifacts
+                    for img_issue in img_issues:
+                        artifacts.append({
+                            'type': 'missing_images',
+                            'count': img_issue.get('count', 0),
+                            'examples': img_issue.get('missing_srcs', []),
+                            'severity': img_issue.get('severity', 'high')
+                        })
+                    
+                    # Add to issues list for reporting
+                    missing_count = img_issues[0].get('count', 0) if img_issues else 0
+                    orig_count = img_issues[0].get('original_count', 0) if img_issues else 0
+                    trans_count = img_issues[0].get('translated_count', 0) if img_issues else 0
+                    issues.append(f"missing_images_{missing_count}_lost_({trans_count}/{orig_count})")
+                else:
+                    print(f"[IMAGE DEBUG] No missing images detected for chapter {chapter_num}")
+            except Exception as e:
+                # Print exception for debugging
+                print(f"[IMAGE DEBUG] Exception during image check: {e}")
+                import traceback
+                print(traceback.format_exc())
                     
         # HTML tag check (skip for text files)
         check_missing_html_tag = qa_settings.get('check_missing_html_tag', True)
@@ -4408,6 +4665,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
             'check_repetition': True,
             'check_translation_artifacts': False,
             'check_glossary_leakage': True,
+            'check_missing_images': True,
             'min_file_length': 0,
             'report_format': 'detailed',
             'auto_save_report': True,
@@ -4425,10 +4683,22 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     check_word_count = qa_settings.get('check_word_count_ratio', False)
     check_multiple_headers = qa_settings.get('check_multiple_headers', True)
     
-    # Extract word counts from original EPUB/text file if needed
+    # Extract word counts and image info from original EPUB/text file if needed
     original_word_counts = {}
+    original_image_info = {}  # For missing image detection
     merge_info = {}  # For request merging support
     combined_text_file = None  # For text file mode word count analysis
+    
+    # Extract image info from EPUB if missing images check is enabled
+    check_missing_imgs = qa_settings.get('check_missing_images', True)
+    if check_missing_imgs and not text_file_mode and epub_path and os.path.exists(epub_path):
+        log(f"🖼️ Extracting image information from original EPUB: {os.path.basename(epub_path)}")
+        original_image_info = extract_epub_image_info(epub_path, log)
+        if original_image_info:
+            total_images = sum(info['image_count'] for info in original_image_info.values())
+            log(f"   Found images in {len(original_image_info)} chapters ({total_images} total images)")
+        else:
+            log(f"   No images found in EPUB (or unable to extract)")
     
     if check_word_count:
         if text_file_mode:
@@ -4548,6 +4818,8 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     log(f"   ✓ Encoding issues check: {'ENABLED' if qa_settings.get('check_encoding_issues', True) else 'DISABLED'}")
     log(f"   ✓ Repetition check: {'ENABLED' if qa_settings.get('check_repetition', True) else 'DISABLED'}")
     log(f"   ✓ Translation artifacts check: {'ENABLED' if qa_settings.get('check_translation_artifacts', False) else 'DISABLED'}")
+    log(f"   ✓ Glossary leakage check: {'ENABLED' if qa_settings.get('check_glossary_leakage', True) else 'DISABLED'}")
+    log(f"   ✓ Missing images check: {'ENABLED' if qa_settings.get('check_missing_images', True) else 'DISABLED'}")
     log(f"   ✓ Missing HTML tag check: {'ENABLED' if qa_settings.get('check_missing_html_tag', False) else 'DISABLED'}")
     log(f"   ✓ Missing header tags check: {'ENABLED' if qa_settings.get('check_missing_header_tags', True) else 'DISABLED'}")
     log(f"   ✓ Paragraph structure check: {'ENABLED' if qa_settings.get('check_paragraph_structure', True) else 'DISABLED'}")    
@@ -4641,7 +4913,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     # Prepare worker data
     worker_args = []
     for batch in batches:
-        args = (batch, folder_path, qa_settings, mode, original_word_counts, merge_info, text_file_mode)
+        args = (batch, folder_path, qa_settings, mode, original_word_counts, merge_info, text_file_mode, original_image_info)
         worker_args.append(args)
     
     # Process files in parallel

@@ -3694,11 +3694,11 @@ def _create_processing_options_section(self, parent):
     left_v.addWidget(emergency_desc)
     
     # Emergency Image Restoration (Add below Paragraph Restoration)
-    img_restore_cb = self._create_styled_checkbox("Emergency Image Restoration (Recommended)")
+    img_restore_cb = self._create_styled_checkbox("Emergency Image Restoration")
     try:
-        # Default to True if not present
+        # Default to False if not present (disabled by default)
         if not hasattr(self, 'emergency_image_restore_var'):
-            self.emergency_image_restore_var = True
+            self.emergency_image_restore_var = False
         img_restore_cb.setChecked(bool(self.emergency_image_restore_var))
     except Exception:
         pass

@@ -250,6 +250,8 @@ class QAScannerMixin:
             'check_encoding_issues': False,
             'check_repetition': True,
             'check_translation_artifacts': False,
+            'check_glossary_leakage': True,
+            'check_missing_images': True,
             'min_file_length': 0,
             'report_format': 'detailed',
             'auto_save_report': True,
@@ -2195,6 +2197,21 @@ class QAScannerMixin:
         warn_mismatch_checkbox = self._create_styled_checkbox("Warn when EPUB and folder names don't match")
         warn_mismatch_checkbox.setChecked(qa_settings.get('warn_name_mismatch', True))
         wordcount_layout.addWidget(warn_mismatch_checkbox)
+        
+        wordcount_layout.addSpacing(10)
+        
+        # Missing images check (requires source file like word count does)
+        check_missing_images_checkbox = self._create_styled_checkbox("Check for missing image tags (images lost during translation)")
+        check_missing_images_checkbox.setChecked(qa_settings.get('check_missing_images', True))
+        wordcount_layout.addWidget(check_missing_images_checkbox)
+        
+        images_desc = QLabel("Compares image tags between original and translated HTML files.\n" +
+                            "Detects when <img> tags are lost during translation process.")
+        images_desc.setFont(QFont('Arial', 9))
+        images_desc.setStyleSheet("color: gray;")
+        images_desc.setWordWrap(True)
+        images_desc.setMaximumWidth(700)
+        wordcount_layout.addWidget(images_desc)
 
         scroll_layout.addSpacing(20)
         
@@ -2645,6 +2662,7 @@ class QAScannerMixin:
                     'check_repetition': (check_repetition_checkbox, lambda x: x.isChecked()),
                     'check_translation_artifacts': (check_artifacts_checkbox, lambda x: x.isChecked()),
                     'check_glossary_leakage': (check_glossary_checkbox, lambda x: x.isChecked()),
+                    'check_missing_images': (check_missing_images_checkbox, lambda x: x.isChecked()),
                     'min_file_length': (min_length_spinbox, lambda x: x.value()),
                     'min_duplicate_word_count': (min_dup_words_spinbox, lambda x: x.value()),
                     'min_text_length_for_spacing': (min_spacing_text_spinbox, lambda x: x.value()),
@@ -2827,6 +2845,7 @@ class QAScannerMixin:
                         ('QA_CHECK_REPETITION', '1' if qa_settings.get('check_repetition', True) else '0'),
                         ('QA_CHECK_ARTIFACTS', '1' if qa_settings.get('check_translation_artifacts', False) else '0'),
                         ('QA_CHECK_GLOSSARY_LEAKAGE', '1' if qa_settings.get('check_glossary_leakage', True) else '0'),
+                        ('QA_CHECK_MISSING_IMAGES', '1' if qa_settings.get('check_missing_images', True) else '0'),
                         ('QA_MIN_FILE_LENGTH', str(qa_settings.get('min_file_length', 0))),
                         ('QA_REPORT_FORMAT', qa_settings.get('report_format', 'detailed')),
                         ('QA_AUTO_SAVE_REPORT', '1' if qa_settings.get('auto_save_report', True) else '0'),
@@ -2915,6 +2934,7 @@ class QAScannerMixin:
                 check_artifacts_checkbox.setChecked(False)
 
                 check_glossary_checkbox.setChecked(True)
+                check_missing_images_checkbox.setChecked(True)
                 min_length_spinbox.setValue(0)
                 # Set 'detailed' radio button as checked
                 for rb, value in format_radio_buttons:
