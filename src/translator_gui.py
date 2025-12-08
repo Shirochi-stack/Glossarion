@@ -6966,12 +6966,6 @@ Important rules:
 
     def _extract_glossary_from_text_file(self, file_path):
         """Extract glossary from EPUB or TXT file using existing glossary extraction"""
-        # Skip if manual glossary is already loaded
-        if (hasattr(self, 'manual_glossary_path') and self.manual_glossary_path and 
-            hasattr(self, 'manual_glossary_manually_loaded') and self.manual_glossary_manually_loaded):
-            self.append_log("ℹ️ Skipping automatic glossary extraction (manual glossary already loaded)")
-            return {}
-            
         # Skip glossary extraction for traditional APIs
         try:
             api_key = self.api_key_entry.text()

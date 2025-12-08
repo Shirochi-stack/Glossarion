@@ -3383,11 +3383,16 @@ class BatchTranslationProcessor:
                 try:
                     # Load glossary to get original size
                     with open(glossary_path, 'r', encoding='utf-8') as f:
-                        if glossary_path.lower().endswith('.csv'):
+                        if glossary_path.lower().endswith(('.csv', '.md', '.txt')):
                             original_glossary = f.read()
                         else:
-                            glossary_data = json.load(f)
-                            original_glossary = json.dumps(glossary_data, ensure_ascii=False, indent=2)
+                            try:
+                                glossary_data = json.load(f)
+                                original_glossary = json.dumps(glossary_data, ensure_ascii=False, indent=2)
+                            except json.JSONDecodeError:
+                                # If JSON parsing fails, treat as text
+                                f.seek(0)
+                                original_glossary = f.read()
                     
                     original_length = len(original_glossary)
                     

@@ -170,6 +170,9 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         print("📁 ❌ Glossary generation stopped by user")
         return {}
     
+    # Check if automatic glossary generation is enabled
+    enable_auto_glossary = os.getenv("ENABLE_AUTO_GLOSSARY", "1") == "1"
+    
     # Check for manual glossary first (CSV only)
     manual_glossary_path = os.getenv("MANUAL_GLOSSARY")
     existing_glossary = None
@@ -184,9 +187,22 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
                 f.write(content)
             print(f"📁 ✅ Manual CSV glossary copied to: {target_path}")
             existing_glossary = content
+            
+            # Skip automatic generation when manual glossary is loaded
+            if not enable_auto_glossary:
+                print(f"ℹ️ Automatic glossary generation disabled, using manual glossary only")
+                return {}
+            else:
+                print(f"ℹ️ Skipping automatic glossary generation (manual glossary already loaded)")
+                return {}
         except Exception as e:
             print(f"⚠️ Could not copy manual glossary: {e}")
             print(f"📁 Proceeding with automatic generation...")
+    
+    # Check if auto-glossary is disabled without a manual glossary
+    if not enable_auto_glossary:
+        print(f"ℹ️ Automatic glossary generation is disabled and no manual glossary provided")
+        return {}
     
     # Check for existing glossary from manual extraction
     glossary_folder_path = os.path.join(output_dir, "Glossary")
