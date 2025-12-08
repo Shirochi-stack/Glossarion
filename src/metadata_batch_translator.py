@@ -99,6 +99,7 @@ class MetadataBatchTranslatorUI:
         if 'batch_header_system_prompt' not in self.gui.config:
             self.gui.config['batch_header_system_prompt'] = (
                 "You are a professional translator specializing in novel chapter titles. "
+                "You must translate the chapter titles to {target_lang}. "
                 "Respond with only the translated JSON, nothing else. "
                 "Maintain the original tone and style while making titles natural in the target language."
             )
@@ -107,8 +108,7 @@ class MetadataBatchTranslatorUI:
         if 'batch_header_prompt' not in self.gui.config:
             self.gui.config['batch_header_prompt'] = (
                 "Translate these chapter titles to {target_lang}.\n"
-                "- For titles with parentheses containing Chinese/Japanese characters (like 終篇, 完結編, etc.), translate both the main title and the parenthetical text.\n"
-                "- Common markers: 終篇/終章 = 'Final Chapter', 完結編 = 'Final Arc/Volume', 後編 = 'Part 2', 前編 = 'Part 1'.\n"
+                "- For titles with parenthetical text, translate both the main title and the parenthetical content.\n"
                 "- Translate the meaning accurately - don't use overly dramatic words unless the original implies them.\n"
                 "- Preserve the chapter number format exactly as shown.\n"
                 "Return ONLY a JSON object with chapter numbers as keys.\n"
@@ -867,6 +867,7 @@ class MetadataBatchTranslatorUI:
         """)
         self.header_batch_system_text.setPlainText(self.gui.config.get('batch_header_system_prompt',
             "You are a professional translator specializing in novel chapter titles. "
+            "You must translate chapter titles to {target_lang}. "
             "Respond with only the translated JSON, nothing else. "
             "Maintain the original tone and style while making titles natural in the target language."))
         tab_layout.addWidget(self.header_batch_system_text)
@@ -1448,6 +1449,7 @@ class BatchHeaderTranslator:
             self.config.get('batch_header_system_prompt') or  # CHANGED: Use correct config key
             os.getenv('BATCH_HEADER_SYSTEM_PROMPT') or  # CHANGED: Use specific env var
             "You are a professional translator specializing in novel chapter titles. "
+            "Translate to {target_lang}. "
             "Respond with only the translated JSON, nothing else. "
             "Maintain the original tone and style while making titles natural in the target language."
         )
@@ -1549,7 +1551,8 @@ class BatchHeaderTranslator:
         # Handle output language - this is what {target_lang} should be replaced with
         output_lang = self.config.get('output_language', 'English')
         
-        # Replace {target_lang} variable in the user prompt with the output language
+        # Replace {target_lang} variable in both system prompt and user prompt with the output language
+        system_prompt = self.system_prompt.replace('{target_lang}', output_lang)
         prompt_template = prompt_template.replace('{target_lang}', output_lang)
         
         # Add the titles to translate
@@ -1565,8 +1568,8 @@ class BatchHeaderTranslator:
         
         print(f"[DEBUG] Using temperature: {temperature}, max_tokens: {max_tokens} (from GUI/env)")
         
-        # Count system prompt tokens once
-        system_tokens = count_tokens(self.system_prompt)
+        # Count system prompt tokens once (use the formatted version with target_lang replaced)
+        system_tokens = count_tokens(system_prompt)
         print(f"[DEBUG] System prompt tokens: {system_tokens}")
         
         # Determine max workers from config or environment variable
@@ -1609,7 +1612,7 @@ class BatchHeaderTranslator:
                         print(f"    ... and {len(batch_headers) - 3} more")
                 
                 messages = [
-                    {"role": "system", "content": self.system_prompt},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ]
                 
