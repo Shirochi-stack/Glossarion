@@ -3991,10 +3991,6 @@ class BatchTranslationProcessor:
             cleaned = re.sub(r"^```(?:html)?\s*\n?", "", cleaned, count=1, flags=re.MULTILINE)
             cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
             
-            # Emergency Image Restoration (if enabled)
-            if self.config.EMERGENCY_IMAGE_RESTORE:
-                cleaned = ContentProcessor.emergency_restore_images(cleaned, merged_content)
-            
             # Get parent chapter info
             parent_actual_num, parent_content, parent_idx, parent_chapter, parent_content_hash = chapters_data[0]
             merged_child_nums = [cn for cn, _, _, _, _ in chapters_data[1:]]
@@ -4011,6 +4007,11 @@ class BatchTranslationProcessor:
                     cleaned = convert_enhanced_text_to_html(cleaned, parent_chapter)
                 except Exception as conv_err:
                     print(f"   ⚠️ Enhanced HTML conversion failed: {conv_err} — saving raw content")
+            
+            # Emergency Image Restoration (if enabled)
+            # MOVED: Run AFTER markdown->HTML conversion to avoid losing tags
+            if self.config.EMERGENCY_IMAGE_RESTORE:
+                cleaned = ContentProcessor.emergency_restore_images(cleaned, merged_content)
             
             # Optionally restore paragraphs if the output lacks structure
             if getattr(self.config, 'EMERGENCY_RESTORE', False):
