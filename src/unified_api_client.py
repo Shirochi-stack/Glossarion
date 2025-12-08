@@ -3425,6 +3425,9 @@ class UnifiedClient:
             if openai is not None:
                 if base_url is None:
                     base_url = os.getenv("GROQ_API_URL", "https://api.groq.com/openai/v1")
+                    # If env var is set but empty, use the hardcoded default
+                    if not base_url or base_url.strip() == '':
+                        base_url = "https://api.groq.com/openai/v1"
                 
                 # MICROSECOND LOCK for Groq client
                 with self._model_lock:
@@ -10114,6 +10117,10 @@ class UnifiedClient:
                 try:
                     if self._cancelled:
                         raise UnifiedClientError("Operation cancelled")
+                    
+                    # Fix empty base_url for Groq
+                    if provider == 'groq' and (not base_url or base_url.strip() == ''):
+                        base_url = "https://api.groq.com/openai/v1"
                     
                     client = self._get_openai_client(base_url=base_url, api_key=actual_api_key)
                     
