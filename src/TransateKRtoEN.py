@@ -2210,7 +2210,7 @@ class ContentProcessor:
     
     @staticmethod
     def emergency_restore_images(text, original_html=None, verbose=True):
-        """Emergency restoration of images lost during translation - Sibling-Based Positioning"""
+        """Emergency restoration of images lost during translation - Filename Pattern Search"""
         if not original_html or not text:
             return text
             
@@ -2219,6 +2219,9 @@ class ContentProcessor:
                 print(message)
                 
         try:
+            import re
+            import os
+            
             # Parse both documents
             soup_orig = BeautifulSoup(original_html, 'html.parser')
             soup_text = BeautifulSoup(text, 'html.parser')
@@ -2238,7 +2241,7 @@ class ContentProcessor:
             # If translation has fewer images, try to restore them
             if len(text_images) < len(orig_images):
                 log(f"🖼️ Image mismatch! Source: {len(orig_images)}, Translation: {len(text_images)}")
-                log("🔧 Attempting emergency image restoration (sibling-based method)...")
+                log("🔧 Attempting emergency image restoration (filename search method)...")
                 
                 # Get the set of image sources present in translation
                 present_srcs = set()
@@ -2247,135 +2250,82 @@ class ContentProcessor:
                     if src:
                         present_srcs.add(src)
                 
-                # --- Step 1: Build positional map of source document ---
-                # Strategy: Find all text blocks and images in order, track text block indices
-                
-                block_tags = {'p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'section', 'article', 'header', 'footer', 'ul', 'ol', 'li', 'blockquote', 'pre'}
-                
-                # Get all text blocks (blocks with actual text content)
-                source_text_blocks = []
-                for block in soup_orig.find_all(block_tags):
-                    text = block.get_text(strip=True)
-                    if text:
-                        # Check if this is a real text block, not just an image container
-                        direct_imgs = block.find_all('img', recursive=False)
-                        if not direct_imgs:
-                            # No direct images - definitely a text block
-                            source_text_blocks.append(block)
-                        else:
-                            # Has images - check if there's also text
-                            has_text_content = any(
-                                (isinstance(child, str) and child.strip()) or
-                                (hasattr(child, 'name') and child.name not in ['img'] and child.get_text(strip=True))
-                                for child in block.children
-                            )
-                            if has_text_content:
-                                source_text_blocks.append(block)
-                
-                # Build a complete ordered list of all blocks and images to find positions
-                body = soup_orig.find('body') or soup_orig
-                all_elements = list(body.find_all(list(block_tags) + ['img']))
-                
-                # Create a mapping of text blocks to their indices
-                text_block_to_idx = {id(block): idx for idx, block in enumerate(source_text_blocks)}
-                
-                # For each missing image, find which text block it comes after
-                image_positions = []  # (img_tag, text_block_index or -1)
-                
+                # Collect missing images
+                missing_images = []
                 for img in orig_images:
                     src = img.get('src')
-                    if not src or src in present_srcs:
-                        continue
-                    
-                    # Find the index of the most recent text block before this image
-                    prev_text_idx = -1
-                    
-                    try:
-                        img_pos = all_elements.index(img)
-                        
-                        # Walk backwards from img_pos to find the most recent text block
-                        for i in range(img_pos - 1, -1, -1):
-                            elem = all_elements[i]
-                            elem_id = id(elem)
-                            if elem_id in text_block_to_idx:
-                                prev_text_idx = text_block_to_idx[elem_id]
-                                break
-                    except (ValueError, AttributeError):
-                        pass
-                    
-                    image_positions.append((img, prev_text_idx))
+                    if src and src not in present_srcs:
+                        missing_images.append((src, img))
                 
-                if not image_positions:
+                if not missing_images:
                     return text
                 
-                # --- Step 2: Insert images in translation using index positions ---
+                # Convert both to strings for searching
+                source_str = str(original_html)
+                text_str = str(text)
                 inserted_count = 0
                 
-                # Get all text blocks from translation in order
-                trans_text_blocks = []
-                trans_body = soup_text.find('body')
-                if not trans_body:
-                    trans_body = soup_text
+                # For each missing image, find where it appears in source and insert at same relative position in output
+                for src, orig_img in missing_images:
+                    # Extract just the filename from the path
+                    filename = os.path.basename(src)
                     
-                for block in trans_body.find_all(block_tags):
-                    text = block.get_text(strip=True)
-                    if text:
-                        trans_text_blocks.append(block)
-                
-                for img_tag, text_block_idx in image_positions:
-                    # Create new image wrapped in paragraph
-                    new_p = soup_text.new_tag('p')
-                    new_img = soup_text.new_tag('img', src=img_tag.get('src'))
-                    for attr, val in img_tag.attrs.items():
-                        if attr != 'src':
-                            new_img[attr] = val
-                    new_p.append(new_img)
+                    # Search for the filename in the SOURCE HTML to find its position
+                    pattern = re.escape(filename)
+                    source_matches = list(re.finditer(pattern, source_str, re.IGNORECASE))
                     
-                    inserted = False
-                    
-                    if text_block_idx == -1:
-                        # Insert at document start (after h1 if present)
-                        h1 = soup_text.find('h1')
-                        if h1:
-                            h1.insert_after(new_p)
-                            inserted = True
-                        else:
-                            body = soup_text.find('body')
-                            if body and body.contents:
-                                body.contents[0].insert_before(new_p)
-                                inserted = True
-                            elif body:
-                                body.insert(0, new_p)
-                                inserted = True
+                    if source_matches:
+                        # Found the filename in source! Calculate its relative position
+                        source_pos = source_matches[0].start()
+                        source_len = len(source_str)
+                        
+                        # Calculate proportional position (0.0 to 1.0)
+                        relative_pos = source_pos / source_len if source_len > 0 else 0.5
+                        
+                        # Calculate corresponding position in translation
+                        text_len = len(text_str)
+                        insert_pos = int(relative_pos * text_len)
+                        
+                        # Find a good insertion point (after a tag close, not in the middle of text)
+                        # Search backwards for the nearest '>' to insert after a complete tag
+                        while insert_pos > 0 and text_str[insert_pos] != '>':
+                            insert_pos -= 1
+                        insert_pos += 1  # Insert after the '>'
+                        
+                        # Create the image tag HTML
+                        img_html = f'<p><img src="{src}"'
+                        for attr, val in orig_img.attrs.items():
+                            if attr != 'src':
+                                img_html += f' {attr}="{val}"'
+                        img_html += '/></p>'
+                        
+                        # Insert the image HTML at the calculated position
+                        text_str = text_str[:insert_pos] + img_html + text_str[insert_pos:]
+                        inserted_count += 1
                     else:
-                        # Insert after the corresponding text block in translation
-                        if 0 <= text_block_idx < len(trans_text_blocks):
-                            trans_text_blocks[text_block_idx].insert_after(new_p)
-                            inserted = True
-                        elif trans_text_blocks:
-                            # Index out of range - insert after last block
-                            trans_text_blocks[-1].insert_after(new_p)
-                            inserted = True
-                    
-                    # Fallback: append to end
-                    if not inserted:
+                        # Filename not found in source - append to end as fallback
+                        soup_text = BeautifulSoup(text_str, 'html.parser')
                         body = soup_text.find('body')
-                        if body:
-                            body.append(new_p)
-                        else:
-                            soup_text.append(new_p)
-                        inserted = True
-                    
-                    if inserted:
+                        if not body:
+                            body = soup_text
+                        
+                        new_p = soup_text.new_tag('p')
+                        new_img = soup_text.new_tag('img', src=src)
+                        for attr, val in orig_img.attrs.items():
+                            if attr != 'src':
+                                new_img[attr] = val
+                        new_p.append(new_img)
+                        body.append(new_p)
+                        text_str = str(soup_text)
                         inserted_count += 1
                 
-                log(f"✅ Restored {inserted_count} missing images using sibling-based positioning")
-                return str(soup_text)
+                log(f"✅ Restored {inserted_count} missing images using filename search")
+                return text_str
                 
         except Exception as e:
             log(f"⚠️ Failed to restore images: {e}")
-            # import traceback
-            # traceback.print_exc()
+            import traceback
+            traceback.print_exc()
             return text
             
         return text
