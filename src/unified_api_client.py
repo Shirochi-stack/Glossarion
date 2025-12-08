@@ -6686,9 +6686,27 @@ class UnifiedClient:
                 
                 # Format messages - convert to google-genai format
                 contents = []
-                for msg in messages:
+                for msg_idx, msg in enumerate(messages):
                     role = msg.get('role', 'user')
                     content = msg.get('content', '')
+                    
+                    # Debug logging
+                    if not self._is_stop_requested():
+                        print(f"   Debug: Message {msg_idx}: role={role}, content type={type(content).__name__}")
+                        if isinstance(content, list):
+                            print(f"   Debug: Content list has {len(content)} parts")
+                            for part_idx, part in enumerate(content):
+                                print(f"   Debug:   Part {part_idx}: type={type(part).__name__}, keys={list(part.keys()) if isinstance(part, dict) else 'N/A'}")
+                                if isinstance(part, dict) and part.get('type') in ['image', 'image_url']:
+                                    # Show what's in the image field
+                                    if 'image' in part:
+                                        img_data = part['image']
+                                        print(f"   Debug:     'image' key contains: type={type(img_data).__name__}, is_str={isinstance(img_data, str)}, starts_with_data={str(img_data).startswith('data:') if isinstance(img_data, str) else 'N/A'}, length={len(str(img_data)) if img_data else 0}")
+                                        if isinstance(img_data, dict):
+                                            print(f"   Debug:     'image' dict keys: {list(img_data.keys())}")
+                                    if 'image_url' in part:
+                                        img_url_data = part['image_url']
+                                        print(f"   Debug:     'image_url' key contains: type={type(img_url_data).__name__}")
                     
                     if role == 'system':
                         # System messages become user messages with INSTRUCTIONS prefix
@@ -6703,10 +6721,26 @@ class UnifiedClient:
                                         text_value = part.get('text', '')
                                         if isinstance(text_value, str):
                                             parts.append(types.Part(text=text_value))
-                                    elif part.get('type') == 'image_url':
-                                        # Handle image
-                                        image_url = part.get('image_url', {})
-                                        url = image_url.get('url', '') if isinstance(image_url, dict) else image_url
+                                    elif part.get('type') in ['image_url', 'image']:
+                                        # Handle image - check both 'image_url' and 'image' keys
+                                        url = ''
+                                        if 'image_url' in part:
+                                            image_url = part.get('image_url', {})
+                                            url = image_url.get('url', '') if isinstance(image_url, dict) else image_url
+                                        elif 'image' in part:
+                                            # Direct image key - can be dict or string
+                                            image_data = part.get('image', '')
+                                            if isinstance(image_data, dict):
+                                                # Image is a dict, try common keys: 'url', 'data', 'base64'
+                                                url = image_data.get('url', '') or image_data.get('data', '') or image_data.get('base64', '')
+                                                # If we got base64 without data: prefix, add it
+                                                if url and not url.startswith('data:'):
+                                                    # Detect mime type from the data or default to webp
+                                                    mime_type = 'image/webp'  # Default for your use case
+                                                    url = f'data:{mime_type};base64,{url}'
+                                            else:
+                                                url = image_data
+                                        
                                         if url and isinstance(url, str) and url.startswith('data:'):
                                             import base64
                                             mime_and_data = url.split(',', 1)
@@ -6719,6 +6753,8 @@ class UnifiedClient:
                                                     mime_type = 'image/webp'
                                                 image_bytes = base64.b64decode(base64_data)
                                                 parts.append(types.Part(inline_data=types.Blob(mime_type=mime_type, data=image_bytes)))
+                                                if not self._is_stop_requested():
+                                                    print(f"   ✅ Added image to request (mime: {mime_type}, size: {len(image_bytes)} bytes)")
                             if parts:
                                 contents.append(types.Content(role='user', parts=parts))
                         elif isinstance(content, str):
