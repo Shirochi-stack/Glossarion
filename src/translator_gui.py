@@ -8207,13 +8207,14 @@ Important rules:
     def browse_files(self):
         """Select one or more files - automatically handles single/multiple selection"""
         file_filter = (
-            "Supported files (*.epub *.cbz *.pdf *.txt *.json *.csv *.png *.jpg *.jpeg *.gif *.bmp *.webp);;"
+            "Supported files (*.epub *.cbz *.pdf *.txt *.json *.csv *.md *.png *.jpg *.jpeg *.gif *.bmp *.webp);;"
             "EPUB/CBZ (*.epub *.cbz);;"
             "EPUB files (*.epub);;"
             "Comic Book Zip (*.cbz);;"
             "PDF files (*.pdf);;"
-            "Text files (*.txt *.json *.csv);;"
+            "Text files (*.txt *.json *.csv *.md);;"
             "CSV files (*.csv);;"
+            "Markdown files (*.md);;"
             "Image files (*.png *.jpg *.jpeg *.gif *.bmp *.webp);;"
             "PNG files (*.png);;"
             "JPEG files (*.jpg *.jpeg);;"
@@ -8240,7 +8241,7 @@ Important rules:
         )
         if folder_path:
             # Find all supported files in the folder
-            supported_extensions = {'.epub', '.cbz', '.pdf', '.txt', '.json', '.csv', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
+            supported_extensions = {'.epub', '.cbz', '.pdf', '.txt', '.json', '.csv', '.md', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
             files = []
             
             # Recursively find files if deep scan is enabled
@@ -8264,7 +8265,7 @@ Important rules:
                 self.append_log(f"📁 Found {len(files)} supported files in: {os.path.basename(folder_path)}")
             else:
                 QMessageBox.warning(self, "No Files Found", 
-                                     f"No supported files found in:\n{folder_path}\n\nSupported formats: EPUB, TXT, PNG, JPG, JPEG, GIF, BMP, WebP")
+                                     f"No supported files found in:\n{folder_path}\n\nSupported formats: EPUB, TXT, MD, PNG, JPG, JPEG, GIF, BMP, WebP")
 
     def clear_file_selection(self):
         """Clear all selected files"""
