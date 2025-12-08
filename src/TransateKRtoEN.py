@@ -546,8 +546,7 @@ class RequestMerger:
         
         # Helper to check for markdown header pattern
         def get_markdown_header_match(text):
-            # Match markdown headers with optional trailing backslashes/newlines
-            return re.match(r'^\s*(#{1,6})\s+(.+?)(?:\\n\\|\s)*$', text, re.DOTALL)
+            return re.match(r'^\s*(#{1,6})\s+(.+?)\s*$', text, re.DOTALL)
 
         # 1. Scan for <p> tags that contain ONLY a markdown header
         for p in soup.find_all('p'):
@@ -2232,14 +2231,11 @@ class ContentProcessor:
             # Extract images from translation
             text_images = soup_text.find_all('img')
             
-            # Check if we need to restore images
-            # Case 1: Translation has fewer images
-            # Case 2: Translation has images but they might be in wrong positions (always restore for merged content)
-            if len(text_images) >= len(orig_images):
-                # Counts match or exceed - assume correct, skip restoration
+            # If counts match, nothing to do
+            if len(orig_images) == len(text_images):
                 return text
                 
-            # Translation has fewer images, try to restore them
+            # If translation has fewer images, try to restore them
             if len(text_images) < len(orig_images):
                 log(f"🖼️ Image mismatch! Source: {len(orig_images)}, Translation: {len(text_images)}")
                 log("🔧 Attempting emergency image restoration (text-ratio method)...")
@@ -2302,8 +2298,7 @@ class ContentProcessor:
                 trans_elements = flatten_blocks(soup_text)
                 
                 if not trans_elements:
-                    # Target is empty or weird? Just append all missing images at the end
-                    log(f"⚠️ No content blocks found in translation, appending {len(image_positions)} images to end")
+                    # Target is empty or weird? Just append all missing images
                     for img, _ in image_positions:
                         new_p = soup_text.new_tag('p')
                         new_img = soup_text.new_tag('img', src=img.get('src'))
@@ -2312,7 +2307,6 @@ class ContentProcessor:
                         new_p.append(new_img)
                         if soup_text.body: soup_text.body.append(new_p)
                         else: soup_text.append(new_p)
-                    log(f"✅ Appended {len(image_positions)} missing images to end of document")
                     return str(soup_text)
 
                 # Calculate cumulative text lengths of target blocks
@@ -3833,60 +3827,6 @@ class BatchTranslationProcessor:
             # No history for failed chapters
             return False, actual_num, None, None, None
     
-    def _get_original_chapter_content(self, chapter):
-        """Extract original chapter content directly from EPUB by filename.
-        
-        Args:
-            chapter: Chapter dict with filename/original_basename
-            
-        Returns:
-            Original HTML content string, or None if extraction fails
-        """
-        try:
-            # Get the EPUB path from environment variable (set by translator_gui)
-            epub_path = os.getenv('EPUB_PATH')
-            print(f"   [DEBUG] epub_path from env: {epub_path}")
-            if not epub_path or not os.path.exists(epub_path):
-                print(f"   [DEBUG] EPUB path invalid or doesn't exist")
-                return None
-            
-            # Get the original filename from chapter
-            filename = chapter.get('original_basename') or chapter.get('filename')
-            print(f"   [DEBUG] Looking for filename: {filename}")
-            if not filename:
-                print(f"   [DEBUG] No filename in chapter: {list(chapter.keys())}")
-                return None
-            
-            # Extract from EPUB - match by basename without extension
-            import zipfile
-            with zipfile.ZipFile(epub_path, 'r') as zf:
-                # Get all files in the EPUB
-                all_files = zf.namelist()
-                
-                # Find files that match the basename (without extension)
-                target_basename = os.path.splitext(filename)[0]
-                print(f"   [DEBUG] Searching for basename: {target_basename}")
-                
-                for epub_file in all_files:
-                    epub_basename = os.path.splitext(os.path.basename(epub_file))[0]
-                    if epub_basename == target_basename:
-                        try:
-                            content = zf.read(epub_file).decode('utf-8', errors='ignore')
-                            print(f"   [DEBUG] Successfully read from: {epub_file}")
-                            return content
-                        except Exception as e:
-                            print(f"   [DEBUG] Failed to read {epub_file}: {e}")
-                            continue
-                
-                print(f"   [DEBUG] No matching file found for basename: {target_basename}")
-            
-            return None
-        except Exception as e:
-            print(f"   ⚠️ Failed to extract original chapter content: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-    
     def process_merged_group(self, merge_group, progress_manager):
         """
         Process a merge group (multiple chapters merged into a single API request).
@@ -3916,9 +3856,7 @@ class BatchTranslationProcessor:
         for idx, chapter in merge_group:
             actual_num = chapter.get('actual_chapter_num', chapter['num'])
             content_hash = chapter.get("content_hash") or ContentProcessor.get_content_hash(chapter["body"])
-            # Use original_body if available (contains images), fallback to body
-            original_content = chapter.get('original_body', chapter["body"])
-            chapters_data.append((actual_num, original_content, idx, chapter, content_hash))
+            chapters_data.append((actual_num, chapter["body"], idx, chapter, content_hash))
         
         try:
             # Mark all chapters as in_progress
@@ -4070,7 +4008,10 @@ class BatchTranslationProcessor:
                 except Exception as conv_err:
                     print(f"   ⚠️ Enhanced HTML conversion failed: {conv_err} — saving raw content")
             
-            # NOTE: Image restoration moved to after split (per-section basis)
+            # Emergency Image Restoration (if enabled)
+            # MOVED: Run AFTER markdown->HTML conversion to avoid losing tags
+            if self.config.EMERGENCY_IMAGE_RESTORE:
+                cleaned = ContentProcessor.emergency_restore_images(cleaned, merged_content)
             
             # Optionally restore paragraphs if the output lacks structure
             if getattr(self.config, 'EMERGENCY_RESTORE', False):
@@ -4126,46 +4067,9 @@ class BatchTranslationProcessor:
                 # Split successful - save each section as individual file
                 print(f"   ✂️ Splitting merged content into {len(split_sections)} individual files")
                 
-                # DEBUG: Check images before split
-                from bs4 import BeautifulSoup
-                pre_split_soup = BeautifulSoup(cleaned, 'html.parser')
-                pre_split_imgs = len(pre_split_soup.find_all('img'))
-                print(f"[DEBUG] Before split: {pre_split_imgs} images in merged content")
-                
                 saved_files = []
                 for i, (actual_num, content, idx, chapter, content_hash) in enumerate(chapters_data):
                     section_content = split_sections[i]
-                    
-                    # Restore images by extracting directly from source EPUB
-                    if self.config.EMERGENCY_IMAGE_RESTORE:
-                        from bs4 import BeautifulSoup
-                        # Extract original chapter HTML from EPUB to get images
-                        original_html = self._get_original_chapter_content(chapter)
-                        if original_html:
-                            orig_soup = BeautifulSoup(original_html, 'html.parser')
-                            img_tags = orig_soup.find_all('img')
-                            if img_tags:
-                                print(f"   [Ch {actual_num}] Found {len(img_tags)} images in source, injecting into translation...")
-                                # Inject images into the translated section
-                                section_soup = BeautifulSoup(section_content, 'html.parser')
-                                # Append images at the end of the body
-                                body = section_soup.body or section_soup
-                                for img in img_tags:
-                                    # Create paragraph wrapper for image
-                                    p = section_soup.new_tag('p')
-                                    new_img = section_soup.new_tag('img', src=img.get('src'))
-                                    # Copy all attributes
-                                    for attr, val in img.attrs.items():
-                                        if attr != 'src':
-                                            new_img[attr] = val
-                                    p.append(new_img)
-                                    body.append(p)
-                                section_content = str(section_soup)
-                                print(f"   [Ch {actual_num}] ✅ Injected {len(img_tags)} images")
-                            else:
-                                print(f"   [Ch {actual_num}] No images in source")
-                        else:
-                            print(f"   [Ch {actual_num}] ⚠️ Could not extract original HTML")
                     
                     # Generate filename for this chapter using content.opf naming
                     fname = FileUtilities.create_chapter_filename(chapter, actual_num)
