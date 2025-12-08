@@ -4221,7 +4221,21 @@ def cross_reference_word_counts(original_counts, translated_file, translated_tex
             
             return result
     
-    # Fallback: old chapter number extraction logic (kept for backwards compatibility)
+    # Check if spine order was used (check if any entry has spine_index field)
+    # If spine order was used, we should NOT use chapter number fallback
+    spine_order_used = any(info.get('spine_index') is not None for info in original_counts.values())
+    
+    if spine_order_used:
+        # Spine order was used - no exact filename match means no match
+        # Do NOT use chapter number fallback as it will match wrong chapters
+        return {
+            'found_match': False,
+            'chapter_num': None,
+            'reason': f'No exact filename match for \'{search_name}\' in spine order'
+        }
+    
+    # Fallback: No spine order available, use chapter number extraction
+    # This is only safe when the EPUB didn't have a proper spine
     chapter_num = None
     
     # PRIORITY 1: Extract from filename patterns (most specific first)
