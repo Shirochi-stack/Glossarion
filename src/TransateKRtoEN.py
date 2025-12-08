@@ -325,9 +325,41 @@ class RequestMerger:
                 merged_parts.append(content)
                 continue
 
-            # If the chapter already has any heading tags (including those we may
-            # have just converted from markdown), use as‑is.
-            if soup.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
+            # If the chapter already has an h1 tag, use as‑is (it's already good)
+            if soup.find('h1'):
+                merged_parts.append(str(soup))
+                continue
+            
+            # Check if there's an h2-h6 near the start (first 3 tags) that we can promote
+            # This ensures we have an h1 at the document start for split-the-merge
+            promoted_header = None
+            check_limit = 3  # Check first 3 tags
+            tags_checked = 0
+            
+            # Start from body if it exists, otherwise from the whole document
+            search_root = soup.body if soup.body else soup
+            
+            for tag in search_root.find_all(True):  # Find all tags
+                if tag.name in ['h2', 'h3', 'h4', 'h5', 'h6']:
+                    # Found a header near the start - promote it to h1
+                    promoted_header = tag
+                    break
+                tags_checked += 1
+                if tags_checked >= check_limit:
+                    break
+            
+            # If we found an h2-h6 near the start, promote it to h1
+            if promoted_header:
+                original_level = promoted_header.name
+                heading_text = promoted_header.get_text(strip=True)
+                new_h1 = soup.new_tag('h1')
+                new_h1.string = heading_text
+                promoted_header.replace_with(new_h1)
+                if log_injections:
+                    print(
+                        f"   ℹ️ Request Merging: Promoted <{original_level}> to <h1> at document start for "
+                        f"chapter {chapter_num}: '{heading_text[:80]}'"
+                    )
                 merged_parts.append(str(soup))
                 continue
 
