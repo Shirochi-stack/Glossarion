@@ -300,17 +300,17 @@ class RequestMerger:
                         # Must be at start of line (ignoring whitespace)
                         m = re.match(r'^\s*(#{1,6})\s+(.+)$', line)
                         if m:
-                            level = len(m.group(1))
                             h_text = m.group(2).strip()
-                            # Replace the line with HTML header
-                            lines[i] = f'<h{level}>{h_text}</h{level}>'
+                            # ALWAYS use h1 for synthetic merge headers regardless of markdown level
+                            # This ensures consistent header structure for split-the-merge
+                            lines[i] = f'<h1>{h_text}</h1>'
                             content = '\n'.join(lines)
                             if log_injections:
                                 print(
-                                    f"   ℹ️ Request Merging: Converted markdown header to <h{level}> for "
+                                    f"   ℹ️ Request Merging: Converted markdown header to <h1> for "
                                     f"chapter {chapter_num}:\n"
                                     f"      Before: '{line.strip()[:80]}'\n"
-                                    f"      After:  '<h{level}>{h_text[:80]}</h{level}>'"
+                                    f"      After:  '<h1>{h_text[:80]}</h1>'"
                                 )
                         # Whether we found a header or not, stop after the first 
                         # non-empty line so we don't accidentally convert headers
