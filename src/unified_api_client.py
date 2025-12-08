@@ -9903,9 +9903,6 @@ class UnifiedClient:
             # Strip the 'groq/' prefix from the model name if present
             if effective_model.startswith('groq/'):
                 effective_model = effective_model[5:]  # Remove 'groq/' prefix
-            # Strip /chat/completions from base_url if present (SDK adds it automatically)
-            if base_url and '/chat/completions' in base_url:
-                base_url = base_url.replace('/chat/completions', '')
         elif provider == 'chutes':
             # Strip the 'chutes/' prefix from the model name if present
             if effective_model.startswith('chutes/'):
@@ -10103,7 +10100,7 @@ class UnifiedClient:
         sdk_compatible = ['deepseek', 'together', 'mistral', 'yi', 'qwen', 'moonshot', 'groq', 
                          'electronhub', 'openrouter', 'fireworks', 'xai', 'gemini-openai', 'chutes']
         
-        # Allow forcing HTTP-only for OpenRouter via toggle (default: enabled)
+        # Allow forcing HTTP-only for OpenRouter via toggle (default: disabled)
         openrouter_http_only = os.getenv('OPENROUTER_USE_HTTP_ONLY', '0') == '1'
         if provider == 'openrouter' and openrouter_http_only:
             print("OpenRouter HTTP-only mode enabled — using direct HTTP client")
@@ -10690,6 +10687,15 @@ class UnifiedClient:
             # Endpoint and idempotency
             endpoint = "/chat/completions"
             headers["Idempotency-Key"] = self._get_idempotency_key()
+            
+            # For Groq HTTP-only: ensure base_url is set
+            if provider == 'groq' and (not base_url or base_url == ''):
+                base_url = os.getenv("GROQ_API_URL", "https://api.groq.com/openai/v1")
+                # If env var is set but empty, use the hardcoded default
+                if not base_url or base_url == '':
+                    base_url = "https://api.groq.com/openai/v1"
+                print(f"⚠️ Groq HTTP: base_url was empty, using default: {base_url}")
+            
             resp = self._http_request_with_retries(
                 method="POST",
                 url=f"{base_url}{endpoint}",
