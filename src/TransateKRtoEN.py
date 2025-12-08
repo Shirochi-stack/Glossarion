@@ -177,12 +177,23 @@ class TranslationConfig:
         """Return the effective output token limit, considering per-key overrides.
 
         - Start from the global MAX_OUTPUT_TOKENS.
+        - Check if the model has a discovered limit (from auto-adjustment)
         - If multi-key mode is enabled, intersect with any per-key
           individual_output_token_limit values (min of all >0 limits).
         - If fallback keys are enabled, also intersect with their per-key
           individual_output_token_limit values.
         """
         effective = self.MAX_OUTPUT_TOKENS
+        
+        # Check if we've discovered a model limit via auto-adjustment
+        try:
+            from unified_api_client import UnifiedClient
+            with UnifiedClient._model_limits_lock:
+                cached_limit = UnifiedClient._model_token_limits.get(self.MODEL)
+                if cached_limit and cached_limit < effective:
+                    effective = cached_limit
+        except Exception:
+            pass
 
         # Collect per-key limits from multi-key pool (only from enabled keys)
         per_key_limits = []
