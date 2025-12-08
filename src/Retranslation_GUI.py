@@ -2186,7 +2186,7 @@ class RetranslationMixin:
             progress_file = data['progress_file']
             folder_path = data['folder_path']
             
-            # Reload progress data if it exists
+            # ALWAYS reload progress data from file to catch deletions
             progress_data = None
             html_files = []
             has_progress_tracking = os.path.exists(progress_file)
@@ -2195,6 +2195,7 @@ class RetranslationMixin:
                 try:
                     with open(progress_file, 'r', encoding='utf-8') as f:
                         progress_data = json.load(f)
+                    print(f"🔄 Reloaded progress file from disk")
                     
                     # Extract files from progress data (primary source)
                     # Check if this is the newer nested structure with 'images' key
@@ -2208,8 +2209,14 @@ class RetranslationMixin:
                                 output_file = output_file.replace('\\', '/')
                                 if '/' in output_file:
                                     output_file = os.path.basename(output_file)
+                                
+                                # Only include if file actually exists on disk
                                 if output_file and output_file not in html_files:
-                                    html_files.append(output_file)
+                                    full_path = os.path.join(output_dir, output_file)
+                                    if os.path.exists(full_path):
+                                        html_files.append(output_file)
+                                    else:
+                                        print(f"⚠️ File in progress but not on disk: {output_file}")
                     else:
                         # Older structure: progress_data[hash] = {entry}
                         for key, value in progress_data.items():
@@ -2219,8 +2226,14 @@ class RetranslationMixin:
                                 output_file = output_file.replace('\\', '/')
                                 if '/' in output_file:
                                     output_file = os.path.basename(output_file)
+                                
+                                # Only include if file actually exists on disk
                                 if output_file and output_file not in html_files:
-                                    html_files.append(output_file)
+                                    full_path = os.path.join(output_dir, output_file)
+                                    if os.path.exists(full_path):
+                                        html_files.append(output_file)
+                                    else:
+                                        print(f"⚠️ File in progress but not on disk: {output_file}")
                 except Exception as e:
                     print(f"Failed to load progress file: {e}")
                     has_progress_tracking = False
@@ -2304,9 +2317,15 @@ class RetranslationMixin:
                     'output_dir': output_dir
                 })
             
-            # Update data dictionary
+            # Update data dictionary with fresh data
             data['file_info'] = file_info
             data['progress_data'] = progress_data
+            
+            # IMPORTANT: Also update the original refresh_data dict so future operations use fresh data
+            # This ensures delete operations after refresh work with current state
+            if 'progress_data' in data:
+                # Update the reference in the closure
+                data['progress_data'] = progress_data
             
             # Clear and rebuild listbox
             listbox = data['listbox']
@@ -3233,7 +3252,6 @@ class RetranslationMixin:
             
             # Delete selected files
             deleted_count = 0
-            progress_updated = False
             
             for idx in selected_indices:
                 info = file_info[idx]
@@ -3249,17 +3267,17 @@ class RetranslationMixin:
                             # Check nested structure first
                             if 'images' in progress_data and hash_key in progress_data['images']:
                                 del progress_data['images'][hash_key]
-                                progress_updated = True
+                                print(f"Removed {hash_key} from progress_data['images']")
                             # Check flat structure
                             elif hash_key in progress_data:
                                 del progress_data[hash_key]
-                                progress_updated = True
+                                print(f"Removed {hash_key} from progress_data")
                             
                 except Exception as e:
                     print(f"Failed to delete {info['path']}: {e}")
             
-            # Save updated progress if modified
-            if progress_updated and progress_data:
+            # ALWAYS save progress file after any deletions
+            if deleted_count > 0 and progress_data:
                 try:
                     with open(progress_file, 'w', encoding='utf-8') as f:
                         json.dump(progress_data, f, ensure_ascii=False, indent=2)
