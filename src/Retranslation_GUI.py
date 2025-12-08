@@ -2166,6 +2166,203 @@ class RetranslationMixin:
             if 'file_missing' in stats_labels:
                 stats_labels['file_missing'].setText(f"⚠️ File Missing: {file_missing}")
 
+    def _refresh_image_folder_data(self, data):
+        """Refresh the image folder retranslation dialog data by rescanning files"""
+        try:
+            # Validate that widgets still exist
+            if not self._is_data_valid(data):
+                print("⚠️ Cannot refresh - widgets have been deleted")
+                return
+            
+            # Save current selections to restore after refresh
+            selected_indices = []
+            try:
+                selected_indices = [data['listbox'].row(item) for item in data['listbox'].selectedItems()]
+            except RuntimeError:
+                print("⚠️ Could not save selection state - widget was deleted")
+                return
+            
+            output_dir = data['output_dir']
+            progress_file = data['progress_file']
+            folder_path = data['folder_path']
+            
+            # Reload progress data if it exists
+            progress_data = None
+            html_files = []
+            has_progress_tracking = os.path.exists(progress_file)
+            
+            if has_progress_tracking:
+                try:
+                    with open(progress_file, 'r', encoding='utf-8') as f:
+                        progress_data = json.load(f)
+                    
+                    # Extract files from progress data (primary source)
+                    # Check if this is the newer nested structure with 'images' key
+                    images_dict = progress_data.get('images', {})
+                    if images_dict:
+                        # Newer structure: progress_data['images'][hash] = {entry}
+                        for key, value in images_dict.items():
+                            if isinstance(value, dict) and 'output_file' in value:
+                                output_file = value['output_file']
+                                # Handle both forward and backslashes in paths
+                                output_file = output_file.replace('\\', '/')
+                                if '/' in output_file:
+                                    output_file = os.path.basename(output_file)
+                                if output_file and output_file not in html_files:
+                                    html_files.append(output_file)
+                    else:
+                        # Older structure: progress_data[hash] = {entry}
+                        for key, value in progress_data.items():
+                            if isinstance(value, dict) and 'output_file' in value:
+                                output_file = value['output_file']
+                                # Handle both forward and backslashes in paths
+                                output_file = output_file.replace('\\', '/')
+                                if '/' in output_file:
+                                    output_file = os.path.basename(output_file)
+                                if output_file and output_file not in html_files:
+                                    html_files.append(output_file)
+                except Exception as e:
+                    print(f"Failed to load progress file: {e}")
+                    has_progress_tracking = False
+            
+            # Also scan directory for any HTML files not in progress (fallback)
+            if os.path.exists(output_dir):
+                try:
+                    for file in os.listdir(output_dir):
+                        file_path = os.path.join(output_dir, file)
+                        if (os.path.isfile(file_path) and 
+                            file.endswith('.html') and 
+                            file not in html_files and
+                            re.match(r'response_\d+_', file)):
+                            html_files.append(file)
+                except Exception as e:
+                    print(f"Error scanning directory: {e}")
+            
+            # Rescan cover images
+            image_files = []
+            images_dir = os.path.join(output_dir, "images")
+            if os.path.exists(images_dir):
+                try:
+                    for file in os.listdir(images_dir):
+                        if file.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp')):
+                            image_files.append(file)
+                except Exception as e:
+                    print(f"Error scanning images directory: {e}")
+            
+            # Rebuild file_info list
+            file_info = []
+            
+            # Add translated files (both HTML and generated images)
+            for html_file in sorted(set(html_files)):
+                # Determine file type and extract info
+                is_html = html_file.lower().endswith(('.html', '.xhtml', '.htm'))
+                is_image = html_file.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif'))
+                
+                if is_html:
+                    match = re.match(r'response_(\d+)_(.+)\.html', html_file)
+                    if match:
+                        index = match.group(1)
+                        base_name = match.group(2)
+                elif is_image:
+                    # For generated images, just use the filename
+                    base_name = os.path.splitext(html_file)[0]
+                
+                # Find hash key if progress tracking exists
+                hash_key = None
+                if progress_data:
+                    # Check nested structure first
+                    images_dict = progress_data.get('images', {})
+                    if images_dict:
+                        for key, value in images_dict.items():
+                            if isinstance(value, dict) and 'output_file' in value:
+                                if html_file in value['output_file']:
+                                    hash_key = key
+                                    break
+                    else:
+                        # Check flat structure
+                        for key, value in progress_data.items():
+                            if isinstance(value, dict) and 'output_file' in value:
+                                if html_file in value['output_file']:
+                                    hash_key = key
+                                    break
+                
+                file_info.append({
+                    'type': 'translated',
+                    'file': html_file,
+                    'path': os.path.join(output_dir, html_file),
+                    'hash_key': hash_key,
+                    'output_dir': output_dir
+                })
+            
+            # Add cover images
+            for img_file in sorted(image_files):
+                file_info.append({
+                    'type': 'cover',
+                    'file': img_file,
+                    'path': os.path.join(images_dir, img_file),
+                    'hash_key': None,
+                    'output_dir': output_dir
+                })
+            
+            # Update data dictionary
+            data['file_info'] = file_info
+            data['progress_data'] = progress_data
+            
+            # Clear and rebuild listbox
+            listbox = data['listbox']
+            listbox.clear()
+            
+            # Add all tracked files to display
+            for info in file_info:
+                if info['type'] == 'translated':
+                    file_name = info['file']
+                    # Check if it's an HTML file or a generated image
+                    is_html = file_name.lower().endswith(('.html', '.xhtml', '.htm'))
+                    is_image = file_name.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif'))
+                    
+                    if is_html:
+                        match = re.match(r'response_(\d+)_(.+)\.html', file_name)
+                        if match:
+                            index = match.group(1)
+                            base_name = match.group(2)
+                            display = f"📄 Image {index} | {base_name} | ✅ Completed"
+                        else:
+                            display = f"📄 {file_name} | ✅ Completed"
+                    elif is_image:
+                        # Generated image file (e.g., Test1.png from imagen)
+                        base_name = os.path.splitext(file_name)[0]
+                        display = f"🖼️ {base_name} | ✅ Completed"
+                    else:
+                        display = f"📄 {file_name} | ✅ Completed"
+                elif info['type'] == 'cover':
+                    display = f"🖼️ Cover | {info['file']} | ⏭️ Skipped (cover)"
+                else:
+                    display = f"📄 {info['file']}"
+                
+                listbox.addItem(display)
+            
+            # Restore selections
+            try:
+                if selected_indices:
+                    for idx in selected_indices:
+                        if idx < listbox.count():
+                            listbox.item(idx).setSelected(True)
+                    # Update selection count
+                    if 'selection_count_label' in data and data['selection_count_label']:
+                        data['selection_count_label'].setText(f"Selected: {len(selected_indices)}")
+                else:
+                    listbox.clearSelection()
+                    if 'selection_count_label' in data and data['selection_count_label']:
+                        data['selection_count_label'].setText("Selected: 0")
+            except RuntimeError:
+                print("⚠️ Could not restore selection state - widget was deleted during refresh")
+            
+            print(f"✅ Image folder data refreshed: {len(html_files)} HTML files, {len(image_files)} cover images")
+            
+        except Exception as e:
+            print(f"❌ Failed to refresh image folder data: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _force_retranslation_multiple_files(self):
         """Handle force retranslation when multiple files are selected - now uses shared logic"""
@@ -2579,9 +2776,9 @@ class RetranslationMixin:
                 if match:
                     index = match.group(1)
                     base_name = match.group(2)
-                    display = f"📄 Image {index} | {base_name} | ✅ Translated"
+                    display = f"📄 Image {index} | {base_name} | ✅ Completed"
                 else:
-                    display = f"📄 {file} | ✅ Translated"
+                    display = f"📄 {file} | ✅ Completed"
                 
                 listbox.addItem(display)
                 file_info.append({
@@ -2803,9 +3000,9 @@ class RetranslationMixin:
             if match:
                 index = match.group(1)
                 base_name = match.group(2)
-                display = f"📄 Image {index} | {base_name} | ✅ Translated"
+                display = f"📄 Image {index} | {base_name} | ✅ Completed"
             else:
-                display = f"📄 {html_file} | ✅ Translated"
+                display = f"📄 {html_file} | ✅ Completed"
             
             listbox.addItem(display)
             
@@ -2954,8 +3151,14 @@ class RetranslationMixin:
                         print(f"Deleted translation: {item['path']}")
                         
                         # Remove from progress tracking if applicable
-                        if progress_data and item.get('hash_key') and item['hash_key'] in progress_data:
-                            del progress_data[item['hash_key']]
+                        if progress_data and item.get('hash_key'):
+                            hash_key = item['hash_key']
+                            # Check nested structure first
+                            if 'images' in progress_data and hash_key in progress_data['images']:
+                                del progress_data['images'][hash_key]
+                            # Check flat structure
+                            elif hash_key in progress_data:
+                                del progress_data[hash_key]
                     
                     # Update the listbox display
                     display = f"🖼️ Skipped | {base_name if match else item['file']} | ⏭️ Moved to images folder"
@@ -2984,6 +3187,10 @@ class RetranslationMixin:
                     print(f"Updated progress tracking file")
                 except Exception as e:
                     print(f"Failed to update progress file: {e}")
+            
+            # Auto-refresh the display to show updated status
+            if 'refresh_data' in locals():
+                self._refresh_image_folder_data(refresh_data)
             
             # Update selection count
             update_selection_count()
@@ -3037,9 +3244,16 @@ class RetranslationMixin:
                         print(f"Deleted: {info['path']}")
                         
                         # Remove from progress tracking if applicable
-                        if progress_data and info['hash_key'] and info['hash_key'] in progress_data:
-                            del progress_data[info['hash_key']]
-                            progress_updated = True
+                        if progress_data and info.get('hash_key'):
+                            hash_key = info['hash_key']
+                            # Check nested structure first
+                            if 'images' in progress_data and hash_key in progress_data['images']:
+                                del progress_data['images'][hash_key]
+                                progress_updated = True
+                            # Check flat structure
+                            elif hash_key in progress_data:
+                                del progress_data[hash_key]
+                                progress_updated = True
                             
                 except Exception as e:
                     print(f"Failed to delete {info['path']}: {e}")
@@ -3052,6 +3266,10 @@ class RetranslationMixin:
                     print(f"Updated progress tracking file")
                 except Exception as e:
                     print(f"Failed to update progress file: {e}")
+            
+            # Auto-refresh the display to show updated status
+            if 'refresh_data' in locals():
+                self._refresh_image_folder_data(refresh_data)
             
             QMessageBox.information(self, "Success", 
                 f"Deleted {deleted_count} file(s).\n\n"
@@ -3085,7 +3303,70 @@ class RetranslationMixin:
         btn_delete = QPushButton("Delete Selected")
         btn_delete.setStyleSheet("QPushButton { background-color: #dc3545; color: white; padding: 5px 15px; font-weight: bold; }")
         btn_delete.clicked.connect(retranslate_selected)
-        button_layout.addWidget(btn_delete, 1, 0, 1, 2)
+        button_layout.addWidget(btn_delete, 1, 0, 1, 1)
+        
+        # Add animated refresh button
+        btn_refresh = AnimatedRefreshButton("  Refresh")  # Double space for icon padding
+        btn_refresh.setStyleSheet(
+            "QPushButton { "
+            "background-color: #17a2b8; "
+            "color: white; "
+            "padding: 5px 15px; "
+            "font-weight: bold; "
+            "}"
+        )
+        
+        # Create data dict for refresh function
+        refresh_data = {
+            'type': 'image_folder',
+            'listbox': listbox,
+            'file_info': file_info,
+            'progress_file': progress_file,
+            'progress_data': progress_data,
+            'output_dir': output_dir,
+            'folder_path': folder_path,
+            'selection_count_label': selection_count_label,
+            'dialog': dialog
+        }
+        
+        # Create refresh handler with animation
+        def animated_refresh():
+            import time
+            btn_refresh.start_animation()
+            btn_refresh.setEnabled(False)
+            
+            # Track start time for minimum animation duration
+            start_time = time.time()
+            min_animation_duration = 0.8  # 800ms minimum
+            
+            # Use QTimer to run refresh after animation starts
+            def do_refresh():
+                try:
+                    self._refresh_image_folder_data(refresh_data)
+                    
+                    # Calculate remaining time to meet minimum animation duration
+                    elapsed = time.time() - start_time
+                    remaining = max(0, min_animation_duration - elapsed)
+                    
+                    # Schedule animation stop after remaining time
+                    def finish_animation():
+                        btn_refresh.stop_animation()
+                        btn_refresh.setEnabled(True)
+                    
+                    if remaining > 0:
+                        QTimer.singleShot(int(remaining * 1000), finish_animation)
+                    else:
+                        finish_animation()
+                        
+                except Exception as e:
+                    print(f"Error during refresh: {e}")
+                    btn_refresh.stop_animation()
+                    btn_refresh.setEnabled(True)
+            
+            QTimer.singleShot(50, do_refresh)  # Small delay to let animation start
+        
+        btn_refresh.clicked.connect(animated_refresh)
+        button_layout.addWidget(btn_refresh, 1, 1, 1, 1)
         
         btn_cancel = QPushButton("Cancel")
         btn_cancel.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 5px 15px; font-weight: bold; }")

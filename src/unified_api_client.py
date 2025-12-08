@@ -6875,8 +6875,10 @@ class UnifiedClient:
                     }
                 
                 # Save configuration to file
+                # IMPORTANT: Include image generation info in type for proper directory routing
+                request_type = "VERTEX_AI_GEMINI_IMAGE_REQUEST" if enable_image_output else "VERTEX_AI_GEMINI_REQUEST"
                 config_data = {
-                    "type": "VERTEX_AI_GEMINI_REQUEST",
+                    "type": request_type,
                     "model": model_name,
                     "project_id": project_id,
                     "location": location,
