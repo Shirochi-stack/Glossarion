@@ -811,6 +811,14 @@ class GlossaryManagerMixin:
         if not hasattr(self, 'custom_glossary_fields'):
             self.custom_glossary_fields = self.config.get('custom_glossary_fields', [])
         
+        # Add "description" as default field if list is empty and user hasn't manually removed it
+        description_removed_flag = self.config.get('custom_field_description_removed', False)
+        if not self.custom_glossary_fields and not description_removed_flag:
+            self.custom_glossary_fields = ['description']
+            # Save to config so it persists
+            self.config['custom_glossary_fields'] = self.custom_glossary_fields
+            self.save_config(show_message=False)
+        
         for field in self.custom_glossary_fields:
             self.custom_fields_listbox.addItem(field)
         
@@ -829,6 +837,11 @@ class GlossaryManagerMixin:
                 self.custom_glossary_fields.append(field)
                 self.custom_fields_listbox.addItem(field)
                 self.custom_field_entry.clear()
+                
+                # If user manually adds "description" back, clear the removal flag
+                if field.lower() == 'description':
+                    self.config['custom_field_description_removed'] = False
+                    self.save_config(show_message=False)
         
         def remove_custom_field():
             current_row = self.custom_fields_listbox.currentRow()
@@ -837,6 +850,11 @@ class GlossaryManagerMixin:
                 field = item.text()
                 self.custom_glossary_fields.remove(field)
                 self.custom_fields_listbox.takeItem(current_row)
+                
+                # If user manually removes "description", set flag to prevent re-adding
+                if field.lower() == 'description':
+                    self.config['custom_field_description_removed'] = True
+                    self.save_config(show_message=False)
         
         # Use screen ratio for button widths: ~8% of screen width
         button_width = int(self._screen.width() * 0.08)
