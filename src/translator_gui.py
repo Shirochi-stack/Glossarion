@@ -7263,6 +7263,7 @@ Important rules:
             # Set translation parameters from GUI
             os.environ['TRANSLATION_TEMPERATURE'] = str(self.trans_temp.text())
             os.environ['MAX_OUTPUT_TOKENS'] = str(self.max_output_tokens)
+            os.environ['OUTPUT_LANGUAGE'] = self.config.get('output_language', 'English')
             
             # Set batch translation settings
             os.environ['BATCH_TRANSLATE_HEADERS'] = "1" if self.batch_translate_headers_var else "0"

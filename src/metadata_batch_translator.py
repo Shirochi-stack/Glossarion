@@ -2583,6 +2583,15 @@ def enhance_epub_compiler(compiler_instance):
             compiler_instance.api_client.compression_factor = compression_factor
             print(f"[DEBUG] Set compression factor: {compression_factor}")
         
+        # Get output_language - GUI should pass this via OUTPUT_LANGUAGE env var
+        env_output_lang = os.getenv('OUTPUT_LANGUAGE')
+        if env_output_lang:
+            config['output_language'] = env_output_lang
+            print(f"[DEBUG] Using output_language from GUI (env): {config['output_language']}")
+        elif 'output_language' not in config:
+            config['output_language'] = 'English'  # Default
+            print(f"[DEBUG] Using default output_language: {config['output_language']}")
+        
         try:
             # Create batch header translator if needed
             if batch_translate:
