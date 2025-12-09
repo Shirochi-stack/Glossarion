@@ -3342,8 +3342,12 @@ class BatchTranslationProcessor:
             print(f"🔄 Starting #{idx+1} (Internal: {terminology} {chap_num}, Actual: {terminology} {actual_num})  (thread: {threading.current_thread().name}) [File: {chapter.get('original_basename', f'{terminology}_{chap_num}')}]")
                       
             content_hash = chapter.get("content_hash") or ContentProcessor.get_content_hash(chapter["body"])
+            
+            # Determine output filename early so we can track it in progress
+            fname = FileUtilities.create_chapter_filename(chapter, actual_num)
+            
             with self.progress_lock:
-                self.update_progress_fn(idx, actual_num, content_hash, None, status="in_progress")
+                self.update_progress_fn(idx, actual_num, content_hash, fname, status="in_progress")
                 self.save_progress_fn()
             
             chapter_body = chapter["body"]
@@ -3804,7 +3808,9 @@ class BatchTranslationProcessor:
         except Exception as e:
             print(f"❌ Chapter {actual_num} failed: {e}")
             with self.progress_lock:
-                self.update_progress_fn(idx, actual_num, content_hash, None, status="failed")
+                # Use the same output filename so we can track failed chapters properly
+                fname = FileUtilities.create_chapter_filename(chapter, actual_num)
+                self.update_progress_fn(idx, actual_num, content_hash, fname, status="failed")
                 self.save_progress_fn()
             # No history for failed chapters
             return False, actual_num, None, None, None
@@ -3844,7 +3850,9 @@ class BatchTranslationProcessor:
             # Mark all chapters as in_progress
             for actual_num, _, idx, chapter, content_hash in chapters_data:
                 with self.progress_lock:
-                    self.update_progress_fn(idx, actual_num, content_hash, None, status="in_progress")
+                    # Determine output filename for tracking
+                    fname = FileUtilities.create_chapter_filename(chapter, actual_num)
+                    self.update_progress_fn(idx, actual_num, content_hash, fname, status="in_progress")
                     self.save_progress_fn()
             
             # Merge chapter contents
@@ -8117,9 +8125,7 @@ def main(log_callback=None, stop_callback=None):
                         c["body"] = original_body
 
                 print(f"📖 Translating text content ({text_size} characters)")
-                # Set output_file immediately when starting translation (not null)
-                fname = FileUtilities.create_chapter_filename(c, actual_num)
-                progress_manager.update(idx, actual_num, content_hash, output_file=fname, status="in_progress", chapter_obj=c)
+                progress_manager.update(idx, actual_num, content_hash, output_file=None, status="in_progress", chapter_obj=c)
                 progress_manager.save()
                 
                 # REQUEST MERGING: If this is a parent chapter, merge content from child chapters

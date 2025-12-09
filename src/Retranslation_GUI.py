@@ -552,8 +552,12 @@ class RetranslationMixin:
                                 parent_info = prog["chapters"][parent_key]
                                 if parent_info.get('status') == 'completed':
                                     matched_info = chapter_info
-                    # In-progress chapters: match by output_file or key if output_file is null
-                    elif status == 'in_progress' and (not out_file or out_file == expected_response):
+                    # In-progress and failed chapters: match by actual_num AND output_file to avoid duplicates
+                    # when 2 files have the same chapter number
+                    elif status in ['in_progress', 'failed'] and out_file == expected_response:
+                        matched_info = chapter_info
+                    # Legacy in-progress chapters without output_file: still match by actual_num only
+                    elif status == 'in_progress' and not out_file:
                         matched_info = chapter_info
                     # Normal match: output file matches expected
                     elif out_file == expected_response:
@@ -605,8 +609,13 @@ class RetranslationMixin:
                                     break
                                 # else: don't match - will fall through to not_translated
                             
-                            # In-progress chapters: match by output_file or actual_num if output_file is null
-                            if status == 'in_progress' and (not out_file or out_file == expected_response):
+                            # In-progress and failed chapters: match by actual_num AND output_file to avoid duplicates
+                            # when 2 files have the same chapter number
+                            if status in ['in_progress', 'failed'] and out_file == expected_response:
+                                matched_info = chapter_info
+                                break
+                            # Legacy in-progress chapters without output_file: still match by actual_num only
+                            if status == 'in_progress' and not out_file:
                                 matched_info = chapter_info
                                 break
                             
@@ -714,10 +723,16 @@ class RetranslationMixin:
                 output_file = chapter_info.get("output_file", "")
                 status = chapter_info.get("status", "")
                 
-                # Include chapters with output files OR in_progress with null output file
-                if output_file or status == "in_progress":
-                    # Use a placeholder key for null output files
-                    file_key = output_file if output_file else f"_in_progress_{chapter_key}"
+                # Include chapters with output files OR in_progress/failed with null output file (legacy)
+                if output_file or status in ["in_progress", "failed"]:
+                    # Use a placeholder key for null output files (legacy support)
+                    if output_file:
+                        file_key = output_file
+                    elif status == "in_progress":
+                        file_key = f"_in_progress_{chapter_key}"
+                    else:  # failed
+                        file_key = f"_failed_{chapter_key}"
+                    
                     if file_key not in files_to_entries:
                         files_to_entries[file_key] = []
                     files_to_entries[file_key].append((chapter_key, chapter_info))
@@ -727,8 +742,8 @@ class RetranslationMixin:
                 
                 # Get the actual output file (strip placeholder prefix if present)
                 actual_output_file = output_file
-                if output_file.startswith("_in_progress_"):
-                    # For in_progress with null output, use expected filename based on chapter info
+                if output_file.startswith("_in_progress_") or output_file.startswith("_failed_"):
+                    # For in_progress/failed with null output (legacy), use expected filename based on chapter info
                     actual_output_file = chapter_info.get("output_file", "")
                     if not actual_output_file:
                         # Generate expected filename based on actual_num
@@ -961,132 +976,122 @@ class RetranslationMixin:
         
         container_layout.addWidget(title_row)
         
-        # Create a mutable reference for the refresh button (to be set later)
-        btn_refresh_ref = [None]
-        
         # Function to handle toggle change - will be defined after UI is created
         def on_toggle_special_files(state):
             """Rebuild the chapter list when the special files toggle is changed"""
-            # Disable refresh button to prevent concurrent operations
-            if btn_refresh_ref[0]:
-                btn_refresh_ref[0].setEnabled(False)
+            # Update the state variable
+            show_special_files[0] = show_special_files_cb.isChecked()
             
-            try:
-                # Update the state variable
-                show_special_files[0] = show_special_files_cb.isChecked()
+            # For tabs in multi-file dialog, update ALL tabs and all cached states
+            if tab_frame and parent_dialog:
+                # Store the state persistently for ALL files in this multi-file dialog
+                if not hasattr(self, '_retranslation_dialog_cache'):
+                    self._retranslation_dialog_cache = {}
                 
-                # For tabs in multi-file dialog, update ALL tabs and all cached states
-                if tab_frame and parent_dialog:
-                    # Store the state persistently for ALL files in this multi-file dialog
-                    if not hasattr(self, '_retranslation_dialog_cache'):
-                        self._retranslation_dialog_cache = {}
-                    
-                    # Update cache for all files in the current selection
-                    if hasattr(parent_dialog, '_epub_files_in_dialog'):
-                        for f_path in parent_dialog._epub_files_in_dialog:
-                            f_key = os.path.abspath(f_path)
-                            if f_key not in self._retranslation_dialog_cache:
-                                self._retranslation_dialog_cache[f_key] = {}
-                            self._retranslation_dialog_cache[f_key]['show_special_files_state'] = show_special_files[0]
-                    
-                    # Find and update ALL toggle checkboxes and checkmarks in ALL tabs
-                    if hasattr(parent_dialog, '_all_toggle_checkboxes'):
-                        for idx, other_checkbox in enumerate(parent_dialog._all_toggle_checkboxes):
-                            if other_checkbox is None or other_checkbox == show_special_files_cb:
-                                continue
+                # Update cache for all files in the current selection
+                if hasattr(parent_dialog, '_epub_files_in_dialog'):
+                    for f_path in parent_dialog._epub_files_in_dialog:
+                        f_key = os.path.abspath(f_path)
+                        if f_key not in self._retranslation_dialog_cache:
+                            self._retranslation_dialog_cache[f_key] = {}
+                        self._retranslation_dialog_cache[f_key]['show_special_files_state'] = show_special_files[0]
+                
+                # Find and update ALL toggle checkboxes and checkmarks in ALL tabs
+                if hasattr(parent_dialog, '_all_toggle_checkboxes'):
+                    for idx, other_checkbox in enumerate(parent_dialog._all_toggle_checkboxes):
+                        if other_checkbox is None or other_checkbox == show_special_files_cb:
+                            continue
+                        
+                        try:
+                            # Try to check if widget is valid by calling a simple method
+                            other_checkbox.isChecked()
                             
-                            try:
-                                # Try to check if widget is valid by calling a simple method
-                                other_checkbox.isChecked()
-                                
-                                # Widget is valid, update it
-                                # Block signals to avoid triggering its handler
-                                other_checkbox.blockSignals(True)
-                                other_checkbox.setChecked(show_special_files[0])
-                                other_checkbox.blockSignals(False)
-                                
-                                # Update the corresponding checkmark visual
-                                if hasattr(parent_dialog, '_all_checkmark_labels') and idx < len(parent_dialog._all_checkmark_labels):
-                                    other_checkmark = parent_dialog._all_checkmark_labels[idx]
-                                    if other_checkmark is not None:
-                                        try:
-                                            # Check if checkmark is valid
-                                            other_checkmark.isVisible()
-                                            
-                                            # Update checkmark visibility
-                                            if show_special_files[0]:
-                                                other_checkmark.setGeometry(2, 1, 14, 14)
-                                                other_checkmark.show()
-                                            else:
-                                                other_checkmark.hide()
-                                        except RuntimeError:
-                                            # Checkmark was deleted
-                                            parent_dialog._all_checkmark_labels[idx] = None
-                            except (RuntimeError, AttributeError):
-                                # Widget was deleted or invalid
-                                parent_dialog._all_toggle_checkboxes[idx] = None
-                    
-                    # Clear the tab frame's layout
-                    for i in reversed(range(container_layout.count())):
-                        widget = container_layout.itemAt(i).widget()
+                            # Widget is valid, update it
+                            # Block signals to avoid triggering its handler
+                            other_checkbox.blockSignals(True)
+                            other_checkbox.setChecked(show_special_files[0])
+                            other_checkbox.blockSignals(False)
+                            
+                            # Update the corresponding checkmark visual
+                            if hasattr(parent_dialog, '_all_checkmark_labels') and idx < len(parent_dialog._all_checkmark_labels):
+                                other_checkmark = parent_dialog._all_checkmark_labels[idx]
+                                if other_checkmark is not None:
+                                    try:
+                                        # Check if checkmark is valid
+                                        other_checkmark.isVisible()
+                                        
+                                        # Update checkmark visibility
+                                        if show_special_files[0]:
+                                            other_checkmark.setGeometry(2, 1, 14, 14)
+                                            other_checkmark.show()
+                                        else:
+                                            other_checkmark.hide()
+                                    except RuntimeError:
+                                        # Checkmark was deleted
+                                        parent_dialog._all_checkmark_labels[idx] = None
+                        except (RuntimeError, AttributeError):
+                            # Widget was deleted or invalid
+                            parent_dialog._all_toggle_checkboxes[idx] = None
+                
+                # Clear the tab frame's layout
+                for i in reversed(range(container_layout.count())):
+                    widget = container_layout.itemAt(i).widget()
+                    if widget:
+                        widget.setParent(None)
+                        widget.deleteLater()
+                
+                # Rebuild the tab content with new toggle state
+                # The rebuild will replace the checkbox/checkmark at the same index
+                self._force_retranslation_epub_or_text(file_path, parent_dialog, tab_frame, show_special_files[0])
+                return
+            
+            # For standalone dialogs - refresh in place like tabs
+            # Store the state persistently
+            file_key = os.path.abspath(file_path)
+            if not hasattr(self, '_retranslation_dialog_cache'):
+                self._retranslation_dialog_cache = {}
+            if file_key not in self._retranslation_dialog_cache:
+                self._retranslation_dialog_cache[file_key] = {}
+            self._retranslation_dialog_cache[file_key]['show_special_files_state'] = show_special_files[0]
+            
+            # Refresh in place - clear and rebuild container content
+            if dialog and not parent_dialog and container:
+                # Temporarily disconnect the checkbox to prevent recursion
+                show_special_files_cb.stateChanged.disconnect()
+                
+                # Store dialog position and size
+                dialog_pos = dialog.pos()
+                dialog_size = dialog.size()
+                
+                # Clear all widgets from the container
+                while container_layout.count():
+                    item = container_layout.takeAt(0)
+                    if item:
+                        widget = item.widget()
                         if widget:
                             widget.setParent(None)
                             widget.deleteLater()
-                    
-                    # Rebuild the tab content with new toggle state
-                    # The rebuild will replace the checkbox/checkmark at the same index
-                    self._force_retranslation_epub_or_text(file_path, parent_dialog, tab_frame, show_special_files[0])
+                        elif item.layout():
+                            # Handle nested layouts
+                            self._clear_layout(item.layout())
                 
-                # For standalone dialogs - refresh in place like tabs
-                # Store the state persistently
-                file_key = os.path.abspath(file_path)
-                if not hasattr(self, '_retranslation_dialog_cache'):
-                    self._retranslation_dialog_cache = {}
-                if file_key not in self._retranslation_dialog_cache:
-                    self._retranslation_dialog_cache[file_key] = {}
-                self._retranslation_dialog_cache[file_key]['show_special_files_state'] = show_special_files[0]
+                # Remove from cache to force rebuild
+                if file_key in self._retranslation_dialog_cache:
+                    del self._retranslation_dialog_cache[file_key]
                 
-                # Refresh in place - clear and rebuild container content
-                if dialog and not parent_dialog and container:
-                    # Temporarily disconnect the checkbox to prevent recursion
-                    show_special_files_cb.stateChanged.disconnect()
-                    
-                    # Store dialog position and size
-                    dialog_pos = dialog.pos()
-                    dialog_size = dialog.size()
-                    
-                    # Clear all widgets from the container
-                    while container_layout.count():
-                        item = container_layout.takeAt(0)
-                        if item:
-                            widget = item.widget()
-                            if widget:
-                                widget.setParent(None)
-                                widget.deleteLater()
-                            elif item.layout():
-                                # Handle nested layouts
-                                self._clear_layout(item.layout())
-                    
-                    # Remove from cache to force rebuild
-                    if file_key in self._retranslation_dialog_cache:
-                        del self._retranslation_dialog_cache[file_key]
-                    
-                    # Now we need to rebuild the content by calling the function with the existing container
-                    # The trick is to pass the container as if it's a tab_frame
-                    self._force_retranslation_epub_or_text(
-                        file_path, 
-                        parent_dialog=dialog,  # Pass as parent 
-                        tab_frame=container,   # Use container as tab frame to rebuild in place
-                        show_special_files_state=show_special_files[0]
-                    )
-                    
-                    # Restore dialog position and size
-                    dialog.move(dialog_pos)
-                    dialog.resize(dialog_size)
-            finally:
-                # Re-enable refresh button
-                if btn_refresh_ref[0]:
-                    btn_refresh_ref[0].setEnabled(True)
+                # Now we need to rebuild the content by calling the function with the existing container
+                # The trick is to pass the container as if it's a tab_frame
+                self._force_retranslation_epub_or_text(
+                    file_path, 
+                    parent_dialog=dialog,  # Pass as parent 
+                    tab_frame=container,   # Use container as tab frame to rebuild in place
+                    show_special_files_state=show_special_files[0]
+                )
+                
+                # Restore dialog position and size
+                dialog.move(dialog_pos)
+                dialog.resize(dialog_size)
+                return
         
         # Connect the checkbox to the handler
         show_special_files_cb.stateChanged.connect(on_toggle_special_files)
@@ -1289,9 +1294,7 @@ class RetranslationMixin:
             'dialog': dialog,
             'container': container,
             'show_special_files_state': show_special_files[0],  # Store current toggle state
-            'show_special_files_cb': show_special_files_cb,  # Store checkbox reference
-            'btn_refresh': None,  # Will be set when refresh button is created
-            'btn_refresh_ref': btn_refresh_ref  # Reference list for closure access
+            'show_special_files_cb': show_special_files_cb  # Store checkbox reference
         }
         
         # If standalone (no parent), add buttons and show dialog
@@ -1616,19 +1619,9 @@ class RetranslationMixin:
             "}"
         )
         
-        # Store refresh button reference in data dict and closure variable
-        data['btn_refresh'] = btn_refresh
-        data['btn_refresh_ref'][0] = btn_refresh
-        
         # Create refresh handler with animation
         def animated_refresh():
             import time
-            
-            # Disable show_special_files checkbox to prevent concurrent operations
-            show_special_files_cb = data.get('show_special_files_cb')
-            if show_special_files_cb:
-                show_special_files_cb.setEnabled(False)
-            
             btn_refresh.start_animation()
             btn_refresh.setEnabled(False)
             
@@ -1653,9 +1646,6 @@ class RetranslationMixin:
                     def finish_animation():
                         btn_refresh.stop_animation()
                         btn_refresh.setEnabled(True)
-                        # Re-enable show_special_files checkbox
-                        if show_special_files_cb:
-                            show_special_files_cb.setEnabled(True)
                     
                     if remaining > 0:
                         QTimer.singleShot(int(remaining * 1000), finish_animation)
@@ -1666,9 +1656,6 @@ class RetranslationMixin:
                     print(f"Error during refresh: {e}")
                     btn_refresh.stop_animation()
                     btn_refresh.setEnabled(True)
-                    # Re-enable show_special_files checkbox even on error
-                    if show_special_files_cb:
-                        show_special_files_cb.setEnabled(True)
             
             QTimer.singleShot(50, do_refresh)  # Small delay to let animation start
         
