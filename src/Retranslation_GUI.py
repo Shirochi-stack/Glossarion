@@ -671,10 +671,10 @@ class RetranslationMixin:
                                             break
                             else:
                                 # No matching file anywhere – mark as missing.
-                                spine_ch['status'] = 'file_missing'
+                                spine_ch['status'] = 'not_translated'
                         else:
                             # Legacy behaviour: nothing on disk for this entry.
-                            spine_ch['status'] = 'file_missing'
+                            spine_ch['status'] = 'not_translated'
             
             elif file_exists:
                 # File exists but no progress tracking - mark as completed
@@ -1094,7 +1094,6 @@ class RetranslationMixin:
             in_progress = sum(1 for ch in spine_chapters if ch['status'] == 'in_progress')
             missing = sum(1 for ch in spine_chapters if ch['status'] == 'not_translated')
             failed = sum(1 for ch in spine_chapters if ch['status'] in ['failed', 'qa_failed'])
-            file_missing = sum(1 for ch in spine_chapters if ch['status'] == 'file_missing')
             
             stats_font = QFont('Arial', 10)
             
@@ -1135,11 +1134,6 @@ class RetranslationMixin:
             lbl_failed.setStyleSheet("color: red;")
             stats_layout.addWidget(lbl_failed)
             
-            # Match list status: file_missing uses ⚠️ and purple
-            lbl_file_missing = QLabel(f"⚠️ File Missing: {file_missing}")
-            lbl_file_missing.setFont(stats_font)
-            lbl_file_missing.setStyleSheet("color: purple;")
-            stats_layout.addWidget(lbl_file_missing)
             
             stats_layout.addStretch()
         
@@ -1165,7 +1159,6 @@ class RetranslationMixin:
             'merged': '🔗',
             'failed': '❌',
             'qa_failed': '❌',
-            'file_missing': '⚠️',
             'in_progress': '🔄',
             'not_translated': '⬜',
             'unknown': '❓'
@@ -1176,7 +1169,6 @@ class RetranslationMixin:
             'merged': 'Merged',
             'failed': 'Failed',
             'qa_failed': 'QA Failed',
-            'file_missing': 'File Missing',
             'in_progress': 'In Progress',
             'not_translated': 'Not Translated',
             'unknown': 'Unknown'
@@ -1256,8 +1248,6 @@ class RetranslationMixin:
                 item.setForeground(QColor('red'))
             elif status == 'not_translated':
                 item.setForeground(QColor('#2b6cb0'))
-            elif status == 'file_missing':
-                item.setForeground(QColor('purple'))
             elif status == 'in_progress':
                 item.setForeground(QColor('orange'))
             
@@ -1348,7 +1338,7 @@ class RetranslationMixin:
                     if info['status'] in ['failed', 'qa_failed']:
                         data['listbox'].item(idx).setSelected(True)
                 elif status_to_select == 'missing':
-                    if info['status'] in ['not_translated', 'file_missing']:
+                    if info['status'] == 'not_translated':
                         data['listbox'].item(idx).setSelected(True)
                 else:
                     if info['status'] == status_to_select:
@@ -1904,7 +1894,7 @@ class RetranslationMixin:
             if status == "completed":
                 output_path = os.path.join(output_dir, actual_output_file)
                 if not os.path.exists(output_path):
-                    status = "file_missing"
+                    status = "not_translated"
             
             chapter_display_info.append({
                 'key': chapter_key,
@@ -1974,7 +1964,7 @@ class RetranslationMixin:
                 # Verify file actually exists for completed status (but NOT for merged - merged chapters
                 # don't have their own output files, they point to parent's file)
                 if new_status == 'completed' and not os.path.exists(output_path):
-                    new_status = 'file_missing'
+                    new_status = 'not_translated'
                 info['status'] = new_status
                 info['info'] = matched_info
             elif os.path.exists(output_path):
@@ -2009,7 +1999,6 @@ class RetranslationMixin:
             'merged': '🔗',
             'failed': '❌',
             'qa_failed': '❌',
-            'file_missing': '⚠️',
             'in_progress': '🔄',
             'not_translated': '⬜',
             'unknown': '❓'
@@ -2020,7 +2009,6 @@ class RetranslationMixin:
             'merged': 'Merged',
             'failed': 'Failed',
             'qa_failed': 'QA Failed',
-            'file_missing': 'File Missing',
             'in_progress': 'In Progress',
             'not_translated': 'Not Translated',
             'unknown': 'Unknown'
@@ -2106,8 +2094,6 @@ class RetranslationMixin:
                 item.setForeground(QColor('red'))
             elif status == 'not_translated':
                 item.setForeground(QColor('#2b6cb0'))
-            elif status == 'file_missing':
-                item.setForeground(QColor('purple'))
             elif status == 'in_progress':
                 item.setForeground(QColor('orange'))
             
@@ -2140,8 +2126,6 @@ class RetranslationMixin:
                             labels['missing'] = child
                         elif text.startswith('❌ Failed:'):
                             labels['failed'] = child
-                        elif text.startswith('⚠️ File Missing:'):
-                            labels['file_missing'] = child
                     
                     # Recursively search children
                     labels.update(find_stats_labels(child))
@@ -2158,7 +2142,6 @@ class RetranslationMixin:
             in_progress = sum(1 for info in data['chapter_display_info'] if info['status'] == 'in_progress')
             missing = sum(1 for info in data['chapter_display_info'] if info['status'] == 'not_translated')
             failed = sum(1 for info in data['chapter_display_info'] if info['status'] in ['failed', 'qa_failed'])
-            file_missing = sum(1 for info in data['chapter_display_info'] if info['status'] == 'file_missing')
             
             # Update labels
             if 'total' in stats_labels:
@@ -2181,8 +2164,6 @@ class RetranslationMixin:
                 stats_labels['missing'].setText(f"⬜ Not Translated: {missing} | ")
             if 'failed' in stats_labels:
                 stats_labels['failed'].setText(f"❌ Failed: {failed} | ")
-            if 'file_missing' in stats_labels:
-                stats_labels['file_missing'].setText(f"⚠️ File Missing: {file_missing}")
 
     def _refresh_image_folder_data(self, data):
         """Refresh the image folder retranslation dialog data by rescanning files"""
