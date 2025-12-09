@@ -8274,9 +8274,10 @@ Important rules:
     def browse_files(self):
         """Select one or more files - automatically handles single/multiple selection"""
         file_filter = (
-            "Supported files (*.epub *.cbz *.pdf *.txt *.json *.csv *.md *.png *.jpg *.jpeg *.gif *.bmp *.webp);;"
-            "EPUB/CBZ (*.epub *.cbz);;"
+            "Supported files (*.epub *.zip *.cbz *.pdf *.txt *.json *.csv *.md *.png *.jpg *.jpeg *.gif *.bmp *.webp);;"
+            "EPUB/ZIP/CBZ (*.epub *.zip *.cbz);;"
             "EPUB files (*.epub);;"
+            "ZIP files (*.zip);;"
             "Comic Book Zip (*.cbz);;"
             "PDF files (*.pdf);;"
             "Text files (*.txt *.json *.csv *.md);;"
@@ -8308,7 +8309,7 @@ Important rules:
         )
         if folder_path:
             # Find all supported files in the folder
-            supported_extensions = {'.epub', '.cbz', '.pdf', '.txt', '.json', '.csv', '.md', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
+            supported_extensions = {'.epub', '.zip', '.cbz', '.pdf', '.txt', '.json', '.csv', '.md', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
             files = []
             
             # Recursively find files if deep scan is enabled
@@ -8369,7 +8370,7 @@ Important rules:
         if not hasattr(self, 'pdf_conversions'):
             self.pdf_conversions = {}  # Maps converted .txt paths to original .pdf paths
         
-        # Process PDF and CBZ files
+        # Process PDF, CBZ, and ZIP files
         processed_paths = []
         
         for path in paths:
@@ -8377,6 +8378,25 @@ Important rules:
             if lower.endswith('.pdf'):
                 # Direct PDF processing
                 processed_paths.append(path)
+            elif lower.endswith('.zip'):
+                # Convert .zip to .epub extension for backwards compatibility
+                epub_path = path[:-4] + '.epub'  # Replace .zip with .epub
+                # Rename the file if it hasn't been renamed yet
+                if os.path.exists(path) and not os.path.exists(epub_path):
+                    try:
+                        import shutil
+                        shutil.copy2(path, epub_path)  # Copy instead of rename to preserve original
+                        self.append_log(f"📦 Converted {os.path.basename(path)} → {os.path.basename(epub_path)}")
+                        processed_paths.append(epub_path)
+                    except Exception as e:
+                        self.append_log(f"⚠️ Could not convert {os.path.basename(path)} to .epub: {e}")
+                        processed_paths.append(path)  # Use original if conversion fails
+                elif os.path.exists(epub_path):
+                    # .epub version already exists, use it
+                    self.append_log(f"✅ Using existing {os.path.basename(epub_path)}")
+                    processed_paths.append(epub_path)
+                else:
+                    processed_paths.append(path)
             elif lower.endswith('.cbz'):
                 # Extract images from CBZ (ZIP) to a temp folder and add them
                 try:
