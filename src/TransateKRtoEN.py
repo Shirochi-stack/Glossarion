@@ -1887,11 +1887,11 @@ class ProgressManager:
             if status == "merged":
                 continue
             
-            # MERGED / QA_FAILED / FAILED FIX:
-            # Don't delete merged entries or entries that have failed QA/translation,
-            # even if their output file is missing. These should remain visible in the
-            # retranslation UI and be eligible for re-run.
-            if status in ["merged", "qa_failed", "failed"]:
+            # QA_FAILED / FAILED FIX:
+            # Don't delete entries that have failed QA/translation, even if their output
+            # file is missing. These should remain visible in the retranslation UI and
+            # be eligible for re-run.
+            if status in ["merged","qa_failed", "failed"]:
                 continue
             
             if output_file:
@@ -1917,10 +1917,7 @@ class ProgressManager:
                     cleaned_count += 1
         
         # Second pass: Clear merged children whose parents were deleted OR have missing files
-        # NOTE: Disabled so that merged entries are never removed by cleanup_missing_files.
-        # This keeps merge status visible in the retranslation GUI even if parent files
-        # are missing or have been moved.
-        if False and (deleted_parents or parents_with_missing_files):
+        if deleted_parents or parents_with_missing_files:
             all_affected_parents = deleted_parents | parents_with_missing_files
             for chapter_key, chapter_info in list(self.prog["chapters"].items()):
                 if chapter_info.get("status") == "merged":
