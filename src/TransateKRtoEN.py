@@ -1804,6 +1804,9 @@ class ProgressManager:
         # Use helper method to get consistent key
         chapter_key = self._get_chapter_key(actual_num, output_file=None, chapter_obj=chapter_obj, content_hash=content_hash)
         
+        # Only allow auto-discovery when there are no tracked chapters yet
+        auto_discovery_allowed = len(self.prog.get("chapters", {})) == 0
+        
         # Check if we have tracking for this chapter
         if chapter_key in self.prog["chapters"]:
             chapter_info = self.prog["chapters"][chapter_key]
@@ -1837,7 +1840,8 @@ class ProgressManager:
             return True, None, None
         
         # BEFORE auto-discovery, check if ANY entry exists for this chapter's file
-        if chapter_obj:
+        # Only auto-discover when no chapters are tracked yet to avoid overwriting in-progress state
+        if chapter_obj and auto_discovery_allowed:
             from TransateKRtoEN import FileUtilities
             output_filename = FileUtilities.create_chapter_filename(chapter_obj, actual_num)
             
