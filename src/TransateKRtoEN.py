@@ -1891,7 +1891,7 @@ class ProgressManager:
             # Don't delete entries that have failed QA/translation, even if their output
             # file is missing. These should remain visible in the retranslation UI and
             # be eligible for re-run.
-            if status in ["merged","qa_failed", "failed"]:
+            if status in ["qa_failed", "failed"]:
                 continue
             
             if output_file:
