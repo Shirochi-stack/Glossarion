@@ -1724,6 +1724,11 @@ class ProgressManager:
             chapter_info["qa_issues"] = True
             chapter_info["qa_timestamp"] = time.time()
             chapter_info["qa_issues_found"] = qa_issues_found
+        # IMPORTANT: When changing to in_progress or failed status, explicitly clear QA fields
+        # This ensures old qa_failed markers don't persist
+        elif status in ["in_progress", "failed"]:
+            # Don't add QA fields - they will be excluded from chapter_info
+            pass
         
         self.prog["chapters"][chapter_key] = chapter_info
     
@@ -8527,9 +8532,16 @@ def main(log_callback=None, stop_callback=None):
                     msgs, chunk_html, c, chunk_idx, total_chunks
                 )
                 
-                if result is None:
-                    progress_manager.update(idx, actual_num, content_hash, output_file=None, status="failed")
+                # Check if result is None or contains failure markers
+                # Only check for failure markers if response is short (< 50 chars)
+                # Longer responses are likely legitimate translations even if they contain error keywords
+                is_failed = result is None or (len(str(result).strip()) < 50 and is_qa_failed_response(result))
+                
+                if is_failed:
+                    fname = FileUtilities.create_chapter_filename(c, actual_num)
+                    progress_manager.update(idx, actual_num, content_hash, fname, status="failed")
                     progress_manager.save()
+                    print(f"❌ Translation failed for chapter {actual_num} - marked as failed, no output file created")
                     continue
                 
                 # ENHANCED TRUNCATION CHECK: Compare input vs output character counts
@@ -8650,15 +8662,19 @@ def main(log_callback=None, stop_callback=None):
                     for i in range(full_seconds):
                         if check_stop():
                             print("❌ Translation stopped during delay")
-                            # Mark chapter(s) as failed before returning
+                            # Delete in_progress entries instead of marking as failed
                             if merge_info is not None:
                                 for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
                                     g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
-                                    progress_manager.update(g_idx, g_actual_num, g_content_hash, g_fname, status="failed", chapter_obj=g_chapter)
+                                    chapter_key = progress_manager._get_chapter_key(g_actual_num, g_fname, g_chapter, g_content_hash)
+                                    if chapter_key in progress_manager.prog["chapters"]:
+                                        del progress_manager.prog["chapters"][chapter_key]
                                 progress_manager.save()
                             else:
                                 fname = FileUtilities.create_chapter_filename(c, actual_num)
-                                progress_manager.update(idx, actual_num, content_hash, fname, status="failed", chapter_obj=c)
+                                chapter_key = progress_manager._get_chapter_key(actual_num, fname, c, content_hash)
+                                if chapter_key in progress_manager.prog["chapters"]:
+                                    del progress_manager.prog["chapters"][chapter_key]
                                 progress_manager.save()
                             return
                         time.sleep(1)
@@ -8667,32 +8683,40 @@ def main(log_callback=None, stop_callback=None):
                     if fractional_second > 0:
                         if check_stop():
                             print("❌ Translation stopped during delay")
-                            # Mark chapter(s) as failed before returning
+                            # Delete in_progress entries instead of marking as failed
                             if merge_info is not None:
                                 for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
                                     g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
-                                    progress_manager.update(g_idx, g_actual_num, g_content_hash, g_fname, status="failed", chapter_obj=g_chapter)
+                                    chapter_key = progress_manager._get_chapter_key(g_actual_num, g_fname, g_chapter, g_content_hash)
+                                    if chapter_key in progress_manager.prog["chapters"]:
+                                        del progress_manager.prog["chapters"][chapter_key]
                                 progress_manager.save()
                             else:
                                 fname = FileUtilities.create_chapter_filename(c, actual_num)
-                                progress_manager.update(idx, actual_num, content_hash, fname, status="failed", chapter_obj=c)
+                                chapter_key = progress_manager._get_chapter_key(actual_num, fname, c, content_hash)
+                                if chapter_key in progress_manager.prog["chapters"]:
+                                    del progress_manager.prog["chapters"][chapter_key]
                                 progress_manager.save()
                             return
                         time.sleep(fractional_second)
 
             if check_stop():
                 print(f"❌ Translation stopped before saving chapter {actual_num}")
-                # Mark chapter(s) as failed
+                # Delete in_progress entries instead of marking as failed
                 if merge_info is not None:
-                    # Mark all chapters in merge group as failed
+                    # Delete all chapters in merge group
                     for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
                         g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
-                        progress_manager.update(g_idx, g_actual_num, g_content_hash, g_fname, status="failed", chapter_obj=g_chapter)
+                        chapter_key = progress_manager._get_chapter_key(g_actual_num, g_fname, g_chapter, g_content_hash)
+                        if chapter_key in progress_manager.prog["chapters"]:
+                            del progress_manager.prog["chapters"][chapter_key]
                     progress_manager.save()
                 else:
-                    # Mark single chapter as failed
+                    # Delete single chapter
                     fname = FileUtilities.create_chapter_filename(c, actual_num)
-                    progress_manager.update(idx, actual_num, content_hash, fname, status="failed", chapter_obj=c)
+                    chapter_key = progress_manager._get_chapter_key(actual_num, fname, c, content_hash)
+                    if chapter_key in progress_manager.prog["chapters"]:
+                        del progress_manager.prog["chapters"][chapter_key]
                     progress_manager.save()
                 return
 

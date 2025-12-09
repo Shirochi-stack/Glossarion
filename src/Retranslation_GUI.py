@@ -627,7 +627,19 @@ class RetranslationMixin:
             # Set status and output file based on findings
             if matched_info:
                 # We found progress tracking info - use its status
-                spine_ch['status'] = matched_info.get('status', 'unknown')
+                status = matched_info.get('status', 'unknown')
+                
+                # CRITICAL: For failed/in_progress/qa_failed, ALWAYS use progress status
+                # Never let file existence override these statuses
+                if status in ['failed', 'in_progress', 'qa_failed']:
+                    spine_ch['status'] = status
+                    spine_ch['output_file'] = matched_info.get('output_file') or expected_response
+                    spine_ch['progress_entry'] = matched_info
+                    # Skip all other logic - don't check file existence
+                    continue
+                
+                # For other statuses (completed, merged, etc.)
+                spine_ch['status'] = status
                 
                 # For special files, always use the original filename (ignore what's in progress JSON)
                 if is_special:
@@ -637,23 +649,12 @@ class RetranslationMixin:
                 
                 spine_ch['progress_entry'] = matched_info
                 
-                # Handle null output_file (common for failed/in_progress chapters)
+                # Handle null output_file
                 if not spine_ch['output_file']:
                     spine_ch['output_file'] = expected_response
                 
-                # Keep original extension (html/xhtml/htm) as written on disk
-                
                 # Verify file actually exists for completed status
-                # IMPORTANT: some older progress files still point to legacy
-                # "response_"-prefixed filenames, even though the translated
-                # files on disk were later renamed to drop the prefix.
-                #
-                # In that case we want to:
-                #   1. Treat the chapter as completed (not file_missing) if the
-                #      non-prefixed file actually exists on disk, and
-                #   2. Gently self-heal the progress JSON so future runs stay
-                #      in sync.
-                if spine_ch['status'] == 'completed':
+                if status == 'completed':
                     output_path = os.path.join(output_dir, spine_ch['output_file'])
                     if not os.path.exists(output_path):
                         # If the expected_response file exists, prefer that and
@@ -1490,9 +1491,12 @@ class RetranslationMixin:
                             print(f"WARNING: Could not find chapter key for {old_status} chapter {actual_num} (output file: {target_output_file})")
                     
                     # MERGED CHILDREN FIX: Clear any merged children of this chapter
-                    # This applies to ALL statuses being retranslated, not just completed/qa_failed
+                    # ONLY clear children that still have "merged" status
+                    # If split-the-merge succeeded, children will have their own status (completed/qa_failed)
+                    # and should NOT be deleted when parent is retranslated
                     for child_key, child_data in list(data['prog']["chapters"].items()):
-                        if child_data.get("status") == "merged" and child_data.get("merged_parent_chapter") == actual_num:
+                        child_status = child_data.get("status")
+                        if child_status == "merged" and child_data.get("merged_parent_chapter") == actual_num:
                             child_actual_num = child_data.get("actual_num")
                             print(f"🔓 Clearing merged status for child chapter {child_actual_num} (parent {actual_num} being retranslated)")
                             del data['prog']["chapters"][child_key]
