@@ -545,6 +545,9 @@ class RetranslationMixin:
                     chapter_info = prog["chapters"][simple_key]
                     out_file = chapter_info.get('output_file')
                     status = chapter_info.get('status', '')
+                    orig_base = chapter_info.get('original_basename', '')
+                    if orig_base:
+                        orig_base = os.path.basename(orig_base)
                     
                     # Merged chapters: check if parent is completed
                     if status == 'merged':
@@ -555,10 +558,12 @@ class RetranslationMixin:
                                 parent_info = prog["chapters"][parent_key]
                                 if parent_info.get('status') == 'completed':
                                     matched_info = chapter_info
-                    # In-progress, failed, and qa_failed chapters: match by actual_num
-                    # For qa_failed with SPLIT_FAILED, child chapters point to parent's file
+                    # In-progress, failed, and qa_failed chapters: match by actual_num AND original_basename
+                    # This prevents matching unrelated files with the same chapter number
                     elif status in ['in_progress', 'failed', 'qa_failed']:
-                        matched_info = chapter_info
+                        # Only match if basenames match, or if BOTH are missing
+                        if orig_base == filename:
+                            matched_info = chapter_info
                     # Normal match: output file matches expected
                     elif out_file == expected_response:
                         matched_info = chapter_info
@@ -587,7 +592,9 @@ class RetranslationMixin:
                             actual_num = chapter_info.get('chapter_num')
                         
                         if actual_num is not None and actual_num == chapter_num:
-                            orig_base = os.path.basename(chapter_info.get('original_basename', '') or '')
+                            orig_base = chapter_info.get('original_basename', '')
+                            if orig_base:
+                                orig_base = os.path.basename(orig_base)
                             out_file = chapter_info.get('output_file')
                             status = chapter_info.get('status', '')
                             
@@ -609,11 +616,13 @@ class RetranslationMixin:
                                     break
                                 # else: don't match - will fall through to not_translated
                             
-                            # In-progress, failed, and qa_failed chapters: match by actual_num
-                            # For qa_failed with SPLIT_FAILED, child chapters point to parent's file
+                            # In-progress, failed, and qa_failed chapters: match by actual_num AND original_basename
+                            # This prevents matching unrelated files with the same chapter number
                             if status in ['in_progress', 'failed', 'qa_failed']:
-                                matched_info = chapter_info
-                                break
+                                # Only match if basenames match
+                                if orig_base == filename:
+                                    matched_info = chapter_info
+                                    break
                             
                             # Only treat as a match if the original basename matches this filename,
                             # or, when original_basename is missing, the output_file matches what we expect.
@@ -1343,15 +1352,20 @@ class RetranslationMixin:
             # Remove marks
             cleared_count = 0
             for info in qa_failed_chapters:
-                # Find the chapter by actual_num (more reliable for SPLIT_FAILED cases)
+                # Find the chapter by actual_num AND original_filename
                 target_output_file = info['output_file']
                 actual_num = info['num']
+                original_filename = info.get('original_filename', '')
                 chapter_key = None
                 
-                # Search through all chapters to find the one with matching actual_num
+                # Search through all chapters to find the one with matching actual_num AND original_basename
                 for key, ch_info in data['prog']["chapters"].items():
                     ch_actual_num = ch_info.get('actual_num')
-                    if ch_actual_num == actual_num:
+                    ch_orig_base = ch_info.get('original_basename', '')
+                    if ch_orig_base:
+                        ch_orig_base = os.path.basename(ch_orig_base)
+                    # Only match if basenames match
+                    if ch_actual_num == actual_num and ch_orig_base == original_filename:
                         chapter_key = key
                         break
                 
@@ -1444,26 +1458,29 @@ class RetranslationMixin:
                         except Exception as e:
                             print(f"Failed to delete {output_path}: {e}")
                     
-                    # Reset status for any completed, completed_empty, or qa_failed chapters
-                    if ch_info['status'] in ['completed', 'completed_empty', 'completed_image_only', 'qa_failed']:
-                        target_output_file = ch_info['output_file']
-                        chapter_key = None
-                        old_status = ch_info['status']  # Define old_status before using it
-                        
-                        # Search through all chapters to find the one with matching actual_num (more reliable)
-                        # Fall back to output_file matching if actual_num doesn't match
+                    # Reset status to pending for ALL non-not_translated chapters
+                    target_output_file = ch_info['output_file']
+                    original_filename = ch_info.get('original_filename', '')
+                    chapter_key = None
+                    old_status = ch_info['status']
+                    
+                    # Search through all chapters to find the one with matching actual_num AND original_basename
+                    for key, ch_data in data['prog']["chapters"].items():
+                        ch_actual_num = ch_data.get('actual_num')
+                        ch_orig_base = ch_data.get('original_basename', '')
+                        if ch_orig_base:
+                            ch_orig_base = os.path.basename(ch_orig_base)
+                        # Only match if basenames match
+                        if ch_actual_num == actual_num and ch_orig_base == original_filename:
+                            chapter_key = key
+                            break
+                    
+                    # Fallback: If not found by actual_num, try output_file (for backward compatibility)
+                    if not chapter_key:
                         for key, ch_data in data['prog']["chapters"].items():
-                            ch_actual_num = ch_data.get('actual_num')
-                            if ch_actual_num == actual_num:
+                            if ch_data.get('output_file') == target_output_file and ch_data.get('actual_num') == actual_num:
                                 chapter_key = key
                                 break
-                        
-                        # Fallback: If not found by actual_num, try output_file (for backward compatibility)
-                        if not chapter_key:
-                            for key, ch_data in data['prog']["chapters"].items():
-                                if ch_data.get('output_file') == target_output_file and ch_data.get('actual_num') == actual_num:
-                                    chapter_key = key
-                                    break
                         
                         # Update the chapter status if we found the key
                         if chapter_key and chapter_key in data['prog']["chapters"]:
