@@ -1934,11 +1934,29 @@ class RetranslationMixin:
             
             # PRIORITY 1: Try to match by actual_num first (most reliable for merged chapters)
             # This prevents merged chapters from matching the parent's entry by output_file
+            # Search for best match among all entries with matching chapter number
+            candidate_match = None
+            found_exact_match = False
+            
             for chapter_key, chapter_info in data['prog'].get("chapters", {}).items():
                 actual_num = chapter_info.get('actual_num') or chapter_info.get('chapter_num')
                 if actual_num is not None and actual_num == info['num']:
-                    matched_info = chapter_info
-                    break
+                    # Found a candidate with matching chapter number
+                    
+                    # Check for exact output file match - this is the strongest signal
+                    # This fixes issues where a "failed" entry (with null output) masks a "completed" entry
+                    ch_output = chapter_info.get('output_file')
+                    if ch_output and ch_output == output_file:
+                        matched_info = chapter_info
+                        found_exact_match = True
+                        break
+                    
+                    # Keep as fallback candidate if we haven't found an exact match yet
+                    if candidate_match is None:
+                        candidate_match = chapter_info
+            
+            if not found_exact_match and candidate_match:
+                matched_info = candidate_match
             
             # PRIORITY 2: Fall back to output_file matching if no actual_num match
             if not matched_info:
