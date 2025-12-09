@@ -556,9 +556,6 @@ class RetranslationMixin:
                     # when 2 files have the same chapter number
                     elif status in ['in_progress', 'failed'] and out_file == expected_response:
                         matched_info = chapter_info
-                    # Legacy in-progress chapters without output_file: still match by actual_num only
-                    elif status == 'in_progress' and not out_file:
-                        matched_info = chapter_info
                     # Normal match: output file matches expected
                     elif out_file == expected_response:
                         matched_info = chapter_info
@@ -612,10 +609,6 @@ class RetranslationMixin:
                             # In-progress and failed chapters: match by actual_num AND output_file to avoid duplicates
                             # when 2 files have the same chapter number
                             if status in ['in_progress', 'failed'] and out_file == expected_response:
-                                matched_info = chapter_info
-                                break
-                            # Legacy in-progress chapters without output_file: still match by actual_num only
-                            if status == 'in_progress' and not out_file:
                                 matched_info = chapter_info
                                 break
                             
@@ -1844,33 +1837,20 @@ class RetranslationMixin:
         files_to_entries = {}
         for chapter_key, chapter_info in prog.get("chapters", {}).items():
             output_file = chapter_info.get("output_file", "")
-            status = chapter_info.get("status", "")
             
-            # Include chapters with output files OR in_progress with null output file
-            if output_file or status == "in_progress":
-                # Use a placeholder key for null output files
-                file_key = output_file if output_file else f"_in_progress_{chapter_key}"
-                if file_key not in files_to_entries:
-                    files_to_entries[file_key] = []
-                files_to_entries[file_key].append((chapter_key, chapter_info))
+            # Only include chapters with output files (skip null output_file entries)
+            if output_file:
+                if output_file not in files_to_entries:
+                    files_to_entries[output_file] = []
+                files_to_entries[output_file].append((chapter_key, chapter_info))
         
         chapter_display_info = []
         
         for output_file, entries in files_to_entries.items():
             chapter_key, chapter_info = entries[0]
             
-            # Get the actual output file (strip placeholder prefix if present)
+            # Use output_file directly (already filtered to non-null)
             actual_output_file = output_file
-            if output_file.startswith("_in_progress_"):
-                # For in_progress with null output, use expected filename based on chapter info
-                actual_output_file = chapter_info.get("output_file", "")
-                if not actual_output_file:
-                    # Generate expected filename based on actual_num
-                    actual_num = chapter_info.get("actual_num")
-                    if actual_num is not None:
-                        # Use .txt extension for text files, .html for EPUB
-                        ext = ".txt" if file_path.endswith(".txt") else ".html"
-                        actual_output_file = f"response_section_{actual_num}{ext}"
             
             # Check if this is a special file (files without numbers)
             original_basename = chapter_info.get("original_basename", "")
@@ -1949,15 +1929,15 @@ class RetranslationMixin:
                     # Found a candidate with matching chapter number
                     
                     # Check for exact output file match - this is the strongest signal
-                    # This fixes issues where a "failed" entry (with null output) masks a "completed" entry
                     ch_output = chapter_info.get('output_file')
                     if ch_output and ch_output == output_file:
                         matched_info = chapter_info
                         found_exact_match = True
                         break
                     
-                    # Keep as fallback candidate if we haven't found an exact match yet
-                    if candidate_match is None:
+                    # Keep as fallback candidate ONLY if it has a valid output_file
+                    # Skip entries with null output_file
+                    if candidate_match is None and ch_output:
                         candidate_match = chapter_info
             
             if not found_exact_match and candidate_match:
