@@ -899,37 +899,55 @@ class RequestMerger:
         
         header_positions = []
         for header in headers_to_use:
-            # If we're using the logical header map, get the last header in this group
+            # For each logical header, we need:
+            # 1. Start position: where the FIRST header in the group appears (to include it)
+            # 2. Boundary position: where the LAST header in the group ends (where next section starts)
+            
+            first_header = header  # The logical header is always the first in its group
             if use_last_header_map and id(header) in logical_to_last_header:
-                actual_header = logical_to_last_header[id(header)]
+                last_header = logical_to_last_header[id(header)]
             else:
-                actual_header = header
+                last_header = header
             
-            header_str = str(actual_header)
-            occurrence_idx = getattr(actual_header, '_occurrence_index', 0)
+            # Find position of the FIRST header (this is where this section starts)
+            first_header_str = str(first_header)
+            first_occurrence_idx = getattr(first_header, '_occurrence_index', 0)
             
-            # Find the Nth occurrence of this header string
-            pos = -1
-            for i in range(occurrence_idx + 1):
-                pos = content_str.find(header_str, pos + 1)
-                if pos == -1:
+            start_pos = -1
+            for i in range(first_occurrence_idx + 1):
+                start_pos = content_str.find(first_header_str, start_pos + 1)
+                if start_pos == -1:
                     break
             
-            if pos != -1:
-                header_positions.append((pos, header_str, actual_header))
+            if start_pos != -1:
+                # Also find where the LAST header ends (this helps us find where next section starts)
+                last_header_str = str(last_header)
+                last_occurrence_idx = getattr(last_header, '_occurrence_index', 0)
+                
+                last_pos = -1
+                for i in range(last_occurrence_idx + 1):
+                    last_pos = content_str.find(last_header_str, last_pos + 1)
+                    if last_pos == -1:
+                        break
+                
+                if last_pos != -1:
+                    # Find where this last header ends (position after the closing tag)
+                    last_header_end = last_pos + len(last_header_str)
+                    header_positions.append((start_pos, first_header_str, last_header_end, first_header))
         
-        # Sort by position (should already be in order, but just to be safe)
+        # Sort by start position (should already be in order, but just to be safe)
         header_positions.sort(key=lambda x: x[0])
         
         # Extract content sections from headers
-        for i, (pos, header_str, header_elem) in enumerate(header_positions):
+        # Each tuple is: (start_pos, first_header_str, last_header_end_pos, header_elem)
+        for i, (start_pos, first_header_str, last_header_end, header_elem) in enumerate(header_positions):
             if i < len(header_positions) - 1:
-                # Get content from this header to the next
-                next_pos = header_positions[i + 1][0]
-                section = content_str[pos:next_pos].strip()
+                # Get content from this header's start to where the next section's first header starts
+                next_start_pos = header_positions[i + 1][0]
+                section = content_str[start_pos:next_start_pos].strip()
             else:
-                # Last section - get from this header to end
-                section = content_str[pos:].strip()
+                # Last section - get from this header's start to end
+                section = content_str[start_pos:].strip()
             
             sections.append(section)
         
