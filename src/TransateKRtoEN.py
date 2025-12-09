@@ -521,33 +521,38 @@ class RequestMerger:
         def _get_proximity_key(item):
             """Return a numeric key representing *reading order* proximity.
 
-            When EPUB chapters were extracted with OPF support, each chapter
-            dict carries ``spine_order`` (1‑based) which reflects the true
-            reading order from ``content.opf``. That order is a much more
-            reliable signal for request merging proximity than filename-based
-            chapter numbers, especially when there are duplicate logical
-            chapters (e.g. multiple "Ch.004" entries) or interleaved notice/
-            bonus chapters.
+            We want proximity to reflect where chapters sit in the *book* rather
+            than their logical numbering, so that multiple files with the same
+            chapter number (e.g. notice pages vs. main text) don't get merged
+            just because their labels are "4, 5, 4".
 
-            Strategy:
-            - If a ``spine_order`` or ``opf_spine_position`` is present on the
-            chapter object, use that for proximity checks.
-            - Otherwise, fall back to ``_get_actual_num``.
+            Strategy (in order):
+            1. Use ``spine_order`` or ``opf_spine_position`` if present on the
+               chapter object (true reading order from content.opf).
+            2. Fall back to the chapter index ``idx`` (position 0 in the tuple),
+               which preserves the original ordering of the ``chapters`` list.
+            3. As a last resort, fall back to ``_get_actual_num``.
             """
+            # 1) Prefer explicit spine-based order from OPF if available
             try:
                 chapter_obj = item[1]
                 if isinstance(chapter_obj, dict):
-                    # Prefer explicit spine-based order from OPF if available
-                    spine_pos = (
-                        chapter_obj.get('spine_order')
-                        if chapter_obj.get('spine_order') is not None
-                        else chapter_obj.get('opf_spine_position')
-                    )
+                    spine_pos = chapter_obj.get('spine_order')
+                    if spine_pos is None:
+                        spine_pos = chapter_obj.get('opf_spine_position')
                     if spine_pos is not None:
-                        return spine_pos
+                        return float(spine_pos)
             except Exception:
                 pass
 
+            # 2) Fall back to the chapter's index in the master chapter list.
+            # ``idx`` is stored in position 0 in all supported shapes.
+            try:
+                return float(item[0])
+            except Exception:
+                pass
+
+            # 3) Ultimate fallback – use the logical chapter number.
             return _get_actual_num(item)
 
         groups = []
