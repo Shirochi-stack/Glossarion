@@ -552,8 +552,8 @@ class RetranslationMixin:
                                 parent_info = prog["chapters"][parent_key]
                                 if parent_info.get('status') == 'completed':
                                     matched_info = chapter_info
-                    # In-progress chapters: match by key (they have null output_file)
-                    elif status == 'in_progress' and not out_file:
+                    # In-progress chapters: match by output_file or key if output_file is null
+                    elif status == 'in_progress' and (not out_file or out_file == expected_response):
                         matched_info = chapter_info
                     # Normal match: output file matches expected
                     elif out_file == expected_response:
@@ -605,8 +605,8 @@ class RetranslationMixin:
                                     break
                                 # else: don't match - will fall through to not_translated
                             
-                            # In-progress chapters: match by actual_num (they have null output_file)
-                            if status == 'in_progress' and not out_file:
+                            # In-progress chapters: match by output_file or actual_num if output_file is null
+                            if status == 'in_progress' and (not out_file or out_file == expected_response):
                                 matched_info = chapter_info
                                 break
                             
@@ -1290,7 +1290,8 @@ class RetranslationMixin:
             'container': container,
             'show_special_files_state': show_special_files[0],  # Store current toggle state
             'show_special_files_cb': show_special_files_cb,  # Store checkbox reference
-            'btn_refresh': None  # Will be set when refresh button is created
+            'btn_refresh': None,  # Will be set when refresh button is created
+            'btn_refresh_ref': btn_refresh_ref  # Reference list for closure access
         }
         
         # If standalone (no parent), add buttons and show dialog
@@ -1617,7 +1618,7 @@ class RetranslationMixin:
         
         # Store refresh button reference in data dict and closure variable
         data['btn_refresh'] = btn_refresh
-        btn_refresh_ref[0] = btn_refresh
+        data['btn_refresh_ref'][0] = btn_refresh
         
         # Create refresh handler with animation
         def animated_refresh():
