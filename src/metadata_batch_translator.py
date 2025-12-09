@@ -1447,13 +1447,14 @@ class BatchHeaderTranslator:
     
     def __init__(self, client, config: dict = None):
         self.client = client
-        self.config = config or {}
+        self.config = config if config is not None else {}
         self.stop_flag = False
         
         # Use the batch_header_system_prompt, with fallback to env var or default
+        # Use 'or' chaining to handle None, empty string, or missing values
         self.system_prompt = (
-            self.config.get('batch_header_system_prompt') or  # CHANGED: Use correct config key
-            os.getenv('BATCH_HEADER_SYSTEM_PROMPT') or  # CHANGED: Use specific env var
+            self.config.get('batch_header_system_prompt') or
+            os.getenv('BATCH_HEADER_SYSTEM_PROMPT') or
             "You are a professional translator specializing in novel chapter titles. "
             "Translate to {target_lang}. "
             "Respond with only the translated JSON, nothing else. "
@@ -1549,10 +1550,13 @@ class BatchHeaderTranslator:
                 return max(1, len(text) // 4)
         
         # Get configured prompt template from user's config (this is the user prompt)
-        prompt_template = self.config.get('batch_header_prompt',
+        # Use 'or' to handle None or empty string
+        prompt_template = (
+            self.config.get('batch_header_prompt') or
             "Translate these chapter titles to {target_lang}.\n"
             "Return ONLY a JSON object with chapter numbers as keys.\n"
-            "Format: {\"1\": \"translated title\", \"2\": \"translated title\"}")
+            "Format: {\"1\": \"translated title\", \"2\": \"translated title\"}"
+        )
         
         # Handle output language - this is what {target_lang} should be replaced with
         # Check environment variable first (set by GUI), then config, then fallback to English
@@ -1563,7 +1567,7 @@ class BatchHeaderTranslator:
         print(f"[DEBUG] system_prompt BEFORE replacement: '{self.system_prompt[:150]}...'")
         
         # Replace {target_lang} variable in both system prompt and user prompt with the output language
-        system_prompt = self.system_prompt.replace('{target_lang}', output_lang)
+        system_prompt = self.system_prompt.replace('{target_lang}', output_lang) if self.system_prompt else ""
         prompt_template = prompt_template.replace('{target_lang}', output_lang)
         
         print(f"[DEBUG] system_prompt AFTER replacement: '{system_prompt[:150]}...'")
