@@ -1766,8 +1766,9 @@ class RetranslationMixin:
             
             # Check if we're using OPF-based display or fallback
             if data.get('spine_chapters'):
-                # OPF-based: just update status info (spine_chapters are static)
-                self._update_chapter_status_info(data)
+                # OPF-based: Re-run full matching logic to update merged status correctly
+                # We need to re-match spine chapters against the updated progress JSON
+                self._rematch_spine_chapters(data)
             else:
                 # Fallback mode: REBUILD chapter_display_info from scratch to pick up new entries
                 # This is necessary for text files or EPUBs without OPF
@@ -1829,6 +1830,168 @@ class RetranslationMixin:
             except (RuntimeError, AttributeError):
                 # Dialog was also deleted, just print to console
                 print(f"[WARN] Could not show error dialog - dialog was deleted")
+    
+    def _rematch_spine_chapters(self, data):
+        """Re-run the full spine chapter matching logic against updated progress JSON"""
+        # This is essentially lines 443-715 from _force_retranslation_epub_or_text
+        # but adapted to work with existing data structure
+        
+        prog = data['prog']
+        output_dir = data['output_dir']
+        spine_chapters = data['spine_chapters']
+        
+        # Build maps for matching (same as original code)
+        basename_to_progress = {}
+        for chapter_key, chapter_info in prog.get("chapters", {}).items():
+            original_basename = chapter_info.get("original_basename", "")
+            if original_basename:
+                if original_basename not in basename_to_progress:
+                    basename_to_progress[original_basename] = []
+                basename_to_progress[original_basename].append((chapter_key, chapter_info))
+        
+        response_file_to_progress = {}
+        for chapter_key, chapter_info in prog.get("chapters", {}).items():
+            output_file = chapter_info.get("output_file", "")
+            if output_file:
+                if output_file not in response_file_to_progress:
+                    response_file_to_progress[output_file] = []
+                response_file_to_progress[output_file].append((chapter_key, chapter_info))
+        
+        # Re-match each spine chapter (copy of matching logic from lines 462-715)
+        for spine_ch in spine_chapters:
+            filename = spine_ch['filename']
+            chapter_num = spine_ch['file_chapter_num']
+            is_special = spine_ch.get('is_special', False)
+            
+            base_name = os.path.splitext(filename)[0]
+            expected_response = filename  # Simplified - use OPF filename
+            response_path = os.path.join(output_dir, expected_response)
+            
+            matched_info = None
+            
+            # Method 1: Check by original basename
+            if filename in basename_to_progress:
+                entries = basename_to_progress[filename]
+                if entries:
+                    _, chapter_info = entries[0]
+                    status = chapter_info.get('status', '')
+                    if status in ['in_progress', 'failed', 'qa_failed']:
+                        if chapter_info.get('actual_num') == chapter_num:
+                            matched_info = chapter_info
+                    else:
+                        matched_info = chapter_info
+            
+            # Method 4: Match by chapter number key (includes merged logic)
+            if not matched_info:
+                simple_key = str(chapter_num)
+                if simple_key in prog.get("chapters", {}):
+                    chapter_info = prog["chapters"][simple_key]
+                    out_file = chapter_info.get('output_file')
+                    status = chapter_info.get('status', '')
+                    orig_base = chapter_info.get('original_basename', '')
+                    if orig_base:
+                        orig_base = os.path.basename(orig_base)
+                    
+                    # Merged chapters: match by original_basename
+                    if status == 'merged':
+                        parent_num = chapter_info.get('merged_parent_chapter')
+                        filename_noext = os.path.splitext(filename)[0]
+                        if parent_num is not None and (orig_base == filename or orig_base == filename_noext or not orig_base):
+                            parent_key = str(parent_num)
+                            if parent_key in prog.get("chapters", {}):
+                                matched_info = chapter_info
+                    # Other statuses
+                    elif status in ['in_progress', 'failed']:
+                        if chapter_info.get('actual_num') == chapter_num and out_file == expected_response:
+                            matched_info = chapter_info
+                    elif status == 'qa_failed':
+                        if chapter_info.get('actual_num') == chapter_num:
+                            matched_info = chapter_info
+                    elif out_file == expected_response:
+                        matched_info = chapter_info
+                
+                # Check composite key (e.g., "1_chapter0001")
+                if not matched_info:
+                    filename_noext = os.path.splitext(filename)[0]
+                    composite_key = f"{chapter_num}_{filename_noext}"
+                    if composite_key in prog.get("chapters", {}):
+                        matched_info = prog["chapters"][composite_key]
+            
+            # Fallback: iterate through all entries
+            if not matched_info:
+                for chapter_key, chapter_info in prog.get("chapters", {}).items():
+                    actual_num = chapter_info.get('actual_num')
+                    if actual_num is not None and actual_num == chapter_num:
+                        orig_base = chapter_info.get('original_basename', '')
+                        if orig_base:
+                            orig_base = os.path.basename(orig_base)
+                        out_file = chapter_info.get('output_file')
+                        status = chapter_info.get('status', '')
+                        
+                        # Merged: match by original_basename
+                        if status == 'merged':
+                            filename_noext = os.path.splitext(filename)[0]
+                            if orig_base == filename or orig_base == filename_noext or not orig_base:
+                                matched_info = chapter_info
+                                break
+                        # In-progress/failed: require both actual_num and output_file
+                        elif status in ['in_progress', 'failed']:
+                            if actual_num == chapter_num and out_file == expected_response:
+                                matched_info = chapter_info
+                                break
+                        # qa_failed: match by chapter number only
+                        elif status == 'qa_failed':
+                            if actual_num == chapter_num:
+                                matched_info = chapter_info
+                                break
+                        # Other: match by original_basename or output_file
+                        elif (orig_base and orig_base == filename) or (not orig_base and out_file and out_file == expected_response):
+                            matched_info = chapter_info
+                            break
+            
+            # File exists check
+            file_exists = os.path.exists(response_path)
+            
+            # Update spine chapter status
+            if matched_info:
+                status = matched_info.get('status', 'unknown')
+                if status in ['failed', 'in_progress', 'qa_failed']:
+                    spine_ch['status'] = status
+                    spine_ch['output_file'] = matched_info.get('output_file') or expected_response
+                    spine_ch['progress_entry'] = matched_info
+                    continue
+                
+                spine_ch['status'] = status
+                if is_special:
+                    spine_ch['output_file'] = expected_response
+                else:
+                    spine_ch['output_file'] = matched_info.get('output_file', expected_response)
+                spine_ch['progress_entry'] = matched_info
+            elif file_exists:
+                spine_ch['status'] = 'completed'
+                spine_ch['output_file'] = expected_response
+            else:
+                spine_ch['status'] = 'not_translated'
+                spine_ch['output_file'] = expected_response
+        
+        # Rebuild chapter_display_info from updated spine_chapters
+        chapter_display_info = []
+        for spine_ch in spine_chapters:
+            display_info = {
+                'key': spine_ch.get('filename', ''),
+                'num': spine_ch['file_chapter_num'],
+                'info': spine_ch.get('progress_entry', {}),
+                'output_file': spine_ch['output_file'],
+                'status': spine_ch['status'],
+                'duplicate_count': 1,
+                'entries': [],
+                'opf_position': spine_ch['position'],
+                'original_filename': spine_ch['filename'],
+                'is_special': spine_ch.get('is_special', False)
+            }
+            chapter_display_info.append(display_info)
+        
+        data['chapter_display_info'] = chapter_display_info
     
     def _rebuild_chapter_display_info(self, data):
         """Rebuild chapter_display_info from scratch (for fallback mode without OPF)"""
