@@ -262,9 +262,9 @@ class RetranslationMixin:
         
         # For EPUB/text files, use the shared logic
         # Get current toggle state if it exists, or default based on file type
-        # Default to True for .txt files, False for .epub
-        is_txt = input_path.lower().endswith('.txt')
-        show_special = True if is_txt else False
+        # Default to True for .txt, .pdf, .csv, and .json files, False for .epub
+        show_special_extensions = ('.txt', '.pdf', '.csv', '.json')
+        show_special = input_path.lower().endswith(show_special_extensions)
         
         if hasattr(self, '_retranslation_dialog_cache') and file_key in self._retranslation_dialog_cache:
             cached_data = self._retranslation_dialog_cache[file_key]
