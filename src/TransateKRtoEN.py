@@ -5430,7 +5430,10 @@ def is_qa_failed_response(content):
         "[]",  # Empty JSON response from glossary context
         "[API_ERROR]",
         "[TIMEOUT]",
-        "[RATE_LIMIT_EXCEEDED]"
+        "[RATE_LIMIT_EXCEEDED]",
+        "All Google Translate endpoints failed",  # Free Google Translate failures
+        "HTTP 429: Rate Limited",  # Too many requests
+        "HTTP 403: Forbidden"  # IP blocked
     ]
     
     for marker in explicit_failures:
@@ -8907,6 +8910,7 @@ def main(log_callback=None, stop_callback=None):
                 if is_qa_failed_response(cleaned):
                     chapter_status = "qa_failed"
                     failure_reason = get_failure_reason(cleaned)
+                    qa_issues = [failure_reason]
                     print(f"⚠️ Chapter {actual_num} marked as qa_failed: {failure_reason}")
                 elif finish_reason in ["length", "max_tokens"]:
                     chapter_status = "qa_failed"
@@ -8931,6 +8935,7 @@ def main(log_callback=None, stop_callback=None):
                 if is_qa_failed_response(cleaned):
                     chapter_status = "qa_failed"
                     failure_reason = get_failure_reason(cleaned)
+                    qa_issues = [failure_reason]
                     print(f"⚠️ Chapter {actual_num} marked as qa_failed: {failure_reason}")
                 elif finish_reason in ["length", "max_tokens"]:
                     chapter_status = "qa_failed"
