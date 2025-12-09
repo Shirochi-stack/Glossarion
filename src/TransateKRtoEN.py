@@ -708,77 +708,96 @@ class RequestMerger:
         # defined as either a <p> tag or non-whitespace text (plain text), so
         # sequences like <h2>Title</h2><h3>Subtitle</h3> with only whitespace
         # between them will be treated as one boundary.
+        # 
+        # IMPORTANT: For each logical group of adjacent headers, we track the
+        # LAST header in the group, since that's where the actual content starts.
         logical_headers = []
-        for h in headers:
-            if not logical_headers:
-                logical_headers.append(h)
-                continue
+        logical_to_last_header = {}  # Maps logical header to the last physical header in its group
+        
+        current_group_start = None
+        current_group_headers = []
+        
+        for i, h in enumerate(headers):
+            if current_group_start is None:
+                # Start a new group
+                current_group_start = h
+                current_group_headers = [h]
+            else:
+                # Check if this header is adjacent to the previous one
+                prev = current_group_headers[-1]
+                node = prev.next_sibling
+                has_intervening_content = False
 
-            prev = logical_headers[-1]
-            node = prev.next_sibling
-            has_intervening_content = False
-
-            # Scan siblings between prev and current header
-            while node is not None and node is not h:
-                # Skip pure whitespace text nodes
-                if isinstance(node, NavigableString):
-                    if node.strip():  # non-empty text = content
-                        has_intervening_content = True
-                        break
-                else:
-                    # Treat specific structural/empty wrappers as ignorable
-                    # (e.g. <div id="linewrap">, empty <p>, or image wrappers)
-                    
-                    # 1. Empty/whitespace-only tags
-                    try:
-                        text = node.get_text(strip=True)
-                    except Exception:
-                        text = ''
-                        
-                    # If it has text content, check if it's just a duplicate header-like string
-                    if text:
-                        # AGGRESSIVE MODE: Check if the text is very short/navigational
-                        # or looks like a cover image label ("커버보기", "Cover", etc.)
-                        # or is just a duplicate of the header text?
-                        # For the specific issue "커버보기" (View Cover) inside a cover wrapper
-                        # We will aggressively ignore short text nodes inside divs/p's 
-                        # if we are scanning between headers.
-                        
-                        # Heuristic: If text is short (< 20 chars) and not a full sentence, ignore it
-                        # as likely UI debris or labels.
-                        if len(text) < 30 and not any(punct in text for punct in '.!?'):
-                            # Log that we are skipping this short text
-                            # print(f"   ℹ️ Split the Merge: Ignoring short debris '{text}' between headers")
-                            pass
-                        else:
+                # Scan siblings between prev and current header
+                while node is not None and node is not h:
+                    # Skip pure whitespace text nodes
+                    if isinstance(node, NavigableString):
+                        if node.strip():  # non-empty text = content
                             has_intervening_content = True
                             break
-                    
-                    # 2. If no text, check for meaningful media (images)
-                    # We treat images as "content" that should separate headers, unless
-                    # it's a cover image that might belong to the header block.
-                    # But typically an image means "stuff is happening".
-                    # However, user requested aggressive merge even with p tags/images.
-                    # The example shows <div class="cover-wrapper"><img ...></div>.
-                    # If we want to merge across this, we must ignore images too.
-                    
-                    # IGNORE images/divs if they are between two headers that look very similar
-                    # or if we are just being aggressive.
-                    pass
+                    else:
+                        # Treat specific structural/empty wrappers as ignorable
+                        # (e.g. <div id="linewrap">, empty <p>, or image wrappers)
+                        
+                        # 1. Empty/whitespace-only tags
+                        try:
+                            text = node.get_text(strip=True)
+                        except Exception:
+                            text = ''
+                            
+                        # If it has text content, check if it's just a duplicate header-like string
+                        if text:
+                            # AGGRESSIVE MODE: Check if the text is very short/navigational
+                            # or looks like a cover image label ("커버보기", "Cover", etc.)
+                            # or is just a duplicate of the header text?
+                            # For the specific issue "커버보기" (View Cover) inside a cover wrapper
+                            # We will aggressively ignore short text nodes inside divs/p's 
+                            # if we are scanning between headers.
+                            
+                            # Heuristic: If text is short (< 20 chars) and not a full sentence, ignore it
+                            # as likely UI debris or labels.
+                            if len(text) < 30 and not any(punct in text for punct in '.!?'):
+                                # Log that we are skipping this short text
+                                # print(f"   ℹ️ Split the Merge: Ignoring short debris '{text}' between headers")
+                                pass
+                            else:
+                                has_intervening_content = True
+                                break
+                        
+                        # 2. If no text, check for meaningful media (images)
+                        # We treat images as "content" that should separate headers, unless
+                        # it's a cover image that might belong to the header block.
+                        # But typically an image means "stuff is happening".
+                        # However, user requested aggressive merge even with p tags/images.
+                        # The example shows <div class="cover-wrapper"><img ...></div>.
+                        # If we want to merge across this, we must ignore images too.
+                        
+                        # IGNORE images/divs if they are between two headers that look very similar
+                        # or if we are just being aggressive.
+                        pass
 
-                node = node.next_sibling
+                    node = node.next_sibling
 
-            if has_intervening_content:
-                logical_headers.append(h)
-            else:
-                # No content between prev and this header; treat as part of the
-                # same logical header region and do NOT add another split point.
-                header_text = h.get_text(strip=True)[:60]
-                prev_text = prev.get_text(strip=True)[:60]
-                print(
-                    f"   ℹ️ Split the Merge: Treating adjacent header '{header_text}' "
-                    f"as continuation of '{prev_text}'"
-                )
+                if has_intervening_content:
+                    # End the current group and start a new one
+                    logical_headers.append(current_group_start)
+                    logical_to_last_header[id(current_group_start)] = current_group_headers[-1]
+                    current_group_start = h
+                    current_group_headers = [h]
+                else:
+                    # No content between prev and this header; add to current group
+                    header_text = h.get_text(strip=True)[:60]
+                    prev_text = prev.get_text(strip=True)[:60]
+                    print(
+                        f"   ℹ️ Split the Merge: Treating adjacent header '{header_text}' "
+                        f"as continuation of '{prev_text}'"
+                    )
+                    current_group_headers.append(h)
+        
+        # Don't forget the last group
+        if current_group_start is not None:
+            logical_headers.append(current_group_start)
+            logical_to_last_header[id(current_group_start)] = current_group_headers[-1]
 
         # Decide which header list to use for splitting.
         # If proximity-based collapsing produced fewer headers than the
@@ -787,9 +806,12 @@ class RequestMerger:
         if len(logical_headers) < expected_count and len(original_headers) >= expected_count:
             print("   ℹ️ Split the Merge: Proximity header merge reduced boundary count below expected; using raw headers instead")
             headers = original_headers
+            # When falling back to raw headers, don't use the last-header mapping
+            use_last_header_map = False
         else:
             # Use the logical header list for splitting logic from this point on
             headers = logical_headers
+            use_last_header_map = True
         
         # First check: Do we have enough headers?
         has_content_before_first_header = False
@@ -859,18 +881,48 @@ class RequestMerger:
                     sections.append(first_section)
         
         # Find positions of each header in the content
+        # IMPORTANT: For logical headers with adjacent groups, use the LAST header
+        # in the group, since that's where the actual content starts
+        # 
+        # Build a list of all headers in document order with their occurrence index
+        # to handle duplicate header strings (e.g. multiple "<h1>012. Kang Hana.</h1>")
+        all_header_elements = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+        header_occurrence = {}  # Maps header element id to (header_str, occurrence_index)
+        for elem in all_header_elements:
+            header_str = str(elem)
+            if header_str not in header_occurrence:
+                header_occurrence[header_str] = 0
+            else:
+                header_occurrence[header_str] += 1
+            # Store which occurrence this element is
+            elem._occurrence_index = header_occurrence[header_str]
+        
         header_positions = []
         for header in headers_to_use:
-            header_str = str(header)
-            pos = content_str.find(header_str)
+            # If we're using the logical header map, get the last header in this group
+            if use_last_header_map and id(header) in logical_to_last_header:
+                actual_header = logical_to_last_header[id(header)]
+            else:
+                actual_header = header
+            
+            header_str = str(actual_header)
+            occurrence_idx = getattr(actual_header, '_occurrence_index', 0)
+            
+            # Find the Nth occurrence of this header string
+            pos = -1
+            for i in range(occurrence_idx + 1):
+                pos = content_str.find(header_str, pos + 1)
+                if pos == -1:
+                    break
+            
             if pos != -1:
-                header_positions.append((pos, header_str))
+                header_positions.append((pos, header_str, actual_header))
         
         # Sort by position (should already be in order, but just to be safe)
         header_positions.sort(key=lambda x: x[0])
         
         # Extract content sections from headers
-        for i, (pos, header_str) in enumerate(header_positions):
+        for i, (pos, header_str, header_elem) in enumerate(header_positions):
             if i < len(header_positions) - 1:
                 # Get content from this header to the next
                 next_pos = header_positions[i + 1][0]

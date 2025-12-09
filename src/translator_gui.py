@@ -2920,6 +2920,8 @@ Recent translations to summarize:
         
         self.target_lang_combo = QComboBox()
         self.target_lang_combo.setEditable(True)
+        # Disable mouse wheel scrolling to prevent accidental changes
+        self.target_lang_combo.wheelEvent = lambda event: event.ignore()
         languages = [
             "English", "Spanish", "French", "German", "Italian", "Portuguese",
             "Russian", "Arabic", "Hindi", "Chinese (Simplified)",
