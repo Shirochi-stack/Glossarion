@@ -8808,11 +8808,16 @@ def main(log_callback=None, stop_callback=None):
                             section_content = soup.get_text(strip=True)
                         
                         # Save the section
-                        with open(os.path.join(out, split_fname), 'w', encoding='utf-8') as f:
+                        split_output_path = os.path.join(out, split_fname)
+                        with open(split_output_path, 'w', encoding='utf-8') as f:
                             f.write(section_content)
                         
-                        saved_files.append((g_idx, g_chapter, g_actual_num, g_content_hash, split_fname))
-                        print(f"      💾 Saved Chapter {g_actual_num}: {split_fname} ({len(section_content)} chars)")
+                        # Verify file was written successfully
+                        if os.path.exists(split_output_path):
+                            saved_files.append((g_idx, g_chapter, g_actual_num, g_content_hash, split_fname))
+                            print(f"      💾 Saved Chapter {g_actual_num}: {split_fname} ({len(section_content)} chars)")
+                        else:
+                            print(f"      ⚠️ ERROR: Failed to write file {split_fname} - file does not exist after write")
                     
                     # Mark all chapters as completed or qa_failed (for truncated)
                     for g_idx, g_chapter, g_actual_num, g_content_hash, split_fname in saved_files:
@@ -8837,12 +8842,23 @@ def main(log_callback=None, stop_callback=None):
                     soup = BeautifulSoup(cleaned, 'html.parser')
                     text_content = soup.get_text(strip=True)
                     
-                    with open(os.path.join(out, parent_fname), 'w', encoding='utf-8') as f:
+                    parent_output_path = os.path.join(out, parent_fname)
+                    with open(parent_output_path, 'w', encoding='utf-8') as f:
                         f.write(text_content)
                 else:
                     parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
-                    with open(os.path.join(out, parent_fname), 'w', encoding='utf-8') as f:
+                    parent_output_path = os.path.join(out, parent_fname)
+                    with open(parent_output_path, 'w', encoding='utf-8') as f:
                         f.write(cleaned)
+                
+                # Verify file was actually written before marking as completed
+                if not os.path.exists(parent_output_path):
+                    print(f"   ⚠️ ERROR: Failed to write merged file {parent_fname} - file does not exist after write")
+                    # Mark all chapters in the group as failed since parent file wasn't written
+                    for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
+                        progress_manager.update(g_idx, g_actual_num, g_content_hash, None, status="failed", chapter_obj=g_chapter)
+                    progress_manager.save()
+                    continue
                 
                 print(f"   💾 Saved merged content to Chapter {parent_actual_num}: {parent_fname} ({len(cleaned)} chars)")
                 
@@ -8898,6 +8914,13 @@ def main(log_callback=None, stop_callback=None):
                 with open(output_path, 'w', encoding='utf-8') as f:
                     f.write(text_content)
                 
+                # Verify file was actually written before marking as completed
+                if not os.path.exists(output_path):
+                    print(f"⚠️ ERROR: Failed to write file {fname_txt} - file does not exist after write")
+                    # Keep status as in_progress or mark as failed
+                    progress_manager.save()  # Save current in_progress state
+                    continue
+                
                 print(f"💾 Saved text file: {fname_txt} (Chapter {actual_num})")
                 
                 final_title = c['title'] or make_safe_filename(c['title'], actual_num)
@@ -8910,7 +8933,6 @@ def main(log_callback=None, stop_callback=None):
                 if is_qa_failed_response(cleaned):
                     chapter_status = "qa_failed"
                     failure_reason = get_failure_reason(cleaned)
-                    qa_issues = [failure_reason]
                     print(f"⚠️ Chapter {actual_num} marked as qa_failed: {failure_reason}")
                 elif finish_reason in ["length", "max_tokens"]:
                     chapter_status = "qa_failed"
@@ -8922,8 +8944,16 @@ def main(log_callback=None, stop_callback=None):
                 progress_manager.update(idx, actual_num, content_hash, fname_txt, status=chapter_status, chapter_obj=c, qa_issues_found=qa_issues)
             else:
                 # For EPUB files, keep original HTML behavior
-                with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
+                output_path = os.path.join(out, fname)
+                with open(output_path, 'w', encoding='utf-8') as f:
                     f.write(cleaned)
+                
+                # Verify file was actually written before marking as completed
+                if not os.path.exists(output_path):
+                    print(f"⚠️ ERROR: Failed to write file {fname} - file does not exist after write")
+                    # Keep status as in_progress or mark as failed
+                    progress_manager.save()  # Save current in_progress state
+                    continue
                 
                 final_title = c['title'] or make_safe_filename(c['title'], actual_num)
                 # Don't print individual "Processed" messages - these are redundant with the main progress display
@@ -8935,7 +8965,6 @@ def main(log_callback=None, stop_callback=None):
                 if is_qa_failed_response(cleaned):
                     chapter_status = "qa_failed"
                     failure_reason = get_failure_reason(cleaned)
-                    qa_issues = [failure_reason]
                     print(f"⚠️ Chapter {actual_num} marked as qa_failed: {failure_reason}")
                 elif finish_reason in ["length", "max_tokens"]:
                     chapter_status = "qa_failed"
