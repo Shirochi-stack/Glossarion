@@ -558,11 +558,11 @@ class RetranslationMixin:
                                 parent_info = prog["chapters"][parent_key]
                                 if parent_info.get('status') == 'completed':
                                     matched_info = chapter_info
-                    # In-progress, failed, and qa_failed chapters: match by actual_num AND original_basename
+                    # In-progress, failed, and qa_failed chapters: match by output_file
                     # This prevents matching unrelated files with the same chapter number
                     elif status in ['in_progress', 'failed', 'qa_failed']:
-                        # Only match if basenames match, or if BOTH are missing
-                        if orig_base == filename:
+                        # Match by output_file to ensure we're looking at the right file
+                        if out_file == expected_response:
                             matched_info = chapter_info
                     # Normal match: output file matches expected
                     elif out_file == expected_response:
@@ -616,11 +616,11 @@ class RetranslationMixin:
                                     break
                                 # else: don't match - will fall through to not_translated
                             
-                            # In-progress, failed, and qa_failed chapters: match by actual_num AND original_basename
+                            # In-progress, failed, and qa_failed chapters: match by output_file
                             # This prevents matching unrelated files with the same chapter number
                             if status in ['in_progress', 'failed', 'qa_failed']:
-                                # Only match if basenames match
-                                if orig_base == filename:
+                                # Match by output_file to ensure we're looking at the right file
+                                if out_file == expected_response:
                                     matched_info = chapter_info
                                     break
                             
@@ -1352,27 +1352,22 @@ class RetranslationMixin:
             # Remove marks
             cleared_count = 0
             for info in qa_failed_chapters:
-                # Find the chapter by actual_num AND original_filename
+                # Find the chapter by output_file (most reliable)
                 target_output_file = info['output_file']
                 actual_num = info['num']
-                original_filename = info.get('original_filename', '')
                 chapter_key = None
                 
-                # Search through all chapters to find the one with matching actual_num AND original_basename
+                # Search through all chapters to find the one with matching output_file
                 for key, ch_info in data['prog']["chapters"].items():
-                    ch_actual_num = ch_info.get('actual_num')
-                    ch_orig_base = ch_info.get('original_basename', '')
-                    if ch_orig_base:
-                        ch_orig_base = os.path.basename(ch_orig_base)
-                    # Only match if basenames match
-                    if ch_actual_num == actual_num and ch_orig_base == original_filename:
+                    if ch_info.get('output_file') == target_output_file:
                         chapter_key = key
                         break
                 
-                # Fallback: If not found by actual_num, try output_file (for backward compatibility)
+                # Fallback: If not found by output_file, try actual_num (but this is risky)
                 if not chapter_key:
                     for key, ch_info in data['prog']["chapters"].items():
-                        if ch_info.get('output_file') == target_output_file and ch_info.get('actual_num') == actual_num:
+                        if ch_info.get('actual_num') == actual_num:
+                            print(f"WARNING: Matching chapter {actual_num} by number only - this may be incorrect!")
                             chapter_key = key
                             break
                 
@@ -1460,25 +1455,20 @@ class RetranslationMixin:
                     
                     # Reset status to pending for ALL non-not_translated chapters
                     target_output_file = ch_info['output_file']
-                    original_filename = ch_info.get('original_filename', '')
                     chapter_key = None
                     old_status = ch_info['status']
                     
-                    # Search through all chapters to find the one with matching actual_num AND original_basename
+                    # Search through all chapters to find the one with matching output_file
                     for key, ch_data in data['prog']["chapters"].items():
-                        ch_actual_num = ch_data.get('actual_num')
-                        ch_orig_base = ch_data.get('original_basename', '')
-                        if ch_orig_base:
-                            ch_orig_base = os.path.basename(ch_orig_base)
-                        # Only match if basenames match
-                        if ch_actual_num == actual_num and ch_orig_base == original_filename:
+                        if ch_data.get('output_file') == target_output_file:
                             chapter_key = key
                             break
                     
-                    # Fallback: If not found by actual_num, try output_file (for backward compatibility)
+                    # Fallback: If not found by output_file, try actual_num (but this is risky)
                     if not chapter_key:
                         for key, ch_data in data['prog']["chapters"].items():
-                            if ch_data.get('output_file') == target_output_file and ch_data.get('actual_num') == actual_num:
+                            if ch_data.get('actual_num') == actual_num:
+                                print(f"WARNING: Matching chapter {actual_num} by number only - this may be incorrect!")
                                 chapter_key = key
                                 break
                         
