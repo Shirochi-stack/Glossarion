@@ -1824,9 +1824,9 @@ class RetranslationMixin:
             has_numbers = bool(re.search(r'\d', filename_to_check))
             is_special = not has_numbers
             
-            # Skip special files if the toggle is off
-            if is_special and not show_special:
-                continue
+            # Don't skip special files here - let the display logic handle hiding them
+            # This ensures chapter_display_info contains all items, and the listbox
+            # will properly hide/show items based on the toggle state
             
             # Extract chapter number - prioritize stored values
             chapter_num = None
@@ -1861,7 +1861,8 @@ class RetranslationMixin:
                 'output_file': actual_output_file,  # Use actual output file, not placeholder
                 'status': status,
                 'duplicate_count': len(entries),
-                'entries': entries
+                'entries': entries,
+                'is_special': is_special
             })
         
         # Sort by chapter number
@@ -2041,6 +2042,7 @@ class RetranslationMixin:
             
             from PySide6.QtWidgets import QListWidgetItem
             from PySide6.QtGui import QColor
+            from PySide6.QtCore import Qt
             item = QListWidgetItem(display)
             
             # Color code based on status
@@ -2055,7 +2057,24 @@ class RetranslationMixin:
             elif status == 'in_progress':
                 item.setForeground(QColor('orange'))
             
+            # Store metadata in item for filtering
+            is_special = info.get('is_special', False)
+            item.setData(Qt.UserRole, {'is_special': is_special, 'info': info})
+            
+            # Add item to listbox first
             listbox.addItem(item)
+            
+            # Then hide special files if toggle is off (must be done after adding to listbox)
+            # Get current toggle state from data or checkbox
+            show_special_files = data.get('show_special_files_state', False)
+            if 'show_special_files_cb' in data and data['show_special_files_cb']:
+                try:
+                    show_special_files = data['show_special_files_cb'].isChecked()
+                except RuntimeError:
+                    pass  # Widget was deleted
+            
+            if is_special and not show_special_files:
+                item.setHidden(True)
     
     def _update_statistics_display(self, data):
         """Update statistics display if spine chapters are available"""
