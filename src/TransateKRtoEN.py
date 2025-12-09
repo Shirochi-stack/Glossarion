@@ -1839,7 +1839,6 @@ class ProgressManager:
             if output_file:
                 output_path = os.path.join(output_dir, output_file)
                 if not os.path.exists(output_path):
-                    print(f"🗑️ Removing entry for missing file: {output_file}")
                     
                     actual_num = chapter_info.get("actual_num")
                     if actual_num is not None:
@@ -1872,7 +1871,7 @@ class ProgressManager:
                         cleaned_count += 1
         
         if cleaned_count > 0:
-            print(f"🔄 Removed {cleaned_count} entries - will retranslate")
+            print(f"🔄 Removed {cleaned_count} missing file entries")
     
     def migrate_to_content_hash(self, chapters):
         """Change keys to match actual_num values for proper mapping and sort by chapter number"""
@@ -8689,7 +8688,6 @@ def main(log_callback=None, stop_callback=None):
                         g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
                         progress_manager.update(g_idx, g_actual_num, g_content_hash, g_fname, status="failed", chapter_obj=g_chapter)
                     progress_manager.save()
-                    print(f"⚠️ Marked {len(merge_info['group'])} chapters in merge group as failed")
                 else:
                     # Mark single chapter as failed
                     fname = FileUtilities.create_chapter_filename(c, actual_num)
