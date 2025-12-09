@@ -1910,31 +1910,16 @@ class RetranslationMixin:
             # Find matching progress entry
             matched_info = None
             
-            # PRIORITY 1: Try to match by actual_num first (most reliable for merged chapters)
-            # This prevents merged chapters from matching the parent's entry by output_file
-            # Search for best match among all entries with matching chapter number
-            candidate_match = None
-            found_exact_match = False
-            
+            # PRIORITY 1: Match by BOTH actual_num AND output_file
+            # This prevents cross-matching between files with same chapter number but different filenames
             for chapter_key, chapter_info in data['prog'].get("chapters", {}).items():
                 actual_num = chapter_info.get('actual_num') or chapter_info.get('chapter_num')
-                if actual_num is not None and actual_num == info['num']:
-                    # Found a candidate with matching chapter number
-                    
-                    # Check for exact output file match - this is the strongest signal
-                    ch_output = chapter_info.get('output_file')
-                    if ch_output and ch_output == output_file:
-                        matched_info = chapter_info
-                        found_exact_match = True
-                        break
-                    
-                    # Keep as fallback candidate ONLY if it has a valid output_file
-                    # Skip entries with null output_file
-                    if candidate_match is None and ch_output:
-                        candidate_match = chapter_info
-            
-            if not found_exact_match and candidate_match:
-                matched_info = candidate_match
+                ch_output = chapter_info.get('output_file')
+                
+                # BOTH must match - no fallback
+                if actual_num is not None and actual_num == info['num'] and ch_output == output_file:
+                    matched_info = chapter_info
+                    break
             
             # PRIORITY 2: Fall back to output_file matching if no actual_num match
             if not matched_info:
