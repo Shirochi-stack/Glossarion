@@ -598,6 +598,7 @@ class RetranslationMixin:
                                 orig_base = os.path.basename(orig_base)
                             out_file = chapter_info.get('output_file')
                             status = chapter_info.get('status', '')
+                            qa_issues = chapter_info.get('qa_issues_found', [])
                             
                             # Merged chapters: match by actual_num alone (they point to parent's output)
                             # But only treat as merged if the parent chapter is actually completed
@@ -617,10 +618,15 @@ class RetranslationMixin:
                                     break
                                 # else: don't match - will fall through to not_translated
                             
-                            # In-progress, failed, and qa_failed chapters: match by BOTH actual_num AND output_file
-                            # This prevents matching unrelated files with the same chapter number
+                            # In-progress, failed, and qa_failed chapters: normally we require BOTH
+                            # actual_num AND output_file to match to avoid cross-matching files.
+                            # However, for SPLIT_FAILED qa_failed entries, the output_file can differ
+                            # (e.g., due to merged vs. unsplit filenames), so relax the requirement.
                             if status in ['in_progress', 'failed', 'qa_failed']:
-                                if actual_num == chapter_num and out_file == expected_response:
+                                if actual_num == chapter_num and (
+                                    out_file == expected_response
+                                    or ('SPLIT_FAILED' in qa_issues and out_file)
+                                ):
                                     matched_info = chapter_info
                                     break
                             

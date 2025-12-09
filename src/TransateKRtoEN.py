@@ -4023,19 +4023,31 @@ class BatchTranslationProcessor:
             results = []
             if is_qa_failed_response(cleaned):
                 # Save merged content for debugging, then mark all as qa_failed
-                fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
+                parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                 try:
-                    with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
+                    with open(os.path.join(self.out_dir, parent_fname), 'w', encoding='utf-8') as f:
                         f.write(cleaned)
                 except Exception:
                     pass
+
+                # IMPORTANT:
+                # Use each chapter's own expected filename so we overwrite the
+                # existing in_progress entry instead of creating composite keys.
                 for actual_num, _, idx, chapter, content_hash in chapters_data:
+                    chapter_fname = FileUtilities.create_chapter_filename(chapter, actual_num)
                     with self.progress_lock:
-                        self.update_progress_fn(idx, actual_num, content_hash, fname if idx == parent_idx else None, status="qa_failed", chapter_obj=chapter)
+                        self.update_progress_fn(
+                            idx,
+                            actual_num,
+                            content_hash,
+                            chapter_fname,
+                            status="qa_failed",
+                            chapter_obj=chapter,
+                        )
                         self.save_progress_fn()
                     results.append((False, actual_num, None, None, None))
                 return results
-            
+
             # Check if Split the Merge is enabled
             split_the_merge = os.getenv('SPLIT_THE_MERGE', '0') == '1'
             disable_fallback = os.getenv('DISABLE_MERGE_FALLBACK', '0') == '1'
@@ -4048,16 +4060,28 @@ class BatchTranslationProcessor:
             # If disable fallback is enabled and split failed, mark as qa_failed
             if split_the_merge and disable_fallback and (not split_sections or len(split_sections) != len(chapters_data)):
                 print(f"   ⚠️ Split failed and fallback disabled - marking merged group as qa_failed")
-                fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
+                parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                 try:
-                    with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
+                    with open(os.path.join(self.out_dir, parent_fname), 'w', encoding='utf-8') as f:
                         f.write(cleaned)
                 except Exception:
                     pass
+
+                # IMPORTANT:
+                # Use each chapter's own expected filename so we overwrite the
+                # existing in_progress entry instead of creating composite keys.
                 for actual_num, _, idx, chapter, content_hash in chapters_data:
+                    chapter_fname = FileUtilities.create_chapter_filename(chapter, actual_num)
                     with self.progress_lock:
-                        # All chapters (parent and children) should reference the same parent file for SPLIT_FAILED
-                        self.update_progress_fn(idx, actual_num, content_hash, fname, status="qa_failed", qa_issues_found=["SPLIT_FAILED"], chapter_obj=chapter)
+                        self.update_progress_fn(
+                            idx,
+                            actual_num,
+                            content_hash,
+                            chapter_fname,
+                            status="qa_failed",
+                            qa_issues_found=["SPLIT_FAILED"],
+                            chapter_obj=chapter,
+                        )
                         self.save_progress_fn()
                     results.append((False, actual_num, None, None, None))
                 return results
@@ -8828,10 +8852,9 @@ def main(log_callback=None, stop_callback=None):
                 
                 # Check for QA failures first (independent of truncation)
                 if is_qa_failed_response(cleaned):
-                    parent_status = "qa_failed"
-                    print(f"   ⚠️ Chapter {parent_actual_num} marked as qa_failed")
+                    print(f"   ⚠️ Merged response marked as qa_failed for parent + children")
                     
-                    # Save for debugging
+                    # Save for debugging with parent filename
                     parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                     try:
                         with open(os.path.join(out, parent_fname), 'w', encoding='utf-8') as f:
@@ -8839,13 +8862,19 @@ def main(log_callback=None, stop_callback=None):
                     except Exception:
                         pass
                     
-                    # Mark all as qa_failed
-                    progress_manager.update(
-                        parent_idx, parent_actual_num, parent_content_hash, parent_fname,
-                        status=parent_status, chapter_obj=parent_chapter
-                    )
-                    for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group'][1:]:
-                        progress_manager.update(g_idx, g_actual_num, g_content_hash, None, status="qa_failed", chapter_obj=g_chapter)
+                    # Mark ALL chapters in the merge group as qa_failed using
+                    # their own expected filenames so we overwrite existing
+                    # in_progress entries instead of creating composite keys.
+                    for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
+                        g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
+                        progress_manager.update(
+                            g_idx,
+                            g_actual_num,
+                            g_content_hash,
+                            g_fname,
+                            status="qa_failed",
+                            chapter_obj=g_chapter,
+                        )
                     progress_manager.save()
                     print(f"   ⚠️ Merged group marked as qa_failed")
                     continue
@@ -8869,18 +8898,19 @@ def main(log_callback=None, stop_callback=None):
                     except Exception:
                         pass
                     
-                    # Mark parent as qa_failed with the parent file
-                    progress_manager.update(
-                        parent_idx, parent_actual_num, parent_content_hash, parent_fname,
-                        status="qa_failed", chapter_obj=parent_chapter, qa_issues_found=["SPLIT_FAILED"]
-                    )
-                    # Mark children as qa_failed, each with their own expected filename for proper identification
-                    # This allows the progress system to correctly identify which specific chapter to update
-                    for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group'][1:]:
+                    # Mark ALL chapters in the merge group as qa_failed using
+                    # their own expected filenames so we overwrite existing
+                    # in_progress entries instead of creating composite keys.
+                    for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
                         g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
                         progress_manager.update(
-                            g_idx, g_actual_num, g_content_hash, g_fname,
-                            status="qa_failed", chapter_obj=g_chapter, qa_issues_found=["SPLIT_FAILED"]
+                            g_idx,
+                            g_actual_num,
+                            g_content_hash,
+                            g_fname,
+                            status="qa_failed",
+                            chapter_obj=g_chapter,
+                            qa_issues_found=["SPLIT_FAILED"],
                         )
                     progress_manager.save()
                     print(f"   ⚠️ Merged group ({len(merge_info['group'])} chapters) marked as qa_failed with SPLIT_FAILED")
