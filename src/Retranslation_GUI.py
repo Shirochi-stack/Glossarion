@@ -261,12 +261,15 @@ class RetranslationMixin:
                 return
         
         # For EPUB/text files, use the shared logic
-        # Get current toggle state if it exists
-        show_special = False
+        # Get current toggle state if it exists, or default based on file type
+        # Default to True for .txt files, False for .epub
+        is_txt = input_path.lower().endswith('.txt')
+        show_special = True if is_txt else False
+        
         if hasattr(self, '_retranslation_dialog_cache') and file_key in self._retranslation_dialog_cache:
             cached_data = self._retranslation_dialog_cache[file_key]
             if cached_data:
-                show_special = cached_data.get('show_special_files_state', False)
+                show_special = cached_data.get('show_special_files_state', show_special)
         
         self._force_retranslation_epub_or_text(input_path, show_special_files_state=show_special)
 
@@ -2490,8 +2493,10 @@ class RetranslationMixin:
             # Store tab_data reference on the dialog for cross-tab operations
             dialog._tab_data = tab_data
             
-            # Get the global show_special state from the first file that has it cached, or default to False
-            global_show_special = False
+            # Get the global show_special state from the first file that has it cached
+            # Default to True if any text files are present, False otherwise
+            global_show_special = True if text_files else False
+            
             for file_path in epub_files + text_files:
                 file_key = os.path.abspath(file_path)
                 if hasattr(self, '_retranslation_dialog_cache') and file_key in self._retranslation_dialog_cache:
