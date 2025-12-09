@@ -130,7 +130,6 @@ class GoogleFreeTranslateNew:
                 'https://clients5.google.com/translate_a/single',  # Alternative client5
                 'https://clients1.google.com/translate_a/single',
                 'https://clients3.google.com/translate_a/t',
-                'https://translate.google.cn/translate_a/single',
             ]
             
             # Collect all errors for detailed reporting
