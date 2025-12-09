@@ -4051,7 +4051,8 @@ class BatchTranslationProcessor:
                     pass
                 for actual_num, _, idx, chapter, content_hash in chapters_data:
                     with self.progress_lock:
-                        self.update_progress_fn(idx, actual_num, content_hash, fname if idx == parent_idx else None, status="qa_failed", qa_issues_found=["SPLIT_FAILED"], chapter_obj=chapter)
+                        # All chapters (parent and children) should reference the same parent file for SPLIT_FAILED
+                        self.update_progress_fn(idx, actual_num, content_hash, fname, status="qa_failed", qa_issues_found=["SPLIT_FAILED"], chapter_obj=chapter)
                         self.save_progress_fn()
                     results.append((False, actual_num, None, None, None))
                 return results
@@ -8830,13 +8831,13 @@ def main(log_callback=None, stop_callback=None):
                     except Exception:
                         pass
                     
-                    # Mark all as qa_failed
+                    # Mark all as qa_failed - all chapters should reference the parent file for SPLIT_FAILED
                     progress_manager.update(
                         parent_idx, parent_actual_num, parent_content_hash, parent_fname,
                         status="qa_failed", chapter_obj=parent_chapter, qa_issues_found=["SPLIT_FAILED"]
                     )
                     for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group'][1:]:
-                        progress_manager.update(g_idx, g_actual_num, g_content_hash, None, status="qa_failed", chapter_obj=g_chapter, qa_issues_found=["SPLIT_FAILED"])
+                        progress_manager.update(g_idx, g_actual_num, g_content_hash, parent_fname, status="qa_failed", chapter_obj=g_chapter, qa_issues_found=["SPLIT_FAILED"])
                     progress_manager.save()
                     print(f"   ⚠️ Merged group marked as qa_failed")
                     continue

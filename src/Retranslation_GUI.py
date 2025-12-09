@@ -1342,19 +1342,28 @@ class RetranslationMixin:
             # Remove marks
             cleared_count = 0
             for info in qa_failed_chapters:
-                # Find the actual numeric key in progress by matching output_file
+                # Find the chapter by actual_num (more reliable for SPLIT_FAILED cases)
                 target_output_file = info['output_file']
+                actual_num = info['num']
                 chapter_key = None
                 
-                # Search through all chapters to find the one with matching output_file
+                # Search through all chapters to find the one with matching actual_num
                 for key, ch_info in data['prog']["chapters"].items():
-                    if ch_info.get('output_file') == target_output_file:
+                    ch_actual_num = ch_info.get('actual_num')
+                    if ch_actual_num == actual_num:
                         chapter_key = key
                         break
                 
+                # Fallback: If not found by actual_num, try output_file (for backward compatibility)
+                if not chapter_key:
+                    for key, ch_info in data['prog']["chapters"].items():
+                        if ch_info.get('output_file') == target_output_file and ch_info.get('actual_num') == actual_num:
+                            chapter_key = key
+                            break
+                
                 # Update the chapter status if we found the key
                 if chapter_key and chapter_key in data['prog']["chapters"]:
-                    print(f"Updating chapter key {chapter_key} (output file: {target_output_file})")
+                    print(f"Removing QA failed mark for chapter {actual_num} (key: {chapter_key}, output file: {target_output_file})")
                     data['prog']["chapters"][chapter_key]["status"] = "completed"
                     
                     # Remove all QA-related fields
@@ -1365,7 +1374,7 @@ class RetranslationMixin:
                     
                     cleared_count += 1
                 else:
-                    print(f"WARNING: Could not find chapter key for output file: {target_output_file}")
+                    print(f"WARNING: Could not find chapter key for chapter {actual_num} (output file: {target_output_file})")
             
             # Save the updated progress
             with open(data['progress_file'], 'w', encoding='utf-8') as f:
@@ -1440,15 +1449,24 @@ class RetranslationMixin:
                         chapter_key = None
                         old_status = ch_info['status']  # Define old_status before using it
                         
-                        # Search through all chapters to find the one with matching output_file
+                        # Search through all chapters to find the one with matching actual_num (more reliable)
+                        # Fall back to output_file matching if actual_num doesn't match
                         for key, ch_data in data['prog']["chapters"].items():
-                            if ch_data.get('output_file') == target_output_file:
+                            ch_actual_num = ch_data.get('actual_num')
+                            if ch_actual_num == actual_num:
                                 chapter_key = key
                                 break
                         
+                        # Fallback: If not found by actual_num, try output_file (for backward compatibility)
+                        if not chapter_key:
+                            for key, ch_data in data['prog']["chapters"].items():
+                                if ch_data.get('output_file') == target_output_file and ch_data.get('actual_num') == actual_num:
+                                    chapter_key = key
+                                    break
+                        
                         # Update the chapter status if we found the key
                         if chapter_key and chapter_key in data['prog']["chapters"]:
-                            print(f"Resetting {old_status} status to pending for chapter key {chapter_key} (output file: {target_output_file})")
+                            print(f"Resetting {old_status} status to pending for chapter {actual_num} (key: {chapter_key}, output file: {target_output_file})")
                             
                             # Reset status to pending for retranslation
                             data['prog']["chapters"][chapter_key]["status"] = "pending"
@@ -1469,7 +1487,7 @@ class RetranslationMixin:
                             status_reset_count += 1
                             progress_updated = True
                         else:
-                            print(f"WARNING: Could not find chapter key for {old_status} output file: {target_output_file}")
+                            print(f"WARNING: Could not find chapter key for {old_status} chapter {actual_num} (output file: {target_output_file})")
                     
                     # MERGED CHILDREN FIX: Clear any merged children of this chapter
                     # This applies to ALL statuses being retranslated, not just completed/qa_failed
