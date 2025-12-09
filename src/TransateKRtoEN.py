@@ -1782,7 +1782,7 @@ class ProgressManager:
         """Mark a chapter as merged into a parent chapter"""
         chapter_key = self._get_chapter_key(actual_num, output_file=None, chapter_obj=chapter_obj, content_hash=content_hash)
         
-        self.prog["chapters"][chapter_key] = {
+        merged_info = {
             "actual_num": actual_num,
             "content_hash": content_hash,
             "output_file": parent_output_file,  # Point to parent's output file
@@ -1790,6 +1790,14 @@ class ProgressManager:
             "merged_parent_chapter": parent_chapter_num,
             "last_updated": time.time()
         }
+        
+        # Add original_basename so GUI can match by source filename
+        if chapter_obj and 'original_basename' in chapter_obj:
+            merged_info["original_basename"] = chapter_obj['original_basename']
+        elif chapter_obj and 'filename' in chapter_obj:
+            merged_info["original_basename"] = chapter_obj['filename']
+        
+        self.prog["chapters"][chapter_key] = merged_info
     
     def update_merged_chapters_list(self, parent_chapter_num, merged_chapter_nums, parent_content_hash=None, parent_chapter_obj=None):
         """Update the parent chapter to track which chapters were merged into it"""

@@ -551,15 +551,19 @@ class RetranslationMixin:
                     if orig_base:
                         orig_base = os.path.basename(orig_base)
                     
-                    # Merged chapters: check if parent is completed
+                    # Merged chapters: check if parent exists AND original_basename matches
                     if status == 'merged':
                         parent_num = chapter_info.get('merged_parent_chapter')
-                        if parent_num is not None:
+                        # For merged chapters, match by original_basename (not output_file)
+                        # because output_file points to parent's file, not this chapter's source file
+                        # Strip extension for comparison since orig_base may not have it
+                        filename_noext = os.path.splitext(filename)[0]
+                        if parent_num is not None and (orig_base == filename or orig_base == filename_noext or not orig_base):
                             parent_key = str(parent_num)
                             if parent_key in prog.get("chapters", {}):
-                                parent_info = prog["chapters"][parent_key]
-                                if parent_info.get('status') == 'completed':
-                                    matched_info = chapter_info
+                                # Just verify parent exists, don't enforce 'completed' status
+                                # This ensures we show 'merged' even if parent is completed_empty or other states
+                                matched_info = chapter_info
                     # In-progress and failed chapters: require BOTH actual_num AND output_file
                     # to match to avoid cross-matching files.
                     elif status in ['in_progress', 'failed']:
@@ -604,23 +608,20 @@ class RetranslationMixin:
                             status = chapter_info.get('status', '')
                             qa_issues = chapter_info.get('qa_issues_found', [])
                             
-                            # Merged chapters: match by actual_num alone (they point to parent's output)
-                            # But only treat as merged if the parent chapter is actually completed
+                            # Merged chapters: match by actual_num AND original_basename
+                            # For merged, output_file points to parent so we must match by source filename
                             if status == 'merged':
                                 parent_num = chapter_info.get('merged_parent_chapter')
-                                parent_completed = False
-                                if parent_num is not None:
-                                    # Check if parent chapter is completed
+                                # Match by original_basename (the source file), not output_file (parent's file)
+                                # Strip extension for comparison since orig_base may not have it
+                                filename_noext = os.path.splitext(filename)[0]
+                                if parent_num is not None and (orig_base == filename or orig_base == filename_noext or not orig_base):
+                                    # Check if parent chapter exists
                                     parent_key = str(parent_num)
                                     if parent_key in prog.get("chapters", {}):
-                                        parent_info = prog["chapters"][parent_key]
-                                        if parent_info.get('status') == 'completed':
-                                            parent_completed = True
-                                
-                                if parent_completed:
-                                    matched_info = chapter_info
-                                    break
-                                # else: don't match - will fall through to not_translated
+                                        # Just verify parent exists, don't enforce 'completed' status
+                                        matched_info = chapter_info
+                                        break
                             
                             # In-progress and failed chapters: require BOTH actual_num AND output_file
                             # to match to avoid cross-matching files.
