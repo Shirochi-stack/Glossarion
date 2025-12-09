@@ -1214,11 +1214,12 @@ class RetranslationMixin:
             is_special = info.get('is_special', False)
             item.setData(Qt.UserRole, {'is_special': is_special, 'info': info})
             
-            # Initially hide special files if toggle is off
+            # Add item to listbox first
+            listbox.addItem(item)
+            
+            # Then hide special files if toggle is off (must be done after adding to listbox)
             if is_special and not show_special_files[0]:
                 item.setHidden(True)
-            
-            listbox.addItem(item)
         
         # Selection count label
         selection_count_label = QLabel("Selected: 0")
