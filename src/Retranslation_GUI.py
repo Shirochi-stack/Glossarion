@@ -555,9 +555,9 @@ class RetranslationMixin:
                                 parent_info = prog["chapters"][parent_key]
                                 if parent_info.get('status') == 'completed':
                                     matched_info = chapter_info
-                    # In-progress and failed chapters: match by actual_num AND output_file to avoid duplicates
-                    # when 2 files have the same chapter number
-                    elif status in ['in_progress', 'failed'] and out_file == expected_response:
+                    # In-progress, failed, and qa_failed chapters: match by actual_num
+                    # For qa_failed with SPLIT_FAILED, child chapters point to parent's file
+                    elif status in ['in_progress', 'failed', 'qa_failed']:
                         matched_info = chapter_info
                     # Normal match: output file matches expected
                     elif out_file == expected_response:
@@ -609,9 +609,9 @@ class RetranslationMixin:
                                     break
                                 # else: don't match - will fall through to not_translated
                             
-                            # In-progress and failed chapters: match by actual_num AND output_file to avoid duplicates
-                            # when 2 files have the same chapter number
-                            if status in ['in_progress', 'failed'] and out_file == expected_response:
+                            # In-progress, failed, and qa_failed chapters: match by actual_num
+                            # For qa_failed with SPLIT_FAILED, child chapters point to parent's file
+                            if status in ['in_progress', 'failed', 'qa_failed']:
                                 matched_info = chapter_info
                                 break
                             
