@@ -376,18 +376,19 @@ class RetranslationMixin:
                             if item_id and href and ('html' in media_type.lower() or href.endswith(('.html', '.xhtml', '.htm'))):
                                 filename = os.path.basename(href)
                                 
-                                # Skip special files (files without numbers) unless show_special_files is enabled
+                                # Detect special files (files without numbers)
                                 import re
                                 # Check if filename contains any digits
                                 has_numbers = bool(re.search(r'\d', filename))
                                 is_special = not has_numbers
-                                if not is_special or show_special_files[0]:
-                                    manifest_chapters[item_id] = {
-                                        'filename': filename,
-                                        'href': href,
-                                        'media_type': media_type,
-                                        'is_special': is_special
-                                    }
+                                
+                                # Add all files - UI will handle filtering based on toggle
+                                manifest_chapters[item_id] = {
+                                    'filename': filename,
+                                    'href': href,
+                                    'media_type': media_type,
+                                    'is_special': is_special
+                                }
                         
                         # Get spine order - the reading order
                         spine = root.find('.//opf:spine', ns)
@@ -400,35 +401,34 @@ class RetranslationMixin:
                                     filename = chapter_info['filename']
                                     is_special = chapter_info.get('is_special', False)
                                     
-                                    # Skip navigation, toc, and cover files (unless show_special_files is enabled)
-                                    if not is_special or show_special_files[0]:
-                                        # Extract chapter number from filename
-                                        import re
-                                        matches = re.findall(r'(\d+)', filename)
-                                        if matches:
-                                            file_chapter_num = int(matches[-1])
-                                        elif is_special:
-                                            # Special files without numbers should be chapter 0
-                                            file_chapter_num = 0
-                                        else:
-                                            file_chapter_num = len(spine_chapters)
-                                        
-                                        spine_chapters.append({
-                                            'id': idref,
-                                            'filename': filename,
-                                            'position': len(spine_chapters),
-                                            'file_chapter_num': file_chapter_num,
-                                            'status': 'unknown',  # Will be updated
-                                            'output_file': None,    # Will be updated
-                                            'is_special': is_special
-                                        })
-                                        
-                                        # Store the order for later use
-                                        opf_chapter_order[filename] = len(spine_chapters) - 1
-                                        
-                                        # Also store without extension for matching
-                                        filename_noext = os.path.splitext(filename)[0]
-                                        opf_chapter_order[filename_noext] = len(spine_chapters) - 1
+                                    # Extract chapter number from filename
+                                    import re
+                                    matches = re.findall(r'(\d+)', filename)
+                                    if matches:
+                                        file_chapter_num = int(matches[-1])
+                                    elif is_special:
+                                        # Special files without numbers should be chapter 0
+                                        file_chapter_num = 0
+                                    else:
+                                        file_chapter_num = len(spine_chapters)
+                                    
+                                    # Add all files - UI will handle filtering based on toggle
+                                    spine_chapters.append({
+                                        'id': idref,
+                                        'filename': filename,
+                                        'position': len(spine_chapters),
+                                        'file_chapter_num': file_chapter_num,
+                                        'status': 'unknown',  # Will be updated
+                                        'output_file': None,    # Will be updated
+                                        'is_special': is_special
+                                    })
+                                    
+                                    # Store the order for later use
+                                    opf_chapter_order[filename] = len(spine_chapters) - 1
+                                    
+                                    # Also store without extension for matching
+                                    filename_noext = os.path.splitext(filename)[0]
+                                    opf_chapter_order[filename_noext] = len(spine_chapters) - 1
                         
             except Exception as e:
                 print(f"Warning: Could not parse OPF: {e}")
@@ -706,7 +706,8 @@ class RetranslationMixin:
                     'duplicate_count': 1,
                     'entries': [],
                     'opf_position': spine_ch['position'],
-                    'original_filename': spine_ch['filename']
+                    'original_filename': spine_ch['filename'],
+                    'is_special': spine_ch.get('is_special', False)
                 }
                 chapter_display_info.append(display_info)
         else:
@@ -755,10 +756,6 @@ class RetranslationMixin:
                 has_numbers = bool(re.search(r'\d', filename_to_check))
                 is_special = not has_numbers
                 
-                # Skip special files if the toggle is off
-                if is_special and not show_special_files[0]:
-                    continue
-                
                 # Extract chapter number - prioritize stored values
                 chapter_num = None
                 if 'actual_num' in chapter_info and chapter_info['actual_num'] is not None:
@@ -792,7 +789,8 @@ class RetranslationMixin:
                     'output_file': actual_output_file,  # Use actual output file, not placeholder
                     'status': status,
                     'duplicate_count': len(entries),
-                    'entries': entries
+                    'entries': entries,
+                    'is_special': is_special
                 })
             
             # Sort by chapter number
@@ -969,76 +967,15 @@ class RetranslationMixin:
         
         container_layout.addWidget(title_row)
         
+        # Store reference to the listbox (will be created later)
+        listbox_ref = [None]
+        
         # Function to handle toggle change - will be defined after UI is created
         def on_toggle_special_files(state):
-            """Rebuild the chapter list when the special files toggle is changed"""
+            """Filter the chapter list when the special files toggle is changed"""
             # Update the state variable
             show_special_files[0] = show_special_files_cb.isChecked()
             
-            # For tabs in multi-file dialog, update ALL tabs and all cached states
-            if tab_frame and parent_dialog:
-                # Store the state persistently for ALL files in this multi-file dialog
-                if not hasattr(self, '_retranslation_dialog_cache'):
-                    self._retranslation_dialog_cache = {}
-                
-                # Update cache for all files in the current selection
-                if hasattr(parent_dialog, '_epub_files_in_dialog'):
-                    for f_path in parent_dialog._epub_files_in_dialog:
-                        f_key = os.path.abspath(f_path)
-                        if f_key not in self._retranslation_dialog_cache:
-                            self._retranslation_dialog_cache[f_key] = {}
-                        self._retranslation_dialog_cache[f_key]['show_special_files_state'] = show_special_files[0]
-                
-                # Find and update ALL toggle checkboxes and checkmarks in ALL tabs
-                if hasattr(parent_dialog, '_all_toggle_checkboxes'):
-                    for idx, other_checkbox in enumerate(parent_dialog._all_toggle_checkboxes):
-                        if other_checkbox is None or other_checkbox == show_special_files_cb:
-                            continue
-                        
-                        try:
-                            # Try to check if widget is valid by calling a simple method
-                            other_checkbox.isChecked()
-                            
-                            # Widget is valid, update it
-                            # Block signals to avoid triggering its handler
-                            other_checkbox.blockSignals(True)
-                            other_checkbox.setChecked(show_special_files[0])
-                            other_checkbox.blockSignals(False)
-                            
-                            # Update the corresponding checkmark visual
-                            if hasattr(parent_dialog, '_all_checkmark_labels') and idx < len(parent_dialog._all_checkmark_labels):
-                                other_checkmark = parent_dialog._all_checkmark_labels[idx]
-                                if other_checkmark is not None:
-                                    try:
-                                        # Check if checkmark is valid
-                                        other_checkmark.isVisible()
-                                        
-                                        # Update checkmark visibility
-                                        if show_special_files[0]:
-                                            other_checkmark.setGeometry(2, 1, 14, 14)
-                                            other_checkmark.show()
-                                        else:
-                                            other_checkmark.hide()
-                                    except RuntimeError:
-                                        # Checkmark was deleted
-                                        parent_dialog._all_checkmark_labels[idx] = None
-                        except (RuntimeError, AttributeError):
-                            # Widget was deleted or invalid
-                            parent_dialog._all_toggle_checkboxes[idx] = None
-                
-                # Clear the tab frame's layout
-                for i in reversed(range(container_layout.count())):
-                    widget = container_layout.itemAt(i).widget()
-                    if widget:
-                        widget.setParent(None)
-                        widget.deleteLater()
-                
-                # Rebuild the tab content with new toggle state
-                # The rebuild will replace the checkbox/checkmark at the same index
-                self._force_retranslation_epub_or_text(file_path, parent_dialog, tab_frame, show_special_files[0])
-                return
-            
-            # For standalone dialogs - refresh in place like tabs
             # Store the state persistently
             file_key = os.path.abspath(file_path)
             if not hasattr(self, '_retranslation_dialog_cache'):
@@ -1047,44 +984,55 @@ class RetranslationMixin:
                 self._retranslation_dialog_cache[file_key] = {}
             self._retranslation_dialog_cache[file_key]['show_special_files_state'] = show_special_files[0]
             
-            # Refresh in place - clear and rebuild container content
-            if dialog and not parent_dialog and container:
-                # Temporarily disconnect the checkbox to prevent recursion
-                show_special_files_cb.stateChanged.disconnect()
+            # For tabs in multi-file dialog, sync toggle state across tabs
+            if tab_frame and parent_dialog:
+                # Update cache for all files in the current selection
+                if hasattr(parent_dialog, '_epub_files_in_dialog'):
+                    for f_path in parent_dialog._epub_files_in_dialog:
+                        f_key = os.path.abspath(f_path)
+                        if f_key not in self._retranslation_dialog_cache:
+                            self._retranslation_dialog_cache[f_key] = {}
+                        self._retranslation_dialog_cache[f_key]['show_special_files_state'] = show_special_files[0]
                 
-                # Store dialog position and size
-                dialog_pos = dialog.pos()
-                dialog_size = dialog.size()
-                
-                # Clear all widgets from the container
-                while container_layout.count():
-                    item = container_layout.takeAt(0)
+                # Sync ALL toggle checkboxes and checkmarks in ALL tabs
+                if hasattr(parent_dialog, '_all_toggle_checkboxes'):
+                    for idx, other_checkbox in enumerate(parent_dialog._all_toggle_checkboxes):
+                        if other_checkbox is None or other_checkbox == show_special_files_cb:
+                            continue
+                        
+                        try:
+                            other_checkbox.isChecked()
+                            other_checkbox.blockSignals(True)
+                            other_checkbox.setChecked(show_special_files[0])
+                            other_checkbox.blockSignals(False)
+                            
+                            if hasattr(parent_dialog, '_all_checkmark_labels') and idx < len(parent_dialog._all_checkmark_labels):
+                                other_checkmark = parent_dialog._all_checkmark_labels[idx]
+                                if other_checkmark is not None:
+                                    try:
+                                        other_checkmark.isVisible()
+                                        if show_special_files[0]:
+                                            other_checkmark.setGeometry(2, 1, 14, 14)
+                                            other_checkmark.show()
+                                        else:
+                                            other_checkmark.hide()
+                                    except RuntimeError:
+                                        parent_dialog._all_checkmark_labels[idx] = None
+                        except (RuntimeError, AttributeError):
+                            parent_dialog._all_toggle_checkboxes[idx] = None
+            
+            # Filter list items instead of rebuilding entire UI
+            if listbox_ref[0]:
+                listbox = listbox_ref[0]
+                for i in range(listbox.count()):
+                    item = listbox.item(i)
                     if item:
-                        widget = item.widget()
-                        if widget:
-                            widget.setParent(None)
-                            widget.deleteLater()
-                        elif item.layout():
-                            # Handle nested layouts
-                            self._clear_layout(item.layout())
-                
-                # Remove from cache to force rebuild
-                if file_key in self._retranslation_dialog_cache:
-                    del self._retranslation_dialog_cache[file_key]
-                
-                # Now we need to rebuild the content by calling the function with the existing container
-                # The trick is to pass the container as if it's a tab_frame
-                self._force_retranslation_epub_or_text(
-                    file_path, 
-                    parent_dialog=dialog,  # Pass as parent 
-                    tab_frame=container,   # Use container as tab frame to rebuild in place
-                    show_special_files_state=show_special_files[0]
-                )
-                
-                # Restore dialog position and size
-                dialog.move(dialog_pos)
-                dialog.resize(dialog_size)
-                return
+                        # Check if this item is marked as special
+                        item_data = item.data(Qt.UserRole)
+                        if item_data and isinstance(item_data, dict):
+                            is_special = item_data.get('is_special', False)
+                            # Show all items if toggle is on, hide special files if toggle is off
+                            item.setHidden(is_special and not show_special_files[0])
         
         # Connect the checkbox to the handler
         show_special_files_cb.stateChanged.connect(on_toggle_special_files)
@@ -1160,6 +1108,9 @@ class RetranslationMixin:
         min_width, _ = self._get_dialog_size(0.36, 0)
         listbox.setMinimumWidth(min_width)
         main_layout.addWidget(listbox)
+        
+        # Store listbox reference for toggle handler
+        listbox_ref[0] = listbox
         
         # Populate listbox with dynamic column widths
         status_icons = {
@@ -1258,6 +1209,14 @@ class RetranslationMixin:
                 item.setForeground(QColor('#2b6cb0'))
             elif status == 'in_progress':
                 item.setForeground(QColor('orange'))
+            
+            # Store metadata in item for filtering
+            is_special = info.get('is_special', False)
+            item.setData(Qt.UserRole, {'is_special': is_special, 'info': info})
+            
+            # Initially hide special files if toggle is off
+            if is_special and not show_special_files[0]:
+                item.setHidden(True)
             
             listbox.addItem(item)
         
