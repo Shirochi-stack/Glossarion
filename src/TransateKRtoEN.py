@@ -485,6 +485,10 @@ class RequestMerger:
         def _get_actual_num(item):
             """Best-effort extraction of the logical chapter number for grouping.
 
+            This is primarily used as a *display* / fallback value. For actual
+            proximity checks we prefer OPF spine order when available (see
+            ``_get_proximity_key`` below).
+
             We try, in order:
             1. Explicit ``actual_num`` in position 2 (non-text merge path).
             2. ``chapter_obj['actual_chapter_num']`` if present.
@@ -514,12 +518,49 @@ class RequestMerger:
             except Exception:
                 return None
 
+        def _get_proximity_key(item):
+            """Return a numeric key representing *reading order* proximity.
+
+            When EPUB chapters were extracted with OPF support, each chapter
+            dict carries ``spine_order`` (1‑based) which reflects the true
+            reading order from ``content.opf``. That order is a much more
+            reliable signal for request merging proximity than filename-based
+            chapter numbers, especially when there are duplicate logical
+            chapters (e.g. multiple "Ch.004" entries) or interleaved notice/
+            bonus chapters.
+
+            Strategy:
+            - If a ``spine_order`` or ``opf_spine_position`` is present on the
+            chapter object, use that for proximity checks.
+            - Otherwise, fall back to ``_get_actual_num``.
+            """
+            try:
+                chapter_obj = item[1]
+                if isinstance(chapter_obj, dict):
+                    # Prefer explicit spine-based order from OPF if available
+                    spine_pos = (
+                        chapter_obj.get('spine_order')
+                        if chapter_obj.get('spine_order') is not None
+                        else chapter_obj.get('opf_spine_position')
+                    )
+                    if spine_pos is not None:
+                        return spine_pos
+            except Exception:
+                pass
+
+            return _get_actual_num(item)
+
         groups = []
         current_group = []
         prev_num = None
 
         for ch in chapters_to_translate:
-            current_num = _get_actual_num(ch)
+            # Use proximity key (spine order when available) instead of the
+            # logical chapter number alone. This prevents far‑apart chapters
+            # with the same numeric label (e.g. multiple "Ch.004" entries in
+            # different parts of the book) from being merged together when
+            # there are many intervening chapters in the OPF spine.
+            current_num = _get_proximity_key(ch)
 
             if not current_group:
                 # Start the first group
