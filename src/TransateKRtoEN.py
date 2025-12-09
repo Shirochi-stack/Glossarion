@@ -1877,7 +1877,7 @@ class ProgressManager:
         deleted_parents = set()  # Track which parent chapters were deleted
         parents_with_missing_files = set()  # Track parents with missing files (for merged children clearing)
         
-        # First pass: Remove entries for missing files (except merged children and in_progress)
+        # First pass: Remove entries for missing files (except merged children and certain non-final states)
         for chapter_key, chapter_info in list(self.prog["chapters"].items()):
             output_file = chapter_info.get("output_file")
             status = chapter_info.get("status")
@@ -1887,8 +1887,11 @@ class ProgressManager:
             if status == "merged":
                 continue
             
-            # IN_PROGRESS FIX: Don't delete in_progress entries - file doesn't exist yet
-            if status == "in_progress":
+            # QA_FAILED / FAILED FIX:
+            # Don't delete entries that have failed QA/translation, even if their output
+            # file is missing. These should remain visible in the retranslation UI and
+            # be eligible for re-run.
+            if status in ["qa_failed", "failed"]:
                 continue
             
             if output_file:

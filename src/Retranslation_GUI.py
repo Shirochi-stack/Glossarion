@@ -560,10 +560,14 @@ class RetranslationMixin:
                                 parent_info = prog["chapters"][parent_key]
                                 if parent_info.get('status') == 'completed':
                                     matched_info = chapter_info
-                    # In-progress, failed, and qa_failed chapters: match by BOTH actual_num AND output_file
-                    # This prevents matching unrelated files with the same chapter number
-                    elif status in ['in_progress', 'failed', 'qa_failed']:
+                    # In-progress and failed chapters: require BOTH actual_num AND output_file
+                    # to match to avoid cross-matching files.
+                    elif status in ['in_progress', 'failed']:
                         if chapter_info.get('actual_num') == chapter_num and out_file == expected_response:
+                            matched_info = chapter_info
+                    # qa_failed chapters: match by chapter number only so they are always visible
+                    elif status == 'qa_failed':
+                        if chapter_info.get('actual_num') == chapter_num:
                             matched_info = chapter_info
                     # Normal match: output file matches expected
                     elif out_file == expected_response:
@@ -618,23 +622,26 @@ class RetranslationMixin:
                                     break
                                 # else: don't match - will fall through to not_translated
                             
-                            # In-progress, failed, and qa_failed chapters: normally we require BOTH
-                            # actual_num AND output_file to match to avoid cross-matching files.
-                            # However, for SPLIT_FAILED qa_failed entries, the output_file can differ
-                            # (e.g., due to merged vs. unsplit filenames), so relax the requirement.
-                            if status in ['in_progress', 'failed', 'qa_failed']:
-                                if actual_num == chapter_num and (
-                                    out_file == expected_response
-                                    or ('SPLIT_FAILED' in qa_issues and out_file)
-                                ):
+                            # In-progress and failed chapters: require BOTH actual_num AND output_file
+                            # to match to avoid cross-matching files.
+                            if status in ['in_progress', 'failed']:
+                                if actual_num == chapter_num and out_file == expected_response:
+                                    matched_info = chapter_info
+                                    break
+                            # qa_failed chapters: match by chapter number only so they are always visible,
+                            # even when filenames don't line up perfectly.
+                            elif status == 'qa_failed':
+                                if actual_num == chapter_num:
                                     matched_info = chapter_info
                                     break
                             
-                            # Only treat as a match if the original basename matches this filename,
-                            # or, when original_basename is missing, the output_file matches what we expect.
-                            if (orig_base and orig_base == filename) or (not orig_base and out_file and out_file == expected_response):
-                                matched_info = chapter_info
-                                break
+                            # Only treat as a match for other statuses if the original basename matches
+                            # this filename, or, when original_basename is missing, the output_file matches
+                            # what we expect.
+                            if status not in ['in_progress', 'failed', 'qa_failed']:
+                                if (orig_base and orig_base == filename) or (not orig_base and out_file and out_file == expected_response):
+                                    matched_info = chapter_info
+                                    break
             
             # Determine if translation file exists
             file_exists = os.path.exists(response_path)
