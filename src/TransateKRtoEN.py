@@ -8141,6 +8141,13 @@ def main(log_callback=None, stop_callback=None):
                     if len(group) > 1:
                         print(f"\n🔗 MERGING {len(group)} chapters into single request...")
                         
+                        # Mark all chapters in the group as in_progress
+                        for g_idx, g_chapter, g_actual_num, g_content_hash in group:
+                            if g_idx != idx:  # Parent already marked above
+                                g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
+                                progress_manager.update(g_idx, g_actual_num, g_content_hash, g_fname, status="in_progress", chapter_obj=g_chapter)
+                        progress_manager.save()
+                        
                         # Build merged content with separators
                         chapters_data = []
                         for g_idx, g_chapter, g_actual_num, g_content_hash in group:
