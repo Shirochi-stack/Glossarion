@@ -8307,6 +8307,20 @@ def main(log_callback=None, stop_callback=None):
                         
                 if check_stop():
                     print(f"❌ Translation stopped during chapter {actual_num}, chunk {chunk_idx}")
+                    # Delete in_progress entries instead of leaving them
+                    if merge_info is not None:
+                        for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
+                            g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
+                            chapter_key = progress_manager._get_chapter_key(g_actual_num, g_fname, g_chapter, g_content_hash)
+                            if chapter_key in progress_manager.prog["chapters"]:
+                                del progress_manager.prog["chapters"][chapter_key]
+                        progress_manager.save()
+                    else:
+                        fname = FileUtilities.create_chapter_filename(c, actual_num)
+                        chapter_key = progress_manager._get_chapter_key(actual_num, fname, c, content_hash)
+                        if chapter_key in progress_manager.prog["chapters"]:
+                            del progress_manager.prog["chapters"][chapter_key]
+                        progress_manager.save()
                     return
                 
                 current_chunk_number += 1
@@ -8855,15 +8869,21 @@ def main(log_callback=None, stop_callback=None):
                     except Exception:
                         pass
                     
-                    # Mark all as qa_failed - all chapters should reference the parent file for SPLIT_FAILED
+                    # Mark parent as qa_failed with the parent file
                     progress_manager.update(
                         parent_idx, parent_actual_num, parent_content_hash, parent_fname,
                         status="qa_failed", chapter_obj=parent_chapter, qa_issues_found=["SPLIT_FAILED"]
                     )
+                    # Mark children as qa_failed, each with their own expected filename for proper identification
+                    # This allows the progress system to correctly identify which specific chapter to update
                     for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group'][1:]:
-                        progress_manager.update(g_idx, g_actual_num, g_content_hash, parent_fname, status="qa_failed", chapter_obj=g_chapter, qa_issues_found=["SPLIT_FAILED"])
+                        g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
+                        progress_manager.update(
+                            g_idx, g_actual_num, g_content_hash, g_fname,
+                            status="qa_failed", chapter_obj=g_chapter, qa_issues_found=["SPLIT_FAILED"]
+                        )
                     progress_manager.save()
-                    print(f"   ⚠️ Merged group marked as qa_failed")
+                    print(f"   ⚠️ Merged group ({len(merge_info['group'])} chapters) marked as qa_failed with SPLIT_FAILED")
                     continue
                 
                 if split_sections and len(split_sections) == len(merge_info['group']):
