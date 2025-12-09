@@ -4027,7 +4027,7 @@ class BatchTranslationProcessor:
                     pass
                 for actual_num, _, idx, chapter, content_hash in chapters_data:
                     with self.progress_lock:
-                        self.update_progress_fn(idx, actual_num, content_hash, fname if idx == parent_idx else None, status="qa_failed")
+                        self.update_progress_fn(idx, actual_num, content_hash, fname if idx == parent_idx else None, status="qa_failed", chapter_obj=chapter)
                         self.save_progress_fn()
                     results.append((False, actual_num, None, None, None))
                 return results
@@ -4052,7 +4052,7 @@ class BatchTranslationProcessor:
                     pass
                 for actual_num, _, idx, chapter, content_hash in chapters_data:
                     with self.progress_lock:
-                        self.update_progress_fn(idx, actual_num, content_hash, fname if idx == parent_idx else None, status="qa_failed", qa_issues_found=["SPLIT_FAILED"])
+                        self.update_progress_fn(idx, actual_num, content_hash, fname if idx == parent_idx else None, status="qa_failed", qa_issues_found=["SPLIT_FAILED"], chapter_obj=chapter)
                         self.save_progress_fn()
                     results.append((False, actual_num, None, None, None))
                 return results
@@ -4089,7 +4089,7 @@ class BatchTranslationProcessor:
                         qa_issues = ["TRUNCATED"] if merged_truncated else None
                         self.update_progress_fn(
                             idx, actual_num, content_hash, fname,
-                            status=chapter_status, qa_issues_found=qa_issues
+                            status=chapter_status, qa_issues_found=qa_issues, chapter_obj=chapter
                         )
                         self.chapters_completed += 1
                     
@@ -4134,12 +4134,12 @@ class BatchTranslationProcessor:
                     qa_issues = ["TRUNCATED"]
                     self.update_progress_fn(
                         parent_idx, parent_actual_num, parent_content_hash, saved_name,
-                        status="qa_failed", qa_issues_found=qa_issues
+                        status="qa_failed", qa_issues_found=qa_issues, chapter_obj=parent_chapter
                     )
                     for actual_num, _, idx, chapter, content_hash in chapters_data[1:]:
                         self.update_progress_fn(
                             idx, actual_num, content_hash, None,
-                            status="qa_failed", qa_issues_found=qa_issues
+                            status="qa_failed", qa_issues_found=qa_issues, chapter_obj=chapter
                         )
                     self.chapters_completed += len(chapters_data)
                 else:
@@ -4147,7 +4147,8 @@ class BatchTranslationProcessor:
                     self.update_progress_fn(
                         parent_idx, parent_actual_num, parent_content_hash, saved_name,
                         status="completed",
-                        merged_chapters=merged_child_nums
+                        merged_chapters=merged_child_nums,
+                        chapter_obj=parent_chapter
                     )
                     self.chapters_completed += 1
                     
@@ -4176,7 +4177,8 @@ class BatchTranslationProcessor:
             results = []
             for actual_num, _, idx, chapter, content_hash in chapters_data:
                 with self.progress_lock:
-                    self.update_progress_fn(idx, actual_num, content_hash, None, status="failed")
+                    fname = FileUtilities.create_chapter_filename(chapter, actual_num)
+                    self.update_progress_fn(idx, actual_num, content_hash, fname, status="failed", chapter_obj=chapter)
                     self.save_progress_fn()
                 results.append((False, actual_num, None, None, None))
             return results
@@ -8648,6 +8650,16 @@ def main(log_callback=None, stop_callback=None):
                     for i in range(full_seconds):
                         if check_stop():
                             print("❌ Translation stopped during delay")
+                            # Mark chapter(s) as failed before returning
+                            if merge_info is not None:
+                                for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
+                                    g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
+                                    progress_manager.update(g_idx, g_actual_num, g_content_hash, g_fname, status="failed", chapter_obj=g_chapter)
+                                progress_manager.save()
+                            else:
+                                fname = FileUtilities.create_chapter_filename(c, actual_num)
+                                progress_manager.update(idx, actual_num, content_hash, fname, status="failed", chapter_obj=c)
+                                progress_manager.save()
                             return
                         time.sleep(1)
                     
@@ -8655,11 +8667,34 @@ def main(log_callback=None, stop_callback=None):
                     if fractional_second > 0:
                         if check_stop():
                             print("❌ Translation stopped during delay")
+                            # Mark chapter(s) as failed before returning
+                            if merge_info is not None:
+                                for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
+                                    g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
+                                    progress_manager.update(g_idx, g_actual_num, g_content_hash, g_fname, status="failed", chapter_obj=g_chapter)
+                                progress_manager.save()
+                            else:
+                                fname = FileUtilities.create_chapter_filename(c, actual_num)
+                                progress_manager.update(idx, actual_num, content_hash, fname, status="failed", chapter_obj=c)
+                                progress_manager.save()
                             return
                         time.sleep(fractional_second)
 
             if check_stop():
                 print(f"❌ Translation stopped before saving chapter {actual_num}")
+                # Mark chapter(s) as failed
+                if merge_info is not None:
+                    # Mark all chapters in merge group as failed
+                    for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
+                        g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
+                        progress_manager.update(g_idx, g_actual_num, g_content_hash, g_fname, status="failed", chapter_obj=g_chapter)
+                    progress_manager.save()
+                    print(f"⚠️ Marked {len(merge_info['group'])} chapters in merge group as failed")
+                else:
+                    # Mark single chapter as failed
+                    fname = FileUtilities.create_chapter_filename(c, actual_num)
+                    progress_manager.update(idx, actual_num, content_hash, fname, status="failed", chapter_obj=c)
+                    progress_manager.save()
                 return
 
             if len(translated_chunks) > 1:
