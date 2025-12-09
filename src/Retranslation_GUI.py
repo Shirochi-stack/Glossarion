@@ -482,33 +482,16 @@ class RetranslationMixin:
                     # Fallback to original filename
                     expected_response = filename
             else:
-                # Handle .htm.html -> .html conversion
-                stripped_base_name = base_name
-                if base_name.endswith('.htm'):
-                    stripped_base_name = base_name[:-4]  # Remove .htm suffix
-
-                # Look for translated file matching base name, with or without 'response_' and with allowed extensions
-                allowed_exts = ('.html', '.xhtml', '.htm', '.png', '.jpg', '.jpeg', '.webp', '.gif')
-                for file in os.listdir(output_dir):
-                    f_low = file.lower()
-                    if f_low.endswith(allowed_exts):
-                        name_no_ext = os.path.splitext(file)[0]
-                        core = name_no_ext[9:] if name_no_ext.startswith('response_') else name_no_ext
-                        # Accept matches for:
-                        # - OPF filename without last extension (base_name)
-                        # - Stripped base for .htm cases
-                        # - OPF filename as-is (e.g., 'chapter_02.htm') when the output file is 'chapter_02.htm.xhtml'
-                        if core == base_name or core == stripped_base_name or core == filename:
-                            expected_response = file
-                            break
-
-                # Fallback - per mode, prefer OPF filename when retain mode is on
-                if not expected_response:
-                    retain = os.getenv('RETAIN_SOURCE_EXTENSION', '0') == '1' or self.config.get('retain_source_extension', False)
-                    if retain:
-                        expected_response = filename
-                    else:
-                        expected_response = f"response_{stripped_base_name}.html"
+                # Use OPF filename directly to avoid mismatching
+                retain = os.getenv('RETAIN_SOURCE_EXTENSION', '0') == '1' or self.config.get('retain_source_extension', False)
+                if retain:
+                    expected_response = filename
+                else:
+                    # Handle .htm.html -> .html conversion
+                    stripped_base_name = base_name
+                    if base_name.endswith('.htm'):
+                        stripped_base_name = base_name[:-4]  # Remove .htm suffix
+                    expected_response = filename  # Use exact OPF filename
             
             response_path = os.path.join(output_dir, expected_response)
             
@@ -520,21 +503,40 @@ class RetranslationMixin:
                 entries = basename_to_progress[filename]
                 if entries:
                     _, chapter_info = entries[0]
-                    matched_info = chapter_info
+                    # For in_progress/failed/qa_failed, also verify actual_num matches
+                    status = chapter_info.get('status', '')
+                    if status in ['in_progress', 'failed', 'qa_failed']:
+                        if chapter_info.get('actual_num') == chapter_num:
+                            matched_info = chapter_info
+                    else:
+                        matched_info = chapter_info
             
             # Method 2: Check by response file (with corrected extension)
             if not matched_info and expected_response in response_file_to_progress:
                 entries = response_file_to_progress[expected_response]
                 if entries:
                     _, chapter_info = entries[0]
-                    matched_info = chapter_info
+                    # For in_progress/failed/qa_failed, also verify actual_num matches
+                    status = chapter_info.get('status', '')
+                    if status in ['in_progress', 'failed', 'qa_failed']:
+                        if chapter_info.get('actual_num') == chapter_num:
+                            matched_info = chapter_info
+                    else:
+                        matched_info = chapter_info
             
             # Method 3: Search through all progress entries for matching output file
             if not matched_info:
                 for chapter_key, chapter_info in prog.get("chapters", {}).items():
                     if chapter_info.get('output_file') == expected_response:
-                        matched_info = chapter_info
-                        break
+                        # For in_progress/failed/qa_failed, also verify actual_num matches
+                        status = chapter_info.get('status', '')
+                        if status in ['in_progress', 'failed', 'qa_failed']:
+                            if chapter_info.get('actual_num') == chapter_num:
+                                matched_info = chapter_info
+                                break
+                        else:
+                            matched_info = chapter_info
+                            break
             
             # Method 4: CRUCIAL - Match by chapter number (actual_num vs file_chapter_num)
             # Also check composite keys for special files (e.g., "0_message", "0_TOC")
@@ -558,11 +560,10 @@ class RetranslationMixin:
                                 parent_info = prog["chapters"][parent_key]
                                 if parent_info.get('status') == 'completed':
                                     matched_info = chapter_info
-                    # In-progress, failed, and qa_failed chapters: match by output_file
+                    # In-progress, failed, and qa_failed chapters: match by BOTH actual_num AND output_file
                     # This prevents matching unrelated files with the same chapter number
                     elif status in ['in_progress', 'failed', 'qa_failed']:
-                        # Match by output_file to ensure we're looking at the right file
-                        if out_file == expected_response:
+                        if chapter_info.get('actual_num') == chapter_num and out_file == expected_response:
                             matched_info = chapter_info
                     # Normal match: output file matches expected
                     elif out_file == expected_response:
@@ -616,11 +617,10 @@ class RetranslationMixin:
                                     break
                                 # else: don't match - will fall through to not_translated
                             
-                            # In-progress, failed, and qa_failed chapters: match by output_file
+                            # In-progress, failed, and qa_failed chapters: match by BOTH actual_num AND output_file
                             # This prevents matching unrelated files with the same chapter number
                             if status in ['in_progress', 'failed', 'qa_failed']:
-                                # Match by output_file to ensure we're looking at the right file
-                                if out_file == expected_response:
+                                if actual_num == chapter_num and out_file == expected_response:
                                     matched_info = chapter_info
                                     break
                             
