@@ -8117,7 +8117,9 @@ def main(log_callback=None, stop_callback=None):
                         c["body"] = original_body
 
                 print(f"📖 Translating text content ({text_size} characters)")
-                progress_manager.update(idx, actual_num, content_hash, output_file=None, status="in_progress", chapter_obj=c)
+                # Set output_file immediately when starting translation (not null)
+                fname = FileUtilities.create_chapter_filename(c, actual_num)
+                progress_manager.update(idx, actual_num, content_hash, output_file=fname, status="in_progress", chapter_obj=c)
                 progress_manager.save()
                 
                 # REQUEST MERGING: If this is a parent chapter, merge content from child chapters
