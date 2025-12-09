@@ -5431,9 +5431,7 @@ def is_qa_failed_response(content):
         "[API_ERROR]",
         "[TIMEOUT]",
         "[RATE_LIMIT_EXCEEDED]",
-        "All Google Translate endpoints failed",  # Free Google Translate failures
-        "HTTP 429: Rate Limited",  # Too many requests
-        "HTTP 403: Forbidden"  # IP blocked
+        "All Google Translate endpoints failed"  # Free Google Translate failures
     ]
     
     for marker in explicit_failures:
