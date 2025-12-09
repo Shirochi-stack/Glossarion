@@ -133,6 +133,9 @@ class GoogleFreeTranslateNew:
                 'https://translate.google.cn/translate_a/single',
             ]
             
+            # Collect all errors for detailed reporting
+            all_errors = []
+            
             for endpoint_url in endpoints_to_try:
                 try:
                     # Check if it's a mobile endpoint (t) or single api
@@ -159,14 +162,21 @@ class GoogleFreeTranslateNew:
                         return result
                         
                 except Exception as e:
-                    self.logger.warning(f"⚠️ Failed with endpoint {endpoint_url}: {e}")
+                    error_msg = f"{endpoint_url}: {e}"
+                    all_errors.append(error_msg)
+                    self.logger.warning(f"⚠️ {error_msg}")
                     continue
             
-            # If all endpoints failed
-            raise Exception("All Google Translate endpoints failed")
+            # If all endpoints failed, report all errors
+            error_summary = "\n".join(f"  • {err}" for err in all_errors)
+            detailed_error = f"All Google Translate endpoints failed:\n{error_summary}"
+            self.logger.error(detailed_error)
+            raise Exception(detailed_error)
             
         except Exception as e:
-            self.logger.error(f"❌ Translation failed: {e}")
+            # Only log if it's not already logged above
+            if "All Google Translate endpoints failed" not in str(e):
+                self.logger.error(f"❌ Translation failed: {e}")
             # Return original text as fallback
             return {
                 'translatedText': text,
@@ -179,6 +189,7 @@ class GoogleFreeTranslateNew:
         # Try multiple client types to avoid 403 errors
         client_types = ['gtx', 'webapp', 't', 'dict-chrome-ex', 'android']
         
+        last_error = None
         for client_type in client_types:
             params = {
                 'client': client_type,
@@ -200,9 +211,13 @@ class GoogleFreeTranslateNew:
                 if result:
                     return result
             except Exception as e:
+                last_error = e
                 self.logger.debug(f"Client type {client_type} failed: {e}")
                 continue
         
+        # If we got here, all client types failed - raise the last error
+        if last_error:
+            raise last_error
         return None
     
     def _try_single_api_request(self, params: dict, endpoint_url: str, client_type: str) -> Optional[Dict[str, Any]]:
@@ -215,48 +230,64 @@ class GoogleFreeTranslateNew:
             timeout=10
         )
         
-        if response.status_code == 200:
-            try:
-                result = response.json()
-                
-                # Handle webapp format (dj=1 returns different structure)
-                if client_type == 'webapp' and isinstance(result, dict):
-                    if 'sentences' in result:
-                        translated_parts = []
-                        for sentence in result['sentences']:
-                            if 'trans' in sentence:
-                                translated_parts.append(sentence['trans'])
-                        
-                        translated_text = ''.join(translated_parts)
-                        detected_lang = result.get('src', params.get('sl', 'auto'))
-                        
-                        return {
-                            'translatedText': translated_text,
-                            'detectedSourceLanguage': detected_lang
-                        }
-                
-                # Handle standard array format
-                elif isinstance(result, list) and len(result) > 0:
-                    # Extract translated text
+        # Log response details for debugging
+        if response.status_code != 200:
+            # Extract error reason from HTML title if possible
+            error_reason = "Unknown"
+            if "403" in str(response.status_code):
+                error_reason = "Forbidden (IP blocked or bot detected)"
+            elif "429" in str(response.status_code):
+                error_reason = "Rate Limited (too many requests)"
+            elif "404" in str(response.status_code):
+                error_reason = "Not Found (endpoint doesn't exist)"
+            elif "500" in str(response.status_code):
+                error_reason = "Server Error"
+            
+            error_msg = f"HTTP {response.status_code}: {error_reason}"
+            raise Exception(error_msg)
+        
+        try:
+            result = response.json()
+            
+            # Handle webapp format (dj=1 returns different structure)
+            if client_type == 'webapp' and isinstance(result, dict):
+                if 'sentences' in result:
                     translated_parts = []
-                    for item in result[0]:
-                        if isinstance(item, list) and len(item) > 0:
-                            translated_parts.append(item[0])
+                    for sentence in result['sentences']:
+                        if 'trans' in sentence:
+                            translated_parts.append(sentence['trans'])
                     
                     translated_text = ''.join(translated_parts)
-                    
-                    # Try to detect source language from response
-                    detected_lang = params.get('sl', 'auto')
-                    if len(result) > 2 and isinstance(result[2], str):
-                        detected_lang = result[2]
+                    detected_lang = result.get('src', params.get('sl', 'auto'))
                     
                     return {
                         'translatedText': translated_text,
                         'detectedSourceLanguage': detected_lang
                     }
-            except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
-                self.logger.warning(f"Failed to parse single API response with client {client_type}: {e}")
+            
+            # Handle standard array format
+            elif isinstance(result, list) and len(result) > 0:
+                # Extract translated text
+                translated_parts = []
+                for item in result[0]:
+                    if isinstance(item, list) and len(item) > 0:
+                        translated_parts.append(item[0])
                 
+                translated_text = ''.join(translated_parts)
+                
+                # Try to detect source language from response
+                detected_lang = params.get('sl', 'auto')
+                if len(result) > 2 and isinstance(result[2], str):
+                    detected_lang = result[2]
+                
+                return {
+                    'translatedText': translated_text,
+                    'detectedSourceLanguage': detected_lang
+                }
+        except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
+            parse_error = f"Parse Error: {type(e).__name__}"
+            raise Exception(parse_error)
+            
         return None
     
     def _translate_via_mobile_api(self, text: str, source_lang: str, target_lang: str, endpoint_url: str) -> Optional[Dict[str, Any]]:
@@ -284,26 +315,41 @@ class GoogleFreeTranslateNew:
             timeout=10
         )
         
-        if response.status_code == 200:
-            try:
-                # This endpoint returns a simple JSON array
-                result = response.json()
-                if isinstance(result, list) and len(result) > 0:
-                    # Extract translated text from first element
-                    if isinstance(result[0], str):
-                        translated_text = result[0]
-                    elif isinstance(result[0], list) and len(result[0]) > 0:
-                        translated_text = result[0][0]
-                    else:
-                        return None
-                    
-                    return {
-                        'translatedText': translated_text,
-                        'detectedSourceLanguage': source_lang
-                    }
-            except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
-                self.logger.warning(f"Failed to parse mobile API response: {e}")
+        if response.status_code != 200:
+            # Extract error reason
+            error_reason = "Unknown"
+            if "403" in str(response.status_code):
+                error_reason = "Forbidden (IP blocked or bot detected)"
+            elif "429" in str(response.status_code):
+                error_reason = "Rate Limited (too many requests)"
+            elif "404" in str(response.status_code):
+                error_reason = "Not Found (endpoint doesn't exist)"
+            elif "500" in str(response.status_code):
+                error_reason = "Server Error"
+            
+            error_msg = f"HTTP {response.status_code}: {error_reason}"
+            raise Exception(error_msg)
+        
+        try:
+            # This endpoint returns a simple JSON array
+            result = response.json()
+            if isinstance(result, list) and len(result) > 0:
+                # Extract translated text from first element
+                if isinstance(result[0], str):
+                    translated_text = result[0]
+                elif isinstance(result[0], list) and len(result[0]) > 0:
+                    translated_text = result[0][0]
+                else:
+                    return None
                 
+                return {
+                    'translatedText': translated_text,
+                    'detectedSourceLanguage': source_lang
+                }
+        except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
+            parse_error = f"Parse Error: {type(e).__name__}"
+            raise Exception(parse_error)
+            
         return None
 
 # Convenience function for easy usage
