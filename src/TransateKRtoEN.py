@@ -1822,7 +1822,7 @@ class ProgressManager:
         deleted_parents = set()  # Track which parent chapters were deleted
         parents_with_missing_files = set()  # Track parents with missing files (for merged children clearing)
         
-        # First pass: Remove entries for missing files (except merged children)
+        # First pass: Remove entries for missing files (except merged children and in_progress)
         for chapter_key, chapter_info in list(self.prog["chapters"].items()):
             output_file = chapter_info.get("output_file")
             status = chapter_info.get("status")
@@ -1830,6 +1830,10 @@ class ProgressManager:
             # MERGED CHAPTERS FIX: Don't delete merged children in first pass
             # They will be handled in second pass if their parent was deleted
             if status == "merged":
+                continue
+            
+            # IN_PROGRESS FIX: Don't delete in_progress entries - file doesn't exist yet
+            if status == "in_progress":
                 continue
             
             if output_file:
@@ -3850,9 +3854,9 @@ class BatchTranslationProcessor:
             # Mark all chapters as in_progress
             for actual_num, _, idx, chapter, content_hash in chapters_data:
                 with self.progress_lock:
-                    # Determine output filename for tracking
+                    # Determine output filename for tracking (consistent with process_single_chapter)
                     fname = FileUtilities.create_chapter_filename(chapter, actual_num)
-                    self.update_progress_fn(idx, actual_num, content_hash, fname, status="in_progress")
+                    self.update_progress_fn(idx, actual_num, content_hash, fname, status="in_progress", chapter_obj=chapter)
                     self.save_progress_fn()
             
             # Merge chapter contents
@@ -8125,7 +8129,9 @@ def main(log_callback=None, stop_callback=None):
                         c["body"] = original_body
 
                 print(f"📖 Translating text content ({text_size} characters)")
-                progress_manager.update(idx, actual_num, content_hash, output_file=None, status="in_progress", chapter_obj=c)
+                # Determine output filename for tracking
+                fname = FileUtilities.create_chapter_filename(c, actual_num)
+                progress_manager.update(idx, actual_num, content_hash, fname, status="in_progress", chapter_obj=c)
                 progress_manager.save()
                 
                 # REQUEST MERGING: If this is a parent chapter, merge content from child chapters

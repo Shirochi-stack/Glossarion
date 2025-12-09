@@ -282,23 +282,73 @@ def create_pdf_from_text(text, output_path):
             # Wrap paragraph
             lines.extend(textwrap.wrap(paragraph, width=wrap_width))
         
+        # Try to find a suitable TrueType font with Unicode support
+        # This is needed for proper rendering of Turkish and other non-ASCII characters
+        font_file = None
+        
+        # Common font paths on Windows, Linux, and Mac
+        font_candidates = [
+            # Windows
+            "C:/Windows/Fonts/Arial.ttf",
+            "C:/Windows/Fonts/times.ttf",
+            "C:/Windows/Fonts/calibri.ttf",
+            # Linux
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            # Mac
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/Library/Fonts/Arial.ttf",
+        ]
+        
+        for candidate in font_candidates:
+            if os.path.exists(candidate):
+                font_file = candidate
+                break
+        
+        if not font_file:
+            print("⚠️ No TrueType font found. PDF may not display non-ASCII characters correctly.")
+        
+        # Create a Font object with the TrueType file for proper Unicode support
+        # Use fontname parameter instead to reference a TrueType font
+        if font_file:
+            font = fitz.Font(fontfile=font_file)
+        else:
+            font = None
+        
         y = margin
         page = doc.new_page()
         
-        # Insert text line by line
+        # Use TextWriter for better Unicode support
+        tw = fitz.TextWriter(page.rect)
+        
+        # Insert text line by line using TextWriter
         for line in lines:
             if y > page_height - margin:
+                # Write accumulated text to current page
+                tw.write_text(page)
+                
+                # Create new page and TextWriter
                 page = doc.new_page()
+                tw = fitz.TextWriter(page.rect)
                 y = margin
             
-            # Insert text
+            # Add text to TextWriter with proper Unicode support
             try:
-                page.insert_text((margin, y), line, fontsize=font_size)
+                if font:
+                    # Use custom TrueType font for proper Unicode rendering
+                    tw.append((margin, y), line, font=font, fontsize=font_size)
+                else:
+                    # Fallback: try with default font
+                    tw.append((margin, y), line, fontsize=font_size)
             except Exception:
                 # Skip problematic lines if any
                 pass
                 
             y += line_height
+        
+        # Write remaining text to final page
+        if page:
+            tw.write_text(page)
             
         doc.save(output_path)
         doc.close()
