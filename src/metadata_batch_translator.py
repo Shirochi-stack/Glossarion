@@ -2031,16 +2031,34 @@ class BatchHeaderTranslator:
                         updated = True
                         content = content2
                     # Replace exact text inside first h1/h2/h3/p/div/span if it equals current_title
-                    for tag in ['h1', 'h2', 'h3', 'p', 'div', 'span']:
-                        pattern = rf'(<{tag}[^>]*>)\s*{_re.escape(current_title)}\s*(</{tag}>)'
-                        # Use a lambda function to avoid backreference issues
-                        def replacement_func(match):
-                            return match.group(1) + new_title + match.group(2)
-                        content2, n = _re.subn(pattern, replacement_func, content, count=1, flags=_re.IGNORECASE)
-                        if n > 0:
-                            updated = True
-                            content = content2
-                            break
+                    # Use BeautifulSoup for robust handling of nested tags and HTML entities
+                    from bs4 import BeautifulSoup as BS
+                    temp_soup = BS(content, 'html.parser')
+                    tag_updated = False
+                    for tag_name in ['h1', 'h2', 'h3', 'p', 'div', 'span']:
+                        tag = temp_soup.find(tag_name)
+                        if tag and tag.get_text().strip() == current_title:
+                            # Clear the tag and set new content
+                            tag.clear()
+                            tag.string = new_title
+                            content2 = str(temp_soup)
+                            if content2 != content:
+                                updated = True
+                                content = content2
+                                tag_updated = True
+                                break
+                    
+                    # Fallback to regex if BeautifulSoup didn't work
+                    if not tag_updated:
+                        for tag in ['h1', 'h2', 'h3', 'p', 'div', 'span']:
+                            pattern = rf'(<{tag}[^>]*>)\s*{_re.escape(current_title)}\s*(</{tag}>)'
+                            def replacement_func(match):
+                                return match.group(1) + new_title + match.group(2)
+                            content2, n = _re.subn(pattern, replacement_func, content, count=1, flags=_re.IGNORECASE)
+                            if n > 0:
+                                updated = True
+                                content = content2
+                                break
                     # Update meta og:title content if it matches
                     def _repl_meta(m):
                         before, val, after = m.group(1), m.group(2), m.group(3)
