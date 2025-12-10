@@ -476,6 +476,20 @@ class TitleExtractor:
 class XHTMLConverter:
     """Handles XHTML conversion and compliance"""
     
+    # Default language for generated XHTML (used for html[@lang] and html[@xml:lang])
+    # This will be synchronized with the EPUB book language by EPUBCompiler.
+    DEFAULT_LANG = "en"
+
+    @classmethod
+    def set_default_language(cls, lang_code: str):
+        """Set default language code used for html lang/xml:lang attributes"""
+        if not lang_code:
+            return
+        try:
+            cls.DEFAULT_LANG = str(lang_code).strip() or "en"
+        except Exception:
+            cls.DEFAULT_LANG = "en"
+    
     @staticmethod
     def ensure_compliance(html_content: str, title: str = "Chapter", 
                          css_links: Optional[List[str]] = None) -> str:
@@ -769,10 +783,13 @@ class XHTMLConverter:
         xml_declaration = '<?xml version="1.0" encoding="utf-8"?>'
         doctype = '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">'
         
+        # Use class-level default language for html element language attributes
+        lang = getattr(XHTMLConverter, "DEFAULT_LANG", "en")
+        
         xhtml_parts = [
             xml_declaration,
             doctype,
-            '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">',
+            f'<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="{lang}" lang="{lang}">',
             '<head>',
             '<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />',
             f'<title>{title}</title>'
@@ -819,9 +836,11 @@ class XHTMLConverter:
         if not safe_title:
             safe_title = "Chapter"
         
+        lang = getattr(XHTMLConverter, "DEFAULT_LANG", "en")
+        
         return f'''<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
-<html xmlns="http://www.w3.org/1999/xhtml">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="{lang}" lang="{lang}">
 <head>
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
 <title>{ContentProcessor.safe_escape(safe_title)}</title>
@@ -962,7 +981,9 @@ class XHTMLConverter:
             
             # Ensure we have proper XHTML structure
             if not soup.find('html'):
-                new_soup = BeautifulSoup('<html xmlns="http://www.w3.org/1999/xhtml"></html>', 'lxml')
+                # Use default XHTML namespace and language attributes
+                lang = getattr(XHTMLConverter, "DEFAULT_LANG", "en")
+                new_soup = BeautifulSoup(f'<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="{lang}" lang="{lang}"></html>', 'lxml')
                 html_tag = new_soup.html
                 for child in list(soup.children):
                     html_tag.append(child)
@@ -1441,6 +1462,17 @@ class EPUBCompiler:
                     except Exception as e:
                         self.log(f"⚠️ Metadata translation failed: {e}")
                         # Continue with original metadata
+
+            # Decide language for EPUB based primarily on GUI's OUTPUT_LANGUAGE
+            try:
+                detected_lang = self._detect_primary_language_from_html(html_files)
+                if detected_lang:
+                    current_lang = metadata.get("language")
+                    if not current_lang or current_lang.lower() != detected_lang.lower():
+                        self.log(f"[INFO] Setting metadata language from OUTPUT_LANGUAGE: {current_lang!r} -> '{detected_lang}'")
+                        metadata["language"] = detected_lang
+            except Exception as e:
+                self.log(f"[WARNING] Failed to determine EPUB language from OUTPUT_LANGUAGE: {e}")
             
             # Create EPUB book
             book = self._create_book(metadata)
@@ -1663,6 +1695,51 @@ class EPUBCompiler:
         
         if not resources_found:
             self.log("⚠️  No resource directories found (CSS/images/fonts)")
+
+    def _detect_primary_language_from_html(self, html_files: List[str]) -> Optional[str]:
+        """Determine language for EPUB/output based on GUI target language.
+
+        Priority:
+          1) OUTPUT_LANGUAGE env var set by TranslatorGUI ("English", "Spanish", ...)
+          2) metadata["language"] if already present (2-letter/ISO-ish code)
+          3) Fallback: "en".
+
+        Returns a BCP‑47 style language code like "en", "es", "ru", "tr", "ko", ...
+        """
+        # 1) First, try OUTPUT_LANGUAGE name from GUI (English, Spanish, ...)
+        output_lang_name = os.getenv('OUTPUT_LANGUAGE', '').strip().lower()
+
+        gui_name_to_code = {
+            # Matches translator_gui.py target_lang_combo entries
+            'english': 'en',
+            'spanish': 'es',
+            'french': 'fr',
+            'german': 'de',
+            'italian': 'it',
+            'portuguese': 'pt',
+            'russian': 'ru',
+            'arabic': 'ar',
+            'hindi': 'hi',
+            'chinese (simplified)': 'zh-CN',
+            'chinese (traditional)': 'zh-TW',
+            'chinese': 'zh-CN',
+            'japanese': 'ja',
+            'korean': 'ko',
+            'turkish': 'tr',
+        }
+
+        if output_lang_name:
+            code = gui_name_to_code.get(output_lang_name)
+            if code:
+                self.log(f"[DEBUG] Using OUTPUT_LANGUAGE from GUI for EPUB language: '{output_lang_name}' -> '{code}'")
+                return code
+            else:
+                # If user typed a raw code like "es" or "pt-BR", just pass it through
+                self.log(f"[DEBUG] OUTPUT_LANGUAGE not in predefined map, using raw value: '{output_lang_name}'")
+                return output_lang_name
+
+        # 2) Nothing from GUI – leave decision to caller by returning None
+        return None
 
     def _analyze_chapters(self) -> Dict[int, Tuple[str, float, str]]:
         """Analyze chapter files and extract titles using parallel processing"""
@@ -2030,9 +2107,10 @@ class EPUBCompiler:
                 lang=metadata.get("language", "en")
             )
             
+            lang = metadata.get("language", "en")
             error_content = f"""<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
-<html xmlns="http://www.w3.org/1999/xhtml">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="{lang}" lang="{lang}">
 <head><title>{ContentProcessor.safe_escape(title)}</title></head>
 <body>
 <h1>{ContentProcessor.safe_escape(title)}</h1>
@@ -2955,8 +3033,15 @@ class EPUBCompiler:
         book_title = self._determine_book_title(metadata)
         book.set_title(book_title)
         
-        # Set language
-        book.set_language(metadata.get("language", "en"))
+        # Set language (dc:language)
+        language_code = metadata.get("language", "en")
+        book.set_language(language_code)
+
+        # Keep XHTMLConverter in sync so generated html/xml:lang attributes match book language
+        try:
+            XHTMLConverter.set_default_language(language_code)
+        except Exception:
+            pass
         
         # Store original title as alternative metadata (not as another dc:title)
         # This prevents EPUB readers from getting confused about which title to display
@@ -3457,9 +3542,10 @@ img {
             
             # Build cover HTML directly without going through ensure_compliance
             # Since it's simple and controlled, we can build it directly
+            lang = metadata.get("language", "en")
             cover_content = f'''<?xml version="1.0" encoding="utf-8"?>
     <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
-    <html xmlns="http://www.w3.org/1999/xhtml">
+    <html xmlns="http://www.w3.org/1999/xhtml" xml:lang="{lang}" lang="{lang}">
     <head>
     <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
     <title>Cover</title>
@@ -3640,9 +3726,10 @@ img {
         css_links = [f"css/{item.file_name.split('/')[-1]}" for item in css_items]
         
         # Build the complete XHTML document manually
+        lang = metadata.get("language", "en")
         xhtml_content = f'''<?xml version="1.0" encoding="utf-8"?>
     <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
-    <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+    <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="{lang}" lang="{lang}">
     <head>
     <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
     <title>Gallery</title>'''
@@ -3674,9 +3761,12 @@ img {
             
     def _create_nav_content(self, toc_items, book_title="Book"):
         """Create navigation content manually"""
-        nav_content = '''<?xml version="1.0" encoding="utf-8"?>
+        # Use the same primary language as the rest of the book for nav.xhtml
+        # We read from XHTMLConverter.DEFAULT_LANG, which is kept in sync with book language.
+        lang = getattr(XHTMLConverter, "DEFAULT_LANG", "en")
+        nav_content = f'''<?xml version="1.0" encoding="utf-8"?>
     <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
-    <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+    <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="{lang}" lang="{lang}">
     <head>
     <title>Table of Contents</title>
     </head>
