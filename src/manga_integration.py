@@ -11,6 +11,7 @@ import time
 import hashlib
 import traceback
 import concurrent.futures
+import re
 from PySide6.QtWidgets import (QWidget, QLabel, QFrame, QPushButton, QVBoxLayout, QHBoxLayout,
                                QGroupBox, QListWidget, QComboBox, QLineEdit, QCheckBox,
                                QRadioButton, QSlider, QSpinBox, QDoubleSpinBox, QTextEdit,
@@ -35,6 +36,16 @@ import ctypes
 import platform
 
 _IS_WINDOWS = platform.system().lower().startswith('win')
+
+# Natural/numerical sort helper function
+def _natural_sort_key(text):
+    """Generate a key for natural/numerical sorting.
+    Converts numeric portions to integers for proper ordering.
+    Examples: '1.png', '2.png', '10.png' -> sorted correctly as 1, 2, 10
+    """
+    def convert(part):
+        return int(part) if part.isdigit() else part.lower()
+    return [convert(c) for c in re.split('([0-9]+)', text)]
 
 # Windows thread priority constants
 if _IS_WINDOWS:
@@ -3060,16 +3071,65 @@ class MangaTranslationTab(QObject):
         file_frame_layout.setContentsMargins(10, 10, 10, 8)
         file_frame_layout.setSpacing(6)
         
+        # Sorting buttons (first row - above file list)
+        sort_btn_frame = QWidget()
+        sort_btn_layout = QHBoxLayout(sort_btn_frame)
+        sort_btn_layout.setContentsMargins(0, 0, 0, 0)
+        sort_btn_layout.setSpacing(4)
+        
+        sort_label = QLabel("Sort:")
+        sort_label.setStyleSheet("color: #e0e0e0; font-weight: bold;")
+        sort_btn_layout.addWidget(sort_label)
+        
+        # Track sort state for each type (ascending by default)
+        self._sort_ascending = {'name': True, 'numeric': True, 'date': True}
+        
+        # Name sort button
+        self.sort_name_btn = QPushButton("↑ Name")
+        self.sort_name_btn.setToolTip("Sort by filename (A-Z). Click again to reverse.")
+        self.sort_name_btn.clicked.connect(lambda: self._toggle_sort('name'))
+        self.sort_name_btn.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 4px 8px; font-size: 9pt; } QPushButton:hover { background-color: #5a6268; }")
+        sort_btn_layout.addWidget(self.sort_name_btn)
+        
+        # Numeric sort button
+        self.sort_numeric_btn = QPushButton("↑ Number")
+        self.sort_numeric_btn.setToolTip("Sort numerically (1, 2, 10). Click again to reverse.")
+        self.sort_numeric_btn.clicked.connect(lambda: self._toggle_sort('numeric'))
+        self.sort_numeric_btn.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 4px 8px; font-size: 9pt; } QPushButton:hover { background-color: #5a6268; }")
+        sort_btn_layout.addWidget(self.sort_numeric_btn)
+        
+        # Date sort button
+        self.sort_date_btn = QPushButton("↑ Date")
+        self.sort_date_btn.setToolTip("Sort by file date (oldest first). Click again to reverse.")
+        self.sort_date_btn.clicked.connect(lambda: self._toggle_sort('date'))
+        self.sort_date_btn.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 4px 8px; font-size: 9pt; } QPushButton:hover { background-color: #5a6268; }")
+        sort_btn_layout.addWidget(self.sort_date_btn)
+        
+        # Reverse button
+        reverse_btn = QPushButton("⇅ Reverse")
+        reverse_btn.setToolTip("Reverse current order")
+        reverse_btn.clicked.connect(lambda: self._sort_files('reverse'))
+        reverse_btn.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 4px 8px; font-size: 9pt; } QPushButton:hover { background-color: #5a6268; }")
+        sort_btn_layout.addWidget(reverse_btn)
+        
+        sort_btn_layout.addStretch()
+        file_frame_layout.addWidget(sort_btn_frame)
+        
         # File listbox (QListWidget handles scrolling automatically)
         self.file_listbox = QListWidget()
         self.file_listbox.setSelectionMode(QListWidget.ExtendedSelection)
         self.file_listbox.setMinimumHeight(200)
+        # Enable drag and drop reordering
+        self.file_listbox.setDragDropMode(QListWidget.InternalMove)
+        self.file_listbox.setDefaultDropAction(Qt.MoveAction)
+        # Connect model changed signal to sync selected_files list
+        self.file_listbox.model().rowsMoved.connect(self._on_files_reordered)
         file_frame_layout.addWidget(self.file_listbox)
         
-        # File buttons
+        # File management buttons (second row - below file list)
         file_btn_frame = QWidget()
         file_btn_layout = QHBoxLayout(file_btn_frame)
-        file_btn_layout.setContentsMargins(0, 6, 0, 0)
+        file_btn_layout.setContentsMargins(0, 4, 0, 0)
         file_btn_layout.setSpacing(4)
         
         add_files_btn = QPushButton("Add Files")
@@ -8268,7 +8328,7 @@ class MangaTranslationTab(QObject):
                     # Collect all images recursively from extract_dir
                     added = 0
                     for root, _, files_in_dir in os.walk(extract_dir):
-                        for fn in sorted(files_in_dir):
+                        for fn in sorted(files_in_dir, key=_natural_sort_key):
                             if fn.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')):
                                 target_path = os.path.join(root, fn)
                                 if target_path not in self.selected_files:
@@ -8318,7 +8378,7 @@ class MangaTranslationTab(QObject):
             except Exception:
                 cbz_temp_root = None
         
-        for filename in sorted(os.listdir(folder)):
+        for filename in sorted(os.listdir(folder), key=_natural_sort_key):
             filepath = os.path.join(folder, filename)
             if not os.path.isfile(filepath):
                 continue
@@ -8353,7 +8413,7 @@ class MangaTranslationTab(QObject):
                     # Collect all images recursively
                     added = 0
                     for root, _, files_in_dir in os.walk(extract_dir):
-                        for fn in sorted(files_in_dir):
+                        for fn in sorted(files_in_dir, key=_natural_sort_key):
                             if fn.lower().endswith(tuple(image_extensions)):
                                 target_path = os.path.join(root, fn)
                                 if target_path not in self.selected_files:
@@ -8422,6 +8482,129 @@ class MangaTranslationTab(QObject):
         if hasattr(self, 'image_preview_widget'):
             self.image_preview_widget.clear()
             self.image_preview_widget.set_image_list([])
+    
+    def _toggle_sort(self, sort_type):
+        """Toggle between ascending and descending sort for the given type.
+        
+        Args:
+            sort_type: One of 'name', 'numeric', 'date'
+        """
+        if not self.selected_files:
+            return
+        
+        # Get current state and toggle it
+        if not hasattr(self, '_sort_ascending'):
+            self._sort_ascending = {'name': True, 'numeric': True, 'date': True}
+        
+        is_ascending = self._sort_ascending.get(sort_type, True)
+        
+        # Apply sort with current direction
+        self._sort_files(sort_type, reverse=not is_ascending)
+        
+        # Toggle the state for next click
+        self._sort_ascending[sort_type] = not is_ascending
+        
+        # Update button text to show current direction
+        arrow = "↓" if not is_ascending else "↑"  # Down arrow for descending, up for ascending
+        
+        if sort_type == 'name':
+            self.sort_name_btn.setText(f"{arrow} Name")
+            self.sort_name_btn.setToolTip(f"Sort by filename ({'Z-A' if not is_ascending else 'A-Z'}). Click to switch.")
+        elif sort_type == 'numeric':
+            self.sort_numeric_btn.setText(f"{arrow} Number")
+            self.sort_numeric_btn.setToolTip(f"Sort numerically ({'10, 2, 1' if not is_ascending else '1, 2, 10'}). Click to switch.")
+        elif sort_type == 'date':
+            self.sort_date_btn.setText(f"{arrow} Date")
+            self.sort_date_btn.setToolTip(f"Sort by date ({'newest first' if not is_ascending else 'oldest first'}). Click to switch.")
+    
+    def _sort_files(self, sort_type, reverse=False):
+        """Sort the file list according to the specified type.
+        
+        Args:
+            sort_type: One of 'name', 'numeric', 'date', 'reverse'
+            reverse: If True, reverse the sort order (descending)
+        """
+        if not self.selected_files:
+            return
+        
+        # Remember current selection
+        current_row = self.file_listbox.currentRow()
+        current_path = None
+        if 0 <= current_row < len(self.selected_files):
+            current_path = self.selected_files[current_row]
+        
+        # Persist current image state before sorting
+        try:
+            if hasattr(self, '_current_image_path') and self._current_image_path:
+                ImageRenderer._persist_current_image_state(self)
+        except Exception:
+            pass
+        
+        # Sort based on type
+        if sort_type == 'reverse':
+            self.selected_files.reverse()
+        elif sort_type == 'name':
+            # Alphabetical sort by filename
+            self.selected_files.sort(key=lambda x: os.path.basename(x).lower(), reverse=reverse)
+        elif sort_type == 'numeric':
+            # Natural/numerical sort
+            self.selected_files.sort(key=lambda x: _natural_sort_key(os.path.basename(x)), reverse=reverse)
+        elif sort_type == 'date':
+            # Sort by file modification date
+            self.selected_files.sort(key=lambda x: os.path.getmtime(x) if os.path.exists(x) else 0, reverse=reverse)
+        
+        # Rebuild the listbox
+        self.file_listbox.clear()
+        for filepath in self.selected_files:
+            self.file_listbox.addItem(os.path.basename(filepath))
+        
+        # Restore selection to the same file if possible
+        if current_path and current_path in self.selected_files:
+            new_row = self.selected_files.index(current_path)
+            self.file_listbox.setCurrentRow(new_row)
+        elif self.file_listbox.count() > 0:
+            self.file_listbox.setCurrentRow(0)
+        
+        # Update thumbnail preview list
+        if hasattr(self, 'image_preview_widget'):
+            self.image_preview_widget.set_image_list(self.selected_files)
+        
+        # Log the action
+        direction = 'descending' if reverse else 'ascending'
+        sort_names = {'name': 'alphabetically', 'numeric': 'numerically', 'date': 'by date', 'reverse': 'in reverse'}
+        if sort_type != 'reverse':
+            self._log(f"📋 Sorted {len(self.selected_files)} files {sort_names.get(sort_type, sort_type)} ({direction})", "info")
+        else:
+            self._log(f"📋 Sorted {len(self.selected_files)} files {sort_names.get(sort_type, sort_type)}", "info")
+    
+    def _on_files_reordered(self, parent, start, end, destination, row):
+        """Handle drag-and-drop reordering of files in the listbox.
+        
+        This is called when the user drags items to reorder them.
+        We need to sync the selected_files list with the new listbox order.
+        """
+        try:
+            # Rebuild selected_files list based on current listbox order
+            new_order = []
+            for i in range(self.file_listbox.count()):
+                item = self.file_listbox.item(i)
+                filename = item.text()
+                # Find the corresponding full path
+                for filepath in self.selected_files:
+                    if os.path.basename(filepath) == filename:
+                        new_order.append(filepath)
+                        break
+            
+            # Update selected_files with new order
+            self.selected_files = new_order
+            
+            # Update thumbnail preview list
+            if hasattr(self, 'image_preview_widget'):
+                self.image_preview_widget.set_image_list(self.selected_files)
+            
+            print(f"[FILE_REORDER] Files reordered via drag-and-drop")
+        except Exception as e:
+            print(f"[FILE_REORDER] Error syncing file order: {e}")
     
     def _on_file_selection_changed(self):
         """Handle file list selection changes to update image preview"""
