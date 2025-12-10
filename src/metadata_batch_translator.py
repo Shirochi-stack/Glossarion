@@ -1576,7 +1576,9 @@ class BatchHeaderTranslator:
         # Add the titles to translate
         user_prompt_template = prompt_template + "\n\nTitles to translate:\n"
         
-        sorted_headers = sorted(headers_dict.items())
+        # Preserve original order (OPF spine order) - do NOT sort by chapter number
+        # The headers_dict is already in the correct order from the caller
+        sorted_headers = list(headers_dict.items())
         all_translations = {}
         total_batches = (len(sorted_headers) + batch_size - 1) // batch_size
         
@@ -1787,8 +1789,8 @@ class BatchHeaderTranslator:
                 f.write("Chapter Header Translations\n")
                 f.write("=" * 50 + "\n\n")
                 
-                # Sort chapter numbers, ensuring chapter 0 comes first if present
-                chapter_numbers = sorted(original.keys())
+                # Preserve order from original dict (OPF spine order) - do NOT sort by chapter number
+                chapter_numbers = list(original.keys())
                 
                 # Summary info
                 total_chapters = len(original)
