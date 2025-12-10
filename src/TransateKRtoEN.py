@@ -1882,9 +1882,6 @@ class ProgressManager:
         # Use helper method to get consistent key
         chapter_key = self._get_chapter_key(actual_num, output_file=None, chapter_obj=chapter_obj, content_hash=content_hash)
         
-        # Only allow auto-discovery when there are no tracked chapters yet
-        auto_discovery_allowed = len(self.prog.get("chapters", {})) == 0
-        
         # Check if we have tracking for this chapter
         if chapter_key in self.prog["chapters"]:
             chapter_info = self.prog["chapters"][chapter_key]
@@ -1917,20 +1914,14 @@ class ProgressManager:
             # Any other status - retranslate
             return True, None, None
         
-        # BEFORE auto-discovery, check if ANY entry exists for this chapter's file
-        # Only auto-discover when no chapters are tracked yet to avoid overwriting in-progress state
-        if chapter_obj and auto_discovery_allowed:
+        # No entry in progress tracking - check if file exists on disk
+        # This handles the case where progress file was deleted but translated files remain
+        if chapter_obj:
             from TransateKRtoEN import FileUtilities
             output_filename = FileUtilities.create_chapter_filename(chapter_obj, actual_num)
-            
-            # Check if ANY entry has this output file
-            for key, info in self.prog["chapters"].items():
-                if info.get("output_file") == output_filename:
-                    # Entry exists somewhere else - don't auto-discover
-                    return True, None, None
-            
-            # NOW check if file exists for auto-discovery
             output_path = os.path.join(output_dir, output_filename)
+            
+            # Check if file exists for auto-discovery
             if os.path.exists(output_path):
                 print(f"📁 Found existing file for chapter {actual_num}: {output_filename}")
                 
