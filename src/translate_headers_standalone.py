@@ -237,73 +237,79 @@ def match_output_to_source_chapters(
     
     # Get all HTML files from output directory
     html_extensions = ('.html', '.xhtml', '.htm')
-    output_files = sorted([
+    output_files_set = set([
         f for f in os.listdir(output_dir) 
         if f.lower().endswith(html_extensions)
     ])
     
-    log(f"📁 Found {len(output_files)} HTML files in output directory")
+    log(f"📁 Found {len(output_files_set)} HTML files in output directory")
     log(f"📚 Have {len(source_mapping)} source chapters to match")
     
-    if not output_files:
+    if not output_files_set:
         log("⚠️ No HTML files found in output directory!")
         return matches
     
     matched_count = 0
     skipped_count = 0
     
-    for output_file in output_files:
-        # Get output filename without extension and response_ prefix
-        output_no_ext = get_basename_without_ext(output_file)
-        # Strip response_ prefix if present
-        if output_no_ext.startswith('response_'):
-            output_no_ext = output_no_ext[9:]  # len('response_') = 9
+    # Iterate in spine order instead of alphabetical
+    for source_file in spine_order:
+        source_basename = get_basename_without_ext(os.path.basename(source_file))
         
-        # Try to match with each source chapter
-        matched = False
-        for source_basename, source_title in source_mapping.items():
-            # Check if filenames match (both stripped of extensions and prefixes)
-            if source_basename == output_no_ext:
-                # Read current title from output file
-                try:
-                    output_path = os.path.join(output_dir, output_file)
-                    with open(output_path, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                    
-                    soup = BeautifulSoup(content, 'html.parser')
-                    
-                    current_title = None
-                    for tag_name in ['h1', 'h2', 'h3', 'title']:
-                        tag = soup.find(tag_name)
-                        if tag:
-                            text = tag.get_text().strip()
-                            if text:
-                                current_title = text
-                                break
-                    
-                    if not current_title:
-                        current_title = f"Chapter {source_basename}"
-                    
-                    matches[output_file] = (source_title, current_title, output_file)
-                    matched_count += 1
-                    matched = True
-                    
-                    if matched_count <= 5:
-                        log(f"  ✓ Matched: {output_file}")
-                        log(f"    Contains source: '{source_basename}'")
-                        log(f"    Source title: '{source_title}'")
-                        log(f"    Current title: '{current_title}'")
-                    
-                    break  # Found a match, stop checking other sources
-                    
-                except Exception as e:
-                    log(f"  ⚠️ Error reading {output_file}: {e}")
-                    break
+        # Skip if not in source_mapping
+        if source_basename not in source_mapping:
+            continue
         
-        if not matched:
+        source_title = source_mapping[source_basename]
+        
+        # Find matching output file
+        output_file = None
+        for candidate in output_files_set:
+            candidate_no_ext = get_basename_without_ext(candidate)
+            # Strip response_ prefix if present
+            if candidate_no_ext.startswith('response_'):
+                candidate_no_ext = candidate_no_ext[9:]
+            
+            if candidate_no_ext == source_basename:
+                output_file = candidate
+                break
+        
+        if output_file:
+            # Read current title from output file
+            try:
+                output_path = os.path.join(output_dir, output_file)
+                with open(output_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                soup = BeautifulSoup(content, 'html.parser')
+                
+                current_title = None
+                for tag_name in ['h1', 'h2', 'h3', 'title']:
+                    tag = soup.find(tag_name)
+                    if tag:
+                        text = tag.get_text().strip()
+                        if text:
+                            current_title = text
+                            break
+                
+                if not current_title:
+                    current_title = f"Chapter {source_basename}"
+                
+                matches[output_file] = (source_title, current_title, output_file)
+                matched_count += 1
+                
+                if matched_count <= 5:
+                    log(f"  ✓ Matched: {output_file}")
+                    log(f"    Contains source: '{source_basename}'")
+                    log(f"    Source title: '{source_title}'")
+                    log(f"    Current title: '{current_title}'")
+                
+            except Exception as e:
+                log(f"  ⚠️ Error reading {output_file}: {e}")
+        else:
             skipped_count += 1
             if skipped_count <= 3:
-                log(f"  ⊝ Skipped (no match): {output_file}")
+                log(f"  ⊝ Skipped (no match): {source_basename}")
     
     log(f"\n📊 Matching results:")
     log(f"  ✓ Matched: {matched_count} chapters")
