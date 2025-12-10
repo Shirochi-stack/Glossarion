@@ -247,18 +247,19 @@ class RetranslationMixin:
                     return
                 
                 if not progress_file or not os.path.exists(progress_file):
-                    # Progress file was deleted - show message and remove from cache
-                    self._show_message('info', "Info", "No progress tracking found.")
+                    # Progress file was deleted - show message and remove from cache,
+                    # but DO NOT return. Fall through so we rebuild the dialog and
+                    # auto-discover completed chapters in a single click.
+                    self._show_message('info', "Info", "No progress tracking found. Existing translations will be auto-discovered.")
                     del self._retranslation_dialog_cache[file_key]
+                else:
+                    dialog = cached_data['dialog']
+                    # Refresh the data before showing
+                    self._refresh_retranslation_data(cached_data)
+                    dialog.show()
+                    dialog.raise_()
+                    dialog.activateWindow()
                     return
-                
-                dialog = cached_data['dialog']
-                # Refresh the data before showing
-                self._refresh_retranslation_data(cached_data)
-                dialog.show()
-                dialog.raise_()
-                dialog.activateWindow()
-                return
         
         # For EPUB/text files, use the shared logic
         # Get current toggle state if it exists, or default based on file type
