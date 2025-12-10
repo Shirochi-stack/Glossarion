@@ -1452,11 +1452,19 @@ class EPUBCompiler:
                             mode=getattr(self, 'metadata_translation_mode', 'together')
                         )
                         
-                        # Preserve original values
-                        for field in self.translate_metadata_fields:
+                        # Preserve original values and mark fields as translated so we don't
+                        # keep re-translating metadata on every EPUB rebuild.
+                        for field, should_translate in self.translate_metadata_fields.items():
+                            if not should_translate:
+                                continue
                             if field in metadata and field in translated_metadata:
                                 if metadata[field] != translated_metadata[field]:
-                                    translated_metadata[f'original_{field}'] = metadata[field]
+                                    # Store original value (if not already present)
+                                    original_key = f'original_{field}'
+                                    if original_key not in translated_metadata:
+                                        translated_metadata[original_key] = metadata[field]
+                                    # Mark as translated so future runs can detect it
+                                    translated_metadata[f'{field}_translated'] = True
                         
                         metadata = translated_metadata
                     except Exception as e:
@@ -1527,6 +1535,12 @@ class EPUBCompiler:
             
             # Write EPUB
             self._write_epub(book, metadata)
+            
+            # Persist updated metadata (including translated fields/language)
+            try:
+                self._save_metadata(metadata)
+            except Exception as e:
+                self.log(f"[WARNING] Failed to save updated metadata.json: {e}")
             
             # Show summary
             self._show_summary(chapter_titles_info, css_items)
@@ -3015,6 +3029,24 @@ class EPUBCompiler:
             self.log("[WARNING] metadata.json not found, using defaults")
         
         return {}
+    
+    def _save_metadata(self, metadata: dict) -> None:
+        """Persist metadata.json alongside the translated HTML output.
+
+        This ensures that once metadata fields (title, creator, subject, description, etc.)
+        have been translated, future EPUB rebuilds can reuse them instead of sending the
+        same fields to the API again.
+        """
+        if not isinstance(metadata, dict):
+            return
+        try:
+            os.makedirs(os.path.dirname(self.metadata_path), exist_ok=True)
+            with open(self.metadata_path, 'w', encoding='utf-8') as f:
+                json.dump(metadata, f, ensure_ascii=False, indent=2)
+            self.log("[DEBUG] Saved updated metadata.json")
+        except Exception as e:
+            # Let caller decide how to log/handle, but don't crash compilation here
+            raise e
     
     def _create_book(self, metadata: dict) -> epub.EpubBook:
         """Create and configure EPUB book with complete metadata"""
