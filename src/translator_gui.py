@@ -7258,6 +7258,13 @@ Important rules:
             os.environ['DISABLE_AUTOMATIC_COVER_CREATION'] = "1" if getattr(self, 'disable_automatic_cover_creation_var', False) else "0"
             os.environ['TRANSLATE_COVER_HTML'] = "1" if getattr(self, 'translate_cover_html_var', False) else "0"
 
+            # If user selected a CSS override file, pass it to EPUB converter
+            css_override_path = getattr(self, 'epub_css_override_path_var', self.config.get('epub_css_override_path', ''))
+            if css_override_path:
+                os.environ['EPUB_CSS_OVERRIDE_PATH'] = css_override_path
+            else:
+                os.environ.pop('EPUB_CSS_OVERRIDE_PATH', None)
+
             source_epub_file = os.path.join(folder, 'source_epub.txt')
             if os.path.exists(source_epub_file):
                 try:
@@ -9175,6 +9182,8 @@ Important rules:
                 ('REMOVE_AI_ARTIFACTS', ['remove_artifacts_checkbox', 'REMOVE_AI_ARTIFACTS_var'], False, bool),
                 ('attach_css_to_chapters', ['attach_css_to_chapters_var'], False, bool),
                 ('epub_use_html_method', ['epub_use_html_method_var'], False, bool),
+                # Optional path to a user-selected CSS file for EPUB converter
+                ('epub_css_override_path', ['epub_css_override_path_var'], '', str),
                 ('use_rolling_summary', ['rolling_summary_var'], False, bool),
                 # Whether to reuse previous source text as memory/history context
                 ('include_source_in_history', ['include_source_in_history_var'], False, bool),

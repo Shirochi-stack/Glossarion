@@ -3597,20 +3597,78 @@ def _create_prompt_management_section(self, parent):
     ncx_cb.setContentsMargins(0, 5, 0, 5)
     section_v.addWidget(ncx_cb)
     
-    # CSS Attachment toggle
+    # CSS Attachment toggle + Load CSS button
     css_cb = self._create_styled_checkbox("Attach CSS to Chapters (May fix or cause styling issues)")
     try:
         css_cb.setChecked(bool(self.attach_css_to_chapters_var))
     except Exception:
         pass
+
+    # Ensure we have a variable to store the override CSS path
+    if not hasattr(self, 'epub_css_override_path_var'):
+        self.epub_css_override_path_var = self.config.get('epub_css_override_path', '')
+
     def _on_css_toggle(checked):
         try:
             self.attach_css_to_chapters_var = bool(checked)
         except Exception:
             pass
+
     css_cb.toggled.connect(_on_css_toggle)
-    css_cb.setContentsMargins(0, 5, 0, 5)
-    section_v.addWidget(css_cb)
+
+    from PySide6.QtWidgets import QFileDialog, QHBoxLayout
+
+    css_row = QWidget()
+    css_row_h = QHBoxLayout(css_row)
+    css_row_h.setContentsMargins(0, 5, 0, 5)
+    css_row_h.setSpacing(8)
+
+    css_row_h.addWidget(css_cb)
+
+    load_css_btn = QPushButton("Load CSS…")
+    load_css_btn.setToolTip("Select a CSS file to use for all chapters (overrides original EPUB CSS)")
+    load_css_btn.setMinimumWidth(100)
+    load_css_btn.setStyleSheet(
+        "QPushButton { background-color: #17a2b8; color: white; padding: 4px 10px; "
+        "border-radius: 4px; font-weight: bold; } "
+        "QPushButton:hover { background-color: #138496; }"
+    )
+    css_row_h.addWidget(load_css_btn)
+
+    import os as _os
+
+    css_status_label = QLabel()
+    css_status_label.setStyleSheet("color: #28a745; font-size: 11pt; font-weight: bold;")
+    css_status_label.hide()
+    css_row_h.addWidget(css_status_label)
+
+    css_path_label = QLabel()
+    css_path_label.setStyleSheet("color: gray; font-size: 9pt;")
+    if getattr(self, 'epub_css_override_path_var', ''):
+        css_path_label.setText(_os.path.basename(self.epub_css_override_path_var))
+        css_status_label.setText("✓")
+        css_status_label.show()
+    css_row_h.addWidget(css_path_label)
+
+    css_row_h.addStretch()
+    section_v.addWidget(css_row)
+
+    def _on_load_css_clicked():
+        try:
+            start_dir = _os.path.dirname(self.epub_css_override_path_var) if getattr(self, 'epub_css_override_path_var', '') else _os.getcwd()
+            file_name, _ = QFileDialog.getOpenFileName(parent, "Select CSS file", start_dir, "CSS Files (*.css);;All Files (*.*)")
+            if file_name:
+                self.epub_css_override_path_var = file_name
+                css_path_label.setText(_os.path.basename(file_name))
+                css_status_label.setText("✓")
+                css_status_label.show()
+                # If user explicitly loads CSS, ensure attachment is enabled
+                if not css_cb.isChecked():
+                    css_cb.setChecked(True)
+        except Exception:
+            pass
+
+    load_css_btn.clicked.connect(_on_load_css_clicked)
     
     # HTML serialization method toggle
     html_method_cb = self._create_styled_checkbox("Use HTML Method for EPUB (Better for preserving whitespaces)")

@@ -3210,7 +3210,14 @@ img {
 """
 
     def _add_css_files(self, book: epub.EpubBook) -> List[epub.EpubItem]:
-        """Add CSS files to book"""
+        """Add CSS files to book.
+
+        Behavior:
+          * Always adds our built‑in default.css.
+          * If EPUB_CSS_OVERRIDE_PATH is set, add ONLY that CSS (plus default) and
+            skip all CSS files from the extracted EPUB/css directory.
+          * Otherwise, add all .css files from self.css_dir as before.
+        """
         css_items = []
         
         # First, add a default CSS to ensure proper formatting
@@ -3224,7 +3231,30 @@ img {
         css_items.append(default_css)
         self.log("✅ Added default CSS")
         
-        # Then add user CSS files
+        # Check for explicit CSS override from GUI
+        override_path = os.getenv('EPUB_CSS_OVERRIDE_PATH', '').strip()
+        if override_path:
+            try:
+                if os.path.isfile(override_path):
+                    self.log(f"[INFO] Using override CSS for EPUB: {override_path}")
+                    with open(override_path, 'r', encoding='utf-8') as f:
+                        css_content = f.read()
+                    override_item = epub.EpubItem(
+                        uid="css_override",
+                        file_name="css/override.css",
+                        media_type="text/css",
+                        content=FileUtils.ensure_bytes(css_content)
+                    )
+                    book.add_item(override_item)
+                    css_items.append(override_item)
+                    return css_items
+                else:
+                    self.log(f"[WARNING] EPUB_CSS_OVERRIDE_PATH does not exist: {override_path}")
+            except Exception as e:
+                self.log(f"[WARNING] Failed to load override CSS '{override_path}': {e}")
+                # Fall back to normal behavior below
+        
+        # Then add user CSS files from css/ directory (original behavior)
         if not os.path.isdir(self.css_dir):
             return css_items
         
@@ -3234,7 +3264,6 @@ img {
         for css_file in css_files:
             css_path = os.path.join(self.css_dir, css_file)
             try:
-                import html
                 with open(css_path, 'r', encoding='utf-8') as f:
                     css_content = f.read()
                 css_item = epub.EpubItem(
