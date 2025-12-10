@@ -454,8 +454,16 @@ class RetranslationMixin:
             if not name:
                 return ""
             base = os.path.basename(name)
+            # Remove response_ prefix
             if base.startswith("response_"):
                 base = base[len("response_"):]
+            # Remove all extensions so that .html, .xhtml, .htm, etc. all match
+            # and double extensions like .html.xhtml collapse to the stem.
+            while True:
+                new_base, ext = os.path.splitext(base)
+                if not ext:
+                    break
+                base = new_base
             return base
 
         def _opf_names_equal(a: str, b: str) -> bool:
@@ -1976,8 +1984,16 @@ class RetranslationMixin:
             if not name:
                 return ""
             base = os.path.basename(name)
+            # Remove response_ prefix
             if base.startswith("response_"):
                 base = base[len("response_"):]
+            # Remove all extensions so that .html, .xhtml, .htm, etc. all match
+            # and double extensions like .html.xhtml collapse to the stem.
+            while True:
+                new_base, ext = os.path.splitext(base)
+                if not ext:
+                    break
+                base = new_base
             return base
 
         def _opf_names_equal(a: str, b: str) -> bool:
