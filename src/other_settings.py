@@ -3627,13 +3627,23 @@ def _create_prompt_management_section(self, parent):
 
     load_css_btn = QPushButton("Load CSS…")
     load_css_btn.setToolTip("Select a CSS file to use for all chapters (overrides original EPUB CSS)")
-    load_css_btn.setMinimumWidth(100)
+    load_css_btn.setMinimumWidth(90)
     load_css_btn.setStyleSheet(
         "QPushButton { background-color: #17a2b8; color: white; padding: 4px 10px; "
         "border-radius: 4px; font-weight: bold; } "
         "QPushButton:hover { background-color: #138496; }"
     )
     css_row_h.addWidget(load_css_btn)
+
+    clear_css_btn = QPushButton("Clear")
+    clear_css_btn.setToolTip("Remove CSS override and use original EPUB CSS again")
+    clear_css_btn.setMinimumWidth(60)
+    clear_css_btn.setStyleSheet(
+        "QPushButton { background-color: #6c757d; color: white; padding: 4px 8px; "
+        "border-radius: 4px; font-weight: bold; } "
+        "QPushButton:hover { background-color: #5a6268; }"
+    )
+    css_row_h.addWidget(clear_css_btn)
 
     import os as _os
 
@@ -3668,7 +3678,16 @@ def _create_prompt_management_section(self, parent):
         except Exception:
             pass
 
+    def _on_clear_css_clicked():
+        try:
+            self.epub_css_override_path_var = ''
+            css_path_label.setText('')
+            css_status_label.hide()
+        except Exception:
+            pass
+
     load_css_btn.clicked.connect(_on_load_css_clicked)
+    clear_css_btn.clicked.connect(_on_clear_css_clicked)
     
     # HTML serialization method toggle
     html_method_cb = self._create_styled_checkbox("Use HTML Method for EPUB (Better for preserving whitespaces)")
