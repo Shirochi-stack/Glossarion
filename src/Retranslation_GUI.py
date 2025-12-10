@@ -585,11 +585,13 @@ class RetranslationMixin:
                 # If not found, check for composite key (chapter_num + filename)
                 if not matched_info and is_special:
                     # For special files, try composite key format: "{chapter_num}_{filename_without_extension}"
-                    base_name = os.path.splitext(filename)[0]
-                    # Remove "response_" prefix if present in the filename
-                    if base_name.startswith("response_"):
-                        base_name = base_name[9:]
-                    composite_key = f"{chapter_num}_{base_name}"
+                    # The composite key in progress is built from the output filename with response_ removed
+                    # So we need to match against the expected_response (which may have response_ prefix)
+                    response_base = os.path.splitext(expected_response)[0]
+                    # Remove "response_" prefix to match how keys are stored in progress
+                    if response_base.startswith("response_"):
+                        response_base = response_base[9:]
+                    composite_key = f"{chapter_num}_{response_base}"
                     
                     if composite_key in prog.get("chapters", {}):
                         matched_info = prog["chapters"][composite_key]
