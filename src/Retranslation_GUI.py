@@ -299,12 +299,17 @@ class RetranslationMixin:
         
         progress_file = os.path.join(output_dir, "translation_progress.json")
         if not os.path.exists(progress_file):
-            if not parent_dialog:
-                self._show_message('info', "Info", "No progress tracking found.")
-            return None
-        
-        with open(progress_file, 'r', encoding='utf-8') as f:
-            prog = json.load(f)
+            # No progress file - create empty progress structure
+            # This allows fuzzy matching to discover existing files
+            print("⚠️ No progress file found - will attempt to discover existing translations")
+            prog = {
+                "chapters": {},
+                "chapter_chunks": {},
+                "version": "2.1"
+            }
+        else:
+            with open(progress_file, 'r', encoding='utf-8') as f:
+                prog = json.load(f)
         
         # Clean up missing files and merged children when opening the GUI
         # This handles the case where parent files were manually deleted
@@ -711,9 +716,90 @@ class RetranslationMixin:
                 spine_ch['output_file'] = expected_response
             
             else:
-                # No file and no progress tracking - not translated
-                spine_ch['status'] = 'not_translated'
-                spine_ch['output_file'] = expected_response
+                # No file and no progress tracking - LAST RESORT: Try exact filename matching
+                # This handles the case where progress file was deleted but files exist
+                # Match by filename only (ignore response_ prefix and all extensions)
+                
+                def normalize_filename(fname):
+                    """Remove response_ prefix and all extensions for exact comparison"""
+                    base = os.path.basename(fname)
+                    # Remove response_ prefix
+                    if base.startswith('response_'):
+                        base = base[9:]
+                    # Remove all extensions (including double extensions like .html.xhtml)
+                    while True:
+                        new_base, ext = os.path.splitext(base)
+                        if not ext:
+                            break
+                        base = new_base
+                    return base
+                
+                # Normalize the OPF filename
+                normalized_opf = normalize_filename(filename)
+                
+                # Search for exact matching file in output directory
+                matched_file = None
+                if os.path.exists(output_dir):
+                    try:
+                        for existing_file in os.listdir(output_dir):
+                            if os.path.isfile(os.path.join(output_dir, existing_file)):
+                                normalized_existing = normalize_filename(existing_file)
+                                # Exact match only - no fuzzy logic
+                                if normalized_existing == normalized_opf:
+                                    matched_file = existing_file
+                                    break
+                    except Exception as e:
+                        print(f"Warning: Error scanning output directory for match: {e}")
+                
+                if matched_file:
+                    # Found an exact matching file by normalized name - mark as completed
+                    spine_ch['status'] = 'completed'
+                    spine_ch['output_file'] = matched_file
+                    print(f"📁 Matched: {filename} -> {matched_file}")
+                else:
+                    # No file and no progress tracking - not translated
+                    spine_ch['status'] = 'not_translated'
+                    spine_ch['output_file'] = expected_response
+        
+        # =====================================================
+        # SAVE AUTO-DISCOVERED FILES TO PROGRESS
+        # =====================================================
+        
+        # Check if we discovered any new completed files (exact matched by normalized filename)
+        # and add them to the progress file
+        progress_updated = False
+        for spine_ch in spine_chapters:
+            # Only add entries that were marked as completed but have no progress entry
+            if spine_ch['status'] == 'completed' and 'progress_entry' not in spine_ch:
+                chapter_num = spine_ch['file_chapter_num']
+                output_file = spine_ch['output_file']
+                filename = spine_ch['filename']
+                
+                # Create a progress entry for this auto-discovered file
+                chapter_key = str(chapter_num)
+                
+                # Check if key already exists (avoid duplicates)
+                if chapter_key not in prog.get("chapters", {}):
+                    prog.setdefault("chapters", {})[chapter_key] = {
+                        "actual_num": chapter_num,
+                        "content_hash": "",  # Unknown since we don't have the source
+                        "output_file": output_file,
+                        "status": "completed",
+                        "last_updated": os.path.getmtime(os.path.join(output_dir, output_file)),
+                        "auto_discovered": True,
+                        "original_basename": filename
+                    }
+                    progress_updated = True
+                    print(f"✅ Auto-discovered and tracked: {filename} -> {output_file}")
+        
+        # Save progress file if we added new entries
+        if progress_updated:
+            try:
+                with open(progress_file, 'w', encoding='utf-8') as f:
+                    json.dump(prog, f, ensure_ascii=False, indent=2)
+                print(f"💾 Saved {sum(1 for ch in spine_chapters if ch['status'] == 'completed' and 'progress_entry' not in ch)} auto-discovered files to progress file")
+            except Exception as e:
+                print(f"⚠️ Warning: Failed to save progress file: {e}")
         
         # =====================================================
         # BUILD DISPLAY INFO
