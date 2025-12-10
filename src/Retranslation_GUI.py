@@ -445,23 +445,46 @@ class RetranslationMixin:
         # MATCH OPF CHAPTERS WITH TRANSLATION PROGRESS
         # =====================================================
         
-        # Build a map of original basenames to progress entries
+        # Helper: normalize filenames for OPF / progress matching
+        # We intentionally strip a leading "response_" prefix so that
+        # files like "chapter001.xhtml" and "response_chapter001.xhtml"
+        # are treated as referring to the same logical entry.
+        def _normalize_opf_match_name(name: str) -> str:
+            if not name:
+                return ""
+            base = os.path.basename(name)
+            if base.startswith("response_"):
+                base = base[len("response_"):]
+            return base
+
+        def _opf_names_equal(a: str, b: str) -> bool:
+            return _normalize_opf_match_name(a) == _normalize_opf_match_name(b)
+
+        # Build a map of original basenames to progress entries (normalized)
         basename_to_progress = {}
         for chapter_key, chapter_info in prog.get("chapters", {}).items():
             original_basename = chapter_info.get("original_basename", "")
             if original_basename:
-                if original_basename not in basename_to_progress:
-                    basename_to_progress[original_basename] = []
-                basename_to_progress[original_basename].append((chapter_key, chapter_info))
+                norm_key = _normalize_opf_match_name(original_basename)
+                if norm_key not in basename_to_progress:
+                    basename_to_progress[norm_key] = []
+                basename_to_progress[norm_key].append((chapter_key, chapter_info))
         
-        # Also build a map of response files
+        # Also build a map of response files (include both exact and normalized keys)
         response_file_to_progress = {}
         for chapter_key, chapter_info in prog.get("chapters", {}).items():
             output_file = chapter_info.get("output_file", "")
             if output_file:
+                # Exact key
                 if output_file not in response_file_to_progress:
                     response_file_to_progress[output_file] = []
                 response_file_to_progress[output_file].append((chapter_key, chapter_info))
+                # Normalized key (ignoring response_ prefix)
+                norm_key = _normalize_opf_match_name(output_file)
+                if norm_key != output_file:
+                    if norm_key not in response_file_to_progress:
+                        response_file_to_progress[norm_key] = []
+                    response_file_to_progress[norm_key].append((chapter_key, chapter_info))
         
         # Update spine chapters with translation status
         for spine_ch in spine_chapters:
@@ -503,9 +526,10 @@ class RetranslationMixin:
             # Check various ways to find the translation progress info
             matched_info = None
             
-            # Method 1: Check by original basename
-            if filename in basename_to_progress:
-                entries = basename_to_progress[filename]
+            # Method 1: Check by original basename (ignoring response_ prefix)
+            basename_key = _normalize_opf_match_name(filename)
+            if basename_key in basename_to_progress:
+                entries = basename_to_progress[basename_key]
                 if entries:
                     _, chapter_info = entries[0]
                     # For in_progress/failed/qa_failed, also verify actual_num matches
@@ -532,7 +556,8 @@ class RetranslationMixin:
             # Method 3: Search through all progress entries for matching output file
             if not matched_info:
                 for chapter_key, chapter_info in prog.get("chapters", {}).items():
-                    if chapter_info.get('output_file') == expected_response:
+                    out_file = chapter_info.get('output_file')
+                    if out_file == expected_response or _opf_names_equal(out_file, expected_response):
                         # For in_progress/failed/qa_failed, also verify actual_num matches
                         status = chapter_info.get('status', '')
                         if status in ['in_progress', 'failed', 'qa_failed']:
@@ -563,7 +588,11 @@ class RetranslationMixin:
                         # because output_file points to parent's file, not this chapter's source file
                         # Strip extension for comparison since orig_base may not have it
                         filename_noext = os.path.splitext(filename)[0]
-                        if parent_num is not None and (orig_base == filename or orig_base == filename_noext or not orig_base):
+                        if parent_num is not None and (
+                            _opf_names_equal(orig_base, filename)
+                            or _opf_names_equal(orig_base, filename_noext)
+                            or not orig_base
+                        ):
                             parent_key = str(parent_num)
                             if parent_key in prog.get("chapters", {}):
                                 # Just verify parent exists, don't enforce 'completed' status
@@ -572,26 +601,26 @@ class RetranslationMixin:
                     # In-progress and failed chapters: require BOTH actual_num AND output_file
                     # to match to avoid cross-matching files.
                     elif status in ['in_progress', 'failed']:
-                        if chapter_info.get('actual_num') == chapter_num and out_file == expected_response:
+                        if chapter_info.get('actual_num') == chapter_num and (
+                            out_file == expected_response or _opf_names_equal(out_file, expected_response)
+                        ):
                             matched_info = chapter_info
                     # qa_failed chapters: match by chapter number only so they are always visible
                     elif status == 'qa_failed':
                         if chapter_info.get('actual_num') == chapter_num:
                             matched_info = chapter_info
-                    # Normal match: output file matches expected
-                    elif out_file == expected_response:
+                    # Normal match: output file matches expected (ignoring response_ prefix)
+                    elif out_file == expected_response or _opf_names_equal(out_file, expected_response):
                         matched_info = chapter_info
                 
                 # If not found, check for composite key (chapter_num + filename)
                 if not matched_info and is_special:
                     # For special files, try composite key format: "{chapter_num}_{filename_without_extension}"
-                    # The composite key in progress is built from the output filename with response_ removed
-                    # So we need to match against the expected_response (which may have response_ prefix)
-                    response_base = os.path.splitext(expected_response)[0]
-                    # Remove "response_" prefix to match how keys are stored in progress
-                    if response_base.startswith("response_"):
-                        response_base = response_base[9:]
-                    composite_key = f"{chapter_num}_{response_base}"
+                    base_name = os.path.splitext(filename)[0]
+                    # Remove "response_" prefix if present in the filename
+                    if base_name.startswith("response_"):
+                        base_name = base_name[9:]
+                    composite_key = f"{chapter_num}_{base_name}"
                     
                     if composite_key in prog.get("chapters", {}):
                         matched_info = prog["chapters"][composite_key]
@@ -622,7 +651,11 @@ class RetranslationMixin:
                                 # Match by original_basename (the source file), not output_file (parent's file)
                                 # Strip extension for comparison since orig_base may not have it
                                 filename_noext = os.path.splitext(filename)[0]
-                                if parent_num is not None and (orig_base == filename or orig_base == filename_noext or not orig_base):
+                                if parent_num is not None and (
+                                    _opf_names_equal(orig_base, filename)
+                                    or _opf_names_equal(orig_base, filename_noext)
+                                    or not orig_base
+                                ):
                                     # Check if parent chapter exists
                                     parent_key = str(parent_num)
                                     if parent_key in prog.get("chapters", {}):
@@ -633,7 +666,9 @@ class RetranslationMixin:
                             # In-progress and failed chapters: require BOTH actual_num AND output_file
                             # to match to avoid cross-matching files.
                             if status in ['in_progress', 'failed']:
-                                if actual_num == chapter_num and out_file == expected_response:
+                                if actual_num == chapter_num and (
+                                    out_file == expected_response or _opf_names_equal(out_file, expected_response)
+                                ):
                                     matched_info = chapter_info
                                     break
                             # qa_failed chapters: match by chapter number only so they are always visible,
@@ -647,7 +682,13 @@ class RetranslationMixin:
                             # this filename, or, when original_basename is missing, the output_file matches
                             # what we expect.
                             if status not in ['in_progress', 'failed', 'qa_failed']:
-                                if (orig_base and orig_base == filename) or (not orig_base and out_file and out_file == expected_response):
+                                if (
+                                    orig_base and _opf_names_equal(orig_base, filename)
+                                ) or (
+                                    not orig_base and out_file and (
+                                        out_file == expected_response or _opf_names_equal(out_file, expected_response)
+                                    )
+                                ):
                                     matched_info = chapter_info
                                     break
             
@@ -1926,25 +1967,46 @@ class RetranslationMixin:
         
         prog = data['prog']
         output_dir = data['output_dir']
+        progress_file = data['progress_file']
         spine_chapters = data['spine_chapters']
         
-        # Build maps for matching (same as original code)
+        # Helper: keep OPF / progress matching rules in sync with _force_retranslation_epub_or_text
+        def _normalize_opf_match_name(name: str) -> str:
+            if not name:
+                return ""
+            base = os.path.basename(name)
+            if base.startswith("response_"):
+                base = base[len("response_"):]
+            return base
+
+        def _opf_names_equal(a: str, b: str) -> bool:
+            return _normalize_opf_match_name(a) == _normalize_opf_match_name(b)
+        
+        # Build maps for matching (same as original code, but normalized)
         basename_to_progress = {}
         for chapter_key, chapter_info in prog.get("chapters", {}).items():
             original_basename = chapter_info.get("original_basename", "")
             if original_basename:
-                if original_basename not in basename_to_progress:
-                    basename_to_progress[original_basename] = []
-                basename_to_progress[original_basename].append((chapter_key, chapter_info))
+                norm_key = _normalize_opf_match_name(original_basename)
+                if norm_key not in basename_to_progress:
+                    basename_to_progress[norm_key] = []
+                basename_to_progress[norm_key].append((chapter_key, chapter_info))
         
         response_file_to_progress = {}
         for chapter_key, chapter_info in prog.get("chapters", {}).items():
             output_file = chapter_info.get("output_file", "")
             if output_file:
+                # Exact key
                 if output_file not in response_file_to_progress:
                     response_file_to_progress[output_file] = []
                 response_file_to_progress[output_file].append((chapter_key, chapter_info))
-        
+                # Normalized key (ignoring response_ prefix)
+                norm_key = _normalize_opf_match_name(output_file)
+                if norm_key != output_file:
+                    if norm_key not in response_file_to_progress:
+                        response_file_to_progress[norm_key] = []
+                    response_file_to_progress[norm_key].append((chapter_key, chapter_info))
+
         # Re-match each spine chapter (copy of matching logic from lines 462-715)
         for spine_ch in spine_chapters:
             filename = spine_ch['filename']
@@ -1952,14 +2014,42 @@ class RetranslationMixin:
             is_special = spine_ch.get('is_special', False)
             
             base_name = os.path.splitext(filename)[0]
-            expected_response = filename  # Simplified - use OPF filename
+            expected_response = None
+            
+            # Mirror expected_response logic from _force_retranslation_epub_or_text
+            if is_special:
+                # Check for response_ prefix version
+                response_with_prefix = f"response_{base_name}.html"
+                retain = os.getenv('RETAIN_SOURCE_EXTENSION', '0') == '1' or self.config.get('retain_source_extension', False)
+                
+                if retain:
+                    expected_response = filename
+                elif os.path.exists(os.path.join(output_dir, response_with_prefix)):
+                    expected_response = response_with_prefix
+                else:
+                    # Fallback to original filename
+                    expected_response = filename
+            else:
+                # Use OPF filename directly to avoid mismatching
+                retain = os.getenv('RETAIN_SOURCE_EXTENSION', '0') == '1' or self.config.get('retain_source_extension', False)
+                if retain:
+                    expected_response = filename
+                else:
+                    # Handle .htm.html -> .html conversion (kept for parity even though we
+                    # currently use the exact OPF filename for expected_response)
+                    stripped_base_name = base_name
+                    if base_name.endswith('.htm'):
+                        stripped_base_name = base_name[:-4]
+                    expected_response = filename
+
             response_path = os.path.join(output_dir, expected_response)
             
             matched_info = None
             
-            # Method 1: Check by original basename
-            if filename in basename_to_progress:
-                entries = basename_to_progress[filename]
+            # Method 1: Check by original basename (ignoring response_ prefix)
+            basename_key = _normalize_opf_match_name(filename)
+            if basename_key in basename_to_progress:
+                entries = basename_to_progress[basename_key]
                 if entries:
                     _, chapter_info = entries[0]
                     status = chapter_info.get('status', '')
@@ -1968,6 +2058,32 @@ class RetranslationMixin:
                             matched_info = chapter_info
                     else:
                         matched_info = chapter_info
+
+            # Method 2: Check by response file map (exact or normalized key)
+            if not matched_info and expected_response in response_file_to_progress:
+                entries = response_file_to_progress[expected_response]
+                if entries:
+                    _, chapter_info = entries[0]
+                    status = chapter_info.get('status', '')
+                    if status in ['in_progress', 'failed', 'qa_failed']:
+                        if chapter_info.get('actual_num') == chapter_num:
+                            matched_info = chapter_info
+                    else:
+                        matched_info = chapter_info
+
+            # Method 3: Search through all progress entries for matching output file
+            if not matched_info:
+                for chapter_key, chapter_info in prog.get("chapters", {}).items():
+                    out_file = chapter_info.get('output_file')
+                    if out_file == expected_response or _opf_names_equal(out_file, expected_response):
+                        status = chapter_info.get('status', '')
+                        if status in ['in_progress', 'failed', 'qa_failed']:
+                            if chapter_info.get('actual_num') == chapter_num:
+                                matched_info = chapter_info
+                                break
+                        else:
+                            matched_info = chapter_info
+                            break
             
             # Method 4: Match by chapter number key (includes merged logic)
             if not matched_info:
@@ -1984,23 +2100,31 @@ class RetranslationMixin:
                     if status == 'merged':
                         parent_num = chapter_info.get('merged_parent_chapter')
                         filename_noext = os.path.splitext(filename)[0]
-                        if parent_num is not None and (orig_base == filename or orig_base == filename_noext or not orig_base):
+                        if parent_num is not None and (
+                            _opf_names_equal(orig_base, filename)
+                            or _opf_names_equal(orig_base, filename_noext)
+                            or not orig_base
+                        ):
                             parent_key = str(parent_num)
                             if parent_key in prog.get("chapters", {}):
                                 matched_info = chapter_info
                     # Other statuses
                     elif status in ['in_progress', 'failed']:
-                        if chapter_info.get('actual_num') == chapter_num and out_file == expected_response:
+                        if chapter_info.get('actual_num') == chapter_num and (
+                            out_file == expected_response or _opf_names_equal(out_file, expected_response)
+                        ):
                             matched_info = chapter_info
                     elif status == 'qa_failed':
                         if chapter_info.get('actual_num') == chapter_num:
                             matched_info = chapter_info
-                    elif out_file == expected_response:
+                    elif out_file == expected_response or _opf_names_equal(out_file, expected_response):
                         matched_info = chapter_info
                 
                 # Check composite key (e.g., "1_chapter0001")
                 if not matched_info:
                     filename_noext = os.path.splitext(filename)[0]
+                    if filename_noext.startswith("response_"):
+                        filename_noext = filename_noext[len("response_"):]
                     composite_key = f"{chapter_num}_{filename_noext}"
                     if composite_key in prog.get("chapters", {}):
                         matched_info = prog["chapters"][composite_key]
@@ -2019,12 +2143,14 @@ class RetranslationMixin:
                         # Merged: match by original_basename
                         if status == 'merged':
                             filename_noext = os.path.splitext(filename)[0]
-                            if orig_base == filename or orig_base == filename_noext or not orig_base:
+                            if _opf_names_equal(orig_base, filename) or _opf_names_equal(orig_base, filename_noext) or not orig_base:
                                 matched_info = chapter_info
                                 break
                         # In-progress/failed: require both actual_num and output_file
                         elif status in ['in_progress', 'failed']:
-                            if actual_num == chapter_num and out_file == expected_response:
+                            if actual_num == chapter_num and (
+                                out_file == expected_response or _opf_names_equal(out_file, expected_response)
+                            ):
                                 matched_info = chapter_info
                                 break
                         # qa_failed: match by chapter number only
@@ -2033,34 +2159,160 @@ class RetranslationMixin:
                                 matched_info = chapter_info
                                 break
                         # Other: match by original_basename or output_file
-                        elif (orig_base and orig_base == filename) or (not orig_base and out_file and out_file == expected_response):
+                        elif (
+                            orig_base and _opf_names_equal(orig_base, filename)
+                        ) or (
+                            not orig_base and out_file and (
+                                out_file == expected_response or _opf_names_equal(out_file, expected_response)
+                            )
+                        ):
                             matched_info = chapter_info
                             break
             
             # File exists check
             file_exists = os.path.exists(response_path)
             
-            # Update spine chapter status
+            # Update spine chapter status (mirror _force_retranslation_epub_or_text)
             if matched_info:
                 status = matched_info.get('status', 'unknown')
+                
+                # CRITICAL: For failed/in_progress/qa_failed, ALWAYS use progress status
+                # Never let file existence override these statuses
                 if status in ['failed', 'in_progress', 'qa_failed']:
                     spine_ch['status'] = status
                     spine_ch['output_file'] = matched_info.get('output_file') or expected_response
                     spine_ch['progress_entry'] = matched_info
                     continue
                 
+                # For other statuses (completed, merged, etc.)
                 spine_ch['status'] = status
+                
+                # For special files, always use the original filename (ignore what's in progress JSON)
                 if is_special:
                     spine_ch['output_file'] = expected_response
                 else:
                     spine_ch['output_file'] = matched_info.get('output_file', expected_response)
+                
                 spine_ch['progress_entry'] = matched_info
+                
+                # Handle null output_file
+                if not spine_ch['output_file']:
+                    spine_ch['output_file'] = expected_response
+                
+                # Verify file actually exists for completed status
+                if status == 'completed':
+                    output_path = os.path.join(output_dir, spine_ch['output_file'])
+                    if not os.path.exists(output_path):
+                        # If the expected_response file exists, prefer that and
+                        # transparently update the progress entry.
+                        if file_exists and expected_response:
+                            fixed_output_path = os.path.join(output_dir, expected_response)
+                            if os.path.exists(fixed_output_path):
+                                spine_ch['output_file'] = expected_response
+
+                                # If this spine chapter is tied to a concrete
+                                # progress entry, keep it consistent.
+                                if 'progress_entry' in spine_ch and spine_ch['progress_entry'] is not None:
+                                    spine_ch['progress_entry']['output_file'] = expected_response
+
+                                    # Also update the master prog dict so the
+                                    # corrected value is written back later.
+                                    for ch_key, ch_info in prog.get('chapters', {}).items():
+                                        if ch_info is spine_ch['progress_entry']:
+                                            prog['chapters'][ch_key]['output_file'] = expected_response
+                                            break
+                        else:
+                            # No matching file anywhere – mark as missing.
+                            spine_ch['status'] = 'not_translated'
+            
             elif file_exists:
+                # File exists but no progress tracking - mark as completed
                 spine_ch['status'] = 'completed'
                 spine_ch['output_file'] = expected_response
+            
             else:
-                spine_ch['status'] = 'not_translated'
-                spine_ch['output_file'] = expected_response
+                # No file and no progress tracking - LAST RESORT: Try exact filename matching
+                # This handles the case where progress file was deleted but files exist
+                # Match by filename only (ignore response_ prefix and all extensions)
+                
+                def normalize_filename(fname):
+                    """Remove response_ prefix and all extensions for exact comparison"""
+                    base = os.path.basename(fname)
+                    # Remove response_ prefix
+                    if base.startswith('response_'):
+                        base = base[9:]
+                    # Remove all extensions (including double extensions like .html.xhtml)
+                    while True:
+                        new_base, ext = os.path.splitext(base)
+                        if not ext:
+                            break
+                        base = new_base
+                    return base
+                
+                # Normalize the OPF filename
+                normalized_opf = normalize_filename(filename)
+                
+                # Search for exact matching file in output directory
+                matched_file = None
+                if os.path.exists(output_dir):
+                    try:
+                        for existing_file in os.listdir(output_dir):
+                            if os.path.isfile(os.path.join(output_dir, existing_file)):
+                                normalized_existing = normalize_filename(existing_file)
+                                # Exact match only - no fuzzy logic
+                                if normalized_existing == normalized_opf:
+                                    matched_file = existing_file
+                                    break
+                    except Exception as e:
+                        print(f"Warning: Error scanning output directory for match: {e}")
+                
+                if matched_file:
+                    # Found an exact matching file by normalized name - mark as completed
+                    spine_ch['status'] = 'completed'
+                    spine_ch['output_file'] = matched_file
+                    print(f"📁 Matched (refresh): {filename} -> {matched_file}")
+                else:
+                    # No file and no progress tracking - not translated
+                    spine_ch['status'] = 'not_translated'
+                    spine_ch['output_file'] = expected_response
+        
+        # =====================================================
+        # SAVE AUTO-DISCOVERED FILES TO PROGRESS (refresh path)
+        # =====================================================
+        
+        progress_updated = False
+        for spine_ch in spine_chapters:
+            # Only add entries that were marked as completed but have no progress entry
+            if spine_ch['status'] == 'completed' and 'progress_entry' not in spine_ch:
+                chapter_num = spine_ch['file_chapter_num']
+                output_file = spine_ch['output_file']
+                filename = spine_ch['filename']
+                
+                # Create a progress entry for this auto-discovered file
+                chapter_key = str(chapter_num)
+                
+                # Check if key already exists (avoid duplicates)
+                if chapter_key not in prog.get("chapters", {}):
+                    prog.setdefault("chapters", {})[chapter_key] = {
+                        "actual_num": chapter_num,
+                        "content_hash": "",  # Unknown since we don't have the source
+                        "output_file": output_file,
+                        "status": "completed",
+                        "last_updated": os.path.getmtime(os.path.join(output_dir, output_file)),
+                        "auto_discovered": True,
+                        "original_basename": filename
+                    }
+                    progress_updated = True
+                    print(f"✅ Auto-discovered and tracked (refresh): {filename} -> {output_file}")
+        
+        # Save progress file if we added new entries
+        if progress_updated:
+            try:
+                with open(progress_file, 'w', encoding='utf-8') as f:
+                    json.dump(prog, f, ensure_ascii=False, indent=2)
+                print(f"💾 Saved {sum(1 for ch in spine_chapters if ch['status'] == 'completed' and 'progress_entry' not in ch)} auto-discovered files to progress file (refresh)")
+            except Exception as e:
+                print(f"⚠️ Warning: Failed to save progress file during refresh: {e}")
         
         # Rebuild chapter_display_info from updated spine_chapters
         chapter_display_info = []
