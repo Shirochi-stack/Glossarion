@@ -80,6 +80,11 @@ class TextFileProcessor:
                             with open(css_path, 'w', encoding='utf-8') as f:
                                 f.write(css_content)
                             print(f"✅ Generated styles.css from PDF")
+                    
+                    # Convert to markdown if html2text is enabled
+                    if self.html2text_enabled:
+                        content = self._html_to_markdown(content)
+                        print(f"✅ Converted HTML to Markdown")
             except Exception as e:
                 print(f"❌ Failed to extract text from PDF: {e}")
                 content = "" # Handle empty content gracefully
