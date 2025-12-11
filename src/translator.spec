@@ -47,6 +47,14 @@ binaries.extend([
     ('appverifUI.dll', '.')
 ])
 
+# Add MSYS2 DLLs for WeasyPrint (PDF generation with formatting and images)
+import glob
+msys2_bin = r'C:\msys64\mingw64\bin'
+if os.path.exists(msys2_bin):
+    for dll in glob.glob(os.path.join(msys2_bin, '*.dll')):
+        binaries.append((dll, '.'))
+    print(f"  Added {len(glob.glob(os.path.join(msys2_bin, '*.dll')))} MSYS2 DLLs for WeasyPrint")
+
 # Collect data files from packages that need them
 for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'chardet', 'charset_normalizer']:
     try:

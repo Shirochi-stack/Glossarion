@@ -42,12 +42,20 @@ binaries.extend([
     ('libwinpthread-1.dll', '.'),
     ('onnxruntime.dll', '.'),
     ('onnxruntime_providers_shared.dll', '.'),
+    ('onnxruntime_providers_cuda.dll', '.'),
+    ('onnxruntime_providers_tensorrt.dll', '.'),
     ('onnx_inpainter.cpp', '.'),
     ('vfcompat.dll', '.'),
     ('appverifUI.dll', '.')
 ])
 
-# Collect data files from packages that need them
+# Add MSYS2 DLLs for WeasyPrint (PDF generation with formatting and images)
+import glob
+msys2_bin = r'C:\msys64\mingw64\bin'
+if os.path.exists(msys2_bin):
+    for dll in glob.glob(os.path.join(msys2_bin, '*.dll')):
+        binaries.append((dll, '.'))
+    print(f"  Added {len(glob.glob(os.path.join(msys2_bin, '*.dll')))} MSYS2 DLLs for WeasyPrint")
 for package in ['langdetect', 'certifi', 'tiktoken_ext', 'ttkbootstrap', 'chardet', 'charset_normalizer']:
     try:
         data, bins, hidden = collect_all(package)
