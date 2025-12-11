@@ -3525,10 +3525,35 @@ class BatchTranslationProcessor:
         thread_name = threading.current_thread().name
         print(f"\n🔗 [{thread_name}] Processing MERGED group: Chapters {[c.get('actual_chapter_num', c['num']) for _, c in merge_group]}")
         
+        # Check ignore settings for filtering
+        batch_translate_active = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
+        ignore_title_tag = os.getenv('IGNORE_TITLE', '0') == '1' and batch_translate_active
+        ignore_header_tags = os.getenv('IGNORE_HEADER', '0') == '1' and batch_translate_active
+        
         for idx, chapter in merge_group:
             actual_num = chapter.get('actual_chapter_num', chapter['num'])
             content_hash = chapter.get("content_hash") or ContentProcessor.get_content_hash(chapter["body"])
-            chapters_data.append((actual_num, chapter["body"], idx, chapter, content_hash))
+            
+            # Get chapter body and apply ignore filters if needed
+            chapter_body = chapter["body"]
+            
+            if (ignore_title_tag or ignore_header_tags) and chapter_body:
+                from bs4 import BeautifulSoup
+                body_soup = BeautifulSoup(chapter_body, 'html.parser')
+                
+                # Remove title tags if ignored (including those in <head>)
+                if ignore_title_tag:
+                    for title_tag in body_soup.find_all('title'):
+                        title_tag.decompose()
+                
+                # Remove header tags if ignored
+                if ignore_header_tags:
+                    for header_tag in body_soup.find_all(['h1', 'h2', 'h3']):
+                        header_tag.decompose()
+                
+                chapter_body = str(body_soup)
+            
+            chapters_data.append((actual_num, chapter_body, idx, chapter, content_hash))
         
         try:
             # Mark all chapters as in_progress
