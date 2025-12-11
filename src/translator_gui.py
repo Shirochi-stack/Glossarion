@@ -1045,6 +1045,10 @@ Text to analyze:
         self.async_wait_for_completion_var = self.config.get('async_wait_for_completion', False)
         self.async_poll_interval_var = self.config.get('async_poll_interval', 60)
         
+        # PDF settings
+        self.pdf_output_format_var = self.config.get('pdf_output_format', 'pdf')
+        self.pdf_render_mode_var = self.config.get('pdf_render_mode', 'html')
+        
          # Enhanced filtering level
         if not hasattr(self, 'enhanced_filtering_var'):
             self.enhanced_filtering_var = self.config.get('enhanced_filtering', 'smart')
