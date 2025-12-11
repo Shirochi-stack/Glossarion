@@ -555,7 +555,7 @@ body {{
     font-family: {font_family};
     font-size: {base_font_size};
     line-height: {line_height_ratio:.2f};
-    color: {text_color};
+    color: #000000;  /* Force black text */
     background-color: #ffffff;
     margin: 2em;
     text-align: justify;
@@ -565,6 +565,7 @@ p {{
     margin: 0.5em 0;
     text-align: justify;
     text-justify: inter-word;
+    color: #000000;  /* Force black text for paragraphs */
 }}
 {heading_styles}
 img {{
@@ -600,14 +601,17 @@ img {{
 }}
 
 .toc-entry a {{
-    text-decoration: none;
-    color: #000000;  /* Black text for TOC links */
+    text-decoration: underline;
+    color: #0000EE;  /* Blue links in TOC (standard hyperlink blue) */
     flex-grow: 1;
 }}
 
 .toc-entry a:hover {{
-    text-decoration: underline;
-    color: #0066cc;
+    color: #551A8B;  /* Purple on hover (visited link color) */
+}}
+
+.toc-entry a:visited {{
+    color: #551A8B;  /* Purple for visited links */
 }}
 
 .toc-page {{
@@ -729,13 +733,19 @@ def _detect_toc_patterns(text: str) -> bool:
     if len(text) > 200:
         return False
     
+    # Skip if too short
+    if len(text) < 3:
+        return False
+    
     # Check for TOC patterns
     toc_patterns = [
-        r'\.\.+\s*\d+',        # Dots followed by page number (e.g., "Chapter 1.....10")
-        r'^.+\s+\d{1,3}$',     # Text followed by space and 1-3 digit page number (e.g., "Introduction 4")
-        r'^Chapter\s+\d+',     # Starts with "Chapter N"
-        r'^\d+\.\d+\s+',       # Starts with section number like "1.1 "
-        r'^[IVX]+\.\s+',       # Roman numerals (I, II, III, etc.)
+        r'\.\.+\s*\d+',                    # Dots followed by page number (e.g., "Chapter 1.....10")
+        r'^.+\s+\d{1,3}$',                 # Text followed by space and 1-3 digit page number (e.g., "Introduction 4")
+        r'^Chapter\s+\d+',                 # Starts with "Chapter N"
+        r'^\d+\.\d+\s+',                   # Starts with section number like "1.1 "
+        r'^[IVX]+\.\s+',                   # Roman numerals (I, II, III, etc.)
+        r'^The\s+[A-Z][a-z]+.*\d{1,3}$',  # "The Machine 8" style
+        r'^In\s+the\s+[A-Z][a-z]+.*\d{1,3}$',  # "In the Golden Age 19" style
     ]
     
     for pattern in toc_patterns:
@@ -851,11 +861,24 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
         doc = fitz.open(pdf_path)
         html_parts = []
         
-        # Try to extract TOC from PDF outline (but don't add it yet - let it appear on its page)
-        toc_from_outline = _extract_toc_from_outline(doc)
+        # Get TOC from PDF outline
+        toc_from_outline = None
+        toc_page_number = 0  # Page where TOC should be inserted (0-indexed)
+        
+        try:
+            toc_data = doc.get_toc(simple=False)
+            if toc_data:
+                # TOC typically appears on first page or near the beginning
+                # We'll insert it on page 0 (first page) as that's most common
+                toc_page_number = 0
+                
+                toc_from_outline = _extract_toc_from_outline(doc)
+                if toc_from_outline:
+                    print(f"📑 Found TOC in PDF outline, will insert at beginning")
+        except:
+            pass
+        
         has_outline_toc = bool(toc_from_outline)
-        if has_outline_toc:
-            print(f"📑 Detected table of contents in PDF outline (will preserve in-place)")
         
         total_pages = len(doc)
         print(f"📄 Processing {total_pages} pages with formatting...")
@@ -1061,6 +1084,11 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
             
             # Add page content with page break if needed
             if page_html:
+                # Insert TOC from outline BEFORE page content on its appropriate page
+                if toc_from_outline and page_num == toc_page_number:
+                    html_parts.append(toc_from_outline)
+                    toc_from_outline = None  # Only insert once
+                
                 page_content = '\n'.join(page_html)
                 
                 # Add page break div for title pages and chapter starts
