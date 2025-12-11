@@ -8805,7 +8805,7 @@ def main(log_callback=None, stop_callback=None):
                 
                 # Normal merged behavior (split not enabled or header count mismatch)
                 # Save entire merged response to parent chapter's file
-                if is_text_file:
+                if is_text_file and not is_pdf_file:
                     parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num).replace('.html', '.txt')
                     from bs4 import BeautifulSoup
                     soup = BeautifulSoup(cleaned, 'html.parser')
@@ -8869,8 +8869,8 @@ def main(log_callback=None, stop_callback=None):
                 # Skip normal save since we handled it above
                 continue
 
-            if is_text_file:
-                # For text files, save as plain text instead of HTML
+            if is_text_file and not is_pdf_file:
+                # For text files (but NOT PDFs), save as plain text instead of HTML
                 fname_txt = fname.replace('.html', '.txt')  # Change extension to .txt
                 
                 # Extract text from HTML
@@ -8968,12 +8968,15 @@ def main(log_callback=None, stop_callback=None):
             translated_chapters = []
             
             for chapter in chapters:
-                # Look for .txt files instead of .html
+                # Look for .txt files for text files, .html for PDFs
                 fname_base = FileUtilities.create_chapter_filename(chapter, chapter['num'])
-                fname_txt = fname_base.replace('.html', '.txt')
+                if is_pdf_file:
+                    fname_to_check = fname_base  # PDFs use .html files
+                else:
+                    fname_to_check = fname_base.replace('.html', '.txt')  # Text files use .txt
                 
-                if os.path.exists(os.path.join(out, fname_txt)):
-                    with open(os.path.join(out, fname_txt), 'r', encoding='utf-8') as f:
+                if os.path.exists(os.path.join(out, fname_to_check)):
+                    with open(os.path.join(out, fname_to_check), 'r', encoding='utf-8') as f:
                         content = f.read()
                     
                     translated_chapters.append({

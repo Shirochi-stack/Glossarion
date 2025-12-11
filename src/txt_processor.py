@@ -22,8 +22,8 @@ class TextFileProcessor:
         model_name = os.getenv("MODEL", "gpt-3.5-turbo")
         self.chapter_splitter = ChapterSplitter(model_name=model_name)
         
-        # Check output format settings for PDFs
-        self.pdf_output_format = os.getenv("PDF_OUTPUT_FORMAT", "html").lower()  # html, markdown, or txt
+        # Check settings for PDFs
+        self.pdf_render_mode = os.getenv("PDF_RENDER_MODE", "absolute").lower()  # absolute, semantic, xhtml, html
         self.pdf_extract_images = os.getenv("PDF_EXTRACT_IMAGES", "1") == "1"
         self.pdf_generate_css = os.getenv("PDF_GENERATE_CSS", "1") == "1"
         self.html2text_enabled = os.getenv("USE_HTML2TEXT", "0") == "1"
@@ -36,9 +36,8 @@ class TextFileProcessor:
         
         if self.file_path.lower().endswith('.pdf'):
             try:
-                # Determine output format
-                if self.pdf_output_format in ['html', 'markdown']:
-                    print(f"📄 Extracting PDF with formatting (format: {self.pdf_output_format})")
+                # Always extract PDFs with formatting (render mode determines the extraction method)
+                    print(f"📄 Extracting PDF with formatting (render mode: {self.pdf_render_mode})")
                     # Extract page by page for PDFs to preserve structure
                     content, images_info = extract_pdf_with_formatting(
                         self.file_path, 
@@ -49,7 +48,7 @@ class TextFileProcessor:
                     is_html_content = True
                     
                     # Generate CSS if enabled (unless overridden by user-loaded CSS)
-                    if self.pdf_generate_css and self.pdf_output_format == 'html':
+                    if self.pdf_generate_css:
                         css_override_path = os.getenv('EPUB_CSS_OVERRIDE_PATH', '').strip()
                         attach_css_enabled = os.getenv('ATTACH_CSS_TO_CHAPTERS', '0') == '1'
                         css_path = os.path.join(self.output_dir, 'styles.css')
@@ -81,14 +80,6 @@ class TextFileProcessor:
                             with open(css_path, 'w', encoding='utf-8') as f:
                                 f.write(css_content)
                             print(f"✅ Generated styles.css from PDF")
-                    
-                    # Convert to markdown if html2text is enabled
-                    if self.html2text_enabled or self.pdf_output_format == 'markdown':
-                        content = self._html_to_markdown(content)
-                        print(f"✅ Converted HTML to Markdown")
-                else:
-                    print(f"📄 Extracting text from PDF: {os.path.basename(self.file_path)}")
-                    content = extract_text_from_pdf(self.file_path)
             except Exception as e:
                 print(f"❌ Failed to extract text from PDF: {e}")
                 content = "" # Handle empty content gracefully
@@ -195,10 +186,7 @@ class TextFileProcessor:
                     
                     # Determine file extension based on format
                     if is_html and self.file_path.lower().endswith('.pdf'):
-                        if self.html2text_enabled or self.pdf_output_format == 'markdown':
-                            file_ext = '.md'
-                        else:
-                            file_ext = '.html'
+                        file_ext = '.html'  # PDFs always use HTML
                     else:
                         file_ext = '.txt'
                     
@@ -252,10 +240,7 @@ class TextFileProcessor:
                 # Chapter is small enough, add as-is
                 # Determine file extension based on format
                 if is_html and self.file_path.lower().endswith('.pdf'):
-                    if self.html2text_enabled or self.pdf_output_format == 'markdown':
-                        file_ext = '.md'
-                    else:
-                        file_ext = '.html'
+                    file_ext = '.html'  # PDFs always use HTML
                 else:
                     file_ext = '.txt'
                 
