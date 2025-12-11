@@ -1517,6 +1517,22 @@ def create_pdf_from_html(html_content: str, output_path: str, css_path: Optional
     try:
         # Try using weasyprint first (best HTML rendering)
         try:
+            # On Windows, try to auto-detect MSYS2 DLL directory for WeasyPrint
+            if sys.platform == 'win32' and 'WEASYPRINT_DLL_DIRECTORIES' not in os.environ:
+                msys2_paths = [
+                    r'C:\msys64\mingw64\bin',
+                    r'C:\msys64\ucrt64\bin',
+                    r'C:\msys32\mingw64\bin',
+                    os.path.expandvars(r'%USERPROFILE%\msys64\mingw64\bin'),
+                ]
+                for msys_path in msys2_paths:
+                    if os.path.exists(msys_path):
+                        gobject_dll = os.path.join(msys_path, 'libgobject-2.0-0.dll')
+                        if os.path.exists(gobject_dll):
+                            os.environ['WEASYPRINT_DLL_DIRECTORIES'] = msys_path
+                            print(f"   • Auto-detected MSYS2 DLLs: {msys_path}")
+                            break
+            
             from weasyprint import HTML, CSS
             from weasyprint.text.fonts import FontConfiguration
             
@@ -1592,15 +1608,90 @@ def create_pdf_from_html(html_content: str, output_path: str, css_path: Optional
             print(f"✅ Successfully created PDF with WeasyPrint: {os.path.basename(output_path)}")
             return True
             
-        except ImportError:
+        except ImportError as e:
             print("⚠️ WeasyPrint not available, trying alternative methods...")
+            print(f"   • ImportError: {e}")
+            if sys.platform == 'win32':
+                print("   • For Windows: Install MSYS2 and run: pacman -S mingw-w64-x86_64-pango")
+                print("   • Then set: WEASYPRINT_DLL_DIRECTORIES=C:\\msys64\\mingw64\\bin")
+            pass
+        except Exception as e:
+            error_msg = str(e)
+            print(f"⚠️ WeasyPrint failed: {error_msg[:200]}")
+            
+            # Provide specific guidance for DLL errors on Windows
+            if sys.platform == 'win32' and ('cannot load library' in error_msg or 'DLL' in error_msg):
+                print("\n⚠️ WeasyPrint DLL Error - Follow these steps:")
+                print("   1. Install MSYS2 from https://www.msys2.org/")
+                print("   2. Open MSYS2 terminal and run: pacman -S mingw-w64-x86_64-pango")
+                print("   3. Set environment variable: WEASYPRINT_DLL_DIRECTORIES=C:\\msys64\\mingw64\\bin")
+                print("   4. Or manually set it before running:")
+                print("      $env:WEASYPRINT_DLL_DIRECTORIES='C:\\msys64\\mingw64\\bin'")
+                print("\n   • Falling back to alternative PDF generation methods...\n")
             pass
         
-        # Try pdfkit (wkhtmltopdf wrapper) as fallback
+        # Try xhtml2pdf (pure Python, bundleable) as fallback
+        try:
+            from xhtml2pdf import pisa
+            
+            print("📄 Using xhtml2pdf for PDF generation (pure Python, bundleable)...")
+            
+            # Prepare HTML with embedded CSS
+            full_html = html_content
+            if css_path and os.path.exists(css_path):
+                try:
+                    with open(css_path, 'r', encoding='utf-8') as f:
+                        css_content = f.read()
+                    
+                    # Remove CSS features that xhtml2pdf doesn't support well
+                    # Remove CSS comments that might cause parsing issues
+                    import re as css_re
+                    css_content = css_re.sub(r'/\*.*?\*/', '', css_content, flags=css_re.DOTALL)
+                    
+                    # Embed CSS into HTML
+                    if '<head>' in full_html:
+                        full_html = full_html.replace('<head>', f'<head><style>{css_content}</style>', 1)
+                    else:
+                        full_html = f'<html><head><style>{css_content}</style></head><body>{full_html}</body></html>'
+                    print("   \u2022 Embedded CSS styling")
+                except Exception as css_err:
+                    print(f"   \u26a0\ufe0f Could not embed CSS: {css_err}")
+            
+            # Embed images as data URIs for xhtml2pdf (it doesn't handle file paths well)
+            base_path = os.path.dirname(output_path) if output_path else None
+            full_html = _embed_images_as_data_uris(full_html, base_path, images_dir)
+            print("   • Embedded images as data URIs for xhtml2pdf")
+            
+            # Convert HTML to PDF
+            with open(output_path, 'wb') as pdf_file:
+                pisa_status = pisa.CreatePDF(
+                    full_html.encode('utf-8'),
+                    dest=pdf_file,
+                    encoding='utf-8'
+                )
+            
+            if not pisa_status.err:
+                print(f"✅ Successfully created PDF with xhtml2pdf: {os.path.basename(output_path)}")
+                if images_dir and os.path.exists(images_dir):
+                    print(f"   • Images embedded in PDF")
+                return True
+            else:
+                print(f"⚠️ xhtml2pdf reported errors during conversion")
+                return False
+            
+        except ImportError:
+            print("⚠️ xhtml2pdf not available, trying next method...")
+            print("   • Install with: pip install xhtml2pdf")
+            pass
+        except Exception as e:
+            print(f"⚠️ xhtml2pdf failed: {e}")
+            pass
+        
+        # Try pdfkit (wkhtmltopdf wrapper) as fallback (not bundleable)
         try:
             import pdfkit
             
-            print("📄 Using pdfkit for PDF generation...")
+            print("📄 Using pdfkit for PDF generation (requires wkhtmltopdf)...")
             
             # Configure options
             options = {
@@ -1628,7 +1719,11 @@ def create_pdf_from_html(html_content: str, output_path: str, css_path: Optional
             import fitz
             from bs4 import BeautifulSoup
             
-            print("📄 Using PyMuPDF fallback for PDF generation (limited HTML support)...")
+            print("\n⚠️ WARNING: Using PyMuPDF fallback - this will create a TEXT-ONLY PDF!")
+            print("   • All HTML formatting, CSS styles, and images will be LOST")
+            print("   • The HTML file has been saved with full formatting and images")
+            print("   • Recommended: Use the HTML file or install WeasyPrint for proper PDF")
+            print("   • Creating basic text PDF...\n")
             
             # Parse HTML to extract text while preserving some structure
             soup = BeautifulSoup(html_content, 'html.parser')
@@ -1641,7 +1736,25 @@ def create_pdf_from_html(html_content: str, output_path: str, css_path: Optional
             text_content = soup.get_text(separator='\n', strip=True)
             
             # Use the text-based PDF creator
-            return create_pdf_from_text(text_content, output_path)
+            result = create_pdf_from_text(text_content, output_path)
+            
+            if result:
+                # Save a note file next to the PDF
+                note_path = output_path.replace('.pdf', '_README.txt')
+                try:
+                    with open(note_path, 'w', encoding='utf-8') as f:
+                        f.write("NOTE: This PDF was created with limited fallback support.\n")
+                        f.write("It contains only plain text without formatting or images.\n\n")
+                        f.write("For the full version with formatting and images, use the HTML file:\n")
+                        f.write(f"  {output_path.replace('.pdf', '.html')}\n\n")
+                        f.write("Or install WeasyPrint for proper PDF generation:\n")
+                        f.write("  1. Install MSYS2 from https://www.msys2.org/\n")
+                        f.write("  2. Run: pacman -S mingw-w64-x86_64-pango\n")
+                        f.write("  3. Set: $env:WEASYPRINT_DLL_DIRECTORIES='C:\\msys64\\mingw64\\bin'\n")
+                except:
+                    pass
+            
+            return result
             
         except Exception as e:
             print(f"❌ PyMuPDF fallback failed: {e}")
