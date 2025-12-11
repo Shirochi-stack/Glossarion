@@ -498,17 +498,14 @@ class RequestMerger:
             List of content sections if marker count matches expected_count,
             or None if marker count doesn't match (fallback to normal merged behavior)
         """
-        from bs4 import BeautifulSoup, Comment
+        import re
         
-        # Parse the HTML
-        soup = BeautifulSoup(content, 'html.parser')
-        
-        # Find all SPLIT_MARKER comments
-        # These are invisible HTML comments that were injected during merge
-        markers = []
-        for comment in soup.find_all(string=lambda text: isinstance(text, Comment)):
-            if 'SPLIT_MARKER' in comment:
-                markers.append(comment)
+        # Find all SPLIT_MARKER comments using regex
+        # This is more reliable than BeautifulSoup parsing because:
+        # 1. The AI might return markers as plain text, not parsed Comment nodes
+        # 2. Markdown conversion might have altered the HTML structure
+        marker_pattern = r'<!--\s*SPLIT_MARKER:.*?-->'
+        markers = re.findall(marker_pattern, content, flags=re.DOTALL)
         
         # Check if we have the expected number of markers
         if len(markers) != expected_count:
@@ -517,52 +514,22 @@ class RequestMerger:
         
         print(f"   ✓️ Split the Merge: Found {len(markers)} split markers matching expected count")
         
-        # Convert to string for splitting
-        content_str = str(soup)
+        # Split content by markers using regex
+        # This splits on the marker pattern and includes the markers in the results
+        sections = re.split(marker_pattern, content, flags=re.DOTALL)
         
-        # Find positions of all markers in the content string
-        marker_positions = []
-        search_pos = 0
+        # The first element is content before the first marker (should be empty or whitespace)
+        # Remove it if it's just whitespace
+        if sections and sections[0].strip() == '':
+            sections.pop(0)
         
-        for marker in markers:
-            marker_str = str(marker)
-            # Find this marker in the content
-            pos = content_str.find(marker_str, search_pos)
-            if pos != -1:
-                marker_positions.append(pos)
-                search_pos = pos + len(marker_str)
-            else:
-                print(f"   ⚠️ Split the Merge: Failed to locate marker in content")
-                return None
+        # Verify we got the expected number of sections
+        if len(sections) != expected_count:
+            print(f"   ⚠️ Split the Merge: Split resulted in {len(sections)} sections but expected {expected_count}")
+            return None
         
-        # Split content based on marker positions
-        sections = []
-        
-        for i, marker_pos in enumerate(marker_positions):
-            if i == 0:
-                # First section: from start to first marker
-                section_start = 0
-            else:
-                # Subsequent sections: from previous marker to this marker
-                section_start = marker_positions[i-1]
-            
-            if i < len(marker_positions) - 1:
-                # Not the last section: go up to next marker
-                section_end = marker_positions[i+1]
-            else:
-                # Last section: go to end of content
-                section_end = len(content_str)
-            
-            # Extract the section (including the marker itself)
-            section = content_str[section_start:section_end].strip()
-            sections.append(section)
-        
-        # Remove all SPLIT_MARKER comments from each section to keep HTML clean
-        cleaned_sections = []
-        for section in sections:
-            # Remove the marker comment
-            cleaned = re.sub(r'<!--\s*SPLIT_MARKER:.*?-->', '', section, flags=re.DOTALL)
-            cleaned_sections.append(cleaned.strip())
+        # Clean up sections (remove leading/trailing whitespace)
+        cleaned_sections = [section.strip() for section in sections]
         
         print(f"   ✓️ Split the Merge: Successfully split into {len(cleaned_sections)} sections (markers removed)")
         return cleaned_sections
