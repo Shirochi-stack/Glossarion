@@ -4460,6 +4460,26 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 QMessageBox.critical(self, "Error", "Please select file(s) to translate.")
                 return
             self.selected_files = [file_path]
+            
+            # Auto-clear glossary if file doesn't match (works for both manual and auto-loaded)
+            if self.manual_glossary_path:
+                current_file_base = os.path.splitext(os.path.basename(file_path))[0]
+                # Check both glossary filename AND parent folder name
+                glossary_full_path = self.manual_glossary_path
+                glossary_name = os.path.basename(glossary_full_path)
+                glossary_parent = os.path.basename(os.path.dirname(glossary_full_path))
+                
+                # Check if the current file's base name appears in the glossary path (filename or parent folder)
+                if current_file_base not in glossary_name and current_file_base not in glossary_parent:
+                    # Glossary doesn't match, clear it
+                    old_glossary = glossary_full_path
+                    was_manual = getattr(self, 'manual_glossary_manually_loaded', False)
+                    source_type = "manually loaded" if was_manual else "auto-loaded"
+                    self.append_log(f"📑 Cleared {source_type} glossary from different source: {os.path.basename(os.path.dirname(old_glossary))}")
+                    self.manual_glossary_path = None
+                    self.manual_glossary_manually_loaded = False
+                    self.auto_loaded_glossary_path = None
+                    self.auto_loaded_glossary_for_file = None
         
         # Reset stop flags
         self.stop_requested = False
@@ -8549,27 +8569,33 @@ Important rules:
                 except Exception:
                     pass
             elif pdf_files or txt_files:
-                # For PDF/TXT files, clear any manually loaded glossary that doesn't match the file
-                if hasattr(self, 'manual_glossary_manually_loaded') and self.manual_glossary_manually_loaded and self.manual_glossary_path:
+                # For PDF/TXT files, clear any glossary (manual or auto-loaded) that doesn't match the file
+                if self.manual_glossary_path:
                     # Get the current file name (first file if multiple)
                     current_file = pdf_files[0] if pdf_files else txt_files[0]
                     current_file_base = os.path.splitext(os.path.basename(current_file))[0]
                     
-                    # Get the glossary filename
-                    glossary_name = os.path.basename(self.manual_glossary_path)
+                    # Check both glossary filename AND parent folder name
+                    glossary_full_path = self.manual_glossary_path
+                    glossary_name = os.path.basename(glossary_full_path)
+                    glossary_parent = os.path.basename(os.path.dirname(glossary_full_path))
                     
-                    # Check if the current file's base name appears in the glossary filename
-                    if current_file_base not in glossary_name:
+                    # Check if the current file's base name appears in the glossary path (filename or parent folder)
+                    if current_file_base not in glossary_name and current_file_base not in glossary_parent:
                         # Glossary doesn't match, clear it
-                        old_glossary = glossary_name
-                        self.append_log(f"📑 Cleared manually loaded glossary from different source: {old_glossary}")
+                        old_glossary = glossary_full_path
+                        was_manual = getattr(self, 'manual_glossary_manually_loaded', False)
+                        source_type = "manually loaded" if was_manual else "auto-loaded"
+                        self.append_log(f"📑 Cleared {source_type} glossary from different source: {os.path.basename(os.path.dirname(old_glossary))}")
                         self.manual_glossary_path = None
                         self.manual_glossary_manually_loaded = False
                         self.auto_loaded_glossary_path = None
                         self.auto_loaded_glossary_for_file = None
                     else:
                         # Glossary matches the current file, keep it
-                        self.append_log(f"📑 Keeping manually loaded glossary: {glossary_name}")
+                        was_manual = getattr(self, 'manual_glossary_manually_loaded', False)
+                        source_type = "manually loaded" if was_manual else "auto-loaded"
+                        self.append_log(f"📑 Keeping {source_type} glossary: {glossary_name}")
 
     def _convert_json_to_txt(self, json_path):
         """Convert a JSON file to TXT format for translation."""
