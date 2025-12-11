@@ -4203,7 +4203,7 @@ def _create_processing_options_section(self, parent):
     split_merge_cb.setContentsMargins(20, 2, 0, 0)  # Indented to show it's a sub-option
     extraction_v.addWidget(split_merge_cb)
     
-    split_merge_desc = QLabel("Split merged translation output back into separate files based on headers.\nEach chapter gets its own file named after the original content.opf entry.\nWorks if header count is at least the merged chapter count.")
+    split_merge_desc = QLabel("Split merged translation output back into separate files using invisible markers.\nEach chapter gets its own file named after the original content.opf entry.\nMarkers are automatically preserved during translation for reliable splitting.")
     split_merge_desc.setStyleSheet("color: gray; font-size: 9pt;")
     split_merge_desc.setContentsMargins(40, 0, 0, 5)
     extraction_v.addWidget(split_merge_desc)
@@ -4241,7 +4241,7 @@ def _create_processing_options_section(self, parent):
     if not hasattr(self, 'synthetic_merge_headers_var'):
         self.synthetic_merge_headers_var = self.config.get('synthetic_merge_headers', True)
     
-    synthetic_headers_cb = self._create_styled_checkbox("Inject Synthetic Headers for Merged Requests (recommended)")
+    synthetic_headers_cb = self._create_styled_checkbox("Inject Split Markers for Merged Requests (required for splitting)")
     try:
         synthetic_headers_cb.setChecked(bool(self.synthetic_merge_headers_var))
     except Exception:
@@ -4261,8 +4261,8 @@ def _create_processing_options_section(self, parent):
     # auto-detect rich text and render it as a giant HTML heading. To
     # avoid that, describe it without angle brackets.
     synthetic_headers_desc = QLabel(
-        "Ensure each merged chapter has at least one visible h1 heading before sending to the API.\n"
-        "Improves header-based splitting and reduces Split-the-Merge failures."
+        "Inject invisible HTML comment markers at the start of each merged chapter.\n"
+        "REQUIRED: These markers enable split-the-merge to work. They are removed from final output."
     )
     from PySide6.QtCore import Qt as _Qt
     synthetic_headers_desc.setTextFormat(_Qt.PlainText)

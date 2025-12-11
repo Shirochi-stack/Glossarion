@@ -255,23 +255,14 @@ class RequestMerger:
         This is used both for request-size estimation and for the actual
         merged request that is sent to the API.
 
-        Before concatenating, we ensure that each chapter has at least one
-        visible heading (h1–h6). This greatly improves the reliability of
-        Split‑the‑Merge, because the model sees clear structural boundaries
-        between chapters.
-
-        Heuristic per chapter (only if no existing h1–h6):
-
-        1. If there is a <head> tag, replace it with an <h1> whose text comes
-           from <title> if available, otherwise from the chapter title or
-           filename.
-        2. Else, if there is a <title> tag, replace it with an <h1>.
-        3. Else, prepend an <h1> at the start of the document (inside <body>
-           if present) whose text is derived from the filename.
+        Before concatenating, we inject an invisible split marker at the
+        beginning of each chapter. This greatly improves the reliability of
+        Split‑the‑Merge, because the splitter can simply find these markers
+        instead of carefully parsing headers.
 
         Args:
             chapters_data: List of tuples (chapter_num, content, chapter_obj)
-            log_injections: If False, perform header injection silently
+            log_injections: If False, perform marker injection silently
                 (no console logging). Used for size-estimation previews to
                 avoid duplicate log lines.
 
@@ -281,183 +272,64 @@ class RequestMerger:
         if not chapters_data:
             return ""
 
-        # Check whether synthetic header injection is enabled. This is
+        # Check whether split marker injection is enabled. This is
         # controlled via the SYNTHETIC_MERGE_HEADERS env var and surfaced in
         # the Other Settings dialog. Enabled by default.
-        synthetic_headers_enabled = os.getenv('SYNTHETIC_MERGE_HEADERS', '1') == '1'
+        # (Note: We're reusing the same env var for backward compatibility)
+        split_markers_enabled = os.getenv('SYNTHETIC_MERGE_HEADERS', '1') == '1'
 
         merged_parts = []
 
         for chapter_num, content, chapter_obj in chapters_data:
             # If disabled, keep content exactly as-is.
-            if not synthetic_headers_enabled:
+            if not split_markers_enabled:
                 merged_parts.append(content)
                 continue
-            # Defensive: if something goes wrong in the header injection
+            
+            # Defensive: if something goes wrong in the marker injection
             # logic, fall back to the original content rather than breaking
             # the whole merge.
             try:
-                # 0) Pre-check: If content looks like it starts with a Markdown header
-                # (common in enhanced extraction), convert it to an HTML header string
-                # right away. This ensures BeautifulSoup sees a header tag.
+                # Inject an invisible split marker comment at the beginning
+                # The marker contains a preservation notice to ensure the AI keeps it
+                split_marker = '<!-- SPLIT_MARKER: DO NOT REMOVE - REQUIRED FOR PROCESSING -->'
+                
                 if isinstance(content, str):
-                    lines = content.split('\n')
-                    # Check first non-empty line to see if it's a markdown header
-                    for i, line in enumerate(lines[:20]): # Check first 20 lines max
-                        if not line.strip():
-                            continue
-                        
-                        # Match markdown header line (e.g. "# Title")
-                        # Must be at start of line (ignoring whitespace)
-                        m = re.match(r'^\s*(#{1,6})\s+(.+)$', line)
-                        if m:
-                            h_text = m.group(2).strip()
-                            # ALWAYS use h1 for synthetic merge headers regardless of markdown level
-                            # This ensures consistent header structure for split-the-merge
-                            lines[i] = f'<h1>{h_text}</h1>'
-                            content = '\n'.join(lines)
-                            if log_injections:
-                                print(
-                                    f"   ℹ️ Request Merging: Converted markdown header to <h1> for "
-                                    f"chapter {chapter_num}:\n"
-                                    f"      Before: '{line.strip()[:80]}'\n"
-                                    f"      After:  '<h1>{h_text[:80]}</h1>'"
-                                )
-                        # Whether we found a header or not, stop after the first 
-                        # non-empty line so we don't accidentally convert headers
-                        # in the middle of the text (unless they are the very first thing).
-                        break
-
-                soup = BeautifulSoup(content, 'html.parser') if isinstance(content, str) else None
-            except Exception:
-                soup = None
-
-            if soup is None:
-                merged_parts.append(content)
-                continue
-
-            # If the chapter already has an h1 tag, use as‑is (it's already good)
-            if soup.find('h1'):
-                merged_parts.append(str(soup))
-                continue
-
-            # Derive a reasonable heading text for synthetic headers
-            title_tag = soup.find('title')
-            heading_text = None
-            if title_tag:
-                heading_text = title_tag.get_text(strip=True) or None
-
-            if not heading_text:
-                # Prefer chapter_obj['title'], then original_basename/filename,
-                # finally fall back to the numeric chapter number.
-                try:
-                    heading_text = (
-                        (chapter_obj.get('title') or '').strip()
-                        if isinstance(chapter_obj, dict) else None
-                    ) or None
-                except Exception:
-                    heading_text = None
-
-            if not heading_text and isinstance(chapter_obj, dict):
-                try:
-                    raw_name = (
-                        chapter_obj.get('original_basename')
-                        or chapter_obj.get('filename')
-                        or ''
-                    )
-                    base = os.path.splitext(os.path.basename(raw_name))[0]
-                    heading_text = base or None
-                except Exception:
-                    heading_text = None
-
-            if not heading_text:
-                heading_text = f"Chapter {chapter_num}"
-
-            # 1) If there is a <head> tag, replace it entirely with <h1>.
-            head_tag = soup.find('head')
-            if head_tag is not None:
-                new_h1 = soup.new_tag('h1')
-                new_h1.string = heading_text
-                head_tag.replace_with(new_h1)
-                if log_injections:
-                    print(
-                        f"   ℹ️ Request Merging: Injected synthetic <h1> from <head> for "
-                        f"chapter {chapter_num}: '{heading_text[:80]}'"
-                    )
-                merged_parts.append(str(soup))
-                continue
-
-            # 2) Else, if there is a <title> tag, replace it with <h1>.
-            if title_tag is not None:
-                new_h1 = soup.new_tag('h1')
-                new_h1.string = heading_text
-                title_tag.replace_with(new_h1)
-                if log_injections:
-                    print(
-                        f"   ℹ️ Request Merging: Injected synthetic <h1> from <title> for "
-                        f"chapter {chapter_num}: '{heading_text[:80]}'"
-                    )
-                merged_parts.append(str(soup))
-                continue
-            
-            # 3) Check if there's an h2-h6 near the start (first 3 tags) that we can promote
-            # This handles cases where there's no <head>/<title> but there IS an h2-h6
-            promoted_header = None
-            check_limit = 3  # Check first 3 tags
-            tags_checked = 0
-            
-            # Start from body if it exists, otherwise from the whole document
-            search_root = soup.body if soup.body else soup
-            
-            for tag in search_root.find_all(True):  # Find all tags
-                if tag.name in ['h2', 'h3', 'h4', 'h5', 'h6']:
-                    # Found a header near the start - promote it to h1
-                    promoted_header = tag
-                    break
-                tags_checked += 1
-                if tags_checked >= check_limit:
-                    break
-            
-            # If we found an h2-h6 near the start, promote it to h1
-            if promoted_header:
-                original_level = promoted_header.name
-                header_text = promoted_header.get_text(strip=True)
-                new_h1 = soup.new_tag('h1')
-                new_h1.string = header_text
-                promoted_header.replace_with(new_h1)
-                if log_injections:
-                    print(
-                        f"   ℹ️ Request Merging: Promoted <{original_level}> to <h1> at document start for "
-                        f"chapter {chapter_num}: '{header_text[:80]}'"
-                    )
-                merged_parts.append(str(soup))
-                continue
-
-            # 4) Final fallback: insert an <h1> at the beginning of the body
-            # (or document) so the splitter has at least one clear boundary.
-            new_h1 = soup.new_tag('h1')
-            new_h1.string = heading_text
-
-            if soup.body is not None:
-                soup.body.insert(0, new_h1)
-            else:
-                html_tag = soup.find('html')
-                if html_tag is not None:
-                    html_tag.insert(0, new_h1)
+                    soup = BeautifulSoup(content, 'html.parser')
                 else:
-                    # No explicit <html>/<body>; just put it at the start.
+                    # Non-string content, just append as-is
+                    merged_parts.append(content)
+                    continue
+                
+                # Insert the split marker at the very beginning of the document
+                from bs4 import Comment
+                marker_comment = Comment(' SPLIT_MARKER: DO NOT REMOVE - REQUIRED FOR PROCESSING ')
+                
+                # Insert at the beginning of the body if it exists
+                if soup.body is not None:
+                    soup.body.insert(0, marker_comment)
+                else:
+                    # No body tag - insert at document start
                     if soup.contents:
-                        soup.insert(0, new_h1)
+                        soup.insert(0, marker_comment)
                     else:
-                        soup.append(new_h1)
-
-            if log_injections:
-                print(
-                    f"   ℹ️ Request Merging: Prepended synthetic <h1> at document start for "
-                    f"chapter {chapter_num}: '{heading_text[:80]}'"
-                )
-
-            merged_parts.append(str(soup))
+                        soup.append(marker_comment)
+                
+                if log_injections:
+                    # Get a preview of the content for logging
+                    preview = str(soup)[:100].replace('\n', ' ')
+                    print(
+                        f"   ℹ️ Request Merging: Injected invisible split marker for "
+                        f"chapter {chapter_num}: {preview}..."
+                    )
+                
+                merged_parts.append(str(soup))
+                
+            except Exception as e:
+                # Fallback: append original content if anything goes wrong
+                if log_injections:
+                    print(f"   ⚠️ Request Merging: Failed to inject split marker for chapter {chapter_num}: {e}")
+                merged_parts.append(content)
 
         return "\n\n".join(merged_parts)
     
@@ -611,348 +483,89 @@ class RequestMerger:
         return groups
     
     @classmethod
-    def split_by_headers(cls, content, expected_count):
+    def split_by_markers(cls, content, expected_count):
         """
-        Split merged translation output by headers (h1-h6).
+        Split merged translation output by invisible split markers.
+        
+        This is much simpler and more reliable than parsing headers.
+        We just look for the SPLIT_MARKER comments and split on them.
         
         Args:
             content: The translated HTML content
             expected_count: Expected number of sections (should match merged chapter count)
             
         Returns:
-            List of content sections if header count matches expected_count,
-            or None if header count doesn't match (fallback to normal merged behavior)
+            List of content sections if marker count matches expected_count,
+            or None if marker count doesn't match (fallback to normal merged behavior)
         """
-        from bs4 import BeautifulSoup, NavigableString
+        from bs4 import BeautifulSoup, Comment
         
         # Parse the HTML
         soup = BeautifulSoup(content, 'html.parser')
         
-        # Find all headers (h1-h6)
-        headers = list(soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']))
+        # Find all SPLIT_MARKER comments
+        # These are invisible HTML comments that were injected during merge
+        markers = []
+        for comment in soup.find_all(string=lambda text: isinstance(text, Comment)):
+            if 'SPLIT_MARKER' in comment:
+                markers.append(comment)
         
-        import re
-        
-        # Helper to check for markdown header pattern
-        def get_markdown_header_match(text):
-            return re.match(r'^\s*(#{1,6})\s+(.+?)\s*$', text, re.DOTALL)
-
-        # 1. Scan for <p> tags that contain ONLY a markdown header
-        for p in soup.find_all('p'):
-            text = p.get_text(strip=True)
-            match = get_markdown_header_match(text)
-            if match:
-                level = len(match.group(1))
-                h_text = match.group(2).strip()
-                new_h = soup.new_tag(f'h{level}')
-                new_h.string = h_text
-                new_h['data-markdown-converted'] = 'true'
-                p.replace_with(new_h)
-                headers.append(new_h)
-
-        # 2. Scan text nodes (for markdown headers not wrapped in p tags)
-        for node in soup.find_all(string=True):
-            if not node.strip():
-                continue
-            
-            # Skip if parent is already a header or the p-tag we just converted
-            if node.parent.name in ['h1','h2','h3','h4','h5','h6']:
-                continue
-            
-            text = str(node)
-            # Match lines starting with #
-            matches = list(re.finditer(r'(?:^|\n)\s*(#{1,6})\s+(.+?)(?:\n|$)', text))
-            
-            if matches:
-                # Case 1: The entire node is just the header
-                if len(matches) == 1 and matches[0].group(0).strip() == text.strip():
-                    level = len(matches[0].group(1))
-                    h_text = matches[0].group(2).strip()
-                    new_h = soup.new_tag(f'h{level}')
-                    new_h.string = h_text
-                    new_h['data-markdown-converted'] = 'true'
-                    
-                    # If parent is a <p> that we didn't catch earlier (maybe mixed with whitespace), replace it
-                    if node.parent.name == 'p' and node.parent.get_text(strip=True) == text.strip():
-                        node.parent.replace_with(new_h)
-                        headers.append(new_h)
-                    else:
-                        node.replace_with(new_h)
-                        headers.append(new_h)
-
-        # Re-sort headers by their position in the document
-        all_headers = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
-        
-        # LOGIC REVISION: Prioritize H1 tags for splitting.
-        # If we have enough H1 tags to match expected_count, ignore H2-H6.
-        # This prevents accidental splitting on H2 item headers (e.g. "《Item》")
-        # when proper H1 chapter headers are present.
-        
-        h1_headers = [h for h in all_headers if h.name == 'h1']
-        
-        # Apply proximity merge logic to H1s first to see if they suffice
-        # (This is a simplified check; the full proximity loop below will handle the actual merging)
-        # But here we just decide which set of headers to use.
-        
-        if len(h1_headers) >= expected_count:
-            print(f"   ℹ️ Split the Merge: Found {len(h1_headers)} H1 tags (sufficient for {expected_count} chapters). Ignoring H2-H6.")
-            headers = h1_headers
-        else:
-            print(f"   ℹ️ Split the Merge: Found {len(h1_headers)} H1 tags (insufficient for {expected_count} chapters). Including H2-H6.")
-            headers = all_headers
-            
-        original_headers = list(headers)[:]
-
-        # Treat multiple headers in very close proximity as a single logical
-        # header if there is no real content between them. "Content" here is
-        # defined as either a <p> tag or non-whitespace text (plain text), so
-        # sequences like <h2>Title</h2><h3>Subtitle</h3> with only whitespace
-        # between them will be treated as one boundary.
-        # 
-        # IMPORTANT: For each logical group of adjacent headers, we track the
-        # LAST header in the group, since that's where the actual content starts.
-        logical_headers = []
-        logical_to_last_header = {}  # Maps logical header to the last physical header in its group
-        
-        current_group_start = None
-        current_group_headers = []
-        
-        for i, h in enumerate(headers):
-            if current_group_start is None:
-                # Start a new group
-                current_group_start = h
-                current_group_headers = [h]
-            else:
-                # Check if this header is adjacent to the previous one
-                prev = current_group_headers[-1]
-                node = prev.next_sibling
-                has_intervening_content = False
-
-                # Scan siblings between prev and current header
-                while node is not None and node is not h:
-                    # Skip pure whitespace text nodes
-                    if isinstance(node, NavigableString):
-                        if node.strip():  # non-empty text = content
-                            has_intervening_content = True
-                            break
-                    else:
-                        # Treat specific structural/empty wrappers as ignorable
-                        # (e.g. <div id="linewrap">, empty <p>, or image wrappers)
-                        
-                        # 1. Empty/whitespace-only tags
-                        try:
-                            text = node.get_text(strip=True)
-                        except Exception:
-                            text = ''
-                            
-                        # If it has text content, check if it's just a duplicate header-like string
-                        if text:
-                            # AGGRESSIVE MODE: Check if the text is very short/navigational
-                            # or looks like a cover image label ("커버보기", "Cover", etc.)
-                            # or is just a duplicate of the header text?
-                            # For the specific issue "커버보기" (View Cover) inside a cover wrapper
-                            # We will aggressively ignore short text nodes inside divs/p's 
-                            # if we are scanning between headers.
-                            
-                            # Heuristic: If text is short (< 20 chars) and not a full sentence, ignore it
-                            # as likely UI debris or labels.
-                            if len(text) < 30 and not any(punct in text for punct in '.!?'):
-                                # Log that we are skipping this short text
-                                # print(f"   ℹ️ Split the Merge: Ignoring short debris '{text}' between headers")
-                                pass
-                            else:
-                                has_intervening_content = True
-                                break
-                        
-                        # 2. If no text, check for meaningful media (images)
-                        # We treat images as "content" that should separate headers, unless
-                        # it's a cover image that might belong to the header block.
-                        # But typically an image means "stuff is happening".
-                        # However, user requested aggressive merge even with p tags/images.
-                        # The example shows <div class="cover-wrapper"><img ...></div>.
-                        # If we want to merge across this, we must ignore images too.
-                        
-                        # IGNORE images/divs if they are between two headers that look very similar
-                        # or if we are just being aggressive.
-                        pass
-
-                    node = node.next_sibling
-
-                if has_intervening_content:
-                    # End the current group and start a new one
-                    logical_headers.append(current_group_start)
-                    logical_to_last_header[id(current_group_start)] = current_group_headers[-1]
-                    current_group_start = h
-                    current_group_headers = [h]
-                else:
-                    # No content between prev and this header; add to current group
-                    header_text = h.get_text(strip=True)[:60]
-                    prev_text = prev.get_text(strip=True)[:60]
-                    print(
-                        f"   ℹ️ Split the Merge: Treating adjacent header '{header_text}' "
-                        f"as continuation of '{prev_text}'"
-                    )
-                    current_group_headers.append(h)
-        
-        # Don't forget the last group
-        if current_group_start is not None:
-            logical_headers.append(current_group_start)
-            logical_to_last_header[id(current_group_start)] = current_group_headers[-1]
-
-        # Decide which header list to use for splitting.
-        # If proximity-based collapsing produced fewer headers than the
-        # expected chapter count, but the raw header list was sufficient,
-        # fall back to the raw headers to avoid under-splitting.
-        if len(logical_headers) < expected_count and len(original_headers) >= expected_count:
-            print("   ℹ️ Split the Merge: Proximity header merge reduced boundary count below expected; using raw headers instead")
-            headers = original_headers
-            # When falling back to raw headers, don't use the last-header mapping
-            use_last_header_map = False
-        else:
-            # Use the logical header list for splitting logic from this point on
-            headers = logical_headers
-            use_last_header_map = True
-        
-        # First check: Do we have enough headers?
-        has_content_before_first_header = False
-        
-        if len(headers) >= expected_count:
-            # We have enough headers, no need for fallback
-            effective_section_count = len(headers)
-        elif len(headers) > 0 and len(headers) < expected_count:
-            # Fallback: Check if there's content before first header that could count as +1
-            first_header = headers[0]
-            content_before = []
-            for elem in soup.descendants:
-                if elem == first_header:
-                    break
-                if hasattr(elem, 'name') and elem.name == 'p':
-                    text = elem.get_text(strip=True)
-                    if text:
-                        content_before.append(text)
-            
-            # If there are paragraphs with content before first header, count it as +1
-            if len(content_before) > 0:
-                has_content_before_first_header = True
-                effective_section_count = len(headers) + 1
-                print(f"   ℹ️ Split the Merge: Found content before first header, treating as additional section ({effective_section_count} total sections)")
-            else:
-                effective_section_count = len(headers)
-        else:
-            # No headers at all
-            effective_section_count = 0
-        
-        if effective_section_count < expected_count:
-            print(f"   ⚠️ Split the Merge: Section count ({effective_section_count}) is less than chapter count ({expected_count}), using normal merged behavior")
+        # Check if we have the expected number of markers
+        if len(markers) != expected_count:
+            print(f"   ⚠️ Split the Merge: Found {len(markers)} split markers but expected {expected_count}")
             return None
         
-        # If we have more headers than expected, adjust based on whether there's content before first header
-        headers_to_use = headers
-        if has_content_before_first_header:
-            # Need expected_count - 1 headers (since first section is before headers)
-            if len(headers) > expected_count - 1:
-                print(f"   ℹ️ Split the Merge: Found {len(headers)} headers with content before first, using first {expected_count - 1} headers")
-                headers_to_use = headers[:expected_count - 1]
-            else:
-                headers_to_use = headers
-        else:
-            # Need expected_count headers
-            if len(headers) > expected_count:
-                print(f"   ℹ️ Split the Merge: Found {len(headers)} headers, using first {expected_count} to match chapter count")
-                headers_to_use = headers[:expected_count]
+        print(f"   ✓️ Split the Merge: Found {len(markers)} split markers matching expected count")
         
-        if len(headers_to_use) == 0 and not has_content_before_first_header:
-            return None
-        
-        # Split content by headers
-        sections = []
-        
-        # Get the string representation to work with
+        # Convert to string for splitting
         content_str = str(soup)
         
-        # If there's content before the first header, extract it as the first section
-        if has_content_before_first_header and len(headers_to_use) > 0:
-            first_header_str = str(headers_to_use[0])
-            first_header_pos = content_str.find(first_header_str)
-            if first_header_pos > 0:
-                # Extract everything before the first header as first section
-                first_section = content_str[:first_header_pos].strip()
-                if first_section:
-                    sections.append(first_section)
+        # Find positions of all markers in the content string
+        marker_positions = []
+        search_pos = 0
         
-        # Find positions of each header in the content
-        # IMPORTANT: For logical headers with adjacent groups, use the LAST header
-        # in the group, since that's where the actual content starts
-        # 
-        # Build a list of all headers in document order with their occurrence index
-        # to handle duplicate header strings (e.g. multiple "<h1>012. Kang Hana.</h1>")
-        all_header_elements = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
-        header_occurrence = {}  # Maps header element id to (header_str, occurrence_index)
-        for elem in all_header_elements:
-            header_str = str(elem)
-            if header_str not in header_occurrence:
-                header_occurrence[header_str] = 0
+        for marker in markers:
+            marker_str = str(marker)
+            # Find this marker in the content
+            pos = content_str.find(marker_str, search_pos)
+            if pos != -1:
+                marker_positions.append(pos)
+                search_pos = pos + len(marker_str)
             else:
-                header_occurrence[header_str] += 1
-            # Store which occurrence this element is
-            elem._occurrence_index = header_occurrence[header_str]
+                print(f"   ⚠️ Split the Merge: Failed to locate marker in content")
+                return None
         
-        header_positions = []
-        for header in headers_to_use:
-            # For each logical header, we need:
-            # 1. Start position: where the FIRST header in the group appears (to include it)
-            # 2. Boundary position: where the LAST header in the group ends (where next section starts)
-            
-            first_header = header  # The logical header is always the first in its group
-            if use_last_header_map and id(header) in logical_to_last_header:
-                last_header = logical_to_last_header[id(header)]
+        # Split content based on marker positions
+        sections = []
+        
+        for i, marker_pos in enumerate(marker_positions):
+            if i == 0:
+                # First section: from start to first marker
+                section_start = 0
             else:
-                last_header = header
+                # Subsequent sections: from previous marker to this marker
+                section_start = marker_positions[i-1]
             
-            # Find position of the FIRST header (this is where this section starts)
-            first_header_str = str(first_header)
-            first_occurrence_idx = getattr(first_header, '_occurrence_index', 0)
-            
-            start_pos = -1
-            for i in range(first_occurrence_idx + 1):
-                start_pos = content_str.find(first_header_str, start_pos + 1)
-                if start_pos == -1:
-                    break
-            
-            if start_pos != -1:
-                # Also find where the LAST header ends (this helps us find where next section starts)
-                last_header_str = str(last_header)
-                last_occurrence_idx = getattr(last_header, '_occurrence_index', 0)
-                
-                last_pos = -1
-                for i in range(last_occurrence_idx + 1):
-                    last_pos = content_str.find(last_header_str, last_pos + 1)
-                    if last_pos == -1:
-                        break
-                
-                if last_pos != -1:
-                    # Find where this last header ends (position after the closing tag)
-                    last_header_end = last_pos + len(last_header_str)
-                    header_positions.append((start_pos, first_header_str, last_header_end, first_header))
-        
-        # Sort by start position (should already be in order, but just to be safe)
-        header_positions.sort(key=lambda x: x[0])
-        
-        # Extract content sections from headers
-        # Each tuple is: (start_pos, first_header_str, last_header_end_pos, header_elem)
-        for i, (start_pos, first_header_str, last_header_end, header_elem) in enumerate(header_positions):
-            if i < len(header_positions) - 1:
-                # Get content from this header's start to where the next section's first header starts
-                next_start_pos = header_positions[i + 1][0]
-                section = content_str[start_pos:next_start_pos].strip()
+            if i < len(marker_positions) - 1:
+                # Not the last section: go up to next marker
+                section_end = marker_positions[i+1]
             else:
-                # Last section - get from this header's start to end
-                section = content_str[start_pos:].strip()
+                # Last section: go to end of content
+                section_end = len(content_str)
             
+            # Extract the section (including the marker itself)
+            section = content_str[section_start:section_end].strip()
             sections.append(section)
         
-        print(f"   ✅ Split the Merge: Successfully split into {len(sections)} sections")
-        return sections
+        # Remove all SPLIT_MARKER comments from each section to keep HTML clean
+        cleaned_sections = []
+        for section in sections:
+            # Remove the marker comment
+            cleaned = re.sub(r'<!--\s*SPLIT_MARKER:.*?-->', '', section, flags=re.DOTALL)
+            cleaned_sections.append(cleaned.strip())
+        
+        print(f"   ✓️ Split the Merge: Successfully split into {len(cleaned_sections)} sections (markers removed)")
+        return cleaned_sections
 
 
 # =====================================================
@@ -4189,8 +3802,8 @@ class BatchTranslationProcessor:
             split_sections = None
             
             if split_the_merge and len(chapters_data) > 1:
-                # Try to split by headers
-                split_sections = RequestMerger.split_by_headers(cleaned, len(chapters_data))
+                # Try to split by invisible markers
+                split_sections = RequestMerger.split_by_markers(cleaned, len(chapters_data))
             
             # If disable fallback is enabled and split failed, mark as qa_failed
             if split_the_merge and disable_fallback and (not split_sections or len(split_sections) != len(chapters_data)):
@@ -9047,8 +8660,8 @@ def main(log_callback=None, stop_callback=None):
                 split_sections = None
                 
                 if split_the_merge and len(merge_info['group']) > 1:
-                    # Try to split by headers
-                    split_sections = RequestMerger.split_by_headers(cleaned, len(merge_info['group']))
+                    # Try to split by invisible markers
+                    split_sections = RequestMerger.split_by_markers(cleaned, len(merge_info['group']))
                 
                 # If disable fallback is enabled and split failed, mark as qa_failed
                 if split_the_merge and disable_fallback and (not split_sections or len(split_sections) != len(merge_info['group'])):
