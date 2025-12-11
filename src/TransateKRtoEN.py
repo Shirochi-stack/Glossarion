@@ -4145,13 +4145,25 @@ class BatchTranslationProcessor:
             # Check for truncation / QA failures first
             results = []
             if is_qa_failed_response(cleaned):
-                # Save merged content for debugging, then mark all as qa_failed
-                parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
-                try:
-                    with open(os.path.join(self.out_dir, parent_fname), 'w', encoding='utf-8') as f:
-                        f.write(cleaned)
-                except Exception:
-                    pass
+                # Only save file for debugging if it contains meaningful content beyond error markers
+                cleaned_stripped = cleaned.strip()
+                is_only_error_marker = cleaned_stripped in [
+                    "[TRANSLATION FAILED]",
+                    "[Content Blocked]",
+                    "[IMAGE TRANSLATION FAILED]",
+                    "[EXTRACTION FAILED]",
+                    "[RATE LIMITED]",
+                    "[]"
+                ] or cleaned_stripped.startswith("[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]") or cleaned_stripped.startswith("[CONTENT BLOCKED - ORIGINAL TEXT PRESERVED]")
+                
+                if not is_only_error_marker:
+                    # Save for debugging - contains actual translation attempt that failed QA
+                    parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
+                    try:
+                        with open(os.path.join(self.out_dir, parent_fname), 'w', encoding='utf-8') as f:
+                            f.write(cleaned)
+                    except Exception:
+                        pass
 
                 # IMPORTANT:
                 # Use each chapter's own expected filename so we overwrite the
@@ -4183,12 +4195,26 @@ class BatchTranslationProcessor:
             # If disable fallback is enabled and split failed, mark as qa_failed
             if split_the_merge and disable_fallback and (not split_sections or len(split_sections) != len(chapters_data)):
                 print(f"   ⚠️ Split failed and fallback disabled - marking merged group as qa_failed")
-                parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
-                try:
-                    with open(os.path.join(self.out_dir, parent_fname), 'w', encoding='utf-8') as f:
-                        f.write(cleaned)
-                except Exception:
-                    pass
+                
+                # Only save file for debugging if it contains meaningful content beyond error markers
+                cleaned_stripped = cleaned.strip()
+                is_only_error_marker = cleaned_stripped in [
+                    "[TRANSLATION FAILED]",
+                    "[Content Blocked]",
+                    "[IMAGE TRANSLATION FAILED]",
+                    "[EXTRACTION FAILED]",
+                    "[RATE LIMITED]",
+                    "[]"
+                ] or cleaned_stripped.startswith("[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]") or cleaned_stripped.startswith("[CONTENT BLOCKED - ORIGINAL TEXT PRESERVED]")
+                
+                if not is_only_error_marker:
+                    # Save for debugging - contains actual translation attempt that failed split
+                    parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
+                    try:
+                        with open(os.path.join(self.out_dir, parent_fname), 'w', encoding='utf-8') as f:
+                            f.write(cleaned)
+                    except Exception:
+                        pass
 
                 # IMPORTANT:
                 # Use each chapter's own expected filename so we overwrite the
@@ -5592,6 +5618,7 @@ def is_qa_failed_response(content):
     explicit_failures = [
         "[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]",
         "[IMAGE TRANSLATION FAILED]",
+        "[Content Blocked]",
         "API response unavailable",
         "[]",  # Empty JSON response from glossary context
         "[API_ERROR]",
@@ -8977,13 +9004,25 @@ def main(log_callback=None, stop_callback=None):
                 if is_qa_failed_response(cleaned):
                     print(f"   ⚠️ Merged response marked as qa_failed for parent + children")
                     
-                    # Save for debugging with parent filename
-                    parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
-                    try:
-                        with open(os.path.join(out, parent_fname), 'w', encoding='utf-8') as f:
-                            f.write(cleaned)
-                    except Exception:
-                        pass
+                    # Only save file for debugging if it contains meaningful content beyond error markers
+                    cleaned_stripped = cleaned.strip()
+                    is_only_error_marker = cleaned_stripped in [
+                        "[TRANSLATION FAILED]",
+                        "[Content Blocked]",
+                        "[IMAGE TRANSLATION FAILED]",
+                        "[EXTRACTION FAILED]",
+                        "[RATE LIMITED]",
+                        "[]"
+                    ] or cleaned_stripped.startswith("[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]") or cleaned_stripped.startswith("[CONTENT BLOCKED - ORIGINAL TEXT PRESERVED]")
+                    
+                    if not is_only_error_marker:
+                        # Save for debugging - contains actual translation attempt that failed QA
+                        parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
+                        try:
+                            with open(os.path.join(out, parent_fname), 'w', encoding='utf-8') as f:
+                                f.write(cleaned)
+                        except Exception:
+                            pass
                     
                     # Mark ALL chapters in the merge group as qa_failed using
                     # their own expected filenames so we overwrite existing
@@ -9014,12 +9053,26 @@ def main(log_callback=None, stop_callback=None):
                 # If disable fallback is enabled and split failed, mark as qa_failed
                 if split_the_merge and disable_fallback and (not split_sections or len(split_sections) != len(merge_info['group'])):
                     print(f"   ⚠️ Split failed and fallback disabled - marking merged group as qa_failed")
-                    parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
-                    try:
-                        with open(os.path.join(out, parent_fname), 'w', encoding='utf-8') as f:
-                            f.write(cleaned)
-                    except Exception:
-                        pass
+                    
+                    # Only save file for debugging if it contains meaningful content beyond error markers
+                    cleaned_stripped = cleaned.strip()
+                    is_only_error_marker = cleaned_stripped in [
+                        "[TRANSLATION FAILED]",
+                        "[Content Blocked]",
+                        "[IMAGE TRANSLATION FAILED]",
+                        "[EXTRACTION FAILED]",
+                        "[RATE LIMITED]",
+                        "[]"
+                    ] or cleaned_stripped.startswith("[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]") or cleaned_stripped.startswith("[CONTENT BLOCKED - ORIGINAL TEXT PRESERVED]")
+                    
+                    if not is_only_error_marker:
+                        # Save for debugging - contains actual translation attempt that failed split
+                        parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
+                        try:
+                            with open(os.path.join(out, parent_fname), 'w', encoding='utf-8') as f:
+                                f.write(cleaned)
+                        except Exception:
+                            pass
                     
                     # Mark ALL chapters in the merge group as qa_failed using
                     # their own expected filenames so we overwrite existing
