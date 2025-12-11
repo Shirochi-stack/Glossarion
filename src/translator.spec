@@ -6,6 +6,11 @@ Enhanced Translation Tool with QA Scanner, AI Hunter, and Manga Translation
 
 import sys
 import os
+
+# Fix DLL search path for WeasyPrint during build
+if os.name == 'nt' and os.path.exists(r'C:\msys64\mingw64\bin'):
+    os.environ['PATH'] = r'C:\msys64\mingw64\bin' + os.pathsep + os.environ.get('PATH', '')
+
 from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_data_files
 
 # ============================================================================
