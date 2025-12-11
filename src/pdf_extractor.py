@@ -11,6 +11,7 @@ import concurrent.futures
 import re
 import base64
 from typing import Dict, List, Tuple, Optional
+from pathlib import Path
 
 def _extract_chunk(args):
     """
@@ -39,6 +40,35 @@ def _extract_chunk(args):
         pass
         
     return text_parts
+
+def _externalize_data_uri_images(html: str, images_dir: str, page_index: int) -> str:
+    """Replace data URI images with files under images_dir and return modified HTML."""
+    os.makedirs(images_dir, exist_ok=True)
+    # Match src="data:image/<type>;base64,<data>"
+    # Support both double and single quotes around src attribute
+    pattern = re.compile(r'(src\s*=\s*(?:\"|\')data:(image\/[^;]+);base64,([^\"\']+)(?:\"|\'))', re.IGNORECASE)
+
+    def repl(m):
+        mime = m.group(2)  # 'image/png', 'image/jpeg', etc.
+        b64 = m.group(3)
+        ext = 'png'
+        if 'jpeg' in mime or 'jpg' in mime:
+            ext = 'jpg'
+        elif 'gif' in mime:
+            ext = 'gif'
+        elif 'webp' in mime:
+            ext = 'webp'
+        # Deterministic filename
+        fname = f"p{page_index:04d}_{abs(hash(b64)) & 0xffffffff:x}.{ext}"
+        out_path = os.path.join(images_dir, fname)
+        try:
+            with open(out_path, 'wb') as f:
+                f.write(base64.b64decode(b64))
+            return f'src="images/{fname}"'
+        except Exception:
+            return m.group(1)  # fallback to original data URI
+
+    return pattern.sub(repl, html)
 
 def extract_text_from_pdf(pdf_path):
     """
@@ -859,10 +889,11 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
         
         print(f"📄 Extracting PDF with formatting: {os.path.basename(pdf_path)}")
         
-        # Extract images first if enabled
+        # Extract images first if enabled (semantic path). In XHTML path we also export embedded images to files.
         images_by_page = {}
         if extract_images:
             images_by_page = extract_images_from_pdf(pdf_path, output_dir)
+        images_dir = os.path.join(output_dir, 'images')
         
         doc = fitz.open(pdf_path)
         
@@ -879,6 +910,11 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                     page_html = page.get_text("xhtml" if render_mode == "xhtml" else "html")
                 except Exception:
                     page_html = page.get_text("html")
+                # Replace any data URI images with files under images/
+                try:
+                    page_html = _externalize_data_uri_images(page_html, images_dir, i + 1)
+                except Exception:
+                    pass
                 # Inject page anchor and clickable overlays for native PDF links (preserve TOC entries)
                 try:
                     anchor = f'<a id="page-{i + 1}"></a>'
@@ -965,6 +1001,13 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
             current_para = []
             current_para_styles = []
             
+            # Map class to inline style to avoid reliance on external CSS
+            _align_css = {
+                "align-center": "text-align:center;",
+                "align-right": "text-align:right;",
+                "align-left": "text-align:left;",
+                "align-justify": "text-align:justify;"
+            }
             for block_idx, block in enumerate(blocks):
                 if block.get("type") == 0:  # Text block
                     block_text = []
@@ -1047,7 +1090,8 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                         # Flush current paragraph
                         if current_para:
                             para_class = current_para_styles[0] if current_para_styles else "align-justify"
-                            para_tag = f'<p class="{para_class}">'
+                            para_style = _align_css.get(para_class, "")
+                            para_tag = f'<p class="{para_class}" style="{para_style}">'
                             page_html.append(f'{para_tag}{"".join(current_para)}</p>')
                             current_para = []
                             current_para_styles = []
@@ -1055,19 +1099,22 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                         # Create anchor for potential TOC linking
                         anchor_id = re.sub(r'[^a-zA-Z0-9]+', '-', block_content[:50].lower()).strip('-')
                         h_class = f' class="{alignment_class}"' if alignment_class else ''
-                        page_html.append(f'<h1 id="{anchor_id}"{h_class}>{block_content}</h1>')
+                        h_style = f' style="{_align_css.get(alignment_class, "")}"' if alignment_class else ''
+                        page_html.append(f'<h1 id="{anchor_id}"{h_class}{h_style}>{block_content}</h1>')
                     elif max_font_size > 12 and has_bold:
                         # Flush current paragraph
                         if current_para:
                             para_class = current_para_styles[0] if current_para_styles else "align-justify"
-                            para_tag = f'<p class="{para_class}">'
+                            para_style = _align_css.get(para_class, "")
+                            para_tag = f'<p class="{para_class}" style="{para_style}">'
                             page_html.append(f'{para_tag}{"".join(current_para)}</p>')
                             current_para = []
                             current_para_styles = []
                         
                         anchor_id = re.sub(r'[^a-zA-Z0-9]+', '-', block_content[:50].lower()).strip('-')
                         h_class = f' class="{alignment_class}"' if alignment_class else ''
-                        page_html.append(f'<h2 id="{anchor_id}"{h_class}>{block_content}</h2>')
+                        h_style = f' style="{_align_css.get(alignment_class, "")}"' if alignment_class else ''
+                        page_html.append(f'<h2 id="{anchor_id}"{h_class}{h_style}>{block_content}</h2>')
                     else:
                         # Regular paragraph content
                         # Check if we should continue current paragraph or start new one
@@ -1077,7 +1124,8 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                             if alignment_class != prev_alignment:
                                 # Flush existing paragraph with different alignment
                                 para_class = current_para_styles[0] if current_para_styles else "align-justify"
-                                para_tag = f'<p class="{para_class}">'
+                                para_style = _align_css.get(para_class, "")
+                                para_tag = f'<p class="{para_class}" style="{para_style}">'
                                 page_html.append(f'{para_tag}{"".join(current_para)}</p>')
                                 current_para = []
                                 current_para_styles = []
@@ -1091,7 +1139,8 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                     # Flush current paragraph
                     if current_para:
                         para_class = current_para_styles[0] if current_para_styles else "align-justify"
-                        para_tag = f'<p class="{para_class}">'
+                        para_style = _align_css.get(para_class, "")
+                        para_tag = f'<p class="{para_class}" style="{para_style}">'
                         page_html.append(f'{para_tag}{"".join(current_para)}</p>')
                         current_para = []
                         current_para_styles = []
@@ -1113,7 +1162,12 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                             
                             # Create img tag with relative path and centering if detected
                             img_class = f' class="{img_alignment}"' if img_alignment else ''
-                            img_tag = f'<img src="images/{img_filename}"{img_class}'
+                            img_style = ''
+                            if img_alignment == 'align-center':
+                                img_style = ' style="display:block;margin:1em auto;"'
+                            elif img_alignment == 'align-right':
+                                img_style = ' style="display:block;margin-left:auto;"'
+                            img_tag = f'<img src="images/{img_filename}"{img_class}{img_style}'
                             if img_width and img_height:
                                 img_tag += f' width="{img_width}" height="{img_height}"'
                             img_tag += ' alt="PDF Image" />'
@@ -1124,7 +1178,8 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
             # Flush any remaining paragraph
             if current_para:
                 para_class = current_para_styles[0] if current_para_styles else "align-justify"
-                para_tag = f'<p class="{para_class}">'
+                para_style = _align_css.get(para_class, "")
+                para_tag = f'<p class="{para_class}" style="{para_style}">'
                 page_html.append(f'{para_tag}{"".join(current_para)}</p>')
             
             # Close TOC if page ends while still in TOC section
@@ -1182,6 +1237,54 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
         raise
 
 
+def _embed_images_as_data_uris(html: str, base_path: Optional[str], images_dir: Optional[str]) -> str:
+    """Embed <img src> files as data URIs (used only at final PDF step if enabled)."""
+    def _read_file_bytes(p: str) -> Optional[bytes]:
+        try:
+            with open(p, 'rb') as f:
+                return f.read()
+        except Exception:
+            return None
+    def _to_data_uri(path: str) -> Optional[str]:
+        ext = os.path.splitext(path)[1].lower()
+        mime = 'image/png'
+        if ext in ('.jpg', '.jpeg'):
+            mime = 'image/jpeg'
+        elif ext == '.gif':
+            mime = 'image/gif'
+        elif ext == '.webp':
+            mime = 'image/webp'
+        data = _read_file_bytes(path)
+        if data is None:
+            return None
+        return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
+
+    # Replace src="images/..." or relative paths
+    img_re = re.compile(r'<img([^>]+)src="([^"]+)"', re.IGNORECASE)
+    def repl(m):
+        attrs = m.group(1)
+        src = m.group(2)
+        # Resolve file path
+        candidate_paths = []
+        if images_dir and not os.path.isabs(src) and src.startswith('images/'):
+            candidate_paths.append(os.path.join(images_dir, os.path.basename(src)))
+            candidate_paths.append(os.path.join(images_dir, src.split('images/',1)[1]))
+        if base_path and not os.path.isabs(src):
+            candidate_paths.append(os.path.normpath(os.path.join(base_path, src)))
+        if os.path.isabs(src):
+            candidate_paths.append(src)
+        data_uri = None
+        for p in candidate_paths:
+            if os.path.exists(p):
+                data_uri = _to_data_uri(p)
+                if data_uri:
+                    break
+        if data_uri:
+            return f'<img{attrs}src="{data_uri}"'
+        return m.group(0)
+    return img_re.sub(repl, html)
+
+
 def create_pdf_from_html(html_content: str, output_path: str, css_path: Optional[str] = None, images_dir: Optional[str] = None) -> bool:
     """
     Create a PDF from HTML content with proper rendering of formatting and images.
@@ -1232,6 +1335,16 @@ def create_pdf_from_html(html_content: str, output_path: str, css_path: Optional
             elif output_path:
                 base_url = f"file:///{os.path.abspath(os.path.dirname(output_path)).replace(os.sep, '/')}/"
             
+            # Optionally embed images as data URIs at the final step
+            if os.getenv('PDF_EMBED_IMAGES', '0') == '1':
+                # base_path for resolving relative image paths
+                base_path = None
+                if images_dir and os.path.exists(images_dir):
+                    base_path = images_dir
+                elif output_path:
+                    base_path = os.path.dirname(output_path)
+                full_html = _embed_images_as_data_uris(full_html, base_path, images_dir)
+
             # Create HTML object
             html_doc = HTML(string=full_html, base_url=base_url)
             
