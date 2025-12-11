@@ -3,8 +3,25 @@ if __name__ == '__main__':
     import multiprocessing
     multiprocessing.freeze_support()
 
+# Add MSYS2 DLLs to PATH for WeasyPrint (when bundled with PyInstaller)
+import sys
+import os
+if getattr(sys, 'frozen', False):
+    # Running as bundled executable
+    bundle_dir = sys._MEIPASS if hasattr(sys, '_MEIPASS') else os.path.dirname(sys.executable)
+    # Add bundle directory to DLL search path for WeasyPrint DLLs
+    if os.name == 'nt':  # Windows
+        # Add to PATH so Windows can find the bundled DLLs
+        os.environ['PATH'] = bundle_dir + os.pathsep + os.environ.get('PATH', '')
+        # Also try to add DLL directory explicitly
+        try:
+            if sys.version_info >= (3, 8):
+                os.add_dll_directory(bundle_dir)
+        except (AttributeError, OSError):
+            pass
+
 # Standard Library
-import io, json, logging, math, os, shutil, sys, threading, time, re, concurrent.futures, signal
+import io, json, logging, math, shutil, threading, time, re, concurrent.futures, signal
 from logging.handlers import RotatingFileHandler
 import atexit
 import faulthandler
