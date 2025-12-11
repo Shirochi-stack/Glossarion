@@ -290,40 +290,22 @@ class RequestMerger:
             # logic, fall back to the original content rather than breaking
             # the whole merge.
             try:
-                # Inject an invisible split marker comment at the beginning
-                # The marker contains a preservation notice to ensure the AI keeps it
-                split_marker = '<!-- SPLIT_MARKER: DO NOT REMOVE - REQUIRED FOR PROCESSING -->'
-                
                 if isinstance(content, str):
-                    soup = BeautifulSoup(content, 'html.parser')
+                    # Use H1 tag as split marker - AI will preserve visible HTML elements
+                    split_marker = f'<h1 id="split-{chapter_num}">SPLIT MARKER: Do Not Remove This Tag</h1>\n'
+                    marked_content = split_marker + content
+                    
+                    if log_injections:
+                        preview = marked_content[:120].replace('\n', ' ')
+                        print(
+                            f"   ℹ️ Request Merging: Injected H1 split marker for "
+                            f"chapter {chapter_num}: {preview}..."
+                        )
+                    
+                    merged_parts.append(marked_content)
                 else:
                     # Non-string content, just append as-is
                     merged_parts.append(content)
-                    continue
-                
-                # Insert the split marker at the very beginning of the document
-                from bs4 import Comment
-                marker_comment = Comment(' SPLIT_MARKER: DO NOT REMOVE - REQUIRED FOR PROCESSING ')
-                
-                # Insert at the beginning of the body if it exists
-                if soup.body is not None:
-                    soup.body.insert(0, marker_comment)
-                else:
-                    # No body tag - insert at document start
-                    if soup.contents:
-                        soup.insert(0, marker_comment)
-                    else:
-                        soup.append(marker_comment)
-                
-                if log_injections:
-                    # Get a preview of the content for logging
-                    preview = str(soup)[:100].replace('\n', ' ')
-                    print(
-                        f"   ℹ️ Request Merging: Injected invisible split marker for "
-                        f"chapter {chapter_num}: {preview}..."
-                    )
-                
-                merged_parts.append(str(soup))
                 
             except Exception as e:
                 # Fallback: append original content if anything goes wrong
@@ -500,12 +482,10 @@ class RequestMerger:
         """
         import re
         
-        # Find all SPLIT_MARKER comments using regex
-        # This is more reliable than BeautifulSoup parsing because:
-        # 1. The AI might return markers as plain text, not parsed Comment nodes
-        # 2. Markdown conversion might have altered the HTML structure
-        marker_pattern = r'<!--\s*SPLIT_MARKER[^>]*?-->'
-        markers = re.findall(marker_pattern, content, flags=re.DOTALL)
+        # Find all H1 SPLIT_MARKER tags using regex
+        # Using visible H1 elements because AI preserves them unlike HTML comments
+        marker_pattern = r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*'
+        markers = re.findall(marker_pattern, content, flags=re.DOTALL | re.IGNORECASE)
         
         # Check if we have the expected number of markers
         if len(markers) != expected_count:
@@ -515,8 +495,7 @@ class RequestMerger:
         print(f"   ✓️ Split the Merge: Found {len(markers)} split markers matching expected count")
         
         # Split content by markers using regex
-        # This splits on the marker pattern and includes the markers in the results
-        sections = re.split(marker_pattern, content, flags=re.DOTALL)
+        sections = re.split(marker_pattern, content, flags=re.DOTALL | re.IGNORECASE)
         
         # The first element is content before the first marker (should be empty or whitespace)
         # Remove it if it's just whitespace
@@ -531,7 +510,7 @@ class RequestMerger:
         # Clean up sections (remove leading/trailing whitespace)
         cleaned_sections = [section.strip() for section in sections]
         
-        print(f"   ✓️ Split the Merge: Successfully split into {len(cleaned_sections)} sections (markers removed)")
+        print(f"   ✓️ Split the Merge: Successfully split into {len(cleaned_sections)} sections")
         return cleaned_sections
 
 
