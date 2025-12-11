@@ -290,22 +290,40 @@ class RequestMerger:
             # logic, fall back to the original content rather than breaking
             # the whole merge.
             try:
+                # Inject an invisible split marker comment at the beginning
+                # The marker contains a preservation notice to ensure the AI keeps it
+                split_marker = '<!-- SPLIT_MARKER: DO NOT REMOVE - REQUIRED FOR PROCESSING -->'
+                
                 if isinstance(content, str):
-                    # Use VISIBLE span element as split marker
-                    # AI cannot remove visible HTML elements like it removes comments
-                    marked_content = f'<span id="split_marker_{chapter_num}" style="display:none;"></span>\n{content}'
-                    
-                    if log_injections:
-                        preview = marked_content[:120].replace('\n', ' ')
-                        print(
-                            f"   ℹ️ Request Merging: Injected split marker for "
-                            f"chapter {chapter_num}: {preview}..."
-                        )
-                    
-                    merged_parts.append(marked_content)
+                    soup = BeautifulSoup(content, 'html.parser')
                 else:
                     # Non-string content, just append as-is
                     merged_parts.append(content)
+                    continue
+                
+                # Insert the split marker at the very beginning of the document
+                from bs4 import Comment
+                marker_comment = Comment(' SPLIT_MARKER: DO NOT REMOVE - REQUIRED FOR PROCESSING ')
+                
+                # Insert at the beginning of the body if it exists
+                if soup.body is not None:
+                    soup.body.insert(0, marker_comment)
+                else:
+                    # No body tag - insert at document start
+                    if soup.contents:
+                        soup.insert(0, marker_comment)
+                    else:
+                        soup.append(marker_comment)
+                
+                if log_injections:
+                    # Get a preview of the content for logging
+                    preview = str(soup)[:100].replace('\n', ' ')
+                    print(
+                        f"   ℹ️ Request Merging: Injected invisible split marker for "
+                        f"chapter {chapter_num}: {preview}..."
+                    )
+                
+                merged_parts.append(str(soup))
                 
             except Exception as e:
                 # Fallback: append original content if anything goes wrong
@@ -482,10 +500,12 @@ class RequestMerger:
         """
         import re
         
-        # Find all split marker span elements
-        # Using visible HTML elements instead of comments because AI strips comments
-        marker_pattern = r'<span id="split_marker_\d+"[^>]*></span>'
-        markers = re.findall(marker_pattern, content)
+        # Find all SPLIT_MARKER comments using regex
+        # This is more reliable than BeautifulSoup parsing because:
+        # 1. The AI might return markers as plain text, not parsed Comment nodes
+        # 2. Markdown conversion might have altered the HTML structure
+        marker_pattern = r'<!--\s*SPLIT_MARKER[^>]*?-->'
+        markers = re.findall(marker_pattern, content, flags=re.DOTALL)
         
         # Check if we have the expected number of markers
         if len(markers) != expected_count:
@@ -3666,54 +3686,45 @@ class BatchTranslationProcessor:
             
             # Clean the merged response
             cleaned = merged_response
-            
-            # DEBUG: Check if markers exist before cleaning
-            markers_before = len(re.findall(r'<span id="split_marker_\d+"', cleaned))
-            print(f"   🔍 DEBUG: Markers in raw response: {markers_before}")
-            
             if self.config.REMOVE_AI_ARTIFACTS:
                 cleaned = ContentProcessor.clean_ai_artifacts(cleaned, True)
-                markers_after_artifacts = len(re.findall(r'<span id="split_marker_\d+"', cleaned))
-                print(f"   🔍 DEBUG: Markers after clean_ai_artifacts: {markers_after_artifacts}")
-            
             cleaned = ContentProcessor.clean_memory_artifacts(cleaned)
-            markers_after_memory = len(re.findall(r'<span id="split_marker_\d+"', cleaned))
-            print(f"   🔍 DEBUG: Markers after clean_memory_artifacts: {markers_after_memory}")
-            
             cleaned = re.sub(r"^```(?:html)?\s*\n?", "", cleaned, count=1, flags=re.MULTILINE)
             cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
-            markers_after_regex = len(re.findall(r'<span id="split_marker_\d+"', cleaned))
-            print(f"   🔍 DEBUG: Markers after regex cleanup: {markers_after_regex}")
             
             # Get parent chapter info
             parent_actual_num, parent_content, parent_idx, parent_chapter, parent_content_hash = chapters_data[0]
             merged_child_nums = [cn for cn, _, _, _, _ in chapters_data[1:]]
             
-            # If any chapter in the merge group used enhanced (html2text) extraction,
-            # convert the translated markdown/plain text back to HTML before saving
+            # Check if enhanced extraction was used
             try:
                 enhanced_group = any(bool(ch.get('enhanced_extraction')) for _, _, _, ch, _ in chapters_data)
             except Exception:
                 enhanced_group = False
-            if enhanced_group and isinstance(cleaned, str):
+            
+            # Check if Split the Merge is enabled
+            split_the_merge = os.getenv('SPLIT_THE_MERGE', '0') == '1'
+            
+            # If Split the Merge is enabled, SKIP markdown→HTML conversion here
+            # We'll do it AFTER splitting so markers are preserved
+            if not split_the_merge and enhanced_group and isinstance(cleaned, str):
                 print("   🔄 Converting merged enhanced text back to HTML...")
                 try:
                     cleaned = convert_enhanced_text_to_html(cleaned, parent_chapter)
                 except Exception as conv_err:
                     print(f"   ⚠️ Enhanced HTML conversion failed: {conv_err} — saving raw content")
-            
-            # Emergency Image Restoration (if enabled)
-            # MOVED: Run AFTER markdown->HTML conversion to avoid losing tags
-            if self.config.EMERGENCY_IMAGE_RESTORE:
-                cleaned = ContentProcessor.emergency_restore_images(cleaned, merged_content)
-            
-            # Optionally restore paragraphs if the output lacks structure
-            if getattr(self.config, 'EMERGENCY_RESTORE', False):
-                try:
-                    if cleaned and cleaned.count('<p>') < 3 and len(cleaned) > 300:
-                        cleaned = ContentProcessor.emergency_restore_paragraphs(cleaned)
-                except Exception:
-                    pass
+                
+                # Emergency Image Restoration (if enabled)
+                if self.config.EMERGENCY_IMAGE_RESTORE:
+                    cleaned = ContentProcessor.emergency_restore_images(cleaned, merged_content)
+                
+                # Optionally restore paragraphs if the output lacks structure
+                if getattr(self.config, 'EMERGENCY_RESTORE', False):
+                    try:
+                        if cleaned and cleaned.count('<p>') < 3 and len(cleaned) > 300:
+                            cleaned = ContentProcessor.emergency_restore_paragraphs(cleaned)
+                    except Exception:
+                        pass
             
             # Check for truncation / QA failures first
             results = []
@@ -3756,8 +3767,7 @@ class BatchTranslationProcessor:
                     results.append((False, actual_num, None, None, None))
                 return results
 
-            # Check if Split the Merge is enabled
-            split_the_merge = os.getenv('SPLIT_THE_MERGE', '0') == '1'
+            # Now handle split-the-merge
             disable_fallback = os.getenv('DISABLE_MERGE_FALLBACK', '0') == '1'
             split_sections = None
             
@@ -3815,6 +3825,13 @@ class BatchTranslationProcessor:
                 saved_files = []
                 for i, (actual_num, content, idx, chapter, content_hash) in enumerate(chapters_data):
                     section_content = split_sections[i]
+                    
+                    # NOW convert markdown→HTML for each section if enhanced extraction was used
+                    if enhanced_group and isinstance(section_content, str):
+                        try:
+                            section_content = convert_enhanced_text_to_html(section_content, chapter)
+                        except Exception as conv_err:
+                            print(f"   ⚠️ Enhanced HTML conversion failed for chapter {actual_num}: {conv_err}")
                     
                     # Generate filename for this chapter using content.opf naming
                     fname = FileUtilities.create_chapter_filename(chapter, actual_num)
@@ -5487,46 +5504,30 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
     
     preserve_structure = chapter_info.get('preserve_structure', False) if chapter_info else False
     
-    # IMPORTANT: Protect split markers before markdown conversion
-    # markdown2 might alter span elements, so we temporarily replace them with placeholders
-    split_marker_pattern = r'<span id="split_marker_\d+"[^>]*></span>'
-    split_markers = re.findall(split_marker_pattern, plain_text)
-    protected_text = plain_text
-    marker_placeholders = {}
-    
-    for i, marker in enumerate(split_markers):
-        placeholder = f'___SPLIT_MARKER_{i}___'
-        marker_placeholders[placeholder] = marker
-        protected_text = protected_text.replace(marker, placeholder, 1)
-    
     # First, try to use markdown2 for proper markdown conversion
     try:
         import markdown2
         
         # Check if the text contains markdown patterns
         has_markdown = any([
-            '##' in protected_text,  # Headers
-            '**' in protected_text,  # Bold
-            '*' in protected_text and not '**' in protected_text,  # Italic
-            '[' in protected_text and '](' in protected_text,  # Links
-            '```' in protected_text,  # Code blocks
-            '> ' in protected_text,  # Blockquotes
-            '- ' in protected_text or '* ' in protected_text or '1. ' in protected_text  # Lists
+            '##' in plain_text,  # Headers
+            '**' in plain_text,  # Bold
+            '*' in plain_text and not '**' in plain_text,  # Italic
+            '[' in plain_text and '](' in plain_text,  # Links
+            '```' in plain_text,  # Code blocks
+            '> ' in plain_text,  # Blockquotes
+            '- ' in plain_text or '* ' in plain_text or '1. ' in plain_text  # Lists
         ])
         
         if has_markdown or preserve_structure:
             # Use markdown2 for proper conversion
-            html = markdown2.markdown(protected_text, extras=[
+            html = markdown2.markdown(plain_text, extras=[
                 'cuddled-lists',       # Lists without blank lines
                 'fenced-code-blocks',  # Code blocks with ```
                 'break-on-newline',    # Treat single newlines as <br>
                 'smarty-pants',        # Smart quotes and dashes
                 'tables',              # Markdown tables
             ])
-            
-            # Restore split markers
-            for placeholder, original_marker in marker_placeholders.items():
-                html = html.replace(placeholder, original_marker)
             
             # Post-process to ensure proper paragraph structure
             if not '<p>' in html:
@@ -5547,8 +5548,7 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
         print("⚠️ markdown2 not available, using fallback HTML conversion")
     
     # Fallback: Manual markdown-to-HTML conversion
-    # IMPORTANT: Use protected_text here too, not plain_text!
-    lines = protected_text.strip().split('\n')
+    lines = plain_text.strip().split('\n')
     html_parts = []
     in_code_block = False
     code_block_content = []
@@ -5645,12 +5645,7 @@ def convert_enhanced_text_to_html(plain_text, chapter_info=None):
     if in_list:
         final_html.append(f'</{list_type}>')
     
-    # Restore split markers
-    result = '\n'.join(final_html)
-    for placeholder, original_marker in marker_placeholders.items():
-        result = result.replace(placeholder, original_marker)
-    
-    return result
+    return '\n'.join(final_html)
 # =====================================================
 # MAIN TRANSLATION FUNCTION
 # =====================================================
