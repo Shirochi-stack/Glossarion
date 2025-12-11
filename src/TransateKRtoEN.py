@@ -8957,7 +8957,7 @@ def main(log_callback=None, stop_callback=None):
             
             chapters_completed += 1
 
-    if is_text_file:
+    if is_text_file or is_pdf_file:
         print("📄 Text file translation complete!")
         try:
             # Collect all translated chapters with their metadata
@@ -9184,10 +9184,16 @@ def main(log_callback=None, stop_callback=None):
             if log_callback:
                 log_callback(f"✅ Text file translation complete! Created {combined_path}")
             
+            # Exit here for text files and PDFs - don't fall through to EPUB generation
+            print("TRANSLATION_COMPLETE_SIGNAL")
+            return
+            
         except Exception as e:
             print(f"❌ Error creating combined text file: {e}")
             if log_callback:
                 log_callback(f"❌ Error creating combined text file: {e}")
+            print("TRANSLATION_COMPLETE_SIGNAL")
+            return
     else:
         print("🔍 Checking for translated chapters...")
         # Respect retain extension toggle: if enabled, don't look for response_ prefix

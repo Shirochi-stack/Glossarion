@@ -40,23 +40,12 @@ class TextFileProcessor:
                 if self.pdf_output_format in ['html', 'markdown']:
                     print(f"📄 Extracting PDF with formatting (format: {self.pdf_output_format})")
                     # Extract page by page for PDFs to preserve structure
-                    result = extract_pdf_with_formatting(
+                    content, images_info = extract_pdf_with_formatting(
                         self.file_path, 
                         self.output_dir, 
                         extract_images=self.pdf_extract_images,
                         page_by_page=True  # Get pages separately
                     )
-                    
-                    # Handle new return format: (positioned_pages, images_info, clean_pages) or (positioned_pages, images_info)
-                    if len(result) == 3:
-                        content, images_info, clean_content = result
-                        # Store clean content separately for translation payloads
-                        self.clean_content = clean_content
-                    else:
-                        # Old format compatibility
-                        content, images_info = result
-                        self.clean_content = None
-                    
                     is_html_content = True
                     
                     # Generate CSS if enabled (unless overridden by user-loaded CSS)
@@ -112,22 +101,11 @@ class TextFileProcessor:
             # Content is list of (page_num, html) tuples from page_by_page mode
             # page_num is already 1-indexed from pdf_extractor
             raw_chapters = []
-            
-            # Build clean content lookup if available
-            clean_lookup = {}
-            if hasattr(self, 'clean_content') and self.clean_content:
-                if isinstance(self.clean_content, list):
-                    clean_lookup = {page_num: clean_html for page_num, clean_html in self.clean_content}
-            
             for page_num, page_html in content:
-                # Use clean HTML for translation if available, positioned HTML for output
-                translation_content = clean_lookup.get(page_num, page_html)
-                
                 raw_chapters.append({
                     'num': page_num,  # Already 1-indexed
                     'title': f"{self.file_base} - Page {page_num}",
-                    'content': translation_content,  # Clean HTML for translation
-                    'output_content': page_html,  # Positioned HTML for final output
+                    'content': page_html,
                     'is_html': is_html_content,
                     'images_info': {}  # Images already embedded in page HTML
                 })
@@ -190,8 +168,7 @@ class TextFileProcessor:
         
         for chapter_data in raw_chapters:
             # Keep content in its format (may be HTML/markdown/plain text)
-            chapter_content = chapter_data['content']  # Clean HTML for translation
-            output_content = chapter_data.get('output_content', chapter_content)  # Positioned HTML for output
+            chapter_content = chapter_data['content']
             is_html = chapter_data.get('is_html', False)
             images_info = chapter_data.get('images_info', {})
             
@@ -232,13 +209,12 @@ class TextFileProcessor:
                     original_chunk_path = os.path.join(word_count_dir, chunk_filename)
                     if not os.path.exists(original_chunk_path):
                         # Wrap HTML chunks with full document structure
-                        # For PDFs with absolute positioning, save the positioned HTML for output
-                        content_to_write = output_content if is_pdf_page else chunk_content
+                        content_to_write = chunk_content
                         if file_ext == '.html':
                             _render_mode = os.getenv("PDF_RENDER_MODE", "xhtml").lower()
                             if (_render_mode in ("xhtml", "html", "pdf2htmlex", "absolute") and self.file_path.lower().endswith('.pdf')):
                                 # Write the MuPDF page HTML as-is to preserve layout/styles
-                                content_to_write = output_content if is_pdf_page else chunk_content
+                                content_to_write = chunk_content
                             else:
                                 _css_link = "<link rel=\"stylesheet\" href=\"../styles.css\">"
                                 content_to_write = f"""<!DOCTYPE html>
@@ -289,13 +265,12 @@ class TextFileProcessor:
                 original_chunk_path = os.path.join(word_count_dir, chapter_filename)
                 if not os.path.exists(original_chunk_path):
                     # Wrap HTML files with full document structure
-                    # For PDFs with absolute positioning, save the positioned HTML for output
-                    content_to_write = output_content if is_pdf_page else chapter_content
+                    content_to_write = chapter_content
                     if file_ext == '.html':
                         _render_mode = os.getenv("PDF_RENDER_MODE", "xhtml").lower()
                         if (_render_mode in ("xhtml", "html", "pdf2htmlex", "absolute") and self.file_path.lower().endswith('.pdf')):
                             # Write MuPDF page HTML as-is to preserve layout/styles
-                            content_to_write = output_content if is_pdf_page else chapter_content
+                            content_to_write = chapter_content
                         else:
                             _css_link = "<link rel=\"stylesheet\" href=\"../styles.css\">"
                             content_to_write = f"""<!DOCTYPE html>
