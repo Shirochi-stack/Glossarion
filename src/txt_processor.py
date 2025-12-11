@@ -320,10 +320,6 @@ class TextFileProcessor:
         if self.file_path.lower().endswith('.pdf'):
             # For PDF sources, check format
             if is_html_format:
-                # Create HTML output
-                output_filename = f"{self.file_base}_translated.html"
-                output_path = os.path.join(self.output_dir, output_filename)
-                
                 # Wrap in full HTML document with CSS link
                 html_doc = f"""<!DOCTYPE html>
 <html lang="en">
@@ -338,16 +334,43 @@ class TextFileProcessor:
 </body>
 </html>"""
                 
-                with open(output_path, 'w', encoding='utf-8') as f:
+                # First, save HTML file for reference
+                html_output_filename = f"{self.file_base}_translated.html"
+                html_output_path = os.path.join(self.output_dir, html_output_filename)
+                with open(html_output_path, 'w', encoding='utf-8') as f:
                     f.write(html_doc)
+                print(f"✅ Created translated HTML file: {html_output_filename}")
                 
-                # Copy images folder to output directory if it exists
-                images_src = os.path.join(self.output_dir, 'images')
-                if os.path.exists(images_src):
-                    print(f"🖼️ Images folder already in output directory")
+                # Try to create PDF from HTML
+                output_filename = f"{self.file_base}_translated.pdf"
+                output_path = os.path.join(self.output_dir, output_filename)
                 
-                print(f"✅ Created translated HTML file: {output_filename}")
-                return output_path
+                try:
+                    from pdf_extractor import create_pdf_from_html
+                    
+                    # Find CSS and images
+                    css_path = os.path.join(self.output_dir, 'styles.css')
+                    images_dir = os.path.join(self.output_dir, 'images')
+                    
+                    # Provide paths if they exist
+                    css_arg = css_path if os.path.exists(css_path) else None
+                    images_arg = images_dir if os.path.exists(images_dir) else None
+                    
+                    if create_pdf_from_html(html_doc, output_path, css_path=css_arg, images_dir=images_arg):
+                        print(f"✅ Created translated PDF file: {output_filename}")
+                        if images_arg:
+                            print(f"🖼️ PDF includes images from: {os.path.basename(images_dir)}")
+                        return output_path
+                    else:
+                        print(f"⚠️ Failed to create PDF from HTML, using HTML file instead")
+                        return html_output_path
+                        
+                except Exception as e:
+                    print(f"⚠️ Error creating PDF from HTML: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    print(f"⚠️ Using HTML file instead: {html_output_filename}")
+                    return html_output_path
                 
             elif is_markdown_format:
                 # Create markdown output
@@ -366,7 +389,7 @@ class TextFileProcessor:
                 return output_path
             
             else:
-                # Try to create PDF from plain text
+                # Create PDF from plain text
                 output_filename = f"{self.file_base}_translated.pdf"
                 output_path = os.path.join(self.output_dir, output_filename)
                 try:

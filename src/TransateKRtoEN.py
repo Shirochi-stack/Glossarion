@@ -8978,47 +8978,133 @@ def main(log_callback=None, stop_callback=None):
             
             # Create a combined file with proper section structure
             if input_path.lower().endswith('.pdf'):
-                combined_path = os.path.join(out, f"{txt_processor.file_base}_translated.pdf")
-                print(f"📄 Creating PDF output: {combined_path}")
+                # Check if content is HTML or plain text
+                is_html_content = any('<html' in chapter_data.get('content', '').lower() or 
+                                     '<p>' in chapter_data.get('content', '') or
+                                     '<div' in chapter_data.get('content', '')
+                                     for chapter_data in translated_chapters)
                 
-                # Build full text content first
-                full_text_parts = []
-                current_main_chapter = None
-                
-                for i, chapter_data in enumerate(sorted(translated_chapters, key=lambda x: x['num'])):
-                    content = chapter_data['content']
+                if is_html_content:
+                    # HTML content - create PDF from HTML with proper rendering
+                    combined_path = os.path.join(out, f"{txt_processor.file_base}_translated.pdf")
+                    print(f"📄 Creating PDF from HTML with formatting and images...")
                     
-                    if chapter_data.get('is_chunk'):
-                        chunk_info = chapter_data.get('chunk_info', {})
-                        original_chapter = chunk_info.get('original_chapter')
-                        chunk_idx = chunk_info.get('chunk_idx', 1)
-                        total_chunks = chunk_info.get('total_chunks', 1)
+                    # Build full HTML content
+                    html_parts = []
+                    current_main_chapter = None
+                    
+                    for i, chapter_data in enumerate(sorted(translated_chapters, key=lambda x: x['num'])):
+                        content = chapter_data['content']
                         
-                        if original_chapter != current_main_chapter:
-                            current_main_chapter = original_chapter
+                        if chapter_data.get('is_chunk'):
+                            chunk_info = chapter_data.get('chunk_info', {})
+                            original_chapter = chunk_info.get('original_chapter')
+                            chunk_idx = chunk_info.get('chunk_idx', 1)
+                            total_chunks = chunk_info.get('total_chunks', 1)
+                            
+                            if original_chapter != current_main_chapter:
+                                current_main_chapter = original_chapter
+                                if i > 0:
+                                    html_parts.append('<hr />\n\n')
+                            
+                            html_parts.append(content)
+                            if chunk_idx < total_chunks:
+                                html_parts.append('\n')
+                        else:
+                            current_main_chapter = chapter_data['num']
+                            if i > 0:
+                                html_parts.append('<hr />\n\n')
+                            html_parts.append(content)
+                    
+                    full_html_body = "".join(html_parts)
+                    
+                    # Wrap in full HTML document with CSS
+                    css_path = os.path.join(out, 'styles.css')
+                    css_link = '<link rel="stylesheet" href="styles.css">' if os.path.exists(css_path) else ''
+                    
+                    full_html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{txt_processor.file_base} - Translated</title>
+    {css_link}
+</head>
+<body>
+{full_html_body}
+</body>
+</html>"""
+                    
+                    # Save HTML file for reference
+                    html_path = os.path.join(out, f"{txt_processor.file_base}_translated.html")
+                    with open(html_path, 'w', encoding='utf-8') as f:
+                        f.write(full_html)
+                    print(f"   • Created HTML file: {html_path}")
+                    
+                    # Convert HTML to PDF
+                    try:
+                        from pdf_extractor import create_pdf_from_html
+                        
+                        images_dir = os.path.join(out, 'images')
+                        css_arg = css_path if os.path.exists(css_path) else None
+                        images_arg = images_dir if os.path.exists(images_dir) else None
+                        
+                        if create_pdf_from_html(full_html, combined_path, css_path=css_arg, images_dir=images_arg):
+                            print(f"   • Created translated PDF file: {combined_path}")
+                            if images_arg:
+                                print(f"   • PDF includes images from images folder")
+                        else:
+                            print("⚠️ Failed to create PDF from HTML, using HTML file")
+                            combined_path = html_path
+                    except Exception as e:
+                        print(f"⚠️ Error creating PDF from HTML: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        print(f"   • Using HTML file instead: {html_path}")
+                        combined_path = html_path
+                else:
+                    # Plain text content - use text-based PDF creation
+                    combined_path = os.path.join(out, f"{txt_processor.file_base}_translated.pdf")
+                    print(f"📄 Creating PDF from plain text...")
+                    
+                    # Build full text content
+                    full_text_parts = []
+                    current_main_chapter = None
+                    
+                    for i, chapter_data in enumerate(sorted(translated_chapters, key=lambda x: x['num'])):
+                        content = chapter_data['content']
+                        
+                        if chapter_data.get('is_chunk'):
+                            chunk_info = chapter_data.get('chunk_info', {})
+                            original_chapter = chunk_info.get('original_chapter')
+                            chunk_idx = chunk_info.get('chunk_idx', 1)
+                            total_chunks = chunk_info.get('total_chunks', 1)
+                            
+                            if original_chapter != current_main_chapter:
+                                current_main_chapter = original_chapter
+                                if i > 0:
+                                    full_text_parts.append(f"\n\n{'='*50}\n\n")
+                            
+                            full_text_parts.append(content)
+                            if chunk_idx < total_chunks:
+                                full_text_parts.append("\n")
+                        else:
+                            current_main_chapter = chapter_data['num']
                             if i > 0:
                                 full_text_parts.append(f"\n\n{'='*50}\n\n")
-                        
-                        full_text_parts.append(content)
-                        if chunk_idx < total_chunks:
-                            full_text_parts.append("\n")
+                            full_text_parts.append(content)
+                    
+                    full_text = "".join(full_text_parts)
+                    
+                    from pdf_extractor import create_pdf_from_text
+                    if create_pdf_from_text(full_text, combined_path):
+                        print(f"   • Created translated PDF file: {combined_path}")
                     else:
-                        current_main_chapter = chapter_data['num']
-                        if i > 0:
-                            full_text_parts.append(f"\n\n{'='*50}\n\n")
-                        full_text_parts.append(content)
-                
-                full_text = "".join(full_text_parts)
-                
-                from pdf_extractor import create_pdf_from_text
-                if create_pdf_from_text(full_text, combined_path):
-                    print(f"   • Created translated PDF file: {combined_path}")
-                else:
-                    print("⚠️ Failed to create PDF, falling back to text output")
-                    combined_path = os.path.join(out, f"{txt_processor.file_base}_translated.txt")
-                    with open(combined_path, 'w', encoding='utf-8') as f:
-                        f.write(full_text)
-                    print(f"   • Created fallback text file: {combined_path}")
+                        print("⚠️ Failed to create PDF, falling back to text output")
+                        combined_path = os.path.join(out, f"{txt_processor.file_base}_translated.txt")
+                        with open(combined_path, 'w', encoding='utf-8') as f:
+                            f.write(full_text)
+                        print(f"   • Created fallback text file: {combined_path}")
             
             else:
                 combined_path = os.path.join(out, f"{txt_processor.file_base}_translated.txt")

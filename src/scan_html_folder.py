@@ -4486,46 +4486,69 @@ def process_html_file_batch(args):
                     total_glossary_items = sum(g.get('count', 1) for g in glossary_issues)
                     issues.append(f"glossary_leakage_{total_glossary_items}_entries_found")
         
-        # Check for missing images (skip for text files)
+        # Check for missing images (skip for text file mode unless we have HTML files with image info)
         check_missing_imgs = qa_settings.get('check_missing_images', True)
         
         # DEBUG: Show the condition check
         print(f"[DEBUG] File {filename}: text_mode={text_file_mode}, check_imgs={check_missing_imgs}, is_html={filename.lower().endswith(('.html', '.xhtml', '.htm'))}, has_img_info={bool(original_image_info)}")
         
-        if not text_file_mode and check_missing_imgs and filename.lower().endswith(('.html', '.xhtml', '.htm')) and original_image_info:
+        # Allow image checking for HTML files even in text_file_mode if we have original_image_info
+        # This handles cases where PDF sources generate HTML output
+        if check_missing_imgs and filename.lower().endswith(('.html', '.xhtml', '.htm')) and original_image_info:
             # Read the translated HTML content
             try:
                 with open(full_path, 'r', encoding='utf-8') as f:
                     translated_html = f.read()
                 
-                # Match by EXACT filename from spine ONLY
-                # Remove response_ prefix and extension for matching
+                # Match by filename
+                # Remove response_ prefix for matching
                 search_filename = filename.lower()
                 if search_filename.startswith('response_'):
                     search_filename = search_filename[9:]  # Remove 'response_'
-                search_basename = os.path.splitext(search_filename)[0]  # Remove extension
                 
                 has_missing_imgs = False
                 img_issues = []
-                matched_spine_idx = None
+                matched_key = None
                 
-                for spine_idx, img_info in original_image_info.items():
-                    orig_filename = img_info.get('filename', '').lower()
-                    orig_basename = os.path.splitext(orig_filename)[0]  # Remove extension
+                # For text_file_mode, keys are filenames; for EPUB mode, keys are spine indices
+                if text_file_mode:
+                    # Direct filename match or basename match
+                    if search_filename in original_image_info:
+                        matched_key = search_filename
+                    else:
+                        # Try matching by basename (without extension)
+                        search_basename = os.path.splitext(search_filename)[0]
+                        for key, img_info in original_image_info.items():
+                            key_basename = os.path.splitext(key)[0] if isinstance(key, str) else None
+                            if key_basename == search_basename:
+                                matched_key = key
+                                break
                     
-                    # EXACT match only - no fuzzy logic, no position-based matching
-                    if orig_basename == search_basename:
-                        has_missing_imgs, img_issues = detect_missing_images(translated_html, spine_idx, original_image_info)
-                        matched_spine_idx = spine_idx
-                        print(f"[IMAGE DEBUG] Matched {filename} to spine file '{orig_filename}' at spine_idx={spine_idx}")
-                        break
+                    if matched_key:
+                        has_missing_imgs, img_issues = detect_missing_images(translated_html, matched_key, original_image_info)
+                        print(f"[IMAGE DEBUG] Matched {filename} to original chunk '{matched_key}'")
+                    else:
+                        print(f"[IMAGE DEBUG] No match found for {filename} in word_count folder")
                 else:
-                    print(f"[IMAGE DEBUG] No exact match found for {filename} (searched for basename: '{search_basename}')")
+                    # EPUB mode: match by spine index
+                    search_basename = os.path.splitext(search_filename)[0]  # Remove extension
+                    for spine_idx, img_info in original_image_info.items():
+                        orig_filename = img_info.get('filename', '').lower()
+                        orig_basename = os.path.splitext(orig_filename)[0]  # Remove extension
+                        
+                        # EXACT match only - no fuzzy logic, no position-based matching
+                        if orig_basename == search_basename:
+                            has_missing_imgs, img_issues = detect_missing_images(translated_html, spine_idx, original_image_info)
+                            matched_key = spine_idx
+                            print(f"[IMAGE DEBUG] Matched {filename} to spine file '{orig_filename}' at spine_idx={spine_idx}")
+                            break
+                    else:
+                        print(f"[IMAGE DEBUG] No exact match found for {filename} (searched for basename: '{search_basename}')")
                 
-                if matched_spine_idx:
+                if matched_key:
                     print(f"[IMAGE DEBUG] Checked {filename}: found_match={has_missing_imgs}")
                     if has_missing_imgs:
-                        orig_info = original_image_info.get(matched_spine_idx, {})
+                        orig_info = original_image_info.get(matched_key, {})
                         print(f"[IMAGE DEBUG]   Original has {orig_info.get('image_count', 0)} images")
                 
                 if has_missing_imgs:
@@ -4552,10 +4575,11 @@ def process_html_file_batch(args):
                 import traceback
                 print(traceback.format_exc())
                     
-        # HTML tag check (skip for text files)
+        # HTML tag check (allow for HTML files even in text_file_mode)
         check_missing_html_tag = qa_settings.get('check_missing_html_tag', True)
         check_body_tag = qa_settings.get('check_body_tag', False)
-        if not text_file_mode and check_missing_html_tag and filename.lower().endswith(('.html', '.xhtml', '.htm')):
+        # Check HTML structure for any .html file, regardless of text_file_mode
+        if check_missing_html_tag and filename.lower().endswith(('.html', '.xhtml', '.htm')):
             # Create a dummy log function for the worker
             def dummy_log(msg):
                 pass
@@ -4609,18 +4633,35 @@ def process_html_file_batch(args):
             
             # For text files, compare against corresponding chunk from word_count folder
             if text_file_mode and original_word_counts:
-                # Strip response_ prefix and .txt extension from filename
+                # Strip response_ prefix and extension from filename (.txt or .html)
                 clean_filename = filename
                 if clean_filename.lower().startswith('response_'):
                     clean_filename = clean_filename[9:]  # Remove 'response_' prefix
                 
-                # Try to find matching original chunk
+                # Try to find matching original chunk (exact match first)
                 if clean_filename in original_word_counts:
                     # Found matching chunk!
                     translated_wc = len(raw_text.split())
                     original_wc = original_word_counts[clean_filename]
+                else:
+                    # Try matching with different extension (e.g., chunk_1.html vs chunk_1.txt)
+                    base_name = os.path.splitext(clean_filename)[0]
+                    matched_key = None
+                    for key in original_word_counts.keys():
+                        if os.path.splitext(key)[0] == base_name:
+                            matched_key = key
+                            break
                     
-                    if original_wc > 0:
+                    if matched_key:
+                        translated_wc = len(raw_text.split())
+                        original_wc = original_word_counts[matched_key]
+                        clean_filename = matched_key  # Update for display
+                    else:
+                        # No match found, skip this file
+                        translated_wc = None
+                        original_wc = None
+                
+                if original_wc is not None:
                         ratio = translated_wc / original_wc
                         # For text files, use same reasonable bounds as EPUB
                         is_reasonable = 0.7 <= ratio <= 2.0
@@ -4752,10 +4793,17 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     
     # Auto-detect text file mode from source extension when not explicitly set
     # Enable for .txt or .pdf sources so PDFs are treated like text-mode inputs
+    # Also check if word_Count folder exists to determine if we should use text mode for HTML
     if text_file_mode is None:
         if epub_path and epub_path.lower().endswith(('.txt', '.pdf')):
-            text_file_mode = True
-            log(f"📄 Text file mode auto-detected from source file extension ({os.path.splitext(epub_path)[1].lower()})")
+            # Check if word_Count folder exists - if so, we're in text mode with HTML files
+            word_count_folder = os.path.join(folder_path, 'word_count')
+            if os.path.exists(word_count_folder):
+                text_file_mode = True
+                log(f"📄 Text file mode auto-detected: PDF source with word_count folder detected")
+            else:
+                text_file_mode = True
+                log(f"📄 Text file mode auto-detected from source file extension ({os.path.splitext(epub_path)[1].lower()})")
         else:
             text_file_mode = False
     
@@ -4813,16 +4861,50 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     merge_info = {}  # For request merging support
     combined_text_file = None  # For text file mode word count analysis
     
-    # Extract image info from EPUB if missing images check is enabled
+    # Extract image info from EPUB or word_count folder if missing images check is enabled
     check_missing_imgs = qa_settings.get('check_missing_images', True)
-    if check_missing_imgs and not text_file_mode and epub_path and os.path.exists(epub_path):
-        log(f"🖼️ Extracting image information from original EPUB: {os.path.basename(epub_path)}")
-        original_image_info = extract_epub_image_info(epub_path, log)
-        if original_image_info:
-            total_images = sum(info['image_count'] for info in original_image_info.values())
-            log(f"   Found images in {len(original_image_info)} chapters ({total_images} total images)")
-        else:
-            log(f"   No images found in EPUB (or unable to extract)")
+    if check_missing_imgs:
+        if text_file_mode:
+            # For text file mode (PDF sources), extract image info from word_count folder
+            word_count_folder = os.path.join(folder_path, 'word_count')
+            if os.path.exists(word_count_folder):
+                log(f"🖼️ Extracting image information from word_count folder")
+                # Extract image counts from HTML files in word_count folder
+                chunk_files = [f for f in os.listdir(word_count_folder) if f.lower().endswith(('.html', '.htm', '.xhtml'))]
+                if chunk_files:
+                    for chunk_file in chunk_files:
+                        chunk_path = os.path.join(word_count_folder, chunk_file)
+                        try:
+                            with open(chunk_path, 'r', encoding='utf-8') as f:
+                                chunk_html = f.read()
+                            soup = BeautifulSoup(chunk_html, 'html.parser')
+                            images = soup.find_all('img')
+                            if images:
+                                # Use filename as key for matching
+                                original_image_info[chunk_file] = {
+                                    'image_count': len(images),
+                                    'image_srcs': [img.get('src', '') for img in images],
+                                    'filename': chunk_file
+                                }
+                        except Exception as e:
+                            log(f"   ⚠️ Could not extract images from {chunk_file}: {e}")
+                    
+                    if original_image_info:
+                        total_images = sum(info['image_count'] for info in original_image_info.values())
+                        log(f"   Found images in {len(original_image_info)} chunks ({total_images} total images)")
+                    else:
+                        log(f"   No images found in word_count folder HTML files")
+                else:
+                    log(f"   No HTML files found in word_count folder for image extraction")
+        elif epub_path and os.path.exists(epub_path):
+            # For EPUB mode, extract from EPUB
+            log(f"🖼️ Extracting image information from original EPUB: {os.path.basename(epub_path)}")
+            original_image_info = extract_epub_image_info(epub_path, log)
+            if original_image_info:
+                total_images = sum(info['image_count'] for info in original_image_info.values())
+                log(f"   Found images in {len(original_image_info)} chapters ({total_images} total images)")
+            else:
+                log(f"   No images found in EPUB (or unable to extract)")
     
     if check_word_count:
         if text_file_mode:
@@ -4834,8 +4916,8 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                     # Check for word_count folder
                     word_count_folder = os.path.join(folder_path, 'word_count')
                     if os.path.exists(word_count_folder):
-                        # Load word counts from each chunk file
-                        chunk_files = [f for f in os.listdir(word_count_folder) if f.lower().endswith('.txt')]
+                        # Load word counts from each chunk file (support both .txt and .html)
+                        chunk_files = [f for f in os.listdir(word_count_folder) if f.lower().endswith(('.txt', '.html'))]
                         if chunk_files:
                             # Store as {filename: word_count} for easy lookup
                             original_word_counts = {}
@@ -4850,7 +4932,7 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
                             log(f"   Loaded {len(original_word_counts)} original chunk files from word_count folder")
                             log(f"   Total source words: {sum(original_word_counts.values()):,}")
                         else:
-                            log(f"   ⚠️ word_count folder exists but contains no .txt files")
+                            log(f"   ⚠️ word_count folder exists but contains no .txt or .html files")
                             check_word_count = False
                     else:
                         # Fallback: use total source file word count (old behavior)
@@ -4976,7 +5058,8 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     # Get files to scan (HTML or text based on mode)
     if text_file_mode:
         # For text files, scan section files (including response_ prefix versions)
-        all_txt_files = sorted([f for f in os.listdir(folder_path) if f.lower().endswith(".txt")])
+        # Support both .txt and .html files for PDF sources that generate HTML
+        all_txt_files = sorted([f for f in os.listdir(folder_path) if f.lower().endswith((".txt", ".html"))])
         # Filter out only combined files (_translated.txt)
         html_files = [f for f in all_txt_files if not f.endswith('_translated.txt')]
         log(f"📄 Text file mode enabled - scanning section files (response_ prefix ignored for comparison)")
