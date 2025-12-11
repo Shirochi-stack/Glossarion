@@ -3248,6 +3248,7 @@ img {
           * Always adds our built‑in default.css.
           * If EPUB_CSS_OVERRIDE_PATH is set, add ONLY that CSS (plus default) and
             skip all CSS files from the extracted EPUB/css directory.
+          * Also overwrites PDF-generated styles.css in the output directory if override is set.
           * Otherwise, add all .css files from self.css_dir as before.
         """
         css_items = []
@@ -3264,13 +3265,25 @@ img {
         self.log("✅ Added default CSS")
         
         # Check for explicit CSS override from GUI
+        # Only apply if attach_css_to_chapters is enabled
         override_path = os.getenv('EPUB_CSS_OVERRIDE_PATH', '').strip()
-        if override_path:
+        if override_path and self.attach_css_to_chapters:
             try:
                 if os.path.isfile(override_path):
                     self.log(f"[INFO] Using override CSS for EPUB: {override_path}")
                     with open(override_path, 'r', encoding='utf-8') as f:
                         css_content = f.read()
+                    
+                    # IMPORTANT: Overwrite PDF-generated styles.css if it exists
+                    styles_css_path = os.path.join(self.output_dir, 'styles.css')
+                    if os.path.exists(styles_css_path):
+                        try:
+                            with open(styles_css_path, 'w', encoding='utf-8') as f:
+                                f.write(css_content)
+                            self.log(f"✅ Overwrote PDF-generated styles.css with loaded CSS")
+                        except Exception as e:
+                            self.log(f"[WARNING] Failed to overwrite styles.css: {e}")
+                    
                     override_item = epub.EpubItem(
                         uid="css_override",
                         file_name="css/override.css",
@@ -3285,6 +3298,8 @@ img {
             except Exception as e:
                 self.log(f"[WARNING] Failed to load override CSS '{override_path}': {e}")
                 # Fall back to normal behavior below
+        elif override_path and not self.attach_css_to_chapters:
+            self.log(f"[INFO] CSS override set but 'Attach CSS to Chapters' is disabled - ignoring override")
         
         # Then add user CSS files from css/ directory (original behavior)
         if not os.path.isdir(self.css_dir):

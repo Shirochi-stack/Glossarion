@@ -46,13 +46,39 @@ class TextFileProcessor:
                     )
                     is_html_content = True
                     
-                    # Generate CSS if enabled
+                    # Generate CSS if enabled (unless overridden by user-loaded CSS)
                     if self.pdf_generate_css and self.pdf_output_format == 'html':
-                        css_content = generate_css_from_pdf(self.file_path)
+                        css_override_path = os.getenv('EPUB_CSS_OVERRIDE_PATH', '').strip()
+                        attach_css_enabled = os.getenv('ATTACH_CSS_TO_CHAPTERS', '0') == '1'
                         css_path = os.path.join(self.output_dir, 'styles.css')
-                        with open(css_path, 'w', encoding='utf-8') as f:
-                            f.write(css_content)
-                        print(f"✅ Generated styles.css")
+                        
+                        # Only use CSS override if attach_css_to_chapters is enabled
+                        if css_override_path and os.path.exists(css_override_path) and attach_css_enabled:
+                            # Use the user-loaded CSS instead of generating from PDF
+                            try:
+                                import shutil as css_shutil
+                                css_shutil.copy2(css_override_path, css_path)
+                                print(f"✅ Using loaded CSS (overrides PDF-generated CSS): {os.path.basename(css_override_path)}")
+                            except Exception as e:
+                                print(f"⚠️ Failed to copy loaded CSS, generating from PDF instead: {e}")
+                                # Fall back to PDF generation
+                                css_content = generate_css_from_pdf(self.file_path)
+                                with open(css_path, 'w', encoding='utf-8') as f:
+                                    f.write(css_content)
+                                print(f"✅ Generated styles.css from PDF")
+                        elif css_override_path and not attach_css_enabled:
+                            # CSS override is set but attach CSS is disabled
+                            print(f"ℹ️ CSS override set but 'Attach CSS to Chapters' is disabled - generating from PDF")
+                            css_content = generate_css_from_pdf(self.file_path)
+                            with open(css_path, 'w', encoding='utf-8') as f:
+                                f.write(css_content)
+                            print(f"✅ Generated styles.css from PDF")
+                        else:
+                            # Generate CSS from PDF as normal
+                            css_content = generate_css_from_pdf(self.file_path)
+                            with open(css_path, 'w', encoding='utf-8') as f:
+                                f.write(css_content)
+                            print(f"✅ Generated styles.css from PDF")
                     
                     # Convert to markdown if html2text is enabled
                     if self.html2text_enabled or self.pdf_output_format == 'markdown':

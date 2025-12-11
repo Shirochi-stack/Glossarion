@@ -8510,8 +8510,10 @@ Important rules:
                 self.auto_loaded_glossary_for_file = None
                 self.append_log("📑 Cleared glossary settings (image files selected)")
         else:
-            # Handle EPUB/TXT files
+            # Handle EPUB/TXT/PDF files
             epub_files = [p for p in processed_paths if p.lower().endswith('.epub')]
+            pdf_files = [p for p in processed_paths if p.lower().endswith('.pdf')]
+            txt_files = [p for p in processed_paths if p.lower().endswith('.txt')]
             
             if len(epub_files) == 1:
                 # Single EPUB - auto-load glossary
@@ -8546,6 +8548,28 @@ Important rules:
                     self.append_log(f"📖 {len(epub_files)} EPUB files selected - using '{os.path.basename(epub_files[0])}' as primary for word count analysis")
                 except Exception:
                     pass
+            elif pdf_files or txt_files:
+                # For PDF/TXT files, clear any manually loaded glossary that doesn't match the file
+                if hasattr(self, 'manual_glossary_manually_loaded') and self.manual_glossary_manually_loaded and self.manual_glossary_path:
+                    # Get the current file name (first file if multiple)
+                    current_file = pdf_files[0] if pdf_files else txt_files[0]
+                    current_file_base = os.path.splitext(os.path.basename(current_file))[0]
+                    
+                    # Get the glossary filename
+                    glossary_name = os.path.basename(self.manual_glossary_path)
+                    
+                    # Check if the current file's base name appears in the glossary filename
+                    if current_file_base not in glossary_name:
+                        # Glossary doesn't match, clear it
+                        old_glossary = glossary_name
+                        self.append_log(f"📑 Cleared manually loaded glossary from different source: {old_glossary}")
+                        self.manual_glossary_path = None
+                        self.manual_glossary_manually_loaded = False
+                        self.auto_loaded_glossary_path = None
+                        self.auto_loaded_glossary_for_file = None
+                    else:
+                        # Glossary matches the current file, keep it
+                        self.append_log(f"📑 Keeping manually loaded glossary: {glossary_name}")
 
     def _convert_json_to_txt(self, json_path):
         """Convert a JSON file to TXT format for translation."""
