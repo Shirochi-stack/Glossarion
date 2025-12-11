@@ -5715,6 +5715,7 @@ def main(log_callback=None, stop_callback=None):
         input_path = sys.argv[1]
     
     is_text_file = input_path.lower().endswith(('.txt', '.csv', '.json', '.pdf', '.md'))
+    is_pdf_file = input_path.lower().endswith('.pdf')
     
     if is_text_file:
         os.environ["IS_TEXT_FILE_TRANSLATION"] = "1"
@@ -5760,6 +5761,7 @@ def main(log_callback=None, stop_callback=None):
         input_path = args.epub
     
     is_text_file = input_path.lower().endswith(('.txt', '.csv', '.json', '.pdf', '.md'))
+    is_pdf_file = input_path.lower().endswith('.pdf')
     
     # Disable Break Split Count for EPUB files (only works with plain text files)
     if input_path.lower().endswith('.epub'):
@@ -7030,8 +7032,8 @@ def main(log_callback=None, stop_callback=None):
     current_chunk_number = 0
 
     if config.BATCH_TRANSLATION:
-        # Check if request merging is enabled (skip for .txt files)
-        use_request_merging = config.REQUEST_MERGING_ENABLED and config.REQUEST_MERGE_COUNT > 1 and not is_text_file
+        # Check if request merging is enabled (only for PDF files)
+        use_request_merging = config.REQUEST_MERGING_ENABLED and config.REQUEST_MERGE_COUNT > 1 and is_pdf_file
         
         if use_request_merging:
             print(f"\n🔗 REQUEST MERGING + BATCH MODE ENABLED")
@@ -7572,8 +7574,8 @@ def main(log_callback=None, stop_callback=None):
         merge_groups = {}  # Maps parent_idx -> list of child (idx, chapter) tuples
         merged_children = set()  # Set of idx that are merged into another chapter
         
-        # Skip request merging for .txt files
-        if config.REQUEST_MERGING_ENABLED and config.REQUEST_MERGE_COUNT > 1 and not is_text_file:
+        # Request merging only for PDF files
+        if config.REQUEST_MERGING_ENABLED and config.REQUEST_MERGE_COUNT > 1 and is_pdf_file:
             print(f"\n🔗 REQUEST MERGING ENABLED: Combining up to {config.REQUEST_MERGE_COUNT} chapters per request")
             
             # Collect chapters that need translation

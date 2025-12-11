@@ -4206,7 +4206,7 @@ def _create_processing_options_section(self, parent):
     for widget in merge_count_widgets:
         widget.setEnabled(bool(self.request_merging_enabled_var))
     
-    request_merge_desc = QLabel("Combine multiple chapters into a single translation request.\nReduces API overhead and may improve context consistency.")
+    request_merge_desc = QLabel("Combine multiple chapters into a single translation request.\nReduces API overhead and may improve context consistency.\n⚠️ PDF files only - does NOT work with .txt, .csv, .json, or .md files.")
     request_merge_desc.setStyleSheet("color: gray; font-size: 9pt;")
     request_merge_desc.setContentsMargins(20, 0, 0, 5)
     extraction_v.addWidget(request_merge_desc)
