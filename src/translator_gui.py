@@ -9453,7 +9453,7 @@ Important rules:
                 
                 # PDF settings
                 ('pdf_output_format', ['pdf_output_format_var'], 'pdf', str),
-                ('pdf_render_mode', ['pdf_render_mode_var'], 'absolute', str),
+                ('pdf_render_mode', ['pdf_render_mode_var'], 'html', str),
             ]
             
             # Process the settings map to populate self.config
