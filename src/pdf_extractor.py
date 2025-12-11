@@ -608,6 +608,13 @@ img {{
     margin: 1em auto;  /* Center images */
 }}
 
+img.block-image {{
+    max-width: 100%;
+    height: auto;
+    display: block;
+    margin: 1em auto;
+}}
+
 .pdf-block {{
     margin: 0.5em 0;
 }}
@@ -960,9 +967,14 @@ def _hex_color_from_int(c: int) -> str:
         return "#000000"
 
 
-def _extract_absolute_html(pdf_path: str, output_dir: str, page_by_page: bool = False) -> Tuple[str, Dict[int, List[Dict]]]:
+def _extract_absolute_html(pdf_path: str, output_dir: str, page_by_page: bool = False) -> Tuple:
     """Build per-page HTML with absolutely-positioned text spans and images.
     Pure Python using PyMuPDF; preserves layout while keeping text selectable.
+    Also extracts clean text blocks for efficient translation payloads.
+    
+    Returns:
+        If page_by_page=False: (positioned_html, images_by_page, clean_html)
+        If page_by_page=True: (positioned_pages, images_by_page, clean_pages)
     """
     try:
         import fitz
@@ -978,11 +990,14 @@ def _extract_absolute_html(pdf_path: str, output_dir: str, page_by_page: bool = 
 
     doc = fitz.open(pdf_path)
     pages: List[Tuple[int, str]] = []
+    clean_pages: List[Tuple[int, str]] = []  # Clean text for translation payloads
 
     for i in range(len(doc)):
         page = doc[i]
         pw, ph = page.rect.width, page.rect.height
         html_parts: List[str] = []
+        clean_parts: List[str] = []  # Clean paragraphs without positioning
+        
         html_parts.append('<!-- render:absolute -->')
         html_parts.append(f'<div class="pdf-page" id="page-{i+1}" style="position:relative;width:{pw}px;height:{ph}px;margin:0 auto;background:#ffffff;">')
 
@@ -991,7 +1006,10 @@ def _extract_absolute_html(pdf_path: str, output_dir: str, page_by_page: bool = 
         for block in pdata.get("blocks", []):
             if block.get("type") != 0:
                 continue
+            # Collect block text for clean version
+            block_texts = []
             for line in block.get("lines", []):
+                line_texts = []
                 for span in line.get("spans", []):
                     text = span.get("text", "")
                     if not text.strip():
@@ -1009,6 +1027,13 @@ def _extract_absolute_html(pdf_path: str, output_dir: str, page_by_page: bool = 
                            .replace(">", "&gt;"))
                     style = f"position:absolute;left:{x0}px;top:{y0}px;font-size:{fs}px;color:{color};font-family:{fam};white-space:pre;"
                     html_parts.append(f'<span style="{style}">{esc}</span>')
+                    # Collect plain text for clean version
+                    line_texts.append(esc)
+                if line_texts:
+                    block_texts.append(' '.join(line_texts))
+            # Add block as a clean paragraph
+            if block_texts:
+                clean_parts.append(f'<p class="align-justify">{"".join(block_texts)}</p>')
 
         # Place images by bbox if we have them
         for img in images_by_page.get(i, []) + images_by_page.get(i+1, []):
@@ -1022,6 +1047,8 @@ def _extract_absolute_html(pdf_path: str, output_dir: str, page_by_page: bool = 
                 if fname:
                     style = f'position:absolute;left:{x0}px;top:{y0}px;width:{w}px;height:{h}px;object-fit:contain;'
                     html_parts.append(f'<img src="images/{fname}" alt="img" style="{style}" />')
+                    # Add image to clean version without positioning
+                    clean_parts.append(f'<img src="images/{fname}" alt="img" class="block-image" />')
 
         # Make PDF links clickable with absolute overlays
         try:
@@ -1045,13 +1072,21 @@ def _extract_absolute_html(pdf_path: str, output_dir: str, page_by_page: bool = 
 
         html_parts.append('</div>')
         pages.append((i+1, '\n'.join(html_parts)))
+        
+        # Save clean version for this page
+        if clean_parts:
+            clean_html = '\n'.join(clean_parts)
+            clean_pages.append((i+1, clean_html))
 
     doc.close()
-
+    
+    # Return both positioned and clean versions
     if page_by_page:
-        return pages, images_by_page
+        return pages, images_by_page, clean_pages
     else:
-        return '\n\n'.join(p[1] for p in pages), images_by_page
+        positioned_html = '\n\n'.join(p[1] for p in pages)
+        clean_html = '\n\n'.join(p[1] for p in clean_pages)
+        return positioned_html, images_by_page, clean_html
 
 
 def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: bool = True, page_by_page: bool = False) -> Tuple[str, Dict[int, List[Dict]]]:
