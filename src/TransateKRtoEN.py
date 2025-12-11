@@ -1152,7 +1152,18 @@ class FileUtilities:
             if isinstance(actual_num, float):
                 major = int(actual_num)
                 minor = int(round((actual_num - major) * 10))  # Use *10 to get 0, 1, 2, etc. from 1.0, 1.1, 1.2
-                if is_text_file:
+                
+                # PDF CHUNK FIX: Check if the chunk has a specific filename with extension
+                # For PDF chunks, preserve the .html or .md extension from the original filename
+                chunk_filename = chapter.get('filename', '')
+                if chunk_filename and (chunk_filename.endswith('.html') or chunk_filename.endswith('.md')):
+                    # Use the extension from the chunk's original filename
+                    file_ext = '.html' if chunk_filename.endswith('.html') else '.md'
+                    if retain:
+                        return f"section_{major}_{minor}{file_ext}"
+                    else:
+                        return f"response_section_{major}_{minor}{file_ext}"
+                elif is_text_file:
                     return f"section_{major}_{minor}.txt" if retain else f"response_section_{major}_{minor}.txt"
                 else:
                     return f"{major:03d}_{minor:02d}.html" if retain else f"response_{major:03d}_{minor:02d}.html"
@@ -1242,7 +1253,13 @@ class ProgressManager:
         
         Returns the key that should be used for this chapter in the progress dict.
         """
-        chapter_key = str(actual_num)
+        # CHUNK FIX: For decimal chapter numbers (e.g., 1.0, 1.1), use the full decimal in the key
+        # This prevents collisions when multiple chunks share the same integer part
+        if isinstance(actual_num, float) and actual_num != int(actual_num):
+            # Convert to string preserving decimal: "1.0", "1.1", etc.
+            chapter_key = str(actual_num)
+        else:
+            chapter_key = str(actual_num)
         
         # Determine the output filename
         if output_file:
@@ -2996,24 +3013,29 @@ class BatchTranslationProcessor:
         
         # Fallback if not set (common in batch mode where first pass might be skipped)
         if actual_num is None:
-            # Try to extract it using the same logic as non-batch mode
-            raw_num = FileUtilities.extract_actual_chapter_number(chapter, patterns=None, config=self.config)
-            
-            # Apply offset if configured
-            offset = self.config.CHAPTER_NUMBER_OFFSET if hasattr(self.config, 'CHAPTER_NUMBER_OFFSET') else 0
-            raw_num += offset
-            
-            # Check if zero detection is disabled
-            if hasattr(self.config, 'DISABLE_ZERO_DETECTION') and self.config.DISABLE_ZERO_DETECTION:
-                actual_num = raw_num
-            elif hasattr(self.config, '_uses_zero_based') and self.config._uses_zero_based:
-                # This is a 0-based novel, adjust the number
-                actual_num = raw_num + 1
+            # CHUNK FIX: For split text/PDF chunks with decimal numbering, use chap_num directly
+            # Chunks have 'is_chunk' flag and decimal 'num' values (1.0, 1.1, etc.)
+            if chapter.get('is_chunk', False) and isinstance(chap_num, float):
+                actual_num = chap_num
             else:
-                # Default to raw number (1-based or unknown)
-                actual_num = raw_num
-            
-            print(f"    📖 Extracted actual chapter number: {actual_num} (from raw: {raw_num})")
+                # Try to extract it using the same logic as non-batch mode
+                raw_num = FileUtilities.extract_actual_chapter_number(chapter, patterns=None, config=self.config)
+                
+                # Apply offset if configured
+                offset = self.config.CHAPTER_NUMBER_OFFSET if hasattr(self.config, 'CHAPTER_NUMBER_OFFSET') else 0
+                raw_num += offset
+                
+                # Check if zero detection is disabled
+                if hasattr(self.config, 'DISABLE_ZERO_DETECTION') and self.config.DISABLE_ZERO_DETECTION:
+                    actual_num = raw_num
+                elif hasattr(self.config, '_uses_zero_based') and self.config._uses_zero_based:
+                    # This is a 0-based novel, adjust the number
+                    actual_num = raw_num + 1
+                else:
+                    # Default to raw number (1-based or unknown)
+                    actual_num = raw_num
+                
+                print(f"    📖 Extracted actual chapter number: {actual_num} (from raw: {raw_num})")
         
         # Initialize variables that might be needed in except block
         content_hash = None
@@ -7030,6 +7052,14 @@ def main(log_callback=None, stop_callback=None):
         # This ensures batch mode has the same chapter numbering as non-batch mode
         print("📊 Setting chapter numbers...")
         for idx, c in enumerate(chapters):
+            # PDF/TEXT CHUNK FIX: Skip extract_actual_chapter_number for chunks - preserve decimal from c['num']
+            if is_text_file and c.get('is_chunk', False):
+                # For text/PDF chunks, use the decimal number directly (1.0, 1.1, etc.)
+                c['actual_chapter_num'] = c['num']
+                c['raw_chapter_num'] = c['num']
+                c['zero_adjusted'] = False
+                continue
+            
             raw_num = FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config)
             
             # Apply offset if configured
@@ -7057,8 +7087,11 @@ def main(log_callback=None, stop_callback=None):
             content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
             
             # Check if this is a pre-split text chunk with decimal number
-            if (is_text_file and c.get('is_chunk', False) and isinstance(c['num'], float)):
-                actual_num = c['num']  # Preserve the decimal for text files only
+            # IMPORTANT: Check is_chunk FIRST, then use c['num'] regardless of float value
+            # This handles cases like 1.0 where float equals integer but should still be preserved
+            if is_text_file and c.get('is_chunk', False):
+                actual_num = c['num']  # Preserve the decimal for text/PDF chunks
+                c['actual_chapter_num'] = actual_num  # UPDATE THE CHAPTER DICT!
             else:
                 actual_num = c.get('actual_chapter_num', c['num'])  # Now this will exist!
             
