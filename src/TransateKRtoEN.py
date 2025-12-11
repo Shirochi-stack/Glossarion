@@ -5714,7 +5714,7 @@ def main(log_callback=None, stop_callback=None):
     if not input_path and len(sys.argv) > 1:
         input_path = sys.argv[1]
     
-    is_text_file = input_path.lower().endswith(('.txt', '.csv', '.json', '.pdf', '.md'))
+    is_text_file = input_path.lower().endswith(('.txt', '.csv', '.json', '.md'))
     is_pdf_file = input_path.lower().endswith('.pdf')
     
     if is_text_file:
@@ -5760,7 +5760,7 @@ def main(log_callback=None, stop_callback=None):
         args = parser.parse_args()
         input_path = args.epub
     
-    is_text_file = input_path.lower().endswith(('.txt', '.csv', '.json', '.pdf', '.md'))
+    is_text_file = input_path.lower().endswith(('.txt', '.csv', '.json', '.md'))
     is_pdf_file = input_path.lower().endswith('.pdf')
     
     # Disable Break Split Count for EPUB files (only works with plain text files)
@@ -5882,7 +5882,29 @@ def main(log_callback=None, stop_callback=None):
     if hasattr(client, 'reset_cleanup_state'):
         client.reset_cleanup_state()    
         
-    if is_text_file:
+    if is_pdf_file:
+        print("📄 Processing PDF file...")
+        try:
+            txt_processor = TextFileProcessor(input_path, out)
+            chapters = txt_processor.extract_chapters()
+            txt_processor.save_original_structure()
+            
+            metadata = {
+                "title": os.path.splitext(os.path.basename(input_path))[0],
+                "type": "pdf",
+                "chapter_count": len(chapters)
+            }
+        except ImportError as e:
+            print(f"❌ Error: PDF processor not available: {e}")
+            if log_callback:
+                log_callback(f"❌ Error: PDF processor not available: {e}")
+            return
+        except Exception as e:
+            print(f"❌ Error processing PDF file: {e}")
+            if log_callback:
+                log_callback(f"❌ Error processing PDF file: {e}")
+            return
+    elif is_text_file:
         print("📄 Processing text file...")
         try:
             txt_processor = TextFileProcessor(input_path, out)

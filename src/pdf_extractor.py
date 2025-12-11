@@ -815,35 +815,9 @@ def _extract_toc_from_outline(doc) -> str:
 
 def _detect_block_alignment(block: Dict, page_width: float) -> str:
     """
-    Detect alignment of a specific text block.
-    Returns alignment class.
+    Force all text to use justified alignment.
     """
-    bbox = block.get("bbox", [])
-    if len(bbox) < 4:
-        return "align-justify"  # Default to justify if can't detect
-    
-    x0, y0, x1, y1 = bbox
-    block_width = x1 - x0
-    left_margin = x0
-    right_margin = page_width - x1
-    center_x = (x0 + x1) / 2
-    page_center = page_width / 2
-    
-    # More aggressive centering detection
-    center_offset = abs(center_x - page_center)
-    margin_diff = abs(left_margin - right_margin)
-    
-    # If the block is reasonably centered, mark it as centered
-    if center_offset < (page_width * 0.15) and margin_diff < (page_width * 0.1):
-        return "align-center"
-    elif right_margin < 50 and left_margin > 100:
-        return "align-right"
-    elif left_margin < 100 and block_width < page_width * 0.5:
-        # Narrow block at left edge = left aligned
-        return "align-left"
-    else:
-        # Default to justify for body text
-        return "align-justify"
+    return "align-justify"
 
 
 def _is_page_break_candidate(page_num: int, blocks: List[Dict], page_height: float) -> bool:
