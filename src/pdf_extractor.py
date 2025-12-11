@@ -1286,8 +1286,7 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                         # Flush current paragraph
                         if current_para:
                             para_class = current_para_styles[0] if current_para_styles else "align-justify"
-                            para_style = _align_css.get(para_class, "")
-                            para_tag = f'<p class="{para_class}" style="{para_style}">'
+                            para_tag = f'<p class="{para_class}">'
                             page_html.append(f'{para_tag}{"".join(current_para)}</p>')
                             current_para = []
                             current_para_styles = []
@@ -1295,22 +1294,19 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                         # Create anchor for potential TOC linking
                         anchor_id = re.sub(r'[^a-zA-Z0-9]+', '-', block_content[:50].lower()).strip('-')
                         h_class = f' class="{alignment_class}"' if alignment_class else ''
-                        h_style = f' style="{_align_css.get(alignment_class, "")}"' if alignment_class else ''
-                        page_html.append(f'<h1 id="{anchor_id}"{h_class}{h_style}>{block_content}</h1>')
+                        page_html.append(f'<h1 id="{anchor_id}"{h_class}>{block_content}</h1>')
                     elif max_font_size > 12 and has_bold:
                         # Flush current paragraph
                         if current_para:
                             para_class = current_para_styles[0] if current_para_styles else "align-justify"
-                            para_style = _align_css.get(para_class, "")
-                            para_tag = f'<p class="{para_class}" style="{para_style}">'
+                            para_tag = f'<p class="{para_class}">'
                             page_html.append(f'{para_tag}{"".join(current_para)}</p>')
                             current_para = []
                             current_para_styles = []
                         
                         anchor_id = re.sub(r'[^a-zA-Z0-9]+', '-', block_content[:50].lower()).strip('-')
                         h_class = f' class="{alignment_class}"' if alignment_class else ''
-                        h_style = f' style="{_align_css.get(alignment_class, "")}"' if alignment_class else ''
-                        page_html.append(f'<h2 id="{anchor_id}"{h_class}{h_style}>{block_content}</h2>')
+                        page_html.append(f'<h2 id="{anchor_id}"{h_class}>{block_content}</h2>')
                     else:
                         # Regular paragraph content
                         # Check if we should continue current paragraph or start new one
@@ -1320,8 +1316,7 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                             if alignment_class != prev_alignment:
                                 # Flush existing paragraph with different alignment
                                 para_class = current_para_styles[0] if current_para_styles else "align-justify"
-                                para_style = _align_css.get(para_class, "")
-                                para_tag = f'<p class="{para_class}" style="{para_style}">'
+                                para_tag = f'<p class="{para_class}">'
                                 page_html.append(f'{para_tag}{"".join(current_para)}</p>')
                                 current_para = []
                                 current_para_styles = []
@@ -1335,8 +1330,7 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                     # Flush current paragraph
                     if current_para:
                         para_class = current_para_styles[0] if current_para_styles else "align-justify"
-                        para_style = _align_css.get(para_class, "")
-                        para_tag = f'<p class="{para_class}" style="{para_style}">'
+                        para_tag = f'<p class="{para_class}">'
                         page_html.append(f'{para_tag}{"".join(current_para)}</p>')
                         current_para = []
                         current_para_styles = []
@@ -1356,14 +1350,9 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                                 img_block = {"bbox": bbox}
                                 img_alignment = _detect_block_alignment(img_block, page_width)
                             
-                            # Create img tag with relative path and centering if detected
+                            # Create img tag with relative path and class only
                             img_class = f' class="{img_alignment}"' if img_alignment else ''
-                            img_style = ''
-                            if img_alignment == 'align-center':
-                                img_style = ' style="display:block;margin:1em auto;"'
-                            elif img_alignment == 'align-right':
-                                img_style = ' style="display:block;margin-left:auto;"'
-                            img_tag = f'<img src="images/{img_filename}"{img_class}{img_style}'
+                            img_tag = f'<img src="images/{img_filename}"{img_class}'
                             if img_width and img_height:
                                 img_tag += f' width="{img_width}" height="{img_height}"'
                             img_tag += ' alt="PDF Image" />'
@@ -1374,8 +1363,7 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
             # Flush any remaining paragraph
             if current_para:
                 para_class = current_para_styles[0] if current_para_styles else "align-justify"
-                para_style = _align_css.get(para_class, "")
-                para_tag = f'<p class="{para_class}" style="{para_style}">'
+                para_tag = f'<p class="{para_class}">'
                 page_html.append(f'{para_tag}{"".join(current_para)}</p>')
             
             # Close TOC if page ends while still in TOC section
