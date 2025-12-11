@@ -3529,6 +3529,7 @@ class BatchTranslationProcessor:
         batch_translate_active = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
         ignore_title_tag = os.getenv('IGNORE_TITLE', '0') == '1' and batch_translate_active
         ignore_header_tags = os.getenv('IGNORE_HEADER', '0') == '1' and batch_translate_active
+        remove_duplicate_h1_p = os.getenv('REMOVE_DUPLICATE_H1_P', '0') == '1'
         
         for idx, chapter in merge_group:
             actual_num = chapter.get('actual_chapter_num', chapter['num'])
@@ -3537,7 +3538,7 @@ class BatchTranslationProcessor:
             # Get chapter body and apply ignore filters if needed
             chapter_body = chapter["body"]
             
-            if (ignore_title_tag or ignore_header_tags) and chapter_body:
+            if (ignore_title_tag or ignore_header_tags or remove_duplicate_h1_p) and chapter_body:
                 from bs4 import BeautifulSoup
                 body_soup = BeautifulSoup(chapter_body, 'html.parser')
                 
@@ -3550,6 +3551,19 @@ class BatchTranslationProcessor:
                 if ignore_header_tags:
                     for header_tag in body_soup.find_all(['h1', 'h2', 'h3']):
                         header_tag.decompose()
+                
+                # Remove duplicate H1+P pairs (where P immediately follows H1 with same text)
+                if remove_duplicate_h1_p:
+                    for h1_tag in body_soup.find_all('h1'):
+                        # Get the next sibling (skipping whitespace/text nodes)
+                        next_sibling = h1_tag.find_next_sibling()
+                        if next_sibling and next_sibling.name == 'p':
+                            # Compare text content (stripped)
+                            h1_text = h1_tag.get_text(strip=True)
+                            p_text = next_sibling.get_text(strip=True)
+                            if h1_text == p_text:
+                                # Remove the duplicate paragraph
+                                next_sibling.decompose()
                 
                 chapter_body = str(body_soup)
             

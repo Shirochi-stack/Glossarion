@@ -3320,7 +3320,37 @@ def _create_prompt_management_section(self, parent):
     ignore_title_cb.toggled.connect(_on_ignore_title_toggle)
     ignore_h.addWidget(ignore_title_cb)
     
-    ignore_h.addSpacing(15)
+    ignore_h.addStretch()
+    section_v.addWidget(ignore_row)
+    
+    # Second ignore row for additional options
+    ignore_row2 = QWidget()
+    ignore_h2 = QHBoxLayout(ignore_row2)
+    ignore_h2.setContentsMargins(20, 5, 0, 0)
+    
+    # Remove duplicate H1+P pairs
+    if not hasattr(self, 'remove_duplicate_h1_p_var'):
+        self.remove_duplicate_h1_p_var = self.config.get('remove_duplicate_h1_p', False)
+    
+    remove_dup_cb = self._create_styled_checkbox("Remove duplicate H1+P pairs")
+    try:
+        remove_dup_cb.setChecked(bool(self.remove_duplicate_h1_p_var))
+    except Exception:
+        pass
+    def _on_remove_dup_toggle(checked):
+        try:
+            self.remove_duplicate_h1_p_var = bool(checked)
+            self.config['remove_duplicate_h1_p'] = bool(checked)
+        except Exception:
+            pass
+    remove_dup_cb.toggled.connect(_on_remove_dup_toggle)
+    remove_dup_cb.setToolTip(
+        "Remove <p> tags that immediately follow <h1> tags with identical text.\n"
+        "Useful for novels that repeat chapter titles."
+    )
+    ignore_h2.addWidget(remove_dup_cb)
+    
+    ignore_h2.addSpacing(15)
     
     # Add fallback option with warning icon
     use_fallback_cb = self._create_styled_checkbox("⚠️ Use Sorted Fallback")
@@ -3338,10 +3368,10 @@ def _create_prompt_management_section(self, parent):
         "If standalone OPF-based matching fails, fall back to sorted index matching.\n"
         "⚠️ Less accurate - may mismatch chapters if file order differs from OPF spine."
     )
-    ignore_h.addWidget(use_fallback_cb)
-    ignore_h.addStretch()
+    ignore_h2.addWidget(use_fallback_cb)
+    ignore_h2.addStretch()
     
-    section_v.addWidget(ignore_row)
+    section_v.addWidget(ignore_row2)
     
     # Buttons row (below ignore options)
     buttons_row = QWidget()

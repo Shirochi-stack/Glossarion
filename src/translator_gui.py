@@ -984,6 +984,7 @@ Text to analyze:
         self.save_header_translations_var = self.config.get('save_header_translations', True)
         self.ignore_header_var = self.config.get('ignore_header', False)
         self.ignore_title_var = self.config.get('ignore_title', False)
+        self.remove_duplicate_h1_p_var = self.config.get('remove_duplicate_h1_p', False)
         self.use_sorted_fallback_var = self.config.get('use_sorted_fallback', False)  # Disabled by default
         self.attach_css_to_chapters_var = self.config.get('attach_css_to_chapters', False)
         self.epub_use_html_method_var = self.config.get('epub_use_html_method', False)
@@ -4560,6 +4561,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 os.environ['BATCH_TRANSLATE_HEADERS'] = '1' if self.config.get('batch_translate_headers', False) else '0'
                 os.environ['IGNORE_HEADER'] = '1' if self.config.get('ignore_header', False) else '0'
                 os.environ['IGNORE_TITLE'] = '1' if self.config.get('ignore_title', False) else '0'
+                os.environ['REMOVE_DUPLICATE_H1_P'] = '1' if self.config.get('remove_duplicate_h1_p', False) else '0'
                 os.environ['USE_SORTED_FALLBACK'] = '1' if self.config.get('use_sorted_fallback', False) else '0'
                 # Update temperature and max output tokens from GUI's current values
                 os.environ['TRANSLATION_TEMPERATURE'] = str(self.trans_temp.text())

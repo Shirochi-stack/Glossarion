@@ -2070,6 +2070,24 @@ class BatchHeaderTranslator:
                         updated = True
                         content = content2
                     if updated:
+                        # Check if duplicate H1+P removal is enabled
+                        remove_duplicate_h1_p = os.getenv('REMOVE_DUPLICATE_H1_P', '0') == '1'
+                        if remove_duplicate_h1_p:
+                            # Remove duplicate H1+P pairs after updating
+                            from bs4 import BeautifulSoup as BS
+                            temp_soup = BS(content, 'html.parser')
+                            removed_any = False
+                            for h1_tag in temp_soup.find_all('h1'):
+                                next_sibling = h1_tag.find_next_sibling()
+                                if next_sibling and next_sibling.name == 'p':
+                                    h1_text = h1_tag.get_text(strip=True)
+                                    p_text = next_sibling.get_text(strip=True)
+                                    if h1_text == p_text:
+                                        next_sibling.decompose()
+                                        removed_any = True
+                            if removed_any:
+                                content = str(temp_soup)
+                        
                         with open(html_path, 'w', encoding='utf-8') as wf:
                             wf.write(content)
                         updated_count += 1
