@@ -839,13 +839,19 @@ def _is_page_break_candidate(page_num: int, blocks: List[Dict], page_height: flo
     return False
 
 
-def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: bool = True) -> Tuple[str, Dict[int, List[Dict]]]:
+def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: bool = True, page_by_page: bool = False) -> Tuple[str, Dict[int, List[Dict]]]:
     """
     Extract PDF content with HTML formatting and images.
     Preserves font types, alignment, and table of contents.
     
+    Args:
+        pdf_path: Path to PDF file
+        output_dir: Output directory
+        extract_images: Whether to extract images
+        page_by_page: If True, returns list of (page_num, html_content) tuples instead of combined HTML
+    
     Returns:
-    - HTML content with proper structure and image placeholders
+    - HTML content with proper structure and image placeholders (or list if page_by_page=True)
     - Dictionary of extracted images by page number
     """
     try:
@@ -859,24 +865,78 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
             images_by_page = extract_images_from_pdf(pdf_path, output_dir)
         
         doc = fitz.open(pdf_path)
+        
+        # If user requests exact page rendering, use MuPDF's built-in XHTML/HTML renderer for near 1:1 output
+        render_mode = os.getenv("PDF_RENDER_MODE", "xhtml").lower()  # xhtml | html | semantic
+        if render_mode in ("xhtml", "html"):
+            page_list = []
+            total_pages = len(doc)
+            print(f"📄 Rendering {total_pages} pages via MuPDF {render_mode.upper()} (near 1:1 layout)...")
+            import re as _re
+            for i in range(total_pages):
+                page = doc[i]
+                try:
+                    page_html = page.get_text("xhtml" if render_mode == "xhtml" else "html")
+                except Exception:
+                    page_html = page.get_text("html")
+                # Inject page anchor and clickable overlays for native PDF links (preserve TOC entries)
+                try:
+                    anchor = f'<a id="page-{i + 1}"></a>'
+                    links = page.get_links()
+                    overlays = []
+                    for ln in links or []:
+                        r = ln.get('from')
+                        if not r:
+                            continue
+                        try:
+                            x0, y0, x1, y1 = float(r.x0), float(r.y0), float(r.x1), float(r.y1)
+                        except Exception:
+                            # r may be a tuple
+                            x0, y0, x1, y1 = r[0], r[1], r[2], r[3]
+                        href = None
+                        if ln.get('page') is not None and ln.get('page') >= 0:
+                            href = f'#page-{int(ln["page"]) + 1}'
+                        elif ln.get('uri'):
+                            href = ln['uri']
+                        if not href:
+                            continue
+                        overlays.append(
+                            f'<a class="pdf-link-overlay" href="{href}" style="position:absolute; left:{x0}px; top:{y0}px; width:{x1 - x0}px; height:{y1 - y0}px; display:block; opacity:0; z-index:9999; pointer-events:auto;"></a>'
+                        )
+                    overlays_html = ''.join(overlays)
+                    m = _re.search(r'(<body[^>]*>)', page_html, flags=_re.IGNORECASE)
+                    if m:
+                        page_html = page_html.replace(m.group(1), m.group(1) + anchor + overlays_html, 1)
+                    else:
+                        page_html = anchor + overlays_html + page_html
+                except Exception:
+                    pass
+                page_list.append((i + 1, page_html))
+            doc.close()
+            if page_by_page:
+                return page_list, images_by_page
+            else:
+                combined = "\n\n".join(html for _, html in page_list)
+                return combined, images_by_page
+        
         html_parts = []
         
-        # Get TOC from PDF outline
+        # TOC handling mode: preserve (default) means do NOT synthesize a new TOC
+        toc_mode = os.getenv("PDF_TOC_MODE", "preserve").lower()  # preserve | synthesize
+        
+        # Get TOC from PDF outline only if we plan to synthesize
         toc_from_outline = None
         toc_page_number = 0  # Page where TOC should be inserted (0-indexed)
-        
-        try:
-            toc_data = doc.get_toc(simple=False)
-            if toc_data:
-                # TOC typically appears on first page or near the beginning
-                # We'll insert it on page 0 (first page) as that's most common
-                toc_page_number = 0
-                
-                toc_from_outline = _extract_toc_from_outline(doc)
-                if toc_from_outline:
-                    print(f"📑 Found TOC in PDF outline, will insert at beginning")
-        except:
-            pass
+        if toc_mode == "synthesize":
+            try:
+                toc_data = doc.get_toc(simple=False)
+                if toc_data:
+                    toc_page_number = 0
+                    toc_from_outline = _extract_toc_from_outline(doc)
+                    if toc_from_outline:
+                        print(f"📑 Found TOC in PDF outline, will insert at beginning")
+            except:
+                pass
         
         has_outline_toc = bool(toc_from_outline)
         
@@ -959,38 +1019,28 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                     # Check for TOC patterns
                     is_toc_entry = _detect_toc_patterns(block_content)
                     
-                    if is_toc_entry and page_num < 10:  # TOCs usually in first 10 pages
-                        # Start or continue TOC section
+                    if toc_mode == "synthesize" and is_toc_entry and page_num < 10:
+                        # Start or continue synthesized TOC section
                         if not in_toc_section:
                             in_toc_section = True
                             toc_page_detected = True
                             page_html.append('<div class="toc">')
                             page_html.append('<div class="toc-title">Table of Contents</div>')
                         
-                        # Strip any HTML tags from TOC entry and format properly
                         from bs4 import BeautifulSoup
                         clean_text = BeautifulSoup(block_content, 'html.parser').get_text()
-                        
-                        # Try to extract title and page number
-                        # Format: "Title text 123" -> split into title and page num
                         match = re.match(r'^(.+?)\s+(\d{1,3})$', clean_text)
                         if match:
                             title = match.group(1).strip()
                             page_num_text = match.group(2)
-                            # Create anchor from title
                             anchor = re.sub(r'[^a-zA-Z0-9]+', '-', title.lower()).strip('-')
                             page_html.append(f'<div class="toc-entry"><a href="#{anchor}">{title}</a> <span class="toc-page">{page_num_text}</span></div>')
                         else:
-                            # Fallback: just add as plain text
                             page_html.append(f'<div class="toc-entry">{clean_text}</div>')
-                        
-                        continue  # Skip normal processing for this block
-                    elif in_toc_section:
-                        # We were in TOC section but now hit non-TOC content
-                        # Close the TOC div
+                        continue
+                    elif toc_mode == "synthesize" and in_toc_section:
                         page_html.append('</div><!-- end toc -->')
                         in_toc_section = False
-                        # Continue processing this block normally (don't skip)
                     
                     # Determine if this is a heading
                     if max_font_size > 14 and has_bold:
@@ -1084,8 +1134,8 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
             
             # Add page content with page break if needed
             if page_html:
-                # Insert TOC from outline BEFORE page content on its appropriate page
-                if toc_from_outline and page_num == toc_page_number:
+                # Insert TOC from outline BEFORE page content only if synthesizing
+                if toc_mode == "synthesize" and toc_from_outline and page_num == toc_page_number:
                     html_parts.append(toc_from_outline)
                     toc_from_outline = None  # Only insert once
                 
@@ -1099,16 +1149,25 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
         
         doc.close()
         
-        # Log TOC detection
-        if toc_page_detected:
+        # Log TOC synthesis (only if enabled)
+        if toc_mode == "synthesize" and toc_page_detected:
             print(f"📑 Detected and preserved table of contents in document")
         
-        # Combine all pages
-        full_html = '\n\n'.join(html_parts)
-        
-        print(f"✅ Extracted {total_pages} pages with HTML formatting      ")
-        
-        return full_html, images_by_page
+        # Return pages separately or combined based on mode
+        if page_by_page:
+            # Return list of (page_num, html_content) tuples
+            # Note: html_parts may have fewer items than total_pages if some pages were empty
+            # But we want consecutive numbering starting from 1
+            page_list = []
+            for i, html_content in enumerate(html_parts):
+                page_list.append((i + 1, html_content))  # Use 1-indexed page numbers
+            print(f"✅ Extracted {len(page_list)} pages with HTML formatting (page-by-page mode)")
+            return page_list, images_by_page
+        else:
+            # Combine all pages into single HTML
+            full_html = '\n\n'.join(html_parts)
+            print(f"✅ Extracted {total_pages} pages with HTML formatting      ")
+            return full_html, images_by_page
         
     except ImportError:
         print("⚠️ PyMuPDF not available - falling back to plain text")

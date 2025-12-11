@@ -39,10 +39,12 @@ class TextFileProcessor:
                 # Determine output format
                 if self.pdf_output_format in ['html', 'markdown']:
                     print(f"📄 Extracting PDF with formatting (format: {self.pdf_output_format})")
+                    # Extract page by page for PDFs to preserve structure
                     content, images_info = extract_pdf_with_formatting(
                         self.file_path, 
                         self.output_dir, 
-                        extract_images=self.pdf_extract_images
+                        extract_images=self.pdf_extract_images,
+                        page_by_page=True  # Get pages separately
                     )
                     is_html_content = True
                     
@@ -94,14 +96,28 @@ class TextFileProcessor:
             with open(self.file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
         
-        # Treat entire file as single document - no chapter detection
-        raw_chapters = [{
-            'num': 1,
-            'title': self.file_base,
-            'content': content,
-            'is_html': is_html_content,
-            'images_info': images_info
-        }]
+        # Handle page-by-page content from PDFs
+        if isinstance(content, list) and content and isinstance(content[0], tuple):
+            # Content is list of (page_num, html) tuples from page_by_page mode
+            # page_num is already 1-indexed from pdf_extractor
+            raw_chapters = []
+            for page_num, page_html in content:
+                raw_chapters.append({
+                    'num': page_num,  # Already 1-indexed
+                    'title': f"{self.file_base} - Page {page_num}",
+                    'content': page_html,
+                    'is_html': is_html_content,
+                    'images_info': {}  # Images already embedded in page HTML
+                })
+        else:
+            # Treat entire file as single document - no chapter detection
+            raw_chapters = [{
+                'num': 1,
+                'title': self.file_base,
+                'content': content,
+                'is_html': is_html_content,
+                'images_info': images_info
+            }]
         
         # Process for splitting if needed
         final_chapters = self._process_chapters_for_splitting(raw_chapters)
@@ -155,9 +171,13 @@ class TextFileProcessor:
             chapter_content = chapter_data['content']
             is_html = chapter_data.get('is_html', False)
             images_info = chapter_data.get('images_info', {})
+            
+            # Skip token splitting for PDF pages - they're already split by page
+            is_pdf_page = self.file_path.lower().endswith('.pdf') and is_html
+            
             chapter_tokens = self.chapter_splitter.count_tokens(chapter_content)
             
-            if chapter_tokens > available_tokens:
+            if not is_pdf_page and chapter_tokens > available_tokens:
                 # Chapter needs splitting
                 print(f"Chapter {chapter_data['num']} ({chapter_data['title']}) has {chapter_tokens} tokens, splitting...")
                 
@@ -256,17 +276,21 @@ class TextFileProcessor:
                     with open(original_chunk_path, 'w', encoding='utf-8') as f:
                         f.write(content_to_write)
                 
-                final_chapters.append({
+                chapter_dict = {
                     'num': chapter_data['num'],  # Keep as integer for non-split chapters
                     'title': chapter_data['title'],
                     'body': chapter_content,
                     'filename': chapter_filename,
-                    'original_basename': os.path.basename(self.file_path),  # Add original filename for .csv/.json/.txt detection
                     'content_hash': self._generate_hash(chapter_content),
                     'file_size': len(chapter_content),
                     'has_images': False,
                     'is_chunk': False
-                })
+                }
+                # Only set original_basename for non-PDF files
+                # PDF pages should use num-based naming, not original filename
+                if not is_pdf_page:
+                    chapter_dict['original_basename'] = os.path.basename(self.file_path)
+                final_chapters.append(chapter_dict)
         
         # Ensure we have at least one chapter
         if not final_chapters:
