@@ -2314,11 +2314,18 @@ def _process_single_html_file(
             # Remove duplicate H1+P pairs (where P immediately follows H1 with same text)
             if remove_duplicate_h1_p:
                 for h1_tag in content_soup.find_all('h1'):
+                    # Skip split marker H1 tags
+                    h1_id = h1_tag.get('id', '')
+                    if h1_id and h1_id.startswith('split-'):
+                        continue
+                    h1_text = h1_tag.get_text(strip=True)
+                    if 'SPLIT MARKER' in h1_text:
+                        continue
+                    
                     # Get the next sibling (skipping whitespace/text nodes)
                     next_sibling = h1_tag.find_next_sibling()
                     if next_sibling and next_sibling.name == 'p':
                         # Compare text content (stripped)
-                        h1_text = h1_tag.get_text(strip=True)
                         p_text = next_sibling.get_text(strip=True)
                         if h1_text == p_text:
                             # Remove the duplicate paragraph

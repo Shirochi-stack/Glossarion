@@ -2078,9 +2078,16 @@ class BatchHeaderTranslator:
                             temp_soup = BS(content, 'html.parser')
                             removed_any = False
                             for h1_tag in temp_soup.find_all('h1'):
+                                # Skip split marker H1 tags
+                                h1_id = h1_tag.get('id', '')
+                                if h1_id and h1_id.startswith('split-'):
+                                    continue
+                                h1_text = h1_tag.get_text(strip=True)
+                                if 'SPLIT MARKER' in h1_text:
+                                    continue
+                                
                                 next_sibling = h1_tag.find_next_sibling()
                                 if next_sibling and next_sibling.name == 'p':
-                                    h1_text = h1_tag.get_text(strip=True)
                                     p_text = next_sibling.get_text(strip=True)
                                     if h1_text == p_text:
                                         next_sibling.decompose()
