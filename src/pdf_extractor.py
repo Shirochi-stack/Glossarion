@@ -10,6 +10,9 @@ import time
 import concurrent.futures
 import re
 import base64
+import subprocess
+import shutil
+import glob
 from typing import Dict, List, Tuple, Optional
 from pathlib import Path
 
@@ -869,6 +872,214 @@ def _is_page_break_candidate(page_num: int, blocks: List[Dict], page_height: flo
     return False
 
 
+def _extract_with_pdf2htmlex(pdf_path: str, output_dir: str, page_by_page: bool = False) -> Tuple[str, Dict[int, List[Dict]]]:
+    """Use pdf2htmlEX to convert PDF to HTML with near-100% layout fidelity.
+    Returns (html or list[(page_num, html)], images_by_page). Images are external files.
+    """
+    # Determine executable name
+    exe = shutil.which('pdf2htmlEX') or shutil.which('pdf2htmlex')
+    if not exe:
+        raise FileNotFoundError('pdf2htmlEX executable not found')
+
+    # Use a temporary build dir
+    tmp_dir = os.path.join(output_dir, '_pdf2htmlex')
+    os.makedirs(tmp_dir, exist_ok=True)
+
+    # Build command with split pages and external assets
+    cmd = [
+        exe,
+        '--split-pages', '1',           # one HTML per page
+        '--embed-css', '0',             # write external CSS
+        '--embed-image', '0',           # write external image files
+        '--embed-font', '0',            # external fonts
+        '--embed-javascript', '0',
+        '--process-outline', '1',       # preserve links/outline
+        '--dest-dir', tmp_dir,
+        pdf_path
+    ]
+
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except subprocess.CalledProcessError as e:
+        msg = (e.stderr or b'').decode('utf-8', 'ignore')
+        raise RuntimeError(f'pdf2htmlEX failed: {msg[:500]}')
+
+    # Locate CSS and copy to output as styles.css
+    css_files = glob.glob(os.path.join(tmp_dir, '*.css'))
+    css_path = None
+    if css_files:
+        css_path = os.path.join(output_dir, 'styles.css')
+        try:
+            shutil.copy2(css_files[0], css_path)
+        except Exception:
+            css_path = None
+
+    # Collect per-page HTML
+    page_files = sorted(glob.glob(os.path.join(tmp_dir, 'page-*.html')))
+    if not page_files:
+        # Some versions output <basename>.page-1.html
+        page_files = sorted(glob.glob(os.path.join(tmp_dir, '*page-*.html')))
+
+    images_by_page: Dict[int, List[Dict]] = {}
+    pages: List[Tuple[int, str]] = []
+
+    # Prepare images dir
+    images_dir = os.path.join(output_dir, 'images')
+    os.makedirs(images_dir, exist_ok=True)
+
+    # Move/copy images from tmp to images_dir and rewrite src paths
+    # pdf2htmlEX typically writes images next to HTML with names like fNN.png
+    def _rewrite_and_copy_assets(html_text: str) -> str:
+        # Find src="..." attributes that refer to a local file (not data:, not http)
+        def repl(m):
+            src = m.group(2)
+            if src.startswith('data:') or '://' in src:
+                return m.group(0)
+            # Resolve source path in tmp_dir
+            src_path = os.path.normpath(os.path.join(tmp_dir, src))
+            if not os.path.exists(src_path):
+                # try relative basename
+                src_path = os.path.join(tmp_dir, os.path.basename(src))
+                if not os.path.exists(src_path):
+                    return m.group(0)
+            # Copy to images_dir
+            dst_name = os.path.basename(src_path)
+            dst_path = os.path.join(images_dir, dst_name)
+            try:
+                if not os.path.exists(dst_path):
+                    shutil.copy2(src_path, dst_path)
+                return f'<img{m.group(1)}src="images/{dst_name}"'
+            except Exception:
+                return m.group(0)
+        return re.sub(r'<img([^>]+)src="([^"]+)"', repl, html_text, flags=re.IGNORECASE)
+
+    for pf in page_files:
+        # Extract page number from filename
+        m = re.search(r'page-(\d+)\.html$', pf)
+        if not m:
+            m = re.search(r'page-(\d+)\.html', pf)
+        page_num = int(m.group(1)) if m else len(pages) + 1
+        with open(pf, 'r', encoding='utf-8', errors='ignore') as f:
+            html_text = f.read()
+        # Point CSS to ../styles.css for word_count folder context
+        if css_path:
+            html_text = re.sub(r'<link[^>]+href="[^"]+\.css"[^>]*>', '<link rel="stylesheet" href="../styles.css">', html_text, flags=re.IGNORECASE)
+        # Rewrite and copy images
+        html_text = _rewrite_and_copy_assets(html_text)
+        pages.append((page_num, html_text))
+
+    pages.sort(key=lambda x: x[0])
+    if page_by_page:
+        return pages, images_by_page
+    else:
+        combined = '\n\n'.join(p[1] for p in pages)
+        return combined, images_by_page
+
+
+def _hex_color_from_int(c: int) -> str:
+    try:
+        r = (c >> 16) & 255
+        g = (c >> 8) & 255
+        b = c & 255
+        return f"#{r:02X}{g:02X}{b:02X}"
+    except Exception:
+        return "#000000"
+
+
+def _extract_absolute_html(pdf_path: str, output_dir: str, page_by_page: bool = False) -> Tuple[str, Dict[int, List[Dict]]]:
+    """Build per-page HTML with absolutely-positioned text spans and images.
+    Pure Python using PyMuPDF; preserves layout while keeping text selectable.
+    """
+    try:
+        import fitz
+    except Exception as e:
+        raise
+
+    images_by_page: Dict[int, List[Dict]] = {}
+    # Reuse existing image extractor if present
+    try:
+        images_by_page = extract_images_from_pdf(pdf_path, output_dir)
+    except Exception:
+        images_by_page = {}
+
+    doc = fitz.open(pdf_path)
+    pages: List[Tuple[int, str]] = []
+
+    for i in range(len(doc)):
+        page = doc[i]
+        pw, ph = page.rect.width, page.rect.height
+        html_parts: List[str] = []
+        html_parts.append('<!-- render:absolute -->')
+        html_parts.append(f'<div class="pdf-page" id="page-{i+1}" style="position:relative;width:{pw}px;height:{ph}px;margin:0 auto;background:#ffffff;">')
+
+        # Text as absolutely positioned spans
+        pdata = page.get_text("dict")
+        for block in pdata.get("blocks", []):
+            if block.get("type") != 0:
+                continue
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    text = span.get("text", "")
+                    if not text.strip():
+                        continue
+                    x0, y0, x1, y1 = span.get("bbox", [0, 0, 0, 0])
+                    fs = span.get("size", 12)
+                    font = span.get("font", "")
+                    color = _hex_color_from_int(span.get("color", 0))
+                    # Map font to a sane web-safe family if needed
+                    fam = _map_font_to_web_safe(font) if ' _map_font_to_web_safe' in globals() else 'serif'
+                    # Escape HTML special chars
+                    esc = (text
+                           .replace("&", "&amp;")
+                           .replace("<", "&lt;")
+                           .replace(">", "&gt;"))
+                    style = f"position:absolute;left:{x0}px;top:{y0}px;font-size:{fs}px;color:{color};font-family:{fam};white-space:pre;"
+                    html_parts.append(f'<span style="{style}">{esc}</span>')
+
+        # Place images by bbox if we have them
+        for img in images_by_page.get(i, []) + images_by_page.get(i+1, []):
+            # Some callers key by 0-index, some by 1-index; include both
+            bbox = img.get('bbox') or []
+            if len(bbox) >= 4:
+                x0, y0, x1, y1 = bbox[:4]
+                w = max(1, int(x1 - x0))
+                h = max(1, int(y1 - y0))
+                fname = img.get('filename')
+                if fname:
+                    style = f'position:absolute;left:{x0}px;top:{y0}px;width:{w}px;height:{h}px;object-fit:contain;'
+                    html_parts.append(f'<img src="images/{fname}" alt="img" style="{style}" />')
+
+        # Make PDF links clickable with absolute overlays
+        try:
+            links = page.get_links()
+        except Exception:
+            links = []
+        for ln in links or []:
+            r = ln.get('from')
+            if not r:
+                continue
+            x0, y0, x1, y1 = r[0], r[1], r[2], r[3]
+            href = None
+            if ln.get('page') is not None and ln.get('page') >= 0:
+                href = f'#page-{int(ln["page"]) + 1}'
+            elif ln.get('uri'):
+                href = ln['uri']
+            if not href:
+                continue
+            style = f'position:absolute;left:{x0}px;top:{y0}px;width:{max(0,x1-x0)}px;height:{max(0,y1-y0)}px;display:block;opacity:0;z-index:5;'
+            html_parts.append(f'<a href="{href}" style="{style}"></a>')
+
+        html_parts.append('</div>')
+        pages.append((i+1, '\n'.join(html_parts)))
+
+    doc.close()
+
+    if page_by_page:
+        return pages, images_by_page
+    else:
+        return '\n\n'.join(p[1] for p in pages), images_by_page
+
+
 def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: bool = True, page_by_page: bool = False) -> Tuple[str, Dict[int, List[Dict]]]:
     """
     Extract PDF content with HTML formatting and images.
@@ -897,8 +1108,19 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
         
         doc = fitz.open(pdf_path)
         
+        # If user requests external renderer pdf2htmlEX
+        render_mode = os.getenv("PDF_RENDER_MODE", "absolute").lower()  # pdf2htmlex | absolute | xhtml | html | semantic
+        if render_mode in ("pdf2htmlex", "pdf2htmlEX"):
+            try:
+                return _extract_with_pdf2htmlex(pdf_path, output_dir, page_by_page)
+            except Exception as e:
+                print(f"⚠️ pdf2htmlEX path failed, falling back to internal modes: {e}")
+        
+        # Pure-Python absolute layout (selectable text, fixed positions)
+        if render_mode == "absolute":
+            return _extract_absolute_html(pdf_path, output_dir, page_by_page)
+        
         # If user requests exact page rendering, use MuPDF's built-in XHTML/HTML renderer for near 1:1 output
-        render_mode = os.getenv("PDF_RENDER_MODE", "xhtml").lower()  # xhtml | html | semantic
         if render_mode in ("xhtml", "html"):
             page_list = []
             total_pages = len(doc)
@@ -917,7 +1139,7 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                     pass
                 # Inject page anchor and clickable overlays for native PDF links (preserve TOC entries)
                 try:
-                    anchor = f'<a id="page-{i + 1}"></a>'
+                    anchor = f'<a id="page-{i + 1}" style="position:absolute;left:0;top:0;width:0;height:0;display:block;overflow:hidden"></a>'
                     links = page.get_links()
                     overlays = []
                     for ln in links or []:

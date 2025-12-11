@@ -211,13 +211,19 @@ class TextFileProcessor:
                         # Wrap HTML chunks with full document structure
                         content_to_write = chunk_content
                         if file_ext == '.html':
-                            content_to_write = f"""<!DOCTYPE html>
-<html lang="en">
+                            _render_mode = os.getenv("PDF_RENDER_MODE", "xhtml").lower()
+                            if (_render_mode in ("xhtml", "html", "pdf2htmlex", "absolute") and self.file_path.lower().endswith('.pdf')):
+                                # Write the MuPDF page HTML as-is to preserve layout/styles
+                                content_to_write = chunk_content
+                            else:
+                                _css_link = "<link rel=\"stylesheet\" href=\"../styles.css\">"
+                                content_to_write = f"""<!DOCTYPE html>
+<html lang=\"en\">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta charset=\"UTF-8\">
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
     <title>{chunk_title}</title>
-    <link rel="stylesheet" href="../styles.css">
+    {_css_link}
 </head>
 <body>
 {chunk_content}
@@ -261,13 +267,19 @@ class TextFileProcessor:
                     # Wrap HTML files with full document structure
                     content_to_write = chapter_content
                     if file_ext == '.html':
-                        content_to_write = f"""<!DOCTYPE html>
-<html lang="en">
+                        _render_mode = os.getenv("PDF_RENDER_MODE", "xhtml").lower()
+                        if (_render_mode in ("xhtml", "html", "pdf2htmlex", "absolute") and self.file_path.lower().endswith('.pdf')):
+                            # Write MuPDF page HTML as-is to preserve layout/styles
+                            content_to_write = chapter_content
+                        else:
+                            _css_link = "<link rel=\"stylesheet\" href=\"../styles.css\">"
+                            content_to_write = f"""<!DOCTYPE html>
+<html lang=\"en\">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta charset=\"UTF-8\">
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
     <title>{chapter_data['title']}</title>
-    <link rel="stylesheet" href="../styles.css">
+    {_css_link}
 </head>
 <body>
 {chapter_content}
