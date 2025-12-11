@@ -1972,7 +1972,9 @@ Recent translations to summarize:
         
         active = self.config.get('active_profile', next(iter(self.prompt_profiles)))
         self.profile_var = active
-        self.lang_var = self.profile_var
+        # Initialize lang_var to the actual target language from config, not the profile name
+        # This will be properly synced when update_target_language is called during GUI setup
+        self.lang_var = self.config.get('output_language') or self.config.get('glossary_target_language') or 'English'
         
         # Detection mode
         self.duplicate_detection_mode_var = self.config.get('duplicate_detection_mode', 'basic')
@@ -2930,19 +2932,37 @@ Recent translations to summarize:
         ]
         self.target_lang_combo.addItems(languages)
         
-        # Set initial value from config
-        saved_lang = self.config.get('output_language', 'English')
-        index = self.target_lang_combo.findText(saved_lang)
+        # Set initial value from config - prioritize glossary_target_language for consistency
+        # If both exist but differ, use output_language and sync glossary_target_language
+        saved_lang = self.config.get('output_language')
+        glossary_lang = self.config.get('glossary_target_language')
+        
+        # Determine which value to use
+        if saved_lang and glossary_lang and saved_lang != glossary_lang:
+            # They're out of sync - use output_language as the source of truth
+            final_lang = saved_lang
+        elif glossary_lang:
+            # Use glossary_target_language if it exists
+            final_lang = glossary_lang
+        elif saved_lang:
+            # Use output_language if it exists
+            final_lang = saved_lang
+        else:
+            # Neither exists - default to English
+            final_lang = 'English'
+        
+        index = self.target_lang_combo.findText(final_lang)
         if index >= 0:
             self.target_lang_combo.setCurrentIndex(index)
         else:
-            self.target_lang_combo.setCurrentText(saved_lang)
+            self.target_lang_combo.setCurrentText(final_lang)
             
         # Connect to save config
         self.target_lang_combo.currentTextChanged.connect(self.update_target_language)
         
         # Initialize the target language on startup (signal doesn't fire when setting initial value)
-        self.update_target_language(saved_lang)
+        # This will sync all variables: lang_var, output_language, glossary_target_language, and environment vars
+        self.update_target_language(final_lang)
         
         # Add warning label for missing placeholder
         self.target_lang_warning = QLabel()
@@ -3104,6 +3124,8 @@ Recent translations to summarize:
         self.config['output_language'] = text
         # Also update environment variable if needed
         os.environ['OUTPUT_LANGUAGE'] = text
+        # Update lang_var which is used by _get_environment_variables
+        self.lang_var = text
         
         # Sync with main dropdown if called externally
         if hasattr(self, 'target_lang_combo') and self.target_lang_combo.currentText() != text:
@@ -3117,6 +3139,8 @@ Recent translations to summarize:
         
         # Sync with glossary manager dropdowns if they exist
         self.config['glossary_target_language'] = text
+        # IMPORTANT: Also update environment variable immediately so glossary manager sees the change
+        os.environ['GLOSSARY_TARGET_LANGUAGE'] = text
         
         if hasattr(self, 'manual_target_language_combo') and self.manual_target_language_combo:
             if self.manual_target_language_combo.currentText() != text:
