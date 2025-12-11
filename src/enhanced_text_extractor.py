@@ -443,14 +443,37 @@ class EnhancedTextExtractor:
                 batch_translate_active = os.getenv('BATCH_TRANSLATE_HEADERS', '0') == '1'
                 ignore_title_tag = os.getenv('IGNORE_TITLE', '0') == '1' and batch_translate_active
                 ignore_header_tags = os.getenv('IGNORE_HEADER', '0') == '1' and batch_translate_active
+                remove_duplicate_h1_p = os.getenv('REMOVE_DUPLICATE_H1_P', '0') == '1'
+                
                 if ignore_title_tag and soup.title:
                     # Remove <title> so it isn't included when using full extraction
                     soup.title.decompose()
+                
                 if ignore_header_tags:
                     # Remove visible headers from body prior to conversion
                     for tag_name in ['h1', 'h2', 'h3']:
                         for hdr in soup.find_all(tag_name):
                             hdr.decompose()
+                
+                # Remove duplicate H1+P pairs (where P immediately follows H1 with same text)
+                if remove_duplicate_h1_p:
+                    for h1_tag in soup.find_all('h1'):
+                        # Skip split marker H1 tags
+                        h1_id = h1_tag.get('id', '')
+                        if h1_id and h1_id.startswith('split-'):
+                            continue
+                        h1_text = h1_tag.get_text(strip=True)
+                        if 'SPLIT MARKER' in h1_text:
+                            continue
+                        
+                        # Get the next sibling (skipping whitespace/text nodes)
+                        next_sibling = h1_tag.find_next_sibling()
+                        if next_sibling and next_sibling.name == 'p':
+                            # Compare text content (stripped)
+                            p_text = next_sibling.get_text(strip=True)
+                            if h1_text == p_text:
+                                # Remove the duplicate paragraph
+                                next_sibling.decompose()
             except Exception:
                 # Non-fatal – proceed with original soup if anything goes wrong
                 pass
