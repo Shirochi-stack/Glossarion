@@ -8984,28 +8984,39 @@ def main(log_callback=None, stop_callback=None):
                         'title': chapter['title'],
                         'content': content,
                         'is_chunk': chapter.get('is_chunk', False),
-                        'chunk_info': chapter.get('chunk_info', {})
+                        'chunk_info': chapter.get('chunk_info', {}),
+                        'filename': fname_to_check  # Store filename for debugging
                     })
                 elif os.path.exists(os.path.join(out, fname_base)):
                     # Fallback to HTML if txt doesn't exist
                     with open(os.path.join(out, fname_base), 'r', encoding='utf-8') as f:
                         content = f.read()
-                        # Extract text from HTML
-                        from bs4 import BeautifulSoup
-                        soup = BeautifulSoup(content, 'html.parser')
-                        text = soup.get_text(strip=True)
+                        # For PDFs, keep HTML content; for text files, extract text
+                        if is_pdf_file:
+                            # Keep the HTML as-is for PDFs
+                            text = content
+                        else:
+                            # Extract text from HTML for text files
+                            from bs4 import BeautifulSoup
+                            soup = BeautifulSoup(content, 'html.parser')
+                            text = soup.get_text(strip=True)
                     
                     translated_chapters.append({
                         'num': chapter['num'],
                         'title': chapter['title'],
                         'content': text,
                         'is_chunk': chapter.get('is_chunk', False),
-                        'chunk_info': chapter.get('chunk_info', {})
+                        'chunk_info': chapter.get('chunk_info', {}),
+                        'filename': fname_base  # Store filename for debugging
                     })
             
+            # Sort chapters by number to ensure correct order
+            # Handle both integer and float chapter numbers (e.g., 1.0, 1.1, etc.)
+            translated_chapters.sort(key=lambda x: float(x['num']))
+            
             print(f"✅ Translation complete! {len(translated_chapters)} section files created:")
-            for chapter_data in sorted(translated_chapters, key=lambda x: x['num']):
-                print(f"   • Section {chapter_data['num']}: {chapter_data['title']}")
+            for chapter_data in translated_chapters:
+                print(f"   • Section {chapter_data['num']}: {chapter_data['title']} (from {chapter_data.get('filename', 'unknown')})")  
             
             # Create a combined file with proper section structure
             if input_path.lower().endswith('.pdf'):
@@ -9024,8 +9035,18 @@ def main(log_callback=None, stop_callback=None):
                     html_parts = []
                     current_main_chapter = None
                     
-                    for i, chapter_data in enumerate(sorted(translated_chapters, key=lambda x: x['num'])):
+                    # Note: translated_chapters is already sorted at this point
+                    for i, chapter_data in enumerate(translated_chapters):
                         content = chapter_data['content']
+                        
+                        # Extract body content from individual HTML pages if they have full HTML structure
+                        if '<html' in content.lower() and '<body' in content.lower():
+                            from bs4 import BeautifulSoup
+                            soup = BeautifulSoup(content, 'html.parser')
+                            body = soup.find('body')
+                            if body:
+                                # Extract just the body content to avoid nested html/head/body tags
+                                content = ''.join(str(child) for child in body.children)
                         
                         if chapter_data.get('is_chunk'):
                             chunk_info = chapter_data.get('chunk_info', {})
@@ -9036,7 +9057,7 @@ def main(log_callback=None, stop_callback=None):
                             if original_chapter != current_main_chapter:
                                 current_main_chapter = original_chapter
                                 if i > 0:
-                                    html_parts.append('<hr />\n\n')
+                                    html_parts.append('<div class="page-break"></div>\n')
                             
                             html_parts.append(content)
                             if chunk_idx < total_chunks:
@@ -9044,7 +9065,7 @@ def main(log_callback=None, stop_callback=None):
                         else:
                             current_main_chapter = chapter_data['num']
                             if i > 0:
-                                html_parts.append('<hr />\n\n')
+                                html_parts.append('<div class="page-break"></div>\n')
                             html_parts.append(content)
                     
                     full_html_body = "".join(html_parts)
@@ -9080,9 +9101,17 @@ def main(log_callback=None, stop_callback=None):
                         css_arg = css_path if os.path.exists(css_path) else None
                         images_arg = images_dir if os.path.exists(images_dir) else None
                         
+                        # Check if images directory exists and has images
+                        has_images = False
+                        if images_arg and os.path.exists(images_arg):
+                            image_files = [f for f in os.listdir(images_arg) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp'))]
+                            has_images = len(image_files) > 0
+                            if has_images:
+                                print(f"   • Found {len(image_files)} images to include in PDF")
+                        
                         if create_pdf_from_html(full_html, combined_path, css_path=css_arg, images_dir=images_arg):
                             print(f"   • Created translated PDF file: {combined_path}")
-                            if images_arg:
+                            if has_images:
                                 print(f"   • PDF includes images from images folder")
                         else:
                             print("⚠️ Failed to create PDF from HTML, using HTML file")
@@ -9102,7 +9131,8 @@ def main(log_callback=None, stop_callback=None):
                     full_text_parts = []
                     current_main_chapter = None
                     
-                    for i, chapter_data in enumerate(sorted(translated_chapters, key=lambda x: x['num'])):
+                    # Note: translated_chapters is already sorted at this point
+                    for i, chapter_data in enumerate(translated_chapters):
                         content = chapter_data['content']
                         
                         if chapter_data.get('is_chunk'):
@@ -9142,7 +9172,8 @@ def main(log_callback=None, stop_callback=None):
                 with open(combined_path, 'w', encoding='utf-8') as combined:
                     current_main_chapter = None
                     
-                    for i, chapter_data in enumerate(sorted(translated_chapters, key=lambda x: x['num'])):
+                    # Note: translated_chapters is already sorted at this point
+                    for i, chapter_data in enumerate(translated_chapters):
                         content = chapter_data['content']
                         
                         # Check if this is a chunk of a larger chapter

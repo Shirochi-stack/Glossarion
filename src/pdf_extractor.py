@@ -1460,24 +1460,44 @@ def _embed_images_as_data_uris(html: str, base_path: Optional[str], images_dir: 
     def repl(m):
         attrs = m.group(1)
         src = m.group(2)
+        
+        # Skip if already a data URI
+        if src.startswith('data:'):
+            return m.group(0)
+        
         # Resolve file path
         candidate_paths = []
-        if images_dir and not os.path.isabs(src) and src.startswith('images/'):
-            candidate_paths.append(os.path.join(images_dir, os.path.basename(src)))
-            candidate_paths.append(os.path.join(images_dir, src.split('images/',1)[1]))
+        
+        # If src is like "images/foo.png" and we have an images_dir
+        if images_dir and not os.path.isabs(src):
+            if src.startswith('images/'):
+                # Extract filename after "images/"
+                img_filename = src.split('images/', 1)[1]
+                candidate_paths.append(os.path.join(images_dir, img_filename))
+            else:
+                # Try treating src as relative to images_dir
+                candidate_paths.append(os.path.join(images_dir, src))
+        
+        # If src is relative and we have a base_path, try that
         if base_path and not os.path.isabs(src):
             candidate_paths.append(os.path.normpath(os.path.join(base_path, src)))
+        
+        # If src is already absolute
         if os.path.isabs(src):
             candidate_paths.append(src)
+        
+        # Try to find and embed the image
         data_uri = None
         for p in candidate_paths:
             if os.path.exists(p):
                 data_uri = _to_data_uri(p)
                 if data_uri:
                     break
+        
         if data_uri:
             return f'<img{attrs}src="{data_uri}"'
-        return m.group(0)
+        return m.group(0)  # Keep original if not found
+    
     return img_re.sub(repl, html)
 
 
@@ -1525,21 +1545,36 @@ def create_pdf_from_html(html_content: str, output_path: str, css_path: Optional
                 full_html = html_content
             
             # Set base URL for resolving relative paths (images, CSS)
+            # WeasyPrint needs this to resolve relative paths like "images/foo.png"
             base_url = None
-            if images_dir and os.path.exists(images_dir):
-                base_url = f"file:///{os.path.abspath(os.path.dirname(images_dir)).replace(os.sep, '/')}/"
-            elif output_path:
-                base_url = f"file:///{os.path.abspath(os.path.dirname(output_path)).replace(os.sep, '/')}/"
+            if output_path:
+                # Use the output directory as base URL - this allows "images/foo.png" to resolve correctly
+                output_dir = os.path.abspath(os.path.dirname(output_path))
+                base_url = f"file:///{output_dir.replace(os.sep, '/')}/"
+                print(f"   • Using base URL for image resolution: {base_url}")
             
             # Optionally embed images as data URIs at the final step
+            # This is generally not needed as WeasyPrint can handle file paths with proper base_url
             if os.getenv('PDF_EMBED_IMAGES', '0') == '1':
+                print("   • Embedding images as data URIs...")
                 # base_path for resolving relative image paths
-                base_path = None
-                if images_dir and os.path.exists(images_dir):
-                    base_path = images_dir
-                elif output_path:
-                    base_path = os.path.dirname(output_path)
+                base_path = os.path.dirname(output_path) if output_path else None
                 full_html = _embed_images_as_data_uris(full_html, base_path, images_dir)
+            else:
+                # Verify images are accessible
+                if images_dir and os.path.exists(images_dir):
+                    import re
+                    img_refs = re.findall(r'src="images/([^"]+)"', full_html, re.IGNORECASE)
+                    missing_images = []
+                    for img_file in img_refs:
+                        img_path = os.path.join(images_dir, img_file)
+                        if not os.path.exists(img_path):
+                            missing_images.append(img_file)
+                    if missing_images:
+                        print(f"   ⚠️ Warning: {len(missing_images)} referenced images not found in images directory")
+                        if len(missing_images) <= 5:
+                            for img in missing_images:
+                                print(f"      - {img}")
 
             # Create HTML object
             html_doc = HTML(string=full_html, base_url=base_url)
