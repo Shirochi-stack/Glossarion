@@ -6104,6 +6104,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'MAX_IMAGE_DIMENSION': str(self.config.get('max_image_dimension', 2048)),
             'MAX_IMAGE_SIZE_MB': str(self.config.get('max_image_size_mb', 10)),
             'PRESERVE_TRANSPARENCY': "1" if self.config.get('preserve_transparency', False) else "0",
+            
+            # PDF settings
+            'PDF_OUTPUT_FORMAT': self.pdf_output_format_var if hasattr(self, 'pdf_output_format_var') else 'pdf',
+            'PDF_RENDER_MODE': self.pdf_render_mode_var if hasattr(self, 'pdf_render_mode_var') else 'absolute',
             'PRESERVE_ORIGINAL_FORMAT': "1" if self.config.get('preserve_original_format', False) else "0", 
             'OPTIMIZE_FOR_OCR': "1" if self.config.get('optimize_for_ocr', True) else "0",
             'PROGRESSIVE_ENCODING': "1" if self.config.get('progressive_encoding', True) else "0",
@@ -9429,6 +9433,10 @@ Important rules:
                 # Async processing settings
                 ('async_wait_for_completion', ['async_wait_for_completion_var'], False, bool),
                 ('async_poll_interval', ['async_poll_interval_var'], 60, lambda v: safe_int(v, 60)),
+                
+                # PDF settings
+                ('pdf_output_format', ['pdf_output_format_var'], 'pdf', str),
+                ('pdf_render_mode', ['pdf_render_mode_var'], 'absolute', str),
             ]
             
             # Process the settings map to populate self.config

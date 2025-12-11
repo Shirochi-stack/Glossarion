@@ -4354,6 +4354,113 @@ def _create_processing_options_section(self, parent):
     translate_special_desc.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(translate_special_desc)
     
+    # === PDF OUTPUT SETTINGS ===
+    # Separator
+    pdf_sep = QFrame()
+    pdf_sep.setFrameShape(QFrame.HLine)
+    pdf_sep.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(pdf_sep)
+    
+    # PDF Output Format section title
+    pdf_title = QLabel("PDF Output Settings")
+    pdf_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    pdf_title.setContentsMargins(0, 5, 0, 5)
+    section_v.addWidget(pdf_title)
+    
+    # Initialize PDF output format variable
+    if not hasattr(self, 'pdf_output_format_var'):
+        self.pdf_output_format_var = self.config.get('pdf_output_format', 'pdf')
+    
+    # PDF Output Format toggle
+    pdf_format_row = QWidget()
+    pdf_format_h = QHBoxLayout(pdf_format_row)
+    pdf_format_h.setContentsMargins(20, 2, 0, 0)
+    
+    pdf_format_label = QLabel("Output format:")
+    pdf_format_h.addWidget(pdf_format_label)
+    
+    pdf_format_combo = QComboBox()
+    pdf_format_combo.addItems(["pdf", "epub"])
+    pdf_format_combo.setFixedWidth(100)
+    pdf_format_combo.setStyleSheet("""
+        QComboBox::down-arrow {
+            image: none;
+            width: 12px;
+            height: 12px;
+            border: none;
+        }
+    """)
+    self._add_combobox_arrow(pdf_format_combo)
+    self._disable_combobox_mousewheel(pdf_format_combo)
+    try:
+        format_val = self.pdf_output_format_var
+        idx = pdf_format_combo.findText(format_val)
+        if idx >= 0:
+            pdf_format_combo.setCurrentIndex(idx)
+    except Exception:
+        pass
+    def _on_pdf_format_changed(text):
+        try:
+            self.pdf_output_format_var = text
+        except Exception:
+            pass
+    pdf_format_combo.currentTextChanged.connect(_on_pdf_format_changed)
+    pdf_format_h.addWidget(pdf_format_combo)
+    pdf_format_h.addStretch()
+    section_v.addWidget(pdf_format_row)
+    
+    pdf_format_desc = QLabel("Choose whether to output PDFs as .pdf or .epub files.\nPDF: Creates combined PDF with all translated pages\nEPUB: Compiles pages into EPUB format")
+    pdf_format_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    pdf_format_desc.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(pdf_format_desc)
+    
+    # Initialize PDF render mode variable
+    if not hasattr(self, 'pdf_render_mode_var'):
+        self.pdf_render_mode_var = self.config.get('pdf_render_mode', 'absolute')
+    
+    # PDF Render Mode toggle
+    pdf_render_row = QWidget()
+    pdf_render_h = QHBoxLayout(pdf_render_row)
+    pdf_render_h.setContentsMargins(20, 2, 0, 0)
+    
+    pdf_render_label = QLabel("Render mode:")
+    pdf_render_h.addWidget(pdf_render_label)
+    
+    pdf_render_combo = QComboBox()
+    pdf_render_combo.addItems(["absolute", "semantic", "xhtml", "html"])
+    pdf_render_combo.setFixedWidth(100)
+    pdf_render_combo.setStyleSheet("""
+        QComboBox::down-arrow {
+            image: none;
+            width: 12px;
+            height: 12px;
+            border: none;
+        }
+    """)
+    self._add_combobox_arrow(pdf_render_combo)
+    self._disable_combobox_mousewheel(pdf_render_combo)
+    try:
+        render_val = self.pdf_render_mode_var
+        idx = pdf_render_combo.findText(render_val)
+        if idx >= 0:
+            pdf_render_combo.setCurrentIndex(idx)
+    except Exception:
+        pass
+    def _on_pdf_render_changed(text):
+        try:
+            self.pdf_render_mode_var = text
+        except Exception:
+            pass
+    pdf_render_combo.currentTextChanged.connect(_on_pdf_render_changed)
+    pdf_render_h.addWidget(pdf_render_combo)
+    pdf_render_h.addStretch()
+    section_v.addWidget(pdf_render_row)
+    
+    pdf_render_desc = QLabel("PDF extraction mode:\n• absolute: Fixed positioning (perfect layout, smaller payloads)\n• semantic: Semantic HTML (better text flow, larger payloads)\n• xhtml/html: MuPDF native rendering (1:1 layout)")
+    pdf_render_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    pdf_render_desc.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(pdf_render_desc)
+    
     # Disable 0-based Chapter Detection
     zero_detect_cb = self._create_styled_checkbox("Disable 0-based Chapter Detection")
     try:

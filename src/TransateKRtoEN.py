@@ -8957,7 +8957,11 @@ def main(log_callback=None, stop_callback=None):
             
             chapters_completed += 1
 
-    if is_text_file or is_pdf_file:
+    # Check if PDF should output as PDF or EPUB
+    pdf_output_format = os.getenv('PDF_OUTPUT_FORMAT', 'pdf').lower()
+    should_create_pdf = is_text_file or (is_pdf_file and pdf_output_format == 'pdf')
+    
+    if should_create_pdf:
         print("📄 Text file translation complete!")
         try:
             # Collect all translated chapters with their metadata
