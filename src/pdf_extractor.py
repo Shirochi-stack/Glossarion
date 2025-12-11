@@ -471,8 +471,14 @@ def generate_css_from_pdf(pdf_path: str) -> str:
                 median_size = body_font_sizes[len(body_font_sizes) // 2]
                 base_font_size = f"{median_size:.1f}pt"
         
-        # Determine most common alignment
-        text_align = Counter(alignments).most_common(1)[0][0] if alignments else 'justify'
+        # Determine most common alignment, default to justify
+        text_align = 'justify'  # Default to justify
+        if alignments:
+            detected_align = Counter(alignments).most_common(1)[0][0]
+            # Only use detected alignment if it's clearly dominant
+            # Otherwise stick with justify for body text
+            if detected_align:
+                text_align = detected_align
         
         # Calculate line height ratio
         line_height_ratio = 1.6
@@ -552,12 +558,12 @@ body {{
     color: {text_color};
     background-color: #ffffff;
     margin: 2em;
-    text-align: {text_align};
+    text-align: justify;
 }}
 
 p {{
     margin: 0.5em 0;
-    text-align: {text_align};
+    text-align: justify;
     text-justify: inter-word;
 }}
 {heading_styles}
@@ -565,7 +571,7 @@ img {{
     max-width: 100%;
     height: auto;
     display: block;
-    margin: 1em 0;
+    margin: 1em auto;  /* Center images */
 }}
 
 .pdf-block {{
@@ -587,13 +593,16 @@ img {{
 }}
 
 .toc-entry {{
-    margin: 0.3em 0;
-    padding-left: 1em;
+    margin: 0.5em 0;
+    padding: 0.2em 0;
+    display: flex;
+    justify-content: space-between;
 }}
 
 .toc-entry a {{
     text-decoration: none;
-    color: {text_color};
+    color: #000000;  /* Black text for TOC links */
+    flex-grow: 1;
 }}
 
 .toc-entry a:hover {{
@@ -601,15 +610,81 @@ img {{
     color: #0066cc;
 }}
 
+.toc-page {{
+    margin-left: 1em;
+    color: #000000;  /* Black page numbers */
+    font-weight: normal;
+}}
+
 .toc-level-1 {{ padding-left: 0; font-weight: bold; }}
 .toc-level-2 {{ padding-left: 1em; }}
 .toc-level-3 {{ padding-left: 2em; }}
 
-/* Preserve alignment classes */
-.align-left {{ text-align: left; }}
-.align-center {{ text-align: center; }}
-.align-right {{ text-align: right; }}
-.align-justify {{ text-align: justify; }}
+/* Preserve alignment classes - use !important to override defaults */
+.align-left, p.align-left {{
+    text-align: left !important;
+}}
+
+.align-center, p.align-center, img.align-center {{
+    text-align: center !important;
+    display: block;
+    margin-left: auto !important;
+    margin-right: auto !important;
+}}
+
+.align-right, p.align-right {{
+    text-align: right !important;
+}}
+
+.align-justify, p.align-justify {{
+    text-align: justify !important;
+    text-justify: inter-word;
+}}
+
+/* Page breaks for proper document flow */
+.page-break {{
+    page-break-before: always;
+    break-before: page;
+    clear: both;
+    height: 0;
+    margin: 0;
+    padding: 0;
+}}
+
+/* Print-specific page breaks */
+@media print {{
+    .page-break {{
+        page-break-before: always;
+        break-before: page;
+    }}
+}}
+
+/* Improve spacing for centered content */
+.align-center, p.align-center {{
+    text-align: center !important;
+    margin: 1.5em 0;
+}}
+
+/* Centered headings */
+h1.align-center, h2.align-center, h3.align-center {{
+    text-align: center !important;
+}}
+
+/* Add space around headings */
+h1, h2, h3 {{
+    margin-top: 2em;
+    margin-bottom: 1em;
+}}
+
+/* First heading on page needs less top margin */
+h1:first-child, h2:first-child {{
+    margin-top: 0.5em;
+}}
+
+/* Ensure centered elements don't get overridden */
+.align-center * {{
+    text-align: center;
+}}
 """
         
         print(f"✅ Generated CSS with font: {most_common_font}, size: {base_font_size}, align: {text_align}")
@@ -648,13 +723,19 @@ def _detect_toc_patterns(text: str) -> bool:
     Detect if text looks like a table of contents entry.
     Common patterns: page numbers, dots/leaders, chapter numbers.
     """
+    text = text.strip()
+    
+    # Skip if too long (TOC entries are usually short)
+    if len(text) > 200:
+        return False
+    
     # Check for TOC patterns
     toc_patterns = [
-        r'\.\.+\s*\d+',  # Dots followed by page number
-        r'\s+\d+\s*$',     # Ends with page number
-        r'^Chapter\s+\d+',  # Starts with "Chapter N"
-        r'^\d+\.\d+',      # Starts with section number like "1.1"
-        r'\d+\s*$',        # Just a page number at end
+        r'\.\.+\s*\d+',        # Dots followed by page number (e.g., "Chapter 1.....10")
+        r'^.+\s+\d{1,3}$',     # Text followed by space and 1-3 digit page number (e.g., "Introduction 4")
+        r'^Chapter\s+\d+',     # Starts with "Chapter N"
+        r'^\d+\.\d+\s+',       # Starts with section number like "1.1 "
+        r'^[IVX]+\.\s+',       # Roman numerals (I, II, III, etc.)
     ]
     
     for pattern in toc_patterns:
@@ -692,27 +773,60 @@ def _extract_toc_from_outline(doc) -> str:
 def _detect_block_alignment(block: Dict, page_width: float) -> str:
     """
     Detect alignment of a specific text block.
+    Returns alignment class.
     """
     bbox = block.get("bbox", [])
     if len(bbox) < 4:
-        return ""
+        return "align-justify"  # Default to justify if can't detect
     
     x0, y0, x1, y1 = bbox
     block_width = x1 - x0
     left_margin = x0
     right_margin = page_width - x1
+    center_x = (x0 + x1) / 2
+    page_center = page_width / 2
     
-    # Check alignment
-    if abs(left_margin - right_margin) < 30:
+    # More aggressive centering detection
+    center_offset = abs(center_x - page_center)
+    margin_diff = abs(left_margin - right_margin)
+    
+    # If the block is reasonably centered, mark it as centered
+    if center_offset < (page_width * 0.15) and margin_diff < (page_width * 0.1):
         return "align-center"
     elif right_margin < 50 and left_margin > 100:
         return "align-right"
-    elif block_width > page_width * 0.7:
-        return "align-justify"
-    elif left_margin < 100:
+    elif left_margin < 100 and block_width < page_width * 0.5:
+        # Narrow block at left edge = left aligned
         return "align-left"
+    else:
+        # Default to justify for body text
+        return "align-justify"
+
+
+def _is_page_break_candidate(page_num: int, blocks: List[Dict], page_height: float) -> bool:
+    """
+    Detect if a page should be treated as a page break (title page, chapter start, etc.).
+    """
+    # First few pages often have special formatting
+    if page_num < 3:
+        return True
     
-    return ""
+    # Check if page has very few text blocks (likely a title/separator page)
+    text_blocks = [b for b in blocks if b.get("type") == 0]
+    if len(text_blocks) <= 3:
+        return True
+    
+    # Check if first block is centered and large (likely chapter title)
+    if text_blocks:
+        first_block = text_blocks[0]
+        bbox = first_block.get("bbox", [])
+        if len(bbox) >= 4:
+            y_pos = bbox[1]  # Top position
+            # If first text is in top 20% of page, might be chapter start
+            if y_pos < page_height * 0.2:
+                return True
+    
+    return False
 
 
 def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: bool = True) -> Tuple[str, Dict[int, List[Dict]]]:
@@ -737,18 +851,18 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
         doc = fitz.open(pdf_path)
         html_parts = []
         
-        # Try to extract TOC from PDF outline
-        toc_html = _extract_toc_from_outline(doc)
-        if toc_html:
-            html_parts.append(toc_html)
-            print(f"📑 Extracted table of contents from PDF outline")
+        # Try to extract TOC from PDF outline (but don't add it yet - let it appear on its page)
+        toc_from_outline = _extract_toc_from_outline(doc)
+        has_outline_toc = bool(toc_from_outline)
+        if has_outline_toc:
+            print(f"📑 Detected table of contents in PDF outline (will preserve in-place)")
         
         total_pages = len(doc)
         print(f"📄 Processing {total_pages} pages with formatting...")
         
-        # Track potential TOC pages
-        toc_entries = []
+        # Track TOC state
         in_toc_section = False
+        toc_page_detected = False
         
         for page_num in range(total_pages):
             if page_num % 10 == 0 and page_num > 0:
@@ -756,9 +870,13 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
             
             page = doc[page_num]
             page_width = page.rect.width
+            page_height = page.rect.height
             
             # Get structured text with block information
             blocks = page.get_text("dict")["blocks"]
+            
+            # Check if this page should have a page break before it
+            should_page_break = _is_page_break_candidate(page_num, blocks, page_height)
             
             page_html = []
             current_para = []
@@ -771,6 +889,8 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                     
                     # Detect block alignment
                     alignment_class = _detect_block_alignment(block, page_width)
+                    if not alignment_class:
+                        alignment_class = "align-justify"  # Always have a default
                     
                     # Track fonts and styles in this block
                     block_fonts = []
@@ -820,26 +940,41 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                         # Start or continue TOC section
                         if not in_toc_section:
                             in_toc_section = True
-                            if not toc_html:  # Only add if we didn't extract from outline
-                                toc_entries.append('<div class="toc">')
-                                toc_entries.append('<div class="toc-title">Table of Contents</div>')
+                            toc_page_detected = True
+                            page_html.append('<div class="toc">')
+                            page_html.append('<div class="toc-title">Table of Contents</div>')
                         
-                        toc_entries.append(f'<div class="toc-entry">{block_content}</div>')
-                        continue  # Skip adding to main content
-                    elif in_toc_section and page_num < 10:
-                        # Check if we're still in TOC
-                        # If block has normal content, end TOC section
-                        if len(block_content) > 50 and not is_toc_entry:
-                            in_toc_section = False
-                            if toc_entries:
-                                toc_entries.append('</div>')
+                        # Strip any HTML tags from TOC entry and format properly
+                        from bs4 import BeautifulSoup
+                        clean_text = BeautifulSoup(block_content, 'html.parser').get_text()
+                        
+                        # Try to extract title and page number
+                        # Format: "Title text 123" -> split into title and page num
+                        match = re.match(r'^(.+?)\s+(\d{1,3})$', clean_text)
+                        if match:
+                            title = match.group(1).strip()
+                            page_num_text = match.group(2)
+                            # Create anchor from title
+                            anchor = re.sub(r'[^a-zA-Z0-9]+', '-', title.lower()).strip('-')
+                            page_html.append(f'<div class="toc-entry"><a href="#{anchor}">{title}</a> <span class="toc-page">{page_num_text}</span></div>')
+                        else:
+                            # Fallback: just add as plain text
+                            page_html.append(f'<div class="toc-entry">{clean_text}</div>')
+                        
+                        continue  # Skip normal processing for this block
+                    elif in_toc_section:
+                        # We were in TOC section but now hit non-TOC content
+                        # Close the TOC div
+                        page_html.append('</div><!-- end toc -->')
+                        in_toc_section = False
+                        # Continue processing this block normally (don't skip)
                     
                     # Determine if this is a heading
                     if max_font_size > 14 and has_bold:
                         # Flush current paragraph
                         if current_para:
-                            para_class = current_para_styles[0] if current_para_styles else ""
-                            para_tag = f'<p class="{para_class}">' if para_class else '<p>'
+                            para_class = current_para_styles[0] if current_para_styles else "align-justify"
+                            para_tag = f'<p class="{para_class}">'
                             page_html.append(f'{para_tag}{"".join(current_para)}</p>')
                             current_para = []
                             current_para_styles = []
@@ -851,8 +986,8 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                     elif max_font_size > 12 and has_bold:
                         # Flush current paragraph
                         if current_para:
-                            para_class = current_para_styles[0] if current_para_styles else ""
-                            para_tag = f'<p class="{para_class}">' if para_class else '<p>'
+                            para_class = current_para_styles[0] if current_para_styles else "align-justify"
+                            para_tag = f'<p class="{para_class}">'
                             page_html.append(f'{para_tag}{"".join(current_para)}</p>')
                             current_para = []
                             current_para_styles = []
@@ -862,6 +997,19 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                         page_html.append(f'<h2 id="{anchor_id}"{h_class}>{block_content}</h2>')
                     else:
                         # Regular paragraph content
+                        # Check if we should continue current paragraph or start new one
+                        if current_para and current_para_styles:
+                            # If alignment changed or empty line, start new paragraph
+                            prev_alignment = current_para_styles[-1] if current_para_styles else ""
+                            if alignment_class != prev_alignment:
+                                # Flush existing paragraph with different alignment
+                                para_class = current_para_styles[0] if current_para_styles else "align-justify"
+                                para_tag = f'<p class="{para_class}">'
+                                page_html.append(f'{para_tag}{"".join(current_para)}</p>')
+                                current_para = []
+                                current_para_styles = []
+                        
+                        # Add to current paragraph
                         current_para.append(block_content + " ")
                         if alignment_class:
                             current_para_styles.append(alignment_class)
@@ -869,8 +1017,8 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                 elif block.get("type") == 1:  # Image block
                     # Flush current paragraph
                     if current_para:
-                        para_class = current_para_styles[0] if current_para_styles else ""
-                        para_tag = f'<p class="{para_class}">' if para_class else '<p>'
+                        para_class = current_para_styles[0] if current_para_styles else "align-justify"
+                        para_tag = f'<p class="{para_class}">'
                         page_html.append(f'{para_tag}{"".join(current_para)}</p>')
                         current_para = []
                         current_para_styles = []
@@ -882,9 +1030,17 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                             img_filename = img_info['filename']
                             img_width = img_info.get('width', 0)
                             img_height = img_info.get('height', 0)
+                            bbox = img_info.get('bbox', [])
                             
-                            # Create img tag with relative path
-                            img_tag = f'<img src="images/{img_filename}"'
+                            # Detect if image is centered
+                            img_alignment = ""
+                            if len(bbox) >= 4:
+                                img_block = {"bbox": bbox}
+                                img_alignment = _detect_block_alignment(img_block, page_width)
+                            
+                            # Create img tag with relative path and centering if detected
+                            img_class = f' class="{img_alignment}"' if img_alignment else ''
+                            img_tag = f'<img src="images/{img_filename}"{img_class}'
                             if img_width and img_height:
                                 img_tag += f' width="{img_width}" height="{img_height}"'
                             img_tag += ' alt="PDF Image" />'
@@ -894,22 +1050,30 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
             
             # Flush any remaining paragraph
             if current_para:
-                para_class = current_para_styles[0] if current_para_styles else ""
-                para_tag = f'<p class="{para_class}">' if para_class else '<p>'
+                para_class = current_para_styles[0] if current_para_styles else "align-justify"
+                para_tag = f'<p class="{para_class}">'
                 page_html.append(f'{para_tag}{"".join(current_para)}</p>')
             
-            # Add page content
+            # Close TOC if page ends while still in TOC section
+            if in_toc_section:
+                page_html.append('</div><!-- end toc at page end -->')
+                # Don't reset in_toc_section here in case TOC continues on next page
+            
+            # Add page content with page break if needed
             if page_html:
-                html_parts.append('\n'.join(page_html))
+                page_content = '\n'.join(page_html)
+                
+                # Add page break div for title pages and chapter starts
+                if should_page_break and page_num > 0:
+                    html_parts.append('<div class="page-break"></div>')
+                
+                html_parts.append(page_content)
         
         doc.close()
         
-        # Add collected TOC entries if any
-        if toc_entries and not toc_html:
-            if in_toc_section:
-                toc_entries.append('</div>')
-            html_parts.insert(0, '\n'.join(toc_entries))
-            print(f"📑 Detected and preserved table of contents from content")
+        # Log TOC detection
+        if toc_page_detected:
+            print(f"📑 Detected and preserved table of contents in document")
         
         # Combine all pages
         full_html = '\n\n'.join(html_parts)

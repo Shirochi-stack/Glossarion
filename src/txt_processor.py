@@ -188,8 +188,23 @@ class TextFileProcessor:
                     # Save original chunk content to word_count folder (only if it doesn't exist)
                     original_chunk_path = os.path.join(word_count_dir, chunk_filename)
                     if not os.path.exists(original_chunk_path):
+                        # Wrap HTML chunks with full document structure
+                        content_to_write = chunk_content
+                        if file_ext == '.html':
+                            content_to_write = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{chunk_title}</title>
+    <link rel="stylesheet" href="../styles.css">
+</head>
+<body>
+{chunk_content}
+</body>
+</html>"""
                         with open(original_chunk_path, 'w', encoding='utf-8') as f:
-                            f.write(chunk_content)
+                            f.write(content_to_write)
                     
                     final_chapters.append({
                         'num': chunk_num,
@@ -223,8 +238,23 @@ class TextFileProcessor:
                 # Save original content to word_count folder (only if it doesn't exist)
                 original_chunk_path = os.path.join(word_count_dir, chapter_filename)
                 if not os.path.exists(original_chunk_path):
+                    # Wrap HTML files with full document structure
+                    content_to_write = chapter_content
+                    if file_ext == '.html':
+                        content_to_write = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{chapter_data['title']}</title>
+    <link rel="stylesheet" href="../styles.css">
+</head>
+<body>
+{chapter_content}
+</body>
+</html>"""
                     with open(original_chunk_path, 'w', encoding='utf-8') as f:
-                        f.write(chapter_content)
+                        f.write(content_to_write)
                 
                 final_chapters.append({
                     'num': chapter_data['num'],  # Keep as integer for non-split chapters
