@@ -6124,7 +6124,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             
             # PDF settings
             'PDF_OUTPUT_FORMAT': self.pdf_output_format_var if hasattr(self, 'pdf_output_format_var') else 'pdf',
-            'PDF_RENDER_MODE': self.pdf_render_mode_var if hasattr(self, 'pdf_render_mode_var') else 'absolute',
+            'PDF_RENDER_MODE': self.pdf_render_mode_var if hasattr(self, 'pdf_render_mode_var') else 'html',
             'PRESERVE_ORIGINAL_FORMAT': "1" if self.config.get('preserve_original_format', False) else "0", 
             'OPTIMIZE_FOR_OCR': "1" if self.config.get('optimize_for_ocr', True) else "0",
             'PROGRESSIVE_ENCODING': "1" if self.config.get('progressive_encoding', True) else "0",

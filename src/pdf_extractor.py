@@ -553,29 +553,29 @@ def generate_css_from_pdf(pdf_path: str) -> str:
         # If no headings detected, use relative sizing
         if not heading_styles:
             heading_styles = f"""
-h1 {{
+h1 {
     font-family: {font_family};
     font-size: 2em;
     font-weight: bold;
     margin: 1em 0 0.5em 0;
-    text-align: left;
-}}
+    text-align: center;
+}
 
-h2 {{
+h2 {
     font-family: {font_family};
     font-size: 1.5em;
     font-weight: bold;
     margin: 0.8em 0 0.4em 0;
-    text-align: left;
-}}
+    text-align: center;
+}
 
-h3 {{
+h3 {
     font-family: {font_family};
     font-size: 1.2em;
     font-weight: bold;
     margin: 0.6em 0 0.3em 0;
-    text-align: left;
-}}
+    text-align: center;
+}
 """
         
         # Generate CSS with detected properties
