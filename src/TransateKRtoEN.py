@@ -272,20 +272,14 @@ class RequestMerger:
         if not chapters_data:
             return ""
 
-        # Check whether split marker injection is enabled. This is
-        # controlled via the SYNTHETIC_MERGE_HEADERS env var and surfaced in
-        # the Other Settings dialog. Enabled by default.
-        # (Note: We're reusing the same env var for backward compatibility)
-        split_markers_enabled = os.getenv('SYNTHETIC_MERGE_HEADERS', '1') == '1'
+        # Split markers are only needed when split-the-merge is enabled
+        # Check if the feature is turned on
+        split_the_merge_enabled = os.getenv('SPLIT_THE_MERGE', '0') == '1'
+        split_markers_enabled = split_the_merge_enabled
 
         merged_parts = []
 
         for chapter_num, content, chapter_obj in chapters_data:
-            # If disabled, keep content exactly as-is.
-            if not split_markers_enabled:
-                merged_parts.append(content)
-                continue
-            
             # Defensive: if something goes wrong in the marker injection
             # logic, fall back to the original content rather than breaking
             # the whole merge.
