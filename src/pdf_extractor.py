@@ -1313,31 +1313,32 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                         page_html.append(f'<h2 id="{anchor_id}"{h_class}{h_style}>{block_content}</h2>')
                     else:
                         # Regular paragraph content
-                        # Check if we should continue current paragraph or start new one
-                        if current_para and current_para_styles:
-                            # If alignment changed or empty line, start new paragraph
-                            prev_alignment = current_para_styles[-1] if current_para_styles else ""
-                            if alignment_class != prev_alignment:
-                                # Flush existing paragraph with different alignment
-                                para_class = current_para_styles[0] if current_para_styles else "align-justify"
+                        # Combine consecutive blocks into single justified paragraphs for better flow
+                        if current_para:
+                            # Only start new paragraph if explicitly different alignment or very short line (likely paragraph break)
+                            prev_alignment = current_para_styles[-1] if current_para_styles else "align-justify"
+                            is_short_line = len(block_content.strip()) < 40  # Short lines might indicate paragraph breaks
+                            
+                            if alignment_class != prev_alignment or (is_short_line and len(current_para) > 3):
+                                # Flush existing paragraph
+                                para_class = "align-justify"  # Force justify for body text
                                 para_style = _align_css.get(para_class, "")
                                 para_tag = f'<p class="{para_class}" style="{para_style}">'
-                                page_html.append(f'{para_tag}{"".join(current_para)}</p>')
+                                page_html.append(f'{para_tag}{" ".join(current_para)}</p>')
                                 current_para = []
                                 current_para_styles = []
                         
-                        # Add to current paragraph
-                        current_para.append(block_content + " ")
-                        if alignment_class:
-                            current_para_styles.append(alignment_class)
+                        # Add to current paragraph - combine blocks with space
+                        current_para.append(block_content.strip())
+                        current_para_styles.append("align-justify")  # Force justify
                 
                 elif block.get("type") == 1:  # Image block
-                    # Flush current paragraph
+                    # Flush current paragraph before image
                     if current_para:
-                        para_class = current_para_styles[0] if current_para_styles else "align-justify"
+                        para_class = "align-justify"  # Force justify for body text
                         para_style = _align_css.get(para_class, "")
                         para_tag = f'<p class="{para_class}" style="{para_style}">'
-                        page_html.append(f'{para_tag}{"".join(current_para)}</p>')
+                        page_html.append(f'{para_tag}{" ".join(current_para)}</p>')
                         current_para = []
                         current_para_styles = []
                     
@@ -1373,10 +1374,10 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
             
             # Flush any remaining paragraph
             if current_para:
-                para_class = current_para_styles[0] if current_para_styles else "align-justify"
+                para_class = "align-justify"  # Force justify for body text
                 para_style = _align_css.get(para_class, "")
                 para_tag = f'<p class="{para_class}" style="{para_style}">'
-                page_html.append(f'{para_tag}{"".join(current_para)}</p>')
+                page_html.append(f'{para_tag}{" ".join(current_para)}</p>')
             
             # Close TOC if page ends while still in TOC section
             if in_toc_section:
