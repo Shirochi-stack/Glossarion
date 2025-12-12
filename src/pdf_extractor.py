@@ -1178,11 +1178,6 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                     try:
                         from bs4 import BeautifulSoup
                         soup = BeautifulSoup(page_html, 'html.parser')
-                        
-                        # Check if this is a table of contents page
-                        page_text = soup.get_text().lower()
-                        is_toc_page = 'table of contents' in page_text or 'contents' in page_text[:200]
-                        
                         # Center all h1 and h2 tags on these pages
                         for tag in soup.find_all(['h1', 'h2']):
                             # Add both class and inline style for maximum compatibility
@@ -1191,16 +1186,6 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                                 existing_style += ';'
                             tag['style'] = existing_style + 'text-align:center!important;'
                             tag['class'] = tag.get('class', []) + ['align-center']
-                        
-                        # If this is a TOC page, also center p tags
-                        if is_toc_page:
-                            for tag in soup.find_all('p'):
-                                existing_style = tag.get('style', '')
-                                if existing_style and not existing_style.endswith(';'):
-                                    existing_style += ';'
-                                tag['style'] = existing_style + 'text-align:center!important;'
-                                tag['class'] = tag.get('class', []) + ['align-center']
-                        
                         page_html = str(soup)
                     except Exception as e:
                         # If beautifulsoup fails, just use the page as-is
