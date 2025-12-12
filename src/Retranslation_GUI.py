@@ -2390,20 +2390,42 @@ class RetranslationMixin:
         files_to_entries = {}
         for chapter_key, chapter_info in prog.get("chapters", {}).items():
             output_file = chapter_info.get("output_file", "")
+            status = chapter_info.get("status", "")
             
-            # Only include chapters with output files (skip null output_file entries)
-            if output_file:
-                if output_file not in files_to_entries:
-                    files_to_entries[output_file] = []
-                files_to_entries[output_file].append((chapter_key, chapter_info))
+            # Include chapters with output files OR in_progress/failed with null output file (legacy)
+            if output_file or status in ["in_progress", "failed"]:
+                # For merged chapters, use a unique key (chapter_key) instead of output_file
+                # This ensures merged chapters appear as separate entries in the list
+                if status == "merged":
+                    file_key = f"_merged_{chapter_key}"
+                elif output_file:
+                    file_key = output_file
+                elif status == "in_progress":
+                    file_key = f"_in_progress_{chapter_key}"
+                else:  # failed
+                    file_key = f"_failed_{chapter_key}"
+                
+                if file_key not in files_to_entries:
+                    files_to_entries[file_key] = []
+                files_to_entries[file_key].append((chapter_key, chapter_info))
         
         chapter_display_info = []
         
         for output_file, entries in files_to_entries.items():
             chapter_key, chapter_info = entries[0]
             
-            # Use output_file directly (already filtered to non-null)
+            # Get the actual output file (strip placeholder prefix if present)
             actual_output_file = output_file
+            if output_file.startswith("_merged_") or output_file.startswith("_in_progress_") or output_file.startswith("_failed_"):
+                # For merged/in_progress/failed, get the actual output_file from chapter_info
+                actual_output_file = chapter_info.get("output_file", "")
+                if not actual_output_file:
+                    # Generate expected filename based on actual_num
+                    actual_num = chapter_info.get("actual_num")
+                    if actual_num is not None:
+                        # Use .txt extension for text files, .html for EPUB
+                        ext = ".txt" if file_path.endswith(".txt") else ".html"
+                        actual_output_file = f"response_section_{actual_num}{ext}"
             
             # Check if this is a special file (files without numbers)
             original_basename = chapter_info.get("original_basename", "")
