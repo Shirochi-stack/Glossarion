@@ -1797,6 +1797,21 @@ class ContentProcessor:
         if not remove_artifacts:
             return text
         
+        # IMPORTANT: Protect split markers used by request merging
+        # These must NEVER be removed as they're critical for split-the-merge
+        split_marker_pattern = r'<h1[^>]*id="split-\d+"[^>]*>.*?SPLIT MARKER.*?</h1>'
+        has_split_markers = bool(re.search(split_marker_pattern, text, re.DOTALL | re.IGNORECASE))
+        
+        if has_split_markers:
+            # Extract and preserve split markers temporarily
+            split_markers = []
+            def preserve_marker(match):
+                marker_id = f"__SPLIT_MARKER_{len(split_markers)}__"
+                split_markers.append(match.group(0))
+                return marker_id
+            
+            text = re.sub(split_marker_pattern, preserve_marker, text, flags=re.DOTALL | re.IGNORECASE)
+        
         # First, remove thinking tags if they exist
         text = ContentProcessor._remove_thinking_tags(text)
         
@@ -1809,6 +1824,10 @@ class ContentProcessor:
             lines.pop(0)
         
         if not lines:
+            # Restore split markers before returning
+            if has_split_markers:
+                for i, marker in enumerate(split_markers):
+                    text = text.replace(f"__SPLIT_MARKER_{i}__", marker)
             return text
         
         # Check the first non-empty line for AI artifacts
@@ -1846,9 +1865,21 @@ class ContentProcessor:
             remaining_text = '\n'.join(remaining_lines)
             if remaining_text.strip():
                 print(f"✂️ Removed single word artifact: {first_line}")
-                return remaining_text.lstrip()
+                result = remaining_text.lstrip()
+                # Restore split markers
+                if has_split_markers:
+                    for i, marker in enumerate(split_markers):
+                        result = result.replace(f"__SPLIT_MARKER_{i}__", marker)
+                return result
         
-        return '\n'.join(lines)
+        result = '\n'.join(lines)
+        
+        # Restore split markers before returning
+        if has_split_markers:
+            for i, marker in enumerate(split_markers):
+                result = result.replace(f"__SPLIT_MARKER_{i}__", marker)
+        
+        return result
     
     @staticmethod
     def _remove_thinking_tags(text):
