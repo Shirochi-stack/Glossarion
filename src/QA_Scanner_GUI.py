@@ -1207,15 +1207,16 @@ class QAScannerMixin:
                 pass
         
         # ALWAYS populate epub_files_to_scan for auto-search, regardless of word count checking
-        # First check if current selection actually contains source files (EPUB or TXT)
+        # First check if current selection actually contains source files (EPUB, TXT, PDF, or MD)
         current_epub_files = []
         if hasattr(self, 'selected_files') and self.selected_files:
-            # Check for EPUB, TXT, and MD files
-            current_epub_files = [f for f in self.selected_files if f.lower().endswith(('.epub', '.txt', '.md'))]
+            # Check for EPUB, TXT, PDF, and MD files
+            current_epub_files = [f for f in self.selected_files if f.lower().endswith(('.epub', '.txt', '.pdf', '.md'))]
             epub_count = len([f for f in current_epub_files if f.lower().endswith('.epub')])
             txt_count = len([f for f in current_epub_files if f.lower().endswith('.txt')])
+            pdf_count = len([f for f in current_epub_files if f.lower().endswith('.pdf')])
             md_count = len([f for f in current_epub_files if f.lower().endswith('.md')])
-            print(f"[DEBUG] Current selection contains {epub_count} EPUB files, {txt_count} TXT files, and {md_count} MD files")
+            print(f"[DEBUG] Current selection contains {epub_count} EPUB files, {txt_count} TXT files, {pdf_count} PDF files, and {md_count} MD files")
         
         if current_epub_files:
             # Use source files from current selection
@@ -1347,8 +1348,9 @@ class QAScannerMixin:
                                         pass
                                 
                                 if text_file_mode:
-                                    target_files = [f for f in files if f.lower().endswith('.txt')]
-                                    file_type = "TXT"
+                                    # For text mode, check for both .txt AND .html files (PDFs generate .html)
+                                    target_files = [f for f in files if f.lower().endswith(('.txt', '.html', '.xhtml', '.htm'))]
+                                    file_type = "TXT/HTML"
                                 else:
                                     target_files = [f for f in files if f.lower().endswith(('.html', '.xhtml', '.htm'))]
                                     file_type = "HTML/XHTML"
@@ -1401,8 +1403,9 @@ class QAScannerMixin:
                             pass
                     
                     if text_file_mode:
-                        target_files = [f for f in files if f.lower().endswith('.txt')]
-                        file_type = "TXT"
+                        # For text mode, check for both .txt AND .html files (PDFs generate .html)
+                        target_files = [f for f in files if f.lower().endswith(('.txt', '.html', '.xhtml', '.htm'))]
+                        file_type = "TXT/HTML"
                     else:
                         target_files = [f for f in files if f.lower().endswith(('.html', '.xhtml', '.htm'))]
                         file_type = "HTML/XHTML"
@@ -1707,6 +1710,24 @@ class QAScannerMixin:
                         current_selected_files = None
                         if global_selected_files and len(folders_to_scan) == 1:
                             current_selected_files = global_selected_files
+                        
+                        # Auto-detect PDF source file if not already set
+                        # Check if the folder name matches a .pdf file in the parent directory
+                        if not current_epub_path or not os.path.exists(current_epub_path):
+                            folder_basename = os.path.basename(current_folder)
+                            parent_dir = os.path.dirname(current_folder)
+                            
+                            # Try to find a matching PDF file
+                            potential_pdf = os.path.join(parent_dir, folder_basename + ".pdf")
+                            if os.path.exists(potential_pdf):
+                                current_epub_path = potential_pdf
+                                self.append_log(f"   📄 Auto-detected PDF source: {os.path.basename(potential_pdf)}")
+                            else:
+                                # Also try without folder suffix if it has one
+                                potential_pdf_alt = os.path.join(parent_dir, folder_basename.replace("_output", "") + ".pdf")
+                                if os.path.exists(potential_pdf_alt):
+                                    current_epub_path = potential_pdf_alt
+                                    self.append_log(f"   📄 Auto-detected PDF source: {os.path.basename(potential_pdf_alt)}")
                         
                         # Pass the QA settings to scan_html_folder
                         # Don't pass text_file_mode explicitly - let scan_html_folder auto-detect from epub_path

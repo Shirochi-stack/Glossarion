@@ -882,8 +882,8 @@ class RetranslationMixin:
                 output_file = chapter_info.get("output_file", "")
                 status = chapter_info.get("status", "")
                 
-                # Include chapters with output files OR in_progress/failed with null output file (legacy)
-                if output_file or status in ["in_progress", "failed"]:
+                # Include chapters with output files OR in_progress/failed/qa_failed with null output file (legacy)
+                if output_file or status in ["in_progress", "failed", "qa_failed"]:
                     # For merged chapters, use a unique key (chapter_key) instead of output_file
                     # This ensures merged chapters appear as separate entries in the list
                     if status == "merged":
@@ -892,6 +892,8 @@ class RetranslationMixin:
                         file_key = output_file
                     elif status == "in_progress":
                         file_key = f"_in_progress_{chapter_key}"
+                    elif status == "qa_failed":
+                        file_key = f"_qa_failed_{chapter_key}"
                     else:  # failed
                         file_key = f"_failed_{chapter_key}"
                     
@@ -904,8 +906,8 @@ class RetranslationMixin:
                 
                 # Get the actual output file (strip placeholder prefix if present)
                 actual_output_file = output_file
-                if output_file.startswith("_merged_") or output_file.startswith("_in_progress_") or output_file.startswith("_failed_"):
-                    # For merged/in_progress/failed, get the actual output_file from chapter_info
+                if output_file.startswith("_merged_") or output_file.startswith("_in_progress_") or output_file.startswith("_failed_") or output_file.startswith("_qa_failed_"):
+                    # For merged/in_progress/failed/qa_failed, get the actual output_file from chapter_info
                     actual_output_file = chapter_info.get("output_file", "")
                     if not actual_output_file:
                         # Generate expected filename based on actual_num
@@ -2392,8 +2394,8 @@ class RetranslationMixin:
             output_file = chapter_info.get("output_file", "")
             status = chapter_info.get("status", "")
             
-            # Include chapters with output files OR in_progress/failed with null output file (legacy)
-            if output_file or status in ["in_progress", "failed"]:
+            # Include chapters with output files OR in_progress/failed/qa_failed with null output file (legacy)
+            if output_file or status in ["in_progress", "failed", "qa_failed"]:
                 # For merged chapters, use a unique key (chapter_key) instead of output_file
                 # This ensures merged chapters appear as separate entries in the list
                 if status == "merged":
@@ -2402,6 +2404,8 @@ class RetranslationMixin:
                     file_key = output_file
                 elif status == "in_progress":
                     file_key = f"_in_progress_{chapter_key}"
+                elif status == "qa_failed":
+                    file_key = f"_qa_failed_{chapter_key}"
                 else:  # failed
                     file_key = f"_failed_{chapter_key}"
                 
@@ -2416,8 +2420,8 @@ class RetranslationMixin:
             
             # Get the actual output file (strip placeholder prefix if present)
             actual_output_file = output_file
-            if output_file.startswith("_merged_") or output_file.startswith("_in_progress_") or output_file.startswith("_failed_"):
-                # For merged/in_progress/failed, get the actual output_file from chapter_info
+            if output_file.startswith("_merged_") or output_file.startswith("_in_progress_") or output_file.startswith("_failed_") or output_file.startswith("_qa_failed_"):
+                # For merged/in_progress/failed/qa_failed, get the actual output_file from chapter_info
                 actual_output_file = chapter_info.get("output_file", "")
                 if not actual_output_file:
                     # Generate expected filename based on actual_num
@@ -2674,10 +2678,7 @@ class RetranslationMixin:
                 item.setHidden(True)
     
     def _update_statistics_display(self, data):
-        """Update statistics display if spine chapters are available"""
-        if not data.get('spine_chapters'):
-            return
-        
+        """Update statistics display for both OPF and non-OPF files"""
         # Find statistics labels in the container
         container = data['container']
         
@@ -2696,6 +2697,8 @@ class RetranslationMixin:
                             labels['merged'] = child
                         elif text.startswith('🔄 In Progress:'):
                             labels['in_progress'] = child
+                        elif text.startswith('❓ Pending:'):
+                            labels['pending'] = child
                         elif text.startswith('⬜ Not Translated:'):
                             labels['missing'] = child
                         elif text.startswith('❌ Failed:'):
@@ -2708,14 +2711,15 @@ class RetranslationMixin:
         stats_labels = find_stats_labels(container)
         
         if stats_labels:
-            # Recalculate statistics
-            spine_chapters = data['spine_chapters']
-            total_chapters = len(spine_chapters)
-            completed = sum(1 for info in data['chapter_display_info'] if info['status'] == 'completed')
-            merged = sum(1 for info in data['chapter_display_info'] if info['status'] == 'merged')
-            in_progress = sum(1 for info in data['chapter_display_info'] if info['status'] == 'in_progress')
-            missing = sum(1 for info in data['chapter_display_info'] if info['status'] == 'not_translated')
-            failed = sum(1 for info in data['chapter_display_info'] if info['status'] in ['failed', 'qa_failed'])
+            # Recalculate statistics from chapter_display_info (works for both OPF and non-OPF)
+            chapter_display_info = data.get('chapter_display_info', [])
+            total_chapters = len(chapter_display_info)
+            completed = sum(1 for info in chapter_display_info if info['status'] == 'completed')
+            merged = sum(1 for info in chapter_display_info if info['status'] == 'merged')
+            in_progress = sum(1 for info in chapter_display_info if info['status'] == 'in_progress')
+            pending = sum(1 for info in chapter_display_info if info['status'] == 'pending')
+            missing = sum(1 for info in chapter_display_info if info['status'] == 'not_translated')
+            failed = sum(1 for info in chapter_display_info if info['status'] in ['failed', 'qa_failed'])
             
             # Update labels
             if 'total' in stats_labels:
@@ -2734,6 +2738,12 @@ class RetranslationMixin:
                     stats_labels['in_progress'].setVisible(True)
                 else:
                     stats_labels['in_progress'].setVisible(False)
+            if 'pending' in stats_labels:
+                if pending > 0:
+                    stats_labels['pending'].setText(f"❓ Pending: {pending} | ")
+                    stats_labels['pending'].setVisible(True)
+                else:
+                    stats_labels['pending'].setVisible(False)
             if 'missing' in stats_labels:
                 stats_labels['missing'].setText(f"⬜ Not Translated: {missing} | ")
             if 'failed' in stats_labels:

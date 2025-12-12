@@ -3573,8 +3573,15 @@ def update_progress_file(folder_path, results, log):
         update_legacy_format_progress(prog, faulty_chapters, log)
     
     # Write back updated progress
-    with open(prog_path, "w", encoding="utf-8") as pf:
-        json.dump(prog, pf, indent=2, ensure_ascii=False)
+    try:
+        with open(prog_path, "w", encoding="utf-8") as pf:
+            json.dump(prog, pf, indent=2, ensure_ascii=False)
+        log(f"✅ Successfully wrote progress file: {prog_path}")
+    except Exception as e:
+        log(f"❌ ERROR: Failed to write progress file: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
     
     # Log affected chapters - use the already extracted chapter numbers
     affected_chapters_for_log = []
@@ -3604,6 +3611,15 @@ def update_new_format_progress(prog, faulty_chapters, log, folder_path):
     actual_num_to_chapter_key = {}
     basename_to_chapter_key = {}
     merged_child_to_parent = {}  # Maps merged child actual_num -> parent actual_num
+    
+    # Debug: Log first few output files to see what extensions are stored
+    debug_count = 0
+    for chapter_key, chapter_info in prog["chapters"].items():
+        if debug_count < 3:
+            output_file = chapter_info.get("output_file")
+            if output_file:
+                log(f"      DEBUG: Chapter {chapter_key} has output_file='{output_file}'")
+                debug_count += 1
     
     for chapter_key, chapter_info in prog["chapters"].items():
         output_file = chapter_info.get("output_file")
@@ -3687,6 +3703,16 @@ def update_new_format_progress(prog, faulty_chapters, log, folder_path):
         # Method 1: Direct output file match (if not already found via merge redirect)
         if not chapter_key and not is_merged_child:
             chapter_key = output_file_to_chapter_key.get(faulty_filename)
+            
+            # Also try matching with different extensions for text mode (PDF sources use .html)
+            if not chapter_key:
+                # Try swapping .html <-> .txt since PDFs produce .html in text mode
+                if faulty_filename.endswith('.html'):
+                    alt_filename = faulty_filename[:-5] + '.txt'
+                    chapter_key = output_file_to_chapter_key.get(alt_filename)
+                elif faulty_filename.endswith('.txt'):
+                    alt_filename = faulty_filename[:-4] + '.html'
+                    chapter_key = output_file_to_chapter_key.get(alt_filename)
         
         # Method 2: Try without response_ prefix
         if not chapter_key and not is_merged_child and faulty_filename.startswith("response_"):
