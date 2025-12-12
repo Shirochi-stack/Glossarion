@@ -7167,8 +7167,8 @@ def main(log_callback=None, stop_callback=None):
     current_chunk_number = 0
 
     if config.BATCH_TRANSLATION:
-        # Check if request merging is enabled (only for PDF files)
-        use_request_merging = config.REQUEST_MERGING_ENABLED and config.REQUEST_MERGE_COUNT > 1 and is_pdf_file
+        # Check if request merging is enabled (for PDF and EPUB files)
+        use_request_merging = config.REQUEST_MERGING_ENABLED and config.REQUEST_MERGE_COUNT > 1 and (is_pdf_file or not is_text_file)
         
         if use_request_merging:
             print(f"\n🔗 REQUEST MERGING + BATCH MODE ENABLED")
