@@ -541,9 +541,9 @@ class RetranslationMixin:
                 entries = basename_to_progress[basename_key]
                 if entries:
                     _, chapter_info = entries[0]
-                    # For in_progress/failed/qa_failed, also verify actual_num matches
+                    # For in_progress/failed/qa_failed/pending, also verify actual_num matches
                     status = chapter_info.get('status', '')
-                    if status in ['in_progress', 'failed', 'qa_failed']:
+                    if status in ['in_progress', 'failed', 'qa_failed', 'pending']:
                         if chapter_info.get('actual_num') == chapter_num:
                             matched_info = chapter_info
                     else:
@@ -554,9 +554,9 @@ class RetranslationMixin:
                 entries = response_file_to_progress[expected_response]
                 if entries:
                     _, chapter_info = entries[0]
-                    # For in_progress/failed/qa_failed, also verify actual_num matches
+                    # For in_progress/failed/qa_failed/pending, also verify actual_num matches
                     status = chapter_info.get('status', '')
-                    if status in ['in_progress', 'failed', 'qa_failed']:
+                    if status in ['in_progress', 'failed', 'qa_failed', 'pending']:
                         if chapter_info.get('actual_num') == chapter_num:
                             matched_info = chapter_info
                     else:
@@ -567,9 +567,9 @@ class RetranslationMixin:
                 for chapter_key, chapter_info in prog.get("chapters", {}).items():
                     out_file = chapter_info.get('output_file')
                     if out_file == expected_response or _opf_names_equal(out_file, expected_response):
-                        # For in_progress/failed/qa_failed, also verify actual_num matches
+                        # For in_progress/failed/qa_failed/pending, also verify actual_num matches
                         status = chapter_info.get('status', '')
-                        if status in ['in_progress', 'failed', 'qa_failed']:
+                        if status in ['in_progress', 'failed', 'qa_failed', 'pending']:
                             if chapter_info.get('actual_num') == chapter_num:
                                 matched_info = chapter_info
                                 break
@@ -607,9 +607,9 @@ class RetranslationMixin:
                                 # Just verify parent exists, don't enforce 'completed' status
                                 # This ensures we show 'merged' even if parent is completed_empty or other states
                                 matched_info = chapter_info
-                    # In-progress and failed chapters: require BOTH actual_num AND output_file
+                    # In-progress/failed/pending chapters: require BOTH actual_num AND output_file
                     # to match to avoid cross-matching files.
-                    elif status in ['in_progress', 'failed']:
+                    elif status in ['in_progress', 'failed', 'pending']:
                         if chapter_info.get('actual_num') == chapter_num and (
                             out_file == expected_response or _opf_names_equal(out_file, expected_response)
                         ):
@@ -672,9 +672,9 @@ class RetranslationMixin:
                                         matched_info = chapter_info
                                         break
                             
-                            # In-progress and failed chapters: require BOTH actual_num AND output_file
+                            # In-progress/failed/pending chapters: require BOTH actual_num AND output_file
                             # to match to avoid cross-matching files.
-                            if status in ['in_progress', 'failed']:
+                            if status in ['in_progress', 'failed', 'pending']:
                                 if actual_num == chapter_num and (
                                     out_file == expected_response or _opf_names_equal(out_file, expected_response)
                                 ):
@@ -690,7 +690,7 @@ class RetranslationMixin:
                             # Only treat as a match for other statuses if the original basename matches
                             # this filename, or, when original_basename is missing, the output_file matches
                             # what we expect.
-                            if status not in ['in_progress', 'failed', 'qa_failed']:
+                            if status not in ['in_progress', 'failed', 'qa_failed', 'pending']:
                                 if (
                                     orig_base and _opf_names_equal(orig_base, filename)
                                 ) or (
@@ -709,9 +709,9 @@ class RetranslationMixin:
                 # We found progress tracking info - use its status
                 status = matched_info.get('status', 'unknown')
                 
-                # CRITICAL: For failed/in_progress/qa_failed, ALWAYS use progress status
+                # CRITICAL: For failed/in_progress/qa_failed/pending, ALWAYS use progress status
                 # Never let file existence override these statuses
-                if status in ['failed', 'in_progress', 'qa_failed']:
+                if status in ['failed', 'in_progress', 'qa_failed', 'pending']:
                     spine_ch['status'] = status
                     spine_ch['output_file'] = matched_info.get('output_file') or expected_response
                     spine_ch['progress_entry'] = matched_info
@@ -1213,6 +1213,7 @@ class RetranslationMixin:
             completed = sum(1 for ch in spine_chapters if ch['status'] == 'completed')
             merged = sum(1 for ch in spine_chapters if ch['status'] == 'merged')
             in_progress = sum(1 for ch in spine_chapters if ch['status'] == 'in_progress')
+            pending = sum(1 for ch in spine_chapters if ch['status'] == 'pending')
             missing = sum(1 for ch in spine_chapters if ch['status'] == 'not_translated')
             failed = sum(1 for ch in spine_chapters if ch['status'] in ['failed', 'qa_failed'])
             
@@ -1242,6 +1243,14 @@ class RetranslationMixin:
             stats_layout.addWidget(lbl_in_progress)
             if in_progress == 0:
                 lbl_in_progress.setVisible(False)
+            
+            # Pending: marked for retranslation (always create, hide if 0)
+            lbl_pending = QLabel(f"❓ Pending: {pending} | ")
+            lbl_pending.setFont(stats_font)
+            lbl_pending.setStyleSheet("color: white;")
+            stats_layout.addWidget(lbl_pending)
+            if pending == 0:
+                lbl_pending.setVisible(False)
             
             # Not Translated: unique emoji/color (distinct from failures)
             lbl_missing = QLabel(f"⬜ Not Translated: {missing} | ")
@@ -1284,6 +1293,7 @@ class RetranslationMixin:
             'failed': '❌',
             'qa_failed': '❌',
             'in_progress': '🔄',
+            'pending': '❓',
             'not_translated': '⬜',
             'unknown': '❓'
         }
@@ -1294,6 +1304,7 @@ class RetranslationMixin:
             'failed': 'Failed',
             'qa_failed': 'QA Failed',
             'in_progress': 'In Progress',
+            'pending': 'Pending',
             'not_translated': 'Not Translated',
             'unknown': 'Unknown'
         }
@@ -1374,6 +1385,8 @@ class RetranslationMixin:
                 item.setForeground(QColor('#2b6cb0'))
             elif status == 'in_progress':
                 item.setForeground(QColor('orange'))
+            elif status == 'pending':
+                item.setForeground(QColor('white'))  # White for pending
             
             # Store metadata in item for filtering
             is_special = info.get('is_special', False)
@@ -1470,8 +1483,8 @@ class RetranslationMixin:
                 if status_to_select == 'failed':
                     if info['status'] in ['failed', 'qa_failed']:
                         data['listbox'].item(idx).setSelected(True)
-                elif status_to_select == 'missing':
-                    if info['status'] == 'not_translated':
+                elif status_to_select == 'qa_failed':
+                    if info['status'] == 'qa_failed':
                         data['listbox'].item(idx).setSelected(True)
                 else:
                     if info['status'] == status_to_select:
@@ -1487,23 +1500,23 @@ class RetranslationMixin:
             
             selected_indices = [data['listbox'].row(item) for item in selected_items]
             selected_chapters = [data['chapter_display_info'][i] for i in selected_indices]
-            qa_failed_chapters = [ch for ch in selected_chapters if ch['status'] == 'qa_failed']
+            failed_chapters = [ch for ch in selected_chapters if ch['status'] in ['qa_failed', 'failed']]
             
-            if not qa_failed_chapters:
-                QMessageBox.warning(data.get('dialog', self), "No QA Failed Chapters", 
-                                     "None of the selected chapters have 'qa_failed' status.")
+            if not failed_chapters:
+                QMessageBox.warning(data.get('dialog', self), "No Failed Chapters", 
+                                     "None of the selected chapters have 'qa_failed' or 'failed' status.")
                 return
             
-            count = len(qa_failed_chapters)
-            reply = QMessageBox.question(data.get('dialog', self), "Confirm Remove QA Failed Mark", 
-                                      f"Remove QA failed mark from {count} chapters?",
+            count = len(failed_chapters)
+            reply = QMessageBox.question(data.get('dialog', self), "Confirm Remove Failed Mark", 
+                                      f"Remove failed mark from {count} chapters?",
                                       QMessageBox.Yes | QMessageBox.No)
             if reply != QMessageBox.Yes:
                 return
             
             # Remove marks
             cleared_count = 0
-            for info in qa_failed_chapters:
+            for info in failed_chapters:
                 # Find the chapter by output_file (most reliable)
                 target_output_file = info['output_file']
                 actual_num = info['num']
@@ -1525,11 +1538,11 @@ class RetranslationMixin:
                 
                 # Update the chapter status if we found the key
                 if chapter_key and chapter_key in data['prog']["chapters"]:
-                    print(f"Removing QA failed mark for chapter {actual_num} (key: {chapter_key}, output file: {target_output_file})")
+                    print(f"Removing failed mark for chapter {actual_num} (key: {chapter_key}, output file: {target_output_file})")
                     data['prog']["chapters"][chapter_key]["status"] = "completed"
                     
-                    # Remove all QA-related fields
-                    fields_to_remove = ["qa_issues", "qa_timestamp", "qa_issues_found", "duplicate_confidence"]
+                    # Remove all failure-related fields (QA and regular failures)
+                    fields_to_remove = ["qa_issues", "qa_timestamp", "qa_issues_found", "duplicate_confidence", "failure_reason", "error_message"]
                     for field in fields_to_remove:
                         if field in data['prog']["chapters"][chapter_key]:
                             del data['prog']["chapters"][chapter_key][field]
@@ -1545,7 +1558,7 @@ class RetranslationMixin:
             # Auto-refresh the display
             self._refresh_retranslation_data(data)
             
-            QMessageBox.information(data.get('dialog', self), "Success", f"Removed QA failed mark from {cleared_count} chapters.")
+            QMessageBox.information(data.get('dialog', self), "Success", f"Removed failed mark from {cleared_count} chapters.")
         
         def retranslate_selected():
             selected_items = data['listbox'].selectedItems()
@@ -1623,31 +1636,31 @@ class RetranslationMixin:
                                 print(f"WARNING: Matching chapter {actual_num} by number only - this may be incorrect!")
                                 chapter_key = key
                                 break
+                    
+                    # Update the chapter status if we found the key
+                    if chapter_key and chapter_key in data['prog']["chapters"]:
+                        print(f"Resetting {old_status} status to pending for chapter {actual_num} (key: {chapter_key}, output file: {target_output_file})")
                         
-                        # Update the chapter status if we found the key
-                        if chapter_key and chapter_key in data['prog']["chapters"]:
-                            print(f"Resetting {old_status} status to pending for chapter {actual_num} (key: {chapter_key}, output file: {target_output_file})")
-                            
-                            # Reset status to pending for retranslation
-                            data['prog']["chapters"][chapter_key]["status"] = "pending"
-                            
-                            # Remove completion-related fields if they exist
-                            fields_to_remove = []
-                            if old_status == 'qa_failed':
-                                # Remove QA-related fields for qa_failed chapters
-                                fields_to_remove = ["qa_issues", "qa_timestamp", "qa_issues_found", "duplicate_confidence"]
-                            elif old_status == 'completed':
-                                # Remove completion-related fields if any exist for completed chapters
-                                fields_to_remove = ["completion_timestamp", "final_word_count", "translation_quality_score"]
-                            
-                            for field in fields_to_remove:
-                                if field in data['prog']["chapters"][chapter_key]:
-                                    del data['prog']["chapters"][chapter_key][field]
-                            
-                            status_reset_count += 1
-                            progress_updated = True
-                        else:
-                            print(f"WARNING: Could not find chapter key for {old_status} chapter {actual_num} (output file: {target_output_file})")
+                        # Reset status to pending for retranslation
+                        data['prog']["chapters"][chapter_key]["status"] = "pending"
+                        
+                        # Remove completion-related fields if they exist
+                        fields_to_remove = []
+                        if old_status in ['qa_failed', 'failed']:
+                            # Remove QA-related and failure fields
+                            fields_to_remove = ["qa_issues", "qa_timestamp", "qa_issues_found", "duplicate_confidence", "failure_reason", "error_message"]
+                        elif old_status == 'completed':
+                            # Remove completion-related fields if any exist for completed chapters
+                            fields_to_remove = ["completion_timestamp", "final_word_count", "translation_quality_score"]
+                        
+                        for field in fields_to_remove:
+                            if field in data['prog']["chapters"][chapter_key]:
+                                del data['prog']["chapters"][chapter_key][field]
+                        
+                        status_reset_count += 1
+                        progress_updated = True
+                    else:
+                        print(f"WARNING: Could not find chapter key for {old_status} chapter {actual_num} (output file: {target_output_file})")
                     
                     # MERGED CHILDREN FIX: Clear any merged children of this chapter
                     # ONLY clear children that still have "merged" status
@@ -1716,12 +1729,12 @@ class RetranslationMixin:
         btn_select_completed.clicked.connect(lambda: select_status('completed'))
         button_layout.addWidget(btn_select_completed, 0, 2)
         
-        btn_select_missing = QPushButton("Select Missing")
-        btn_select_missing.setMinimumHeight(32)
-        # Use amber for Not Translated / Missing (distinct from failures)
-        btn_select_missing.setStyleSheet("QPushButton { background-color: #d39e00; color: white; padding: 6px 16px; font-weight: bold; font-size: 10pt; }")
-        btn_select_missing.clicked.connect(lambda: select_status('missing'))
-        button_layout.addWidget(btn_select_missing, 0, 3)
+        btn_select_qa_failed = QPushButton("Select QA Failed")
+        btn_select_qa_failed.setMinimumHeight(32)
+        # Use red for QA Failed
+        btn_select_qa_failed.setStyleSheet("QPushButton { background-color: #dc3545; color: white; padding: 6px 16px; font-weight: bold; font-size: 10pt; }")
+        btn_select_qa_failed.clicked.connect(lambda: select_status('qa_failed'))
+        button_layout.addWidget(btn_select_qa_failed, 0, 3)
         
         btn_select_failed = QPushButton("Select Failed")
         btn_select_failed.setMinimumHeight(32)
