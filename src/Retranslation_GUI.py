@@ -1202,13 +1202,14 @@ class RetranslationMixin:
         # Connect the checkbox to the handler
         show_special_files_cb.stateChanged.connect(on_toggle_special_files)
         
-        # Statistics if OPF is available
+        # Statistics - always show for both OPF and non-OPF files
+        stats_frame = QWidget()
+        stats_layout = QHBoxLayout(stats_frame)
+        stats_layout.setContentsMargins(0, 5, 0, 5)
+        container_layout.addWidget(stats_frame)
+        
+        # Calculate stats from the appropriate source
         if spine_chapters:
-            stats_frame = QWidget()
-            stats_layout = QHBoxLayout(stats_frame)
-            stats_layout.setContentsMargins(0, 5, 0, 5)
-            container_layout.addWidget(stats_frame)
-            
             total_chapters = len(spine_chapters)
             completed = sum(1 for ch in spine_chapters if ch['status'] == 'completed')
             merged = sum(1 for ch in spine_chapters if ch['status'] == 'merged')
@@ -1216,56 +1217,66 @@ class RetranslationMixin:
             pending = sum(1 for ch in spine_chapters if ch['status'] == 'pending')
             missing = sum(1 for ch in spine_chapters if ch['status'] == 'not_translated')
             failed = sum(1 for ch in spine_chapters if ch['status'] in ['failed', 'qa_failed'])
-            
-            stats_font = QFont('Arial', 10)
-            
-            lbl_total = QLabel(f"Total: {total_chapters} | ")
-            lbl_total.setFont(stats_font)
-            stats_layout.addWidget(lbl_total)
-            
-            lbl_completed = QLabel(f"✅ Completed: {completed} | ")
-            lbl_completed.setFont(stats_font)
-            lbl_completed.setStyleSheet("color: green;")
-            stats_layout.addWidget(lbl_completed)
-            
-            # Merged: chapters combined into parent request (always create, hide if 0)
-            lbl_merged = QLabel(f"🔗 Merged: {merged} | ")
-            lbl_merged.setFont(stats_font)
-            lbl_merged.setStyleSheet("color: #17a2b8;")  # Cyan/teal
-            stats_layout.addWidget(lbl_merged)
-            if merged == 0:
-                lbl_merged.setVisible(False)
-            
-            # In Progress: currently being translated (always create, hide if 0)
-            lbl_in_progress = QLabel(f"🔄 In Progress: {in_progress} | ")
-            lbl_in_progress.setFont(stats_font)
-            lbl_in_progress.setStyleSheet("color: orange;")
-            stats_layout.addWidget(lbl_in_progress)
-            if in_progress == 0:
-                lbl_in_progress.setVisible(False)
-            
-            # Pending: marked for retranslation (always create, hide if 0)
-            lbl_pending = QLabel(f"❓ Pending: {pending} | ")
-            lbl_pending.setFont(stats_font)
-            lbl_pending.setStyleSheet("color: white;")
-            stats_layout.addWidget(lbl_pending)
-            if pending == 0:
-                lbl_pending.setVisible(False)
-            
-            # Not Translated: unique emoji/color (distinct from failures)
-            lbl_missing = QLabel(f"⬜ Not Translated: {missing} | ")
-            lbl_missing.setFont(stats_font)
-            lbl_missing.setStyleSheet("color: #2b6cb0;")
-            stats_layout.addWidget(lbl_missing)
-            
-            # Match list status: failed/qa_failed use ❌ and red
-            lbl_failed = QLabel(f"❌ Failed: {failed} | ")
-            lbl_failed.setFont(stats_font)
-            lbl_failed.setStyleSheet("color: red;")
-            stats_layout.addWidget(lbl_failed)
-            
-            
-            stats_layout.addStretch()
+        else:
+            # For non-OPF files, calculate from chapter_display_info
+            total_chapters = len(chapter_display_info)
+            completed = sum(1 for ch in chapter_display_info if ch['status'] == 'completed')
+            merged = sum(1 for ch in chapter_display_info if ch['status'] == 'merged')
+            in_progress = sum(1 for ch in chapter_display_info if ch['status'] == 'in_progress')
+            pending = sum(1 for ch in chapter_display_info if ch['status'] == 'pending')
+            missing = sum(1 for ch in chapter_display_info if ch['status'] == 'not_translated')
+            failed = sum(1 for ch in chapter_display_info if ch['status'] in ['failed', 'qa_failed'])
+        
+        # Create labels (outside the if/else so they always appear)
+        stats_font = QFont('Arial', 10)
+        
+        lbl_total = QLabel(f"Total: {total_chapters} | ")
+        lbl_total.setFont(stats_font)
+        stats_layout.addWidget(lbl_total)
+        
+        lbl_completed = QLabel(f"✅ Completed: {completed} | ")
+        lbl_completed.setFont(stats_font)
+        lbl_completed.setStyleSheet("color: green;")
+        stats_layout.addWidget(lbl_completed)
+        
+        # Merged: chapters combined into parent request (always create, hide if 0)
+        lbl_merged = QLabel(f"🔗 Merged: {merged} | ")
+        lbl_merged.setFont(stats_font)
+        lbl_merged.setStyleSheet("color: #17a2b8;")  # Cyan/teal
+        stats_layout.addWidget(lbl_merged)
+        if merged == 0:
+            lbl_merged.setVisible(False)
+        
+        # In Progress: currently being translated (always create, hide if 0)
+        lbl_in_progress = QLabel(f"🔄 In Progress: {in_progress} | ")
+        lbl_in_progress.setFont(stats_font)
+        lbl_in_progress.setStyleSheet("color: orange;")
+        stats_layout.addWidget(lbl_in_progress)
+        if in_progress == 0:
+            lbl_in_progress.setVisible(False)
+        
+        # Pending: marked for retranslation (always create, hide if 0)
+        lbl_pending = QLabel(f"❓ Pending: {pending} | ")
+        lbl_pending.setFont(stats_font)
+        lbl_pending.setStyleSheet("color: white;")
+        stats_layout.addWidget(lbl_pending)
+        if pending == 0:
+            lbl_pending.setVisible(False)
+        
+        # Not Translated: unique emoji/color (distinct from failures)
+        lbl_missing = QLabel(f"⬜ Not Translated: {missing} | ")
+        lbl_missing.setFont(stats_font)
+        lbl_missing.setStyleSheet("color: #2b6cb0;")
+        stats_layout.addWidget(lbl_missing)
+        
+        # Match list status: failed/qa_failed use ❌ and red
+        lbl_failed = QLabel(f"❌ Failed: {failed} | ")
+        lbl_failed.setFont(stats_font)
+        lbl_failed.setStyleSheet("color: red;")
+        stats_layout.addWidget(lbl_failed)
+        
+        
+        stats_layout.addStretch()
         
         # Main frame for listbox
         main_frame = QWidget()
