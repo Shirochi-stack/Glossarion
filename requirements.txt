@@ -57,6 +57,11 @@ markdown2
 rapidfuzz
 pymupdf
 
+# PDF Generation (optional - for HTML to PDF with images/formatting)
+weasyprint  # Recommended for best PDF output quality (requires MSYS2 DLLs)
+xhtml2pdf  # Pure Python fallback (bundleable, but limited CSS support)
+# pdfkit  # Alternative option (requires wkhtmltopdf binary - not bundleable)
+
 # Image processing
 opencv-python-headless
 
