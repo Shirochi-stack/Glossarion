@@ -171,7 +171,88 @@ def _merge_split_paragraphs(html_body: str) -> str:
             # Can't merge, move to next pair
             i += 1
     
-    return str(soup)
+    # Use decode() instead of str() to preserve original formatting and attributes
+    return soup.decode(formatter='minimal')
+
+def _generate_and_replace_toc(html_body: str) -> str:
+    """Generate a proper table of contents from headers and replace any existing broken TOC.
+    
+    Only affects PDFs, not EPUBs.
+    """
+    from bs4 import BeautifulSoup
+    
+    soup = BeautifulSoup(html_body, 'html.parser')
+    
+    # Find all h1 and h2 headers (skip those in first 3 pages/divs as they're likely title page)
+    headers = []
+    all_divs = soup.find_all('div', id=lambda x: x and x.startswith('page'))
+    
+    # Start collecting headers after the first 3 pages
+    for div in all_divs[3:] if len(all_divs) > 3 else []:
+        for header in div.find_all(['h1', 'h2']):
+            header_text = header.get_text().strip()
+            if header_text and len(header_text) > 2:  # Skip very short headers
+                # Create anchor ID
+                if not header.get('id'):
+                    anchor_id = re.sub(r'[^a-zA-Z0-9]+', '-', header_text[:50].lower()).strip('-')
+                    header['id'] = anchor_id
+                else:
+                    anchor_id = header['id']
+                
+                headers.append({
+                    'text': header_text,
+                    'id': anchor_id,
+                    'level': int(header.name[1])  # h1 -> 1, h2 -> 2
+                })
+    
+    # If we found headers, generate TOC
+    if headers:
+        # Build TOC HTML
+        toc_html = '<div class="toc" style="text-align:center;margin:2em 0;">\n'
+        toc_html += '<h1 style="text-align:center!important;">Table of Contents</h1>\n'
+        
+        for h in headers:
+            indent = '' if h['level'] == 1 else '&nbsp;&nbsp;&nbsp;&nbsp;'
+            toc_html += f'<p style="text-align:center!important;margin:0.5em 0;"><a href="#{h["id"]}">{indent}{h["text"]}</a></p>\n'
+        
+        toc_html += '</div>\n'
+        
+        # Search for existing TOC by looking for "Table of Contents" or "Contents" text
+        toc_replaced = False
+        
+        # Method 1: Search for any element containing "Table of Contents" text
+        for element in soup.find_all(string=re.compile(r'table of contents|^contents$', re.IGNORECASE)):
+            # Find the containing page div
+            page_div = element.find_parent('div', id=lambda x: x and x.startswith('page'))
+            if page_div:
+                page_div.clear()
+                page_div.append(BeautifulSoup(toc_html, 'html.parser'))
+                toc_replaced = True
+                print(f"   • Replaced broken TOC with generated TOC ({len(headers)} entries)")
+                break
+        
+        # Method 2: If not found by text, check page divs for TOC-like content
+        if not toc_replaced:
+            for i, div in enumerate(all_divs[:10]):  # Check first 10 pages
+                div_text = div.get_text().lower().strip()
+                # Check if this looks like a TOC page (has "contents" early in the page)
+                if ('table of contents' in div_text or 
+                    (div_text.startswith('contents') or 'contents' in div_text[:100])):
+                    # Replace entire div content with new TOC
+                    div.clear()
+                    div.append(BeautifulSoup(toc_html, 'html.parser'))
+                    toc_replaced = True
+                    print(f"   • Replaced broken TOC on page {i+1} with generated TOC ({len(headers)} entries)")
+                    break
+        
+        # If no TOC page found, insert after first page
+        if not toc_replaced and len(all_divs) > 1:
+            toc_div = BeautifulSoup(f'<div id="page-toc">{toc_html}</div>', 'html.parser')
+            all_divs[0].insert_after(toc_div)
+            print(f"   • Inserted generated TOC after title page ({len(headers)} entries)")
+    
+    # Use decode() instead of str() to preserve original formatting and attributes
+    return soup.decode(formatter='minimal')
 # =====================================================
 # CONFIGURATION AND ENVIRONMENT MANAGEMENT
 # =====================================================
@@ -9333,6 +9414,9 @@ def main(log_callback=None, stop_callback=None):
                     
                     # Post-process: merge paragraphs that span across pages
                     full_html_body = _merge_split_paragraphs(full_html_body)
+                    
+                    # Replace/insert a clean Table of Contents built from h1/h2 headers
+                    full_html_body = _generate_and_replace_toc(full_html_body)
                     
                     # Wrap in full HTML document with CSS
                     css_path = os.path.join(out, 'styles.css')
