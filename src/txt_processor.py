@@ -23,7 +23,7 @@ class TextFileProcessor:
         self.chapter_splitter = ChapterSplitter(model_name=model_name)
         
         # Check settings for PDFs
-        self.pdf_render_mode = os.getenv("PDF_RENDER_MODE", "html").lower()  # absolute, semantic, xhtml, html
+        self.pdf_render_mode = os.getenv("PDF_RENDER_MODE", "xhtml").lower()  # absolute, semantic, xhtml, html
         self.pdf_extract_images = os.getenv("PDF_EXTRACT_IMAGES", "1") == "1"
         self.pdf_generate_css = os.getenv("PDF_GENERATE_CSS", "1") == "1"
         self.html2text_enabled = os.getenv("USE_HTML2TEXT", "0") == "1"

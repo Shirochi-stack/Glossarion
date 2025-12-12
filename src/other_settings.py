@@ -4416,7 +4416,7 @@ def _create_processing_options_section(self, parent):
     
     # Initialize PDF render mode variable
     if not hasattr(self, 'pdf_render_mode_var'):
-        self.pdf_render_mode_var = self.config.get('pdf_render_mode', 'html')
+        self.pdf_render_mode_var = self.config.get('pdf_render_mode', 'xhtml')
     
     # PDF Render Mode toggle
     pdf_render_row = QWidget()

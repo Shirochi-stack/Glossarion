@@ -1047,7 +1047,7 @@ Text to analyze:
         
         # PDF settings
         self.pdf_output_format_var = self.config.get('pdf_output_format', 'pdf')
-        self.pdf_render_mode_var = self.config.get('pdf_render_mode', 'html')
+        self.pdf_render_mode_var = self.config.get('pdf_render_mode', 'xhtml')
         
          # Enhanced filtering level
         if not hasattr(self, 'enhanced_filtering_var'):
@@ -6128,7 +6128,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             
             # PDF settings
             'PDF_OUTPUT_FORMAT': self.pdf_output_format_var if hasattr(self, 'pdf_output_format_var') else 'pdf',
-            'PDF_RENDER_MODE': self.pdf_render_mode_var if hasattr(self, 'pdf_render_mode_var') else 'html',
+            'PDF_RENDER_MODE': self.pdf_render_mode_var if hasattr(self, 'pdf_render_mode_var') else 'xhtml',
             'PRESERVE_ORIGINAL_FORMAT': "1" if self.config.get('preserve_original_format', False) else "0", 
             'OPTIMIZE_FOR_OCR': "1" if self.config.get('optimize_for_ocr', True) else "0",
             'PROGRESSIVE_ENCODING': "1" if self.config.get('progressive_encoding', True) else "0",
@@ -9457,7 +9457,7 @@ Important rules:
                 
                 # PDF settings
                 ('pdf_output_format', ['pdf_output_format_var'], 'pdf', str),
-                ('pdf_render_mode', ['pdf_render_mode_var'], 'html', str),
+                ('pdf_render_mode', ['pdf_render_mode_var'], 'xhtml', str),
             ]
             
             # Process the settings map to populate self.config
