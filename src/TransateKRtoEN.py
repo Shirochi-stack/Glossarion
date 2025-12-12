@@ -461,51 +461,164 @@ class RequestMerger:
     @classmethod
     def split_by_markers(cls, content, expected_count):
         """
-        Split merged translation output by invisible split markers.
+        Split merged translation output by split markers.
         
-        This is much simpler and more reliable than parsing headers.
-        We just look for the SPLIT_MARKER comments and split on them.
+        This method is robust to broken or missing split tags:
+        - Handles partial marker tags (e.g., missing closing tag)
+        - Handles malformed id attributes
+        - Falls back to ANY h1 tag if split markers are missing
+        - Works even if some markers are completely missing
         
         Args:
             content: The translated HTML content
             expected_count: Expected number of sections (should match merged chapter count)
             
         Returns:
-            List of content sections if marker count matches expected_count,
-            or None if marker count doesn't match (fallback to normal merged behavior)
+            List of content sections if we can reliably split,
+            or None if splitting is not possible (fallback to normal merged behavior)
         """
         import re
+        from bs4 import BeautifulSoup
         
-        # Find all H1 SPLIT_MARKER tags using regex
-        # Using visible H1 elements because AI preserves them unlike HTML comments
-        marker_pattern = r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*'
-        markers = re.findall(marker_pattern, content, flags=re.DOTALL | re.IGNORECASE)
+        # Try multiple strategies in order of reliability:
+        # 1. Perfect split markers with proper id="split-N"
+        # 2. Any h1 tag with "split" in the id (even broken)
+        # 3. Any h1 tag containing "SPLIT MARKER" text
+        # 4. Any h1 tag at all
         
-        # Check if we have the expected number of markers
-        if len(markers) != expected_count:
-            print(f"   ⚠️ Split the Merge: Found {len(markers)} split markers but expected {expected_count}")
-            return None
+        # Strategy 1: Perfect markers
+        perfect_pattern = r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>'
+        perfect_markers = list(re.finditer(perfect_pattern, content, flags=re.DOTALL | re.IGNORECASE))
         
-        print(f"   ✓️ Split the Merge: Found {len(markers)} split markers matching expected count")
+        if len(perfect_markers) == expected_count:
+            print(f"   ✓️ Split the Merge: Found {len(perfect_markers)} perfect split markers")
+            return cls._split_by_positions(content, [m.start() for m in perfect_markers])
         
-        # Split content by markers using regex
-        sections = re.split(marker_pattern, content, flags=re.DOTALL | re.IGNORECASE)
+        print(f"   ⚠️ Split the Merge: Found {len(perfect_markers)} perfect markers, expected {expected_count}. Trying fallback strategies...")
         
-        # The first element is content before the first marker (should be empty or whitespace)
-        # Remove it if it's just whitespace
-        if sections and sections[0].strip() == '':
-            sections.pop(0)
+        # Strategy 2: Broken markers with "split" in id (handles broken closing tags, etc.)
+        try:
+            soup = BeautifulSoup(content, 'html.parser')
+            h1_tags = soup.find_all('h1')
+            
+            # Try markers with "split" in id
+            split_id_tags = [tag for tag in h1_tags if tag.get('id') and 'split' in tag.get('id', '').lower()]
+            
+            if len(split_id_tags) == expected_count:
+                print(f"   ✓️ Split the Merge: Found {len(split_id_tags)} h1 tags with 'split' in id (broken marker format)")
+                positions = []
+                for tag in split_id_tags:
+                    # Find position of this tag in original content
+                    tag_str = str(tag)
+                    # Search for the opening tag
+                    opening_tag = re.escape(tag_str.split('>')[0] + '>')
+                    match = re.search(opening_tag, content, flags=re.IGNORECASE)
+                    if match:
+                        positions.append(match.start())
+                
+                if len(positions) == expected_count:
+                    return cls._split_by_positions(content, sorted(positions))
+        except Exception as e:
+            print(f"   ⚠️ Split the Merge: BeautifulSoup fallback failed: {e}")
         
-        # Verify we got the expected number of sections
-        if len(sections) != expected_count:
-            print(f"   ⚠️ Split the Merge: Split resulted in {len(sections)} sections but expected {expected_count}")
-            return None
+        # Strategy 3: H1 tags containing "SPLIT MARKER" text
+        try:
+            soup = BeautifulSoup(content, 'html.parser')
+            h1_tags = soup.find_all('h1')
+            
+            marker_text_tags = [tag for tag in h1_tags if 'split marker' in tag.get_text().lower()]
+            
+            if len(marker_text_tags) == expected_count:
+                print(f"   ✓️ Split the Merge: Found {len(marker_text_tags)} h1 tags with 'SPLIT MARKER' text")
+                positions = []
+                for tag in marker_text_tags:
+                    tag_str = str(tag)
+                    opening_tag = re.escape(tag_str.split('>')[0] + '>')
+                    match = re.search(opening_tag, content, flags=re.IGNORECASE)
+                    if match:
+                        positions.append(match.start())
+                
+                if len(positions) == expected_count:
+                    return cls._split_by_positions(content, sorted(positions))
+        except Exception as e:
+            print(f"   ⚠️ Split the Merge: Text marker fallback failed: {e}")
         
-        # Clean up sections (remove leading/trailing whitespace)
-        cleaned_sections = [section.strip() for section in sections]
+        # Strategy 4: ANY h1 tags (last resort - assumes each chapter starts with h1)
+        try:
+            soup = BeautifulSoup(content, 'html.parser')
+            h1_tags = soup.find_all('h1')
+            
+            if len(h1_tags) == expected_count:
+                print(f"   ⚠️ Split the Merge: Using generic h1 tags as fallback ({len(h1_tags)} found)")
+                positions = []
+                for tag in h1_tags:
+                    tag_str = str(tag)
+                    opening_tag = re.escape(tag_str.split('>')[0] + '>')
+                    match = re.search(opening_tag, content, flags=re.IGNORECASE)
+                    if match:
+                        positions.append(match.start())
+                
+                if len(positions) == expected_count:
+                    return cls._split_by_positions(content, sorted(positions))
+        except Exception as e:
+            print(f"   ⚠️ Split the Merge: Generic h1 fallback failed: {e}")
         
-        print(f"   ✓️ Split the Merge: Successfully split into {len(cleaned_sections)} sections")
-        return cleaned_sections
+        # All strategies failed
+        print(f"   ❌ Split the Merge: Could not reliably split content (found varying h1 counts across strategies)")
+        return None
+    
+    @classmethod
+    def _split_by_positions(cls, content, positions):
+        """
+        Helper to split content at specific character positions.
+        
+        Args:
+            content: Full content string
+            positions: List of character positions where splits should occur (sorted)
+            
+        Returns:
+            List of content sections
+        """
+        if not positions:
+            return [content]
+        
+        sections = []
+        
+        # First section is before the first marker (usually empty/whitespace)
+        first_section = content[:positions[0]].strip()
+        if first_section:  # Only include if non-empty
+            sections.append(first_section)
+        
+        # Middle sections between markers
+        for i in range(len(positions) - 1):
+            # Find where the actual content starts (after the marker tag)
+            start_pos = positions[i]
+            # Skip past the h1 tag
+            marker_end = content.find('</h1>', start_pos)
+            if marker_end != -1:
+                content_start = marker_end + 5  # len('</h1>')
+            else:
+                # Broken closing tag, try to skip past the opening tag at least
+                next_close_bracket = content.find('>', start_pos)
+                content_start = next_close_bracket + 1 if next_close_bracket != -1 else start_pos
+            
+            section = content[content_start:positions[i + 1]].strip()
+            sections.append(section)
+        
+        # Last section after the last marker
+        last_marker_pos = positions[-1]
+        marker_end = content.find('</h1>', last_marker_pos)
+        if marker_end != -1:
+            content_start = marker_end + 5
+        else:
+            next_close_bracket = content.find('>', last_marker_pos)
+            content_start = next_close_bracket + 1 if next_close_bracket != -1 else last_marker_pos
+        
+        last_section = content[content_start:].strip()
+        sections.append(last_section)
+        
+        print(f"   ✓️ Split the Merge: Successfully split into {len(sections)} sections")
+        return sections
 
 
 # =====================================================
