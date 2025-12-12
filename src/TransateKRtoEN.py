@@ -439,18 +439,23 @@ class RequestMerger:
             # the whole merge.
             try:
                 if isinstance(content, str):
-                    # Use H1 tag as split marker - AI will preserve visible HTML elements
-                    split_marker = f'<h1 id="split-{chapter_num}">SPLIT MARKER: Do Not Remove This Tag</h1>\n'
-                    marked_content = split_marker + content
-                    
-                    if log_injections:
-                        preview = marked_content[:120].replace('\n', ' ')
-                        print(
-                            f"   ℹ️ Request Merging: Injected H1 split marker for "
-                            f"chapter {chapter_num}: {preview}..."
-                        )
-                    
-                    merged_parts.append(marked_content)
+                    # Only add split markers if split-the-merge is enabled
+                    if split_markers_enabled:
+                        # Use H1 tag as split marker - AI will preserve visible HTML elements
+                        split_marker = f'<h1 id="split-{chapter_num}">SPLIT MARKER: Do Not Remove This Tag</h1>\n'
+                        marked_content = split_marker + content
+                        
+                        if log_injections:
+                            preview = marked_content[:120].replace('\n', ' ')
+                            print(
+                                f"   ℹ️ Request Merging: Injected H1 split marker for "
+                                f"chapter {chapter_num}: {preview}..."
+                            )
+                        
+                        merged_parts.append(marked_content)
+                    else:
+                        # No split markers - just append content as-is
+                        merged_parts.append(content)
                 else:
                     # Non-string content, just append as-is
                     merged_parts.append(content)
