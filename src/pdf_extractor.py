@@ -829,9 +829,15 @@ def _detect_block_alignment(block: Dict, page_width: float) -> str:
     # Calculate margins
     left_margin = left
     right_margin = page_width - right
+    margin_diff = abs(left_margin - right_margin)
+    
+    # Calculate how centered the block is (percentage)
+    # For a perfectly centered block, this approaches 0
+    center_offset_ratio = margin_diff / page_width if page_width > 0 else 1.0
     
     # Detect alignment based on margins and position
-    if abs(left_margin - right_margin) < 30:
+    # More lenient centering detection: if margins are within 8% of page width, consider centered
+    if center_offset_ratio < 0.08 or margin_diff < 50:
         return "align-center"
     elif right_margin < 50 and left_margin > 100:
         return "align-right"
@@ -1166,6 +1172,25 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                         page_html = anchor + overlays_html + page_html
                 except Exception:
                     pass
+                
+                # Post-process: add centering styles to h1/h2 tags on title pages (first few pages)
+                if i < 3:  # First 3 pages often have title/copyright/TOC
+                    try:
+                        from bs4 import BeautifulSoup
+                        soup = BeautifulSoup(page_html, 'html.parser')
+                        # Center all h1 and h2 tags on these pages
+                        for tag in soup.find_all(['h1', 'h2']):
+                            # Add both class and inline style for maximum compatibility
+                            existing_style = tag.get('style', '')
+                            if existing_style and not existing_style.endswith(';'):
+                                existing_style += ';'
+                            tag['style'] = existing_style + 'text-align:center!important;'
+                            tag['class'] = tag.get('class', []) + ['align-center']
+                        page_html = str(soup)
+                    except Exception as e:
+                        # If beautifulsoup fails, just use the page as-is
+                        pass
+                
                 page_list.append((i + 1, page_html))
             doc.close()
             if page_by_page:
@@ -1222,10 +1247,10 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
             
             # Map class to inline style to avoid reliance on external CSS
             _align_css = {
-                "align-center": "text-align:center;",
-                "align-right": "text-align:right;",
-                "align-left": "text-align:left;",
-                "align-justify": "text-align:justify;"
+                "align-center": "text-align:center!important;",
+                "align-right": "text-align:right!important;",
+                "align-left": "text-align:left!important;",
+                "align-justify": "text-align:justify!important;"
             }
             for block_idx, block in enumerate(blocks):
                 if block.get("type") == 0:  # Text block
