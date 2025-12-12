@@ -244,12 +244,6 @@ def _generate_and_replace_toc(html_body: str) -> str:
                     toc_replaced = True
                     print(f"   • Replaced broken TOC on page {i+1} with generated TOC ({len(headers)} entries)")
                     break
-        
-        # If no TOC page found, insert after first page
-        if not toc_replaced and len(all_divs) > 1:
-            toc_div = BeautifulSoup(f'<div id="page-toc">{toc_html}</div>', 'html.parser')
-            all_divs[0].insert_after(toc_div)
-            print(f"   • Inserted generated TOC after title page ({len(headers)} entries)")
     
     # Use decode() instead of str() to preserve original formatting and attributes
     return soup.decode(formatter='minimal')
