@@ -93,6 +93,85 @@ def get_chapter_terminology(is_text_file, chapter_data=None):
         if chapter_data.get('filename', '').endswith('.txt') or chapter_data.get('is_chunk', False):
             return "Section"
     return "Chapter"
+
+def _merge_split_paragraphs(html_body: str) -> str:
+    """Merge paragraphs that were artificially split across PDF pages.
+    
+    PDFs are extracted page-by-page, which can split paragraphs mid-sentence.
+    This function merges consecutive justified paragraphs that don't end with
+    sentence-ending punctuation, creating more natural paragraph breaks.
+    
+    Only affects PDFs, not EPUBs.
+    """
+    from bs4 import BeautifulSoup
+    
+    soup = BeautifulSoup(html_body, 'html.parser')
+    
+    # Find all <p> tags
+    paragraphs = soup.find_all('p')
+    
+    if len(paragraphs) < 2:
+        return html_body  # Nothing to merge
+    
+    # Process paragraphs and merge when appropriate
+    i = 0
+    while i < len(paragraphs) - 1:
+        current_p = paragraphs[i]
+        next_p = paragraphs[i + 1]
+        
+        # Skip if either is None or not a tag
+        if not current_p or not next_p:
+            i += 1
+            continue
+        
+        # Get paragraph classes - only merge justified paragraphs
+        current_class = current_p.get('class', [])
+        next_class = next_p.get('class', [])
+        
+        current_is_justified = 'align-justify' in current_class if current_class else False
+        next_is_justified = 'align-justify' in next_class if next_class else False
+        
+        # Only merge if both are justified (regular body text)
+        if not (current_is_justified and next_is_justified):
+            i += 1
+            continue
+        
+        # Get text content of current paragraph
+        current_text = current_p.get_text().strip()
+        
+        # Check if current paragraph ends with sentence-ending punctuation
+        ends_with_sentence = bool(re.search(r'[.!?]\s*$', current_text))
+        
+        # Check if next paragraph looks like continuation (doesn't start with capital)
+        next_text = next_p.get_text().strip()
+        starts_with_capital = bool(re.match(r'^[A-Z"\(]', next_text)) if next_text else False
+        
+        # Merge if:
+        # - Current doesn't end with sentence punctuation, OR
+        # - Current ends with sentence but next doesn't start with capital (likely continuation)
+        should_merge = not ends_with_sentence or (ends_with_sentence and not starts_with_capital)
+        
+        if should_merge:
+            # Merge next paragraph's content into current
+            # Add a space between them
+            current_p.append(' ')
+            for content in list(next_p.contents):
+                try:
+                    current_p.append(content.extract())
+                except Exception:
+                    current_p.append(content)
+            
+            # Remove the next paragraph
+            next_p.decompose()
+            
+            # Update list and continue without increment to consider further merges
+            paragraphs = soup.find_all('p')
+            continue
+        else:
+            # Can't merge, move to next pair
+            i += 1
+    
+    return str(soup)
 # =====================================================
 # CONFIGURATION AND ENVIRONMENT MANAGEMENT
 # =====================================================
@@ -257,7 +336,7 @@ class RequestMerger:
 
         Before concatenating, we inject an invisible split marker at the
         beginning of each chapter. This greatly improves the reliability of
-        Split‑the‑Merge, because the splitter can simply find these markers
+        Split-the-Merge, because the splitter can simply find these markers
         instead of carefully parsing headers.
 
         Args:
@@ -9251,6 +9330,9 @@ def main(log_callback=None, stop_callback=None):
                             html_parts.append(content)
                     
                     full_html_body = "".join(html_parts)
+                    
+                    # Post-process: merge paragraphs that span across pages
+                    full_html_body = _merge_split_paragraphs(full_html_body)
                     
                     # Wrap in full HTML document with CSS
                     css_path = os.path.join(out, 'styles.css')

@@ -815,9 +815,32 @@ def _extract_toc_from_outline(doc) -> str:
 
 def _detect_block_alignment(block: Dict, page_width: float) -> str:
     """
-    Force all text to use justified alignment.
+    Detect text alignment based on block position.
+    Returns alignment class: 'align-center', 'align-right', 'align-justify', or 'align-left'.
     """
-    return "align-justify"
+    bbox = block.get("bbox", [])
+    if len(bbox) < 4:
+        return "align-justify"  # Default if no bbox
+    
+    left = bbox[0]
+    right = bbox[2]
+    block_width = right - left
+    
+    # Calculate margins
+    left_margin = left
+    right_margin = page_width - right
+    
+    # Detect alignment based on margins and position
+    if abs(left_margin - right_margin) < 30:
+        return "align-center"
+    elif right_margin < 50 and left_margin > 100:
+        return "align-right"
+    elif block_width > page_width * 0.7:
+        return "align-justify"
+    elif left_margin < 100:
+        return "align-left"
+    else:
+        return "align-justify"
 
 
 def _is_page_break_candidate(page_num: int, blocks: List[Dict], page_height: float) -> bool:
@@ -1313,13 +1336,34 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                         page_html.append(f'<h2 id="{anchor_id}"{h_class}{h_style}>{block_content}</h2>')
                     else:
                         # Regular paragraph content
-                        # Combine consecutive blocks into single justified paragraphs for better flow
+                        # Detect paragraph boundaries based on sentences and formatting
+                        should_start_new_para = False
+                        
                         if current_para:
-                            # Only start new paragraph if explicitly different alignment or very short line (likely paragraph break)
                             prev_alignment = current_para_styles[-1] if current_para_styles else "align-justify"
-                            is_short_line = len(block_content.strip()) < 40  # Short lines might indicate paragraph breaks
                             
-                            if alignment_class != prev_alignment or (is_short_line and len(current_para) > 3):
+                            # Check if previous block ended with sentence-ending punctuation
+                            prev_text = current_para[-1] if current_para else ""
+                            ends_with_sentence = bool(re.search(r'[.!?]\s*$', prev_text.strip()))
+                            
+                            # Check if current block looks like start of new paragraph
+                            # Indicators: starts with capital, previous ended with period, indentation change
+                            is_short_line = len(block_content.strip()) < 40
+                            starts_with_capital = bool(re.match(r'^[A-Z]', block_content.strip()))
+                            
+                            # Start new paragraph if:
+                            # 1. Alignment changed (different text type)
+                            # 2. Previous block ended with sentence AND current is short (likely paragraph break)
+                            # 3. Current block is very short and starts with capital (likely new paragraph)
+                            if alignment_class != prev_alignment:
+                                should_start_new_para = True
+                            elif ends_with_sentence and is_short_line and starts_with_capital:
+                                should_start_new_para = True
+                            elif is_short_line and len(current_para) > 5 and starts_with_capital:
+                                # Multiple blocks accumulated and this looks like paragraph break
+                                should_start_new_para = True
+                            
+                            if should_start_new_para:
                                 # Flush existing paragraph
                                 para_class = "align-justify"  # Force justify for body text
                                 para_style = _align_css.get(para_class, "")
@@ -1372,12 +1416,9 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                             page_html.append(img_tag)
                             break  # Use first image for this block
             
-            # Flush any remaining paragraph
-            if current_para:
-                para_class = "align-justify"  # Force justify for body text
-                para_style = _align_css.get(para_class, "")
-                para_tag = f'<p class="{para_class}" style="{para_style}">'
-                page_html.append(f'{para_tag}{" ".join(current_para)}</p>')
+            # DON'T flush paragraph at end of page - let it continue to next page
+            # This allows paragraphs to flow naturally across page boundaries
+            # Only flush if we're on the last page or if there's a clear paragraph break
             
             # Close TOC if page ends while still in TOC section
             if in_toc_section:
