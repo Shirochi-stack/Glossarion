@@ -322,6 +322,10 @@ def extract_images_from_pdf(pdf_path: str, output_dir: str) -> Dict[int, List[Di
                     image_bytes = base_image["image"]
                     image_ext = base_image["ext"]
                     
+                    # Normalize JPEG extensions to .jpg (PyMuPDF sometimes returns "jpeg")
+                    if image_ext.lower() == "jpeg":
+                        image_ext = "jpg"
+                    
                     # Generate filename
                     filename = f"page_{page_num + 1}_img_{img_index + 1}.{image_ext}"
                     filepath = os.path.join(images_dir, filename)

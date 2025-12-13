@@ -4639,13 +4639,14 @@ def process_html_file_batch(args):
                     else:
                         issues.append(issue)
         
-        # Check for multiple headers
+        # Check for multiple headers (skip for PDF text mode since PDFs don't generate headers)
         check_multiple_headers = qa_settings.get('check_multiple_headers', True)
         has_multiple = False
         header_count = 0
         header_info = None
         
-        if check_multiple_headers:
+        # Disable multiple headers check for text mode (PDFs generate HTML without headers)
+        if check_multiple_headers and not text_file_mode:
             has_multiple, header_count, header_info = detect_multiple_headers(raw_text)
             if has_multiple:
                 issues.append(f"multiple_headers_{header_count}_found")
