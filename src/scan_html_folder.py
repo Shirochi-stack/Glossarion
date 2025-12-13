@@ -4610,7 +4610,9 @@ def process_html_file_batch(args):
             def dummy_log(msg):
                 pass
             
-            has_issues, html_issues = check_html_structure_issues(full_path, dummy_log, check_body_tag=check_body_tag)
+            # For PDF text mode, disable header tag check since PDFs don't generate headers
+            check_header_tags_enabled = not text_file_mode  # Disable for text mode (PDFs generate HTML without headers)
+            has_issues, html_issues = check_html_structure_issues(full_path, dummy_log, check_body_tag=check_body_tag, check_header_tags=check_header_tags_enabled)
             
             if has_issues:
                 for issue in html_issues:
@@ -5404,9 +5406,15 @@ def scan_html_folder(folder_path, log=print, stop_flag=None, mode='quick-scan', 
     log("⚡ ProcessPoolExecutor: ENABLED - Maximum performance achieved!")
 
 
-def check_html_structure_issues(file_path, log, check_body_tag=False):
+def check_html_structure_issues(file_path, log, check_body_tag=False, check_header_tags=True):
     """
     Check for HTML structure problems including unwrapped text and unclosed tags.
+    
+    Args:
+        file_path: Path to the HTML file
+        log: Logging function
+        check_body_tag: Whether to check for body tag issues
+        check_header_tags: Whether to check for missing header tags (h1-h6)
     
     Returns:
         tuple: (has_issues, issue_types) where issue_types is a list of specific issues found
@@ -5530,16 +5538,17 @@ def check_html_structure_issues(file_path, log, check_body_tag=False):
         body_open_exists = bool(re.search(r'<body[^>]*>', content_lower))
         body_close_exists = bool(re.search(r'</body>', content_lower))
         
-        # Check for missing heading tags (h1-h6)
-        has_heading_tag = False
-        for heading_level in range(1, 7):  # h1 through h6
-            if re.search(rf'<h{heading_level}[^>]*>', content_lower):
-                has_heading_tag = True
-                break
-        
-        if not has_heading_tag:
-            issues.append('missing_header_tags')
-            log(f"   HTML file is missing heading tags (h1-h6)")
+        # Check for missing heading tags (h1-h6) - only if enabled
+        if check_header_tags:
+            has_heading_tag = False
+            for heading_level in range(1, 7):  # h1 through h6
+                if re.search(rf'<h{heading_level}[^>]*>', content_lower):
+                    has_heading_tag = True
+                    break
+            
+            if not has_heading_tag:
+                issues.append('missing_header_tags')
+                log(f"   HTML file is missing heading tags (h1-h6)")
         
         missing_structure = []
         

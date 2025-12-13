@@ -49,7 +49,9 @@ def _externalize_data_uri_images(html: str, images_dir: str, page_index: int) ->
     os.makedirs(images_dir, exist_ok=True)
     # Match src="data:image/<type>;base64,<data>"
     # Support both double and single quotes around src attribute
-    pattern = re.compile(r'(src\s*=\s*(?:\"|\')data:(image\/[^;]+);base64,([^\"\']+)(?:\"|\'))', re.IGNORECASE)
+    pattern = re.compile(r'(src\s*=\s*(?:"|\')data:(image/[^;]+);base64,([^"\']+)(?:"|\'))', re.IGNORECASE)
+    
+    img_counter = [0]  # Use list to allow modification in nested function
 
     def repl(m):
         mime = m.group(2)  # 'image/png', 'image/jpeg', etc.
@@ -61,15 +63,22 @@ def _externalize_data_uri_images(html: str, images_dir: str, page_index: int) ->
             ext = 'gif'
         elif 'webp' in mime:
             ext = 'webp'
-        # Deterministic filename
-        fname = f"p{page_index:04d}_{abs(hash(b64)) & 0xffffffff:x}.{ext}"
+        
+        # Use numbered filename consistent with extract_images_from_pdf
+        img_counter[0] += 1
+        fname = f"page_{page_index}_img_{img_counter[0]}.{ext}"
         out_path = os.path.join(images_dir, fname)
-        try:
-            with open(out_path, 'wb') as f:
-                f.write(base64.b64decode(b64))
-            return f'src="images/{fname}"'
-        except Exception:
-            return m.group(1)  # fallback to original data URI
+        
+        # Check if a file with this name already exists from extract_images_from_pdf
+        # If so, don't overwrite it - just reference it
+        if not os.path.exists(out_path):
+            try:
+                with open(out_path, 'wb') as f:
+                    f.write(base64.b64decode(b64))
+            except Exception:
+                return m.group(1)  # fallback to original data URI
+        
+        return f'src="images/{fname}"'
 
     return pattern.sub(repl, html)
 
@@ -1649,10 +1658,24 @@ def create_pdf_from_html(html_content: str, output_path: str, css_path: Optional
                     import re
                     img_refs = re.findall(r'src="images/([^"]+)"', full_html, re.IGNORECASE)
                     missing_images = []
+                    
+                    # Build case-insensitive mapping of actual files in images directory
+                    actual_files_map = {}
+                    try:
+                        for actual_file in os.listdir(images_dir):
+                            actual_files_map[actual_file.lower()] = actual_file
+                    except Exception:
+                        pass
+                    
                     for img_file in img_refs:
+                        # Try exact match first
                         img_path = os.path.join(images_dir, img_file)
                         if not os.path.exists(img_path):
-                            missing_images.append(img_file)
+                            # Try case-insensitive match
+                            img_file_lower = img_file.lower()
+                            if img_file_lower not in actual_files_map:
+                                missing_images.append(img_file)
+                    
                     if missing_images:
                         print(f"   ⚠️ Warning: {len(missing_images)} referenced images not found in images directory")
                         if len(missing_images) <= 5:
