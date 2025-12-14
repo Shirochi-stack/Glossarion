@@ -42,10 +42,12 @@ class ChapterSplitter:
         
         effective_max_tokens = max_tokens
         
-        # Check for break split configuration
+        # Check for break split configuration (skip for PDF files)
+        # Check both the filename parameter and if it looks like a path ending in .pdf
+        is_pdf_file = filename and filename.lower().endswith('.pdf')
         break_split = os.getenv('BREAK_SPLIT_COUNT', '')
         max_elements = None
-        if break_split and break_split.isdigit():
+        if break_split and break_split.isdigit() and not is_pdf_file:
             max_elements = int(break_split)
             print(f"✅ Break split enabled: {max_elements} per chunk")
         
@@ -67,7 +69,7 @@ class ChapterSplitter:
         if filename:
             # Check if it's a known plain text extension
             is_plain_text_file = any(filename.lower().endswith(suffix) for suffix in ['.csv', '.json', '.txt'])
-            if is_plain_text_file and max_elements:
+            if is_plain_text_file and max_elements and not is_pdf_file:
                 print(f"📄 Detected plain text file format (forcing line-based splitting)")
         
         # If it's a plain text file, skip HTML parsing and go directly to line-based splitting
@@ -92,7 +94,7 @@ class ChapterSplitter:
         if is_plain_text_file or not has_html_tags or len(non_empty_elements) <= 1:
             # Plain text mode - split by line count OR token limit
             lines = chapter_html.split('\n')
-            if max_elements:
+            if max_elements and not is_pdf_file:
                 print(f"📝 Total lines in file: {len(lines):,}")
             
             # Calculate tokens for all lines first for balanced splitting
@@ -157,8 +159,8 @@ class ChapterSplitter:
             return [(chunk, i+1, total_chunks) for i, chunk in enumerate(chunks)]
         
         # HTML mode - balanced split by element tokens (with optional element cap)
-        # Count total elements first if Break Split is enabled
-        if max_elements:
+        # Count total elements first if Break Split is enabled (skip for PDFs)
+        if max_elements and not is_pdf_file:
             total_elements = sum(1 for elem in elements if not (isinstance(elem, str) and elem.strip() == ''))
             print(f"🏷️ Total HTML elements in file: {total_elements:,}")
         

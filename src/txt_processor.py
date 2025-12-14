@@ -231,6 +231,7 @@ class TextFileProcessor:
                         'body': chunk_content,
                         'filename': chunk_filename,
                         # Don't set original_basename for chunks - let filename generation use decimal logic
+                        'source_file': self.file_path,  # Add source file path for PDF detection
                         'content_hash': self._generate_hash(chunk_content),
                         'file_size': len(chunk_content),
                         'has_images': False,
@@ -283,6 +284,7 @@ class TextFileProcessor:
                     'title': chapter_data['title'],
                     'body': chapter_content,
                     'filename': chapter_filename,
+                    'source_file': self.file_path,  # Add source file path for PDF detection
                     'content_hash': self._generate_hash(chapter_content),
                     'file_size': len(chapter_content),
                     'has_images': False,
@@ -307,6 +309,7 @@ class TextFileProcessor:
                 'body': all_content or 'Empty file',
                 'filename': 'section_1.txt',  # Changed to avoid using file_base
                 'original_basename': os.path.basename(self.file_path),  # Add original filename for .csv/.json/.txt detection
+                'source_file': self.file_path,  # Add source file path for PDF detection
                 'content_hash': self._generate_hash(all_content or ''),
                 'file_size': len(all_content or ''),
                 'has_images': False,

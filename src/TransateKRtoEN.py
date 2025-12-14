@@ -8364,8 +8364,8 @@ def main(log_callback=None, stop_callback=None):
                     
                     chapter_tokens = chapter_splitter.count_tokens(c["body"])
                     
-                    # Get filename for content type detection
-                    chapter_filename = c.get('filename') or c.get('original_basename', '')
+                    # Get filename for content type detection (prefer source_file for PDFs)
+                    chapter_filename = c.get('source_file') or c.get('filename') or c.get('original_basename', '')
                     
                     if chapter_tokens > available_tokens:
                         # Even pre-split chunks might need further splitting
@@ -8389,8 +8389,8 @@ def main(log_callback=None, stop_callback=None):
                     
                     print(f"📊 Max Chunk size: {available_tokens:,} tokens (based on {max_output_tokens:,} output limit, compression: {compression_factor})")
                     
-                    # Get filename for content type detection
-                    chapter_filename = c.get('filename') or c.get('original_basename', '')
+                    # Get filename for content type detection (prefer source_file for PDFs)
+                    chapter_filename = c.get('source_file') or c.get('filename') or c.get('original_basename', '')
                     chunks = chapter_splitter.split_chapter(c["body"], available_tokens, filename=chapter_filename)
                     
                     # Use consistent terminology

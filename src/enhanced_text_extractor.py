@@ -95,6 +95,12 @@ class EnhancedTextExtractor:
         "'": '␤',   # Alternative closing quote
     }
     
+    # Angle bracket protection markers for invalid tags
+    ANGLE_BRACKET_MARKERS = {
+        '<': '‹',   # Single left-pointing angle quotation mark (U+2039)
+        '>': '›',   # Single right-pointing angle quotation mark (U+203A)
+    }
+    
     
     def __init__(self, filtering_mode: str = "smart", preserve_structure: bool = True):
         """Initialize the enhanced text extractor"""
@@ -261,6 +267,27 @@ class EnhancedTextExtractor:
         """Restore quotes from special markers"""
         for original, marker in self.QUOTE_MARKERS.items():
             text = text.replace(marker, original)
+        return text
+    
+    def _protect_cjk_angle_brackets(self, text: str) -> str:
+        """Protect angle brackets containing CJK text from being treated as HTML tags."""
+        import re
+        # Pattern to match angle brackets containing CJK characters
+        cjk_pattern = r'[\u3000-\u303f\u3040-\u309f\u30a0-\u30ff\u4e00-\u9fff\uac00-\ud7af]'
+        bracket_pattern = rf'<([^<>]*{cjk_pattern}[^<>]*)>'
+        
+        def replace_brackets(match):
+            content = match.group(1)
+            # Use special Unicode markers instead of HTML entities
+            return f"‹{content}›"
+        
+        return re.sub(bracket_pattern, replace_brackets, text)
+    
+    def _restore_cjk_angle_brackets(self, text: str) -> str:
+        """Restore angle brackets from special markers."""
+        # Convert markers back to HTML entities for proper display
+        text = text.replace('‹', '&lt;')
+        text = text.replace('›', '&gt;')
         return text
     
     
@@ -487,6 +514,10 @@ class EnhancedTextExtractor:
             # Convert using html2text
             content_to_convert = self._decode_entities(content_to_convert)
             
+            # Protect CJK text in angle brackets using special markers
+            # that html2text won't interpret as HTML
+            content_to_convert = self._protect_cjk_angle_brackets(content_to_convert)
+            
             # Convert to text with error handling
             try:
                 clean_text = self.h2t.handle(content_to_convert)
@@ -521,6 +552,9 @@ class EnhancedTextExtractor:
             
             # Restore protected quotes
             clean_text = self._restore_quotes(clean_text)
+            
+            # Restore CJK angle brackets as HTML entities
+            clean_text = self._restore_cjk_angle_brackets(clean_text)
             
             # For enhanced mode, both display and translation content are the same
             return clean_text, clean_text, chapter_title
