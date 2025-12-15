@@ -386,6 +386,14 @@ async def translate(
         os.environ['GLOSSARY_DUPLICATE_KEY_MODE'] = config.get('glossary_duplicate_key_mode', 'auto')
         os.environ['GLOSSARY_DUPLICATE_CUSTOM_FIELD'] = config.get('glossary_duplicate_custom_field', '')
         os.environ['GLOSSARY_DUPLICATE_ALGORITHM'] = duplicate_algorithm
+        # Gender context and description for automatic glossary (enabled by default)
+        os.environ['GLOSSARY_INCLUDE_GENDER_CONTEXT'] = '1' if config.get('include_gender_context', True) else '0'
+        os.environ['GLOSSARY_INCLUDE_DESCRIPTION'] = '1' if config.get('include_description', True) else '0'
+        # Custom glossary fields (additional columns) - default to ['description']
+        custom_fields = config.get('custom_glossary_fields', [])
+        if not custom_fields and not config.get('custom_field_description_removed', False):
+            custom_fields = ['description']
+        os.environ['GLOSSARY_CUSTOM_FIELDS'] = json.dumps(custom_fields)
         # Glossary-specific overrides for API settings
         os.environ['GLOSSARY_MAX_OUTPUT_TOKENS'] = str(config.get('glossary_max_output_tokens', max_output_tokens))
         os.environ['GLOSSARY_TEMPERATURE'] = str(config.get('manual_glossary_temperature', 0.1))
@@ -751,10 +759,9 @@ async def translate(
     temperature="Glossary extraction temperature 0.0-1.0 (default: 0.1)",
     batch_size="Paragraphs per batch (default: 10)",
     max_output_tokens="Max output tokens (default: 65536)",
+    glossary_compression_factor="Glossary compression factor (default: 1.0)",
     request_merging="Enable request merging to batch API calls (default: False)",
     merge_count="Number of requests to merge when request merging is enabled (default: 10)",
-    include_gender_context="Include surrounding sentences for better gender detection (more expensive, default: False)",
-    include_description="Include description/context field for each entry (requires gender context, default: False)",
     duplicate_algorithm="Duplicate handling: auto/strict/balanced/aggressive/basic (default: balanced)",
     target_language="Target language for translations"
 )
@@ -774,10 +781,9 @@ async def extract(
     temperature: float = 0.1,
     batch_size: int = 10,
     max_output_tokens: int = 65536,
+    glossary_compression_factor: float = 1.0,
     request_merging: bool = False,
     merge_count: int = 10,
-    include_gender_context: bool = False,
-    include_description: bool = False,
     duplicate_algorithm: str = "balanced",
     target_language: str = "English"
 ):
@@ -919,7 +925,7 @@ async def extract(
         os.environ['GLOSSARY_MIN_FREQUENCY'] = str(config.get('glossary_min_frequency', 2))
         os.environ['GLOSSARY_MAX_NAMES'] = str(config.get('glossary_max_names', 50))
         os.environ['GLOSSARY_MAX_TITLES'] = str(config.get('glossary_max_titles', 30))
-        os.environ['GLOSSARY_COMPRESSION_FACTOR'] = str(config.get('glossary_compression_factor', 0.88))
+        os.environ['GLOSSARY_COMPRESSION_FACTOR'] = str(glossary_compression_factor)
         os.environ['GLOSSARY_FILTER_MODE'] = config.get('glossary_filter_mode', 'all')
         os.environ['GLOSSARY_STRIP_HONORIFICS'] = '1' if config.get('glossary_strip_honorifics', True) else '0'
         os.environ['GLOSSARY_FUZZY_THRESHOLD'] = str(config.get('glossary_fuzzy_threshold', 0.90))
@@ -934,9 +940,10 @@ async def extract(
         os.environ['GLOSSARY_DISABLE_HONORIFICS_FILTER'] = '1' if config.get('glossary_disable_honorifics_filter', False) else '0'
         os.environ['GLOSSARY_REQUEST_MERGING_ENABLED'] = '1' if request_merging else '0'
         os.environ['GLOSSARY_REQUEST_MERGE_COUNT'] = str(merge_count)
-        os.environ['GLOSSARY_INCLUDE_GENDER_CONTEXT'] = '1' if include_gender_context else '0'
-        os.environ['GLOSSARY_INCLUDE_DESCRIPTION'] = '1' if (include_description and include_gender_context) else '0'
         os.environ['GLOSSARY_DUPLICATE_ALGORITHM'] = duplicate_algorithm
+        # Use config defaults for gender context and description (manual glossary extraction)
+        os.environ['GLOSSARY_INCLUDE_GENDER_CONTEXT'] = '1' if config.get('include_gender_context', True) else '0'
+        os.environ['GLOSSARY_INCLUDE_DESCRIPTION'] = '1' if config.get('include_description', True) else '0'
         os.environ['DISABLE_GEMINI_SAFETY'] = 'true'
         
         # Handle Vertex AI / Google Cloud credentials
