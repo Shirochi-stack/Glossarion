@@ -3553,7 +3553,13 @@ class UnifiedClient:
         """
         # Try to load from config file
         try:
-            from translator_gui import CONFIG_FILE
+            # Try to import CONFIG_FILE path, but don't fail if GUI isn't available
+            try:
+                from translator_gui import CONFIG_FILE
+            except (ImportError, SystemExit):
+                # GUI not available, use default config path
+                CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'config.json')
+            
             if os.path.exists(CONFIG_FILE):
                 with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                     config = json.load(f)
