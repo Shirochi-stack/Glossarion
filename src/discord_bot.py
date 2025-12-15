@@ -944,6 +944,11 @@ async def extract(
         # Use config defaults for gender context and description (manual glossary extraction)
         os.environ['GLOSSARY_INCLUDE_GENDER_CONTEXT'] = '1' if config.get('include_gender_context', True) else '0'
         os.environ['GLOSSARY_INCLUDE_DESCRIPTION'] = '1' if config.get('include_description', True) else '0'
+        # Custom glossary fields (additional columns) - default to ['description']
+        custom_fields = config.get('custom_glossary_fields', [])
+        if not custom_fields and not config.get('custom_field_description_removed', False):
+            custom_fields = ['description']
+        os.environ['GLOSSARY_CUSTOM_FIELDS'] = json.dumps(custom_fields)
         os.environ['DISABLE_GEMINI_SAFETY'] = 'true'
         
         # Handle Vertex AI / Google Cloud credentials
