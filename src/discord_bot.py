@@ -172,11 +172,11 @@ async def model_autocomplete(interaction: discord.Interaction, current: str):
     ]
 
 
-@bot.tree.command(name="translate", description="Translate EPUB or TXT file")
+@bot.tree.command(name="translate", description="Translate EPUB, TXT, or PDF file")
 @app_commands.describe(
     api_key="Your API key",
     model="AI model to use (or type custom model name)",
-    file="EPUB or TXT file to translate (optional if using url)",
+    file="EPUB, TXT, or PDF file to translate (optional if using url)",
     url="Google Drive or Dropbox link to file (optional if using file attachment)",
     google_credentials_path="Path to Google Cloud credentials JSON (for Vertex AI models)",
     extraction_mode="Text extraction method",
@@ -185,6 +185,11 @@ async def model_autocomplete(interaction: discord.Interaction, current: str):
     max_output_tokens="Max output tokens (default: 65536)",
     disable_smart_filter="Disable smart glossary filter (default: False)",
     duplicate_algorithm="Duplicate handling: auto/strict/balanced/aggressive/basic (default: balanced)",
+    manual_glossary="Path to manual glossary file (.csv or .json) to use instead of auto-generated",
+    enable_auto_glossary="Enable automatic glossary generation (default: True)",
+    request_merging="Enable request merging (combine multiple chapters per API call)",
+    request_merge_count="Chapters per request when merging enabled (default: 3)",
+    split_the_merge="Split merged translation output back into separate files (default: True)",
     target_language="Target language"
 )
 @app_commands.choices(extraction_mode=[
@@ -205,6 +210,11 @@ async def translate(
     max_output_tokens: int = 65536,
     disable_smart_filter: bool = False,
     duplicate_algorithm: str = "balanced",
+    manual_glossary: str = None,
+    enable_auto_glossary: bool = True,
+    request_merging: bool = False,
+    request_merge_count: int = 3,
+    split_the_merge: bool = True,
     target_language: str = "English"
 ):
     """Translate file using Glossarion"""
@@ -240,9 +250,9 @@ async def translate(
             filename = unquote(os.path.basename(parsed.path)) or 'downloaded_file.epub'
     
     # Validate file extension
-    if not (filename.endswith('.epub') or filename.endswith('.txt')):
+    if not (filename.endswith('.epub') or filename.endswith('.txt') or filename.endswith('.pdf')):
         await interaction.response.send_message(
-            "❌ File must be EPUB or TXT format", 
+            "❌ File must be EPUB, TXT, or PDF format", 
             ephemeral=True
         )
         return
@@ -364,8 +374,8 @@ async def translate(
             os.environ['EXTRACTION_MODE'] = 'smart'
             os.environ['FILE_FILTERING_LEVEL'] = 'smart'
         
-        # Enable automatic glossary generation (set to auto/on by default)
-        os.environ['ENABLE_AUTO_GLOSSARY'] = '1'
+        # Enable automatic glossary generation (user configurable)
+        os.environ['ENABLE_AUTO_GLOSSARY'] = '1' if enable_auto_glossary else '0'
         # Set glossary parameters (use config if available, otherwise use defaults)
         os.environ['GLOSSARY_MIN_FREQUENCY'] = str(config.get('glossary_min_frequency', 2))
         os.environ['GLOSSARY_MAX_NAMES'] = str(config.get('glossary_max_names', 50))
@@ -405,6 +415,24 @@ async def translate(
         
         # Disable batch translate headers (metadata translation)
         os.environ['BATCH_TRANSLATE_HEADERS'] = '0'
+        
+        # Set manual glossary path if provided
+        if manual_glossary:
+            # Validate glossary file exists and has correct extension
+            if os.path.exists(manual_glossary) and (manual_glossary.endswith('.csv') or manual_glossary.endswith('.json')):
+                os.environ['MANUAL_GLOSSARY'] = manual_glossary
+                sys.stderr.write(f"[CONFIG] Using manual glossary: {os.path.basename(manual_glossary)}\n")
+                sys.stderr.flush()
+            else:
+                sys.stderr.write(f"[WARNING] Manual glossary path invalid or not .csv/.json: {manual_glossary}\n")
+                sys.stderr.flush()
+        
+        # Request merging settings (combine multiple chapters into single API request)
+        os.environ['REQUEST_MERGING_ENABLED'] = '1' if request_merging else '0'
+        os.environ['REQUEST_MERGE_COUNT'] = str(request_merge_count)
+        os.environ['SPLIT_THE_MERGE'] = '1' if split_the_merge else '0'
+        os.environ['DISABLE_MERGE_FALLBACK'] = '1'  # Mark as qa_failed if split fails
+        os.environ['SYNTHETIC_MERGE_HEADERS'] = '1'  # Use synthetic headers for better splitting
         
         # Disable Gemini safety filter by default (enabled for Discord bot)
         os.environ['DISABLE_GEMINI_SAFETY'] = 'true'
