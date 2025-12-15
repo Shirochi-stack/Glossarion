@@ -6,12 +6,21 @@ Complete implementation - no truncation
 
 import os
 import json
-from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
-                               QCheckBox, QRadioButton, QButtonGroup, QWidget, QScrollArea,
-                               QFrame, QGroupBox, QTabWidget, QTextEdit, QLineEdit, QComboBox,
-                               QMessageBox, QApplication)
-from PySide6.QtGui import QFont, QIcon
-from PySide6.QtCore import Qt, QSize
+
+# GUI imports - optional for non-GUI usage
+try:
+    from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
+                                   QCheckBox, QRadioButton, QButtonGroup, QWidget, QScrollArea,
+                                   QFrame, QGroupBox, QTabWidget, QTextEdit, QLineEdit, QComboBox,
+                                   QMessageBox, QApplication)
+    from PySide6.QtGui import QFont, QIcon
+    from PySide6.QtCore import Qt, QSize
+    HAS_GUI = True
+except ImportError:
+    HAS_GUI = False
+    # Dummy classes for non-GUI usage
+    QDialog = object
+    QWidget = object
 from typing import Dict, List, Tuple, Optional, Any
 import zipfile
 from bs4 import BeautifulSoup
