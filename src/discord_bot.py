@@ -243,7 +243,7 @@ async def model_autocomplete(interaction: discord.Interaction, current: str):
     file="EPUB, TXT, or PDF file to translate (optional if using url)",
     url="Google Drive or Dropbox link to file (optional if using file attachment)",
     google_credentials_path="Path to Google Cloud credentials JSON (for Vertex AI models)",
-    extraction_mode="Text extraction method",
+    extraction_mode="Text extraction method (default: Enhanced/html2text)",
     temperature="Translation temperature 0.0-1.0 (default: 0.3)",
     batch_size="Paragraphs per batch (default: 10)",
     max_output_tokens="Max output tokens (default: 65536)",
@@ -442,6 +442,10 @@ async def translate(
         # These ensure PDF font sizes, alignments, and styles are preserved
         if filename.endswith('.pdf'):
             sys.stderr.write(f"[CONFIG] Enabling PDF formatting extraction (font size, alignment, etc.)\n")
+            sys.stderr.flush()
+            # Force XHTML render mode for better PDF extraction quality
+            os.environ['PDF_RENDER_MODE'] = 'xhtml'
+            sys.stderr.write(f"[CONFIG] Using XHTML render mode for PDF\n")
             sys.stderr.flush()
             # The pdf_extractor.generate_css_from_pdf() function will automatically
             # detect and apply: base_font_size, font_family, text_align, line_height_ratio
@@ -858,7 +862,7 @@ async def translate(
     file="EPUB, TXT, or PDF file to extract glossary from (optional if using url)",
     url="Google Drive or Dropbox link to file (optional if using file attachment)",
     google_credentials_path="Path to Google Cloud credentials JSON (for Vertex AI models)",
-    extraction_mode="Text extraction method",
+    extraction_mode="Text extraction method (default: Enhanced/html2text)",
     temperature="Glossary extraction temperature 0.0-1.0 (default: 0.1)",
     batch_size="Paragraphs per batch (default: 10)",
     max_output_tokens="Max output tokens (default: 65536)",
@@ -1027,6 +1031,10 @@ async def extract(
         # These ensure PDF font sizes, alignments, and styles are preserved
         if filename.endswith('.pdf'):
             sys.stderr.write(f"[CONFIG] Enabling PDF formatting extraction (font size, alignment, etc.)\n")
+            sys.stderr.flush()
+            # Force XHTML render mode for better PDF extraction quality
+            os.environ['PDF_RENDER_MODE'] = 'xhtml'
+            sys.stderr.write(f"[CONFIG] Using XHTML render mode for PDF\n")
             sys.stderr.flush()
             # The pdf_extractor.generate_css_from_pdf() function will automatically
             # detect and apply: base_font_size, font_family, text_align, line_height_ratio
