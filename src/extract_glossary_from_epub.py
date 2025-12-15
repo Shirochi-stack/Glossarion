@@ -2183,11 +2183,52 @@ def main(log_callback=None, stop_callback=None):
         args.config = os.getenv("CONFIG_PATH", "config.json")
 
     is_text_file = epub_path.lower().endswith('.txt')
+    is_pdf_file = epub_path.lower().endswith('.pdf')
     
     if is_text_file:
         # Import text processor
         from extract_glossary_from_txt import extract_chapters_from_txt
         chapters = extract_chapters_from_txt(epub_path)
+        file_base = os.path.splitext(os.path.basename(epub_path))[0]
+    elif is_pdf_file:
+        # PDF: extract page-by-page using the existing pdf_extractor logic
+        try:
+            from pdf_extractor import extract_pdf_with_formatting
+        except Exception as e:
+            print(f"[Fatal] Failed to import pdf_extractor: {e}")
+            chapters = []
+        else:
+            import tempfile
+            tmp_dir = tempfile.mkdtemp(prefix="glossarion_pdf_extract_")
+
+            # Avoid expensive image extraction paths for glossary; use MuPDF XHTML by default
+            previous_render_mode = os.environ.get("PDF_RENDER_MODE")
+            if not previous_render_mode:
+                os.environ["PDF_RENDER_MODE"] = "xhtml"
+
+            try:
+                page_list, _ = extract_pdf_with_formatting(
+                    pdf_path=epub_path,
+                    output_dir=tmp_dir,
+                    extract_images=False,
+                    page_by_page=True
+                )
+
+                chapters = []
+                for page_num, page_html in page_list:
+                    if check_stop():
+                        return
+                    try:
+                        page_text = BeautifulSoup(page_html, 'html.parser').get_text("\n", strip=True)
+                    except Exception:
+                        page_text = str(page_html)
+                    if page_text and page_text.strip():
+                        chapters.append(page_text)
+
+            finally:
+                if not previous_render_mode:
+                    os.environ.pop("PDF_RENDER_MODE", None)
+
         file_base = os.path.splitext(os.path.basename(epub_path))[0]
     else:
         # Existing EPUB code
@@ -2313,6 +2354,38 @@ def main(log_callback=None, stop_callback=None):
     if is_text_file:
         from extract_glossary_from_txt import extract_chapters_from_txt
         chapters = extract_chapters_from_txt(args.epub)
+    elif args.epub.lower().endswith('.pdf'):
+        # PDF: extract page-by-page using the existing pdf_extractor logic
+        from pdf_extractor import extract_pdf_with_formatting
+        import tempfile
+
+        tmp_dir = tempfile.mkdtemp(prefix="glossarion_pdf_extract_")
+
+        previous_render_mode = os.environ.get("PDF_RENDER_MODE")
+        if not previous_render_mode:
+            os.environ["PDF_RENDER_MODE"] = "xhtml"
+
+        try:
+            page_list, _ = extract_pdf_with_formatting(
+                pdf_path=args.epub,
+                output_dir=tmp_dir,
+                extract_images=False,
+                page_by_page=True
+            )
+
+            chapters = []
+            for page_num, page_html in page_list:
+                if check_stop():
+                    return
+                try:
+                    page_text = BeautifulSoup(page_html, 'html.parser').get_text("\n", strip=True)
+                except Exception:
+                    page_text = str(page_html)
+                if page_text and page_text.strip():
+                    chapters.append(page_text)
+        finally:
+            if not previous_render_mode:
+                os.environ.pop("PDF_RENDER_MODE", None)
     else:
         chapters = extract_chapters_from_epub(args.epub)
     

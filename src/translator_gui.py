@@ -6320,7 +6320,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 ext = os.path.splitext(file_path)[1].lower()
                 if ext in image_extensions:
                     image_files.append(file_path)
-                elif ext in {'.epub', '.txt'}:
+                elif ext in {'.epub', '.txt', '.pdf'}:
                     text_files.append(file_path)
                 else:
                     self.append_log(f"⚠️ Skipping unsupported file type: {ext}")

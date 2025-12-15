@@ -851,11 +851,11 @@ async def translate(
             pass
 
 
-@bot.tree.command(name="extract", description="Extract glossary from EPUB or TXT file")
+@bot.tree.command(name="extract", description="Extract glossary from EPUB, TXT, or PDF file")
 @app_commands.describe(
     api_key="Your API key",
     model="AI model to use (or type custom model name)",
-    file="EPUB or TXT file to extract glossary from (optional if using url)",
+    file="EPUB, TXT, or PDF file to extract glossary from (optional if using url)",
     url="Google Drive or Dropbox link to file (optional if using file attachment)",
     google_credentials_path="Path to Google Cloud credentials JSON (for Vertex AI models)",
     extraction_mode="Text extraction method",
@@ -922,9 +922,9 @@ async def extract(
             filename = unquote(os.path.basename(parsed.path)) or 'downloaded_file.epub'
     
     # Validate file extension
-    if not (filename.endswith('.epub') or filename.endswith('.txt')):
+    if not (filename.endswith('.epub') or filename.endswith('.txt') or filename.endswith('.pdf')):
         await interaction.response.send_message(
-            "❌ File must be EPUB or TXT format", 
+            "❌ File must be EPUB, TXT, or PDF format", 
             ephemeral=True
         )
         return
