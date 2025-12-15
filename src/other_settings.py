@@ -5324,6 +5324,8 @@ def _create_anti_duplicate_section(self, parent):
             except Exception:
                 pass
         slider.setFixedWidth(200)
+        # Disable mousewheel scrolling on slider
+        slider.wheelEvent = lambda event: None
         row_h.addWidget(slider)
         
         value_lbl = QLabel("")
@@ -5366,11 +5368,11 @@ def _create_anti_duplicate_section(self, parent):
     
     # Frequency Penalty
     self.frequency_penalty_var = self.config.get('frequency_penalty', 0.0)
-    freq_slider, self.freq_penalty_value_label = _create_slider_row(core_v, "Frequency Penalty:", self, 'frequency_penalty_var', 0.0, 2.0, decimals=1)
+    freq_slider, self.freq_penalty_value_label = _create_slider_row(core_v, "Frequency Penalty:", self, 'frequency_penalty_var', 0.0, 2.0, decimals=2)
     
     # Presence Penalty
     self.presence_penalty_var = self.config.get('presence_penalty', 0.0)
-    pres_slider, self.pres_penalty_value_label = _create_slider_row(core_v, "Presence Penalty:", self, 'presence_penalty_var', 0.0, 2.0, decimals=1)
+    pres_slider, self.pres_penalty_value_label = _create_slider_row(core_v, "Presence Penalty:", self, 'presence_penalty_var', 0.0, 2.0, decimals=2)
     
     core_v.addStretch()
     
