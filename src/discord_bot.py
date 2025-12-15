@@ -184,6 +184,7 @@ async def model_autocomplete(interaction: discord.Interaction, current: str):
     batch_size="Paragraphs per batch (default: 10)",
     max_output_tokens="Max output tokens (default: 65536)",
     disable_smart_filter="Disable smart glossary filter (default: False)",
+    duplicate_algorithm="Duplicate handling: auto/strict/balanced/aggressive/basic (default: balanced)",
     target_language="Target language"
 )
 @app_commands.choices(extraction_mode=[
@@ -203,6 +204,7 @@ async def translate(
     batch_size: int = 10,
     max_output_tokens: int = 65536,
     disable_smart_filter: bool = False,
+    duplicate_algorithm: str = "balanced",
     target_language: str = "English"
 ):
     """Translate file using Glossarion"""
@@ -383,6 +385,7 @@ async def translate(
         os.environ['GLOSSARY_USE_LEGACY_CSV'] = '0'  # Use modern JSON format
         os.environ['GLOSSARY_DUPLICATE_KEY_MODE'] = config.get('glossary_duplicate_key_mode', 'auto')
         os.environ['GLOSSARY_DUPLICATE_CUSTOM_FIELD'] = config.get('glossary_duplicate_custom_field', '')
+        os.environ['GLOSSARY_DUPLICATE_ALGORITHM'] = duplicate_algorithm
         # Glossary-specific overrides for API settings
         os.environ['GLOSSARY_MAX_OUTPUT_TOKENS'] = str(config.get('glossary_max_output_tokens', max_output_tokens))
         os.environ['GLOSSARY_TEMPERATURE'] = str(config.get('manual_glossary_temperature', 0.1))
@@ -391,6 +394,9 @@ async def translate(
         
         # Set duplicate detection mode to balanced
         os.environ['DUPLICATE_DETECTION_MODE'] = 'balanced'
+        
+        # Disable batch translate headers (metadata translation)
+        os.environ['BATCH_TRANSLATE_HEADERS'] = '0'
         
         # Disable Gemini safety filter by default (enabled for Discord bot)
         os.environ['DISABLE_GEMINI_SAFETY'] = 'true'
@@ -743,9 +749,13 @@ async def translate(
     google_credentials_path="Path to Google Cloud credentials JSON (for Vertex AI models)",
     extraction_mode="Text extraction method",
     temperature="Glossary extraction temperature 0.0-1.0 (default: 0.1)",
+    batch_size="Paragraphs per batch (default: 10)",
     max_output_tokens="Max output tokens (default: 65536)",
     request_merging="Enable request merging to batch API calls (default: False)",
     merge_count="Number of requests to merge when request merging is enabled (default: 10)",
+    include_gender_context="Include surrounding sentences for better gender detection (more expensive, default: False)",
+    include_description="Include description/context field for each entry (requires gender context, default: False)",
+    duplicate_algorithm="Duplicate handling: auto/strict/balanced/aggressive/basic (default: balanced)",
     target_language="Target language for translations"
 )
 @app_commands.choices(extraction_mode=[
@@ -762,9 +772,13 @@ async def extract(
     google_credentials_path: str = None,
     extraction_mode: str = "enhanced",
     temperature: float = 0.1,
+    batch_size: int = 10,
     max_output_tokens: int = 65536,
     request_merging: bool = False,
     merge_count: int = 10,
+    include_gender_context: bool = False,
+    include_description: bool = False,
+    duplicate_algorithm: str = "balanced",
     target_language: str = "English"
 ):
     """Extract glossary from file using Glossarion"""
@@ -884,7 +898,7 @@ async def extract(
         
         # Set translation parameters (same as /translate)
         os.environ['BATCH_TRANSLATION'] = '1'
-        os.environ['BATCH_SIZE'] = '10'
+        os.environ['BATCH_SIZE'] = str(batch_size)
         os.environ['MAX_OUTPUT_TOKENS'] = str(max_output_tokens)
         os.environ['GLOSSARY_TEMPERATURE'] = str(temperature)
         os.environ['TRANSLATION_TEMPERATURE'] = str(temperature)
@@ -920,6 +934,9 @@ async def extract(
         os.environ['GLOSSARY_DISABLE_HONORIFICS_FILTER'] = '1' if config.get('glossary_disable_honorifics_filter', False) else '0'
         os.environ['GLOSSARY_REQUEST_MERGING_ENABLED'] = '1' if request_merging else '0'
         os.environ['GLOSSARY_REQUEST_MERGE_COUNT'] = str(merge_count)
+        os.environ['GLOSSARY_INCLUDE_GENDER_CONTEXT'] = '1' if include_gender_context else '0'
+        os.environ['GLOSSARY_INCLUDE_DESCRIPTION'] = '1' if (include_description and include_gender_context) else '0'
+        os.environ['GLOSSARY_DUPLICATE_ALGORITHM'] = duplicate_algorithm
         os.environ['DISABLE_GEMINI_SAFETY'] = 'true'
         
         # Handle Vertex AI / Google Cloud credentials
@@ -1070,25 +1087,28 @@ async def extract(
             await message.edit(embed=embed, view=None)
             return
         
-        # Find the glossary file
-        glossary_path = None
-        possible_paths = [
-            os.path.join(temp_dir, output_filename),
-            os.path.join(temp_dir, 'Glossary', output_filename),
-            os.path.join(temp_dir, f"{os.path.splitext(filename)[0]}_glossary.json")
-        ]
+        # Find the Glossary output directory
+        glossary_dir = os.path.join(temp_dir, 'Glossary')
         
-        for path in possible_paths:
-            if os.path.exists(path):
-                glossary_path = path
-                break
-        
-        if glossary_path and os.path.exists(glossary_path):
-            file_size = os.path.getsize(glossary_path)
+        if os.path.exists(glossary_dir) and os.path.isdir(glossary_dir):
+            # Create zip of entire Glossary folder
+            output_base = os.path.splitext(filename)[0]
+            zip_filename = f"{output_base}_glossary.zip"
+            zip_path = os.path.join(temp_dir, zip_filename)
+            
+            import zipfile
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for root, dirs, files in os.walk(glossary_dir):
+                    for file_item in files:
+                        file_path = os.path.join(root, file_item)
+                        arcname = os.path.relpath(file_path, glossary_dir)
+                        zipf.write(file_path, arcname)
+            
+            file_size = os.path.getsize(zip_path)
             
             embed = discord.Embed(
                 title="✅ Glossary Extraction Complete!",
-                description=f"**File:** {os.path.basename(glossary_path)}\n**Size:** {file_size / 1024:.2f}KB",
+                description=f"**File:** {zip_filename}\n**Size:** {file_size / 1024:.2f}KB\n\nContains all glossary outputs (CSV, JSON, MD)",
                 color=discord.Color.green()
             )
             await message.edit(embed=embed, view=None)
@@ -1096,7 +1116,7 @@ async def extract(
             try:
                 await interaction.followup.send(
                     f"Here's your extracted glossary!",
-                    file=discord.File(glossary_path),
+                    file=discord.File(zip_path),
                     ephemeral=True
                 )
             except discord.errors.HTTPException as e:
@@ -1108,7 +1128,7 @@ async def extract(
         else:
             embed = discord.Embed(
                 title="❌ Extraction Failed",
-                description="Could not find glossary output file",
+                description="Could not find Glossary output directory",
                 color=discord.Color.red()
             )
             await message.edit(embed=embed, view=None)
