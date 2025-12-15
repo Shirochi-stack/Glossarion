@@ -1153,36 +1153,213 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                     page_html = _externalize_data_uri_images(page_html, images_dir, i + 1)
                 except Exception:
                     pass
-                # Inject page anchor and clickable overlays for native PDF links (preserve TOC entries)
+                # Preserve PDF hyperlinks (annotations) in MuPDF XHTML/HTML output.
+                # IMPORTANT: MuPDF's XHTML output is often *reflowed* (not 1:1 positioned), so absolute overlay
+                # rectangles from PDF coords can end up misaligned. Instead, try to wrap the *actual extracted*
+                # text or images in <a href="..."> so links survive in both HTML and HTML→PDF conversion.
                 try:
-                    anchor = f'<a id="page-{i + 1}" style="position:absolute;left:0;top:0;width:0;height:0;display:block;overflow:hidden"></a>'
-                    links = page.get_links()
-                    overlays = []
-                    for ln in links or []:
+                    from bs4 import BeautifulSoup
+                    from bs4.element import NavigableString, Tag
+
+                    def _rect_to_tuple(r) -> Tuple[float, float, float, float]:
+                        if hasattr(r, 'x0'):
+                            x0, y0, x1, y1 = float(r.x0), float(r.y0), float(r.x1), float(r.y1)
+                        else:
+                            x0, y0, x1, y1 = float(r[0]), float(r[1]), float(r[2]), float(r[3])
+                        # normalize
+                        if x1 < x0:
+                            x0, x1 = x1, x0
+                        if y1 < y0:
+                            y0, y1 = y1, y0
+                        return x0, y0, x1, y1
+
+                    def _rect_area(rt) -> float:
+                        x0, y0, x1, y1 = rt
+                        return max(0.0, x1 - x0) * max(0.0, y1 - y0)
+
+                    def _rect_intersection_area(a, b) -> float:
+                        ax0, ay0, ax1, ay1 = a
+                        bx0, by0, bx1, by1 = b
+                        ix0 = max(ax0, bx0)
+                        iy0 = max(ay0, by0)
+                        ix1 = min(ax1, bx1)
+                        iy1 = min(ay1, by1)
+                        return max(0.0, ix1 - ix0) * max(0.0, iy1 - iy0)
+
+                    def _collapse_ws(s: str) -> str:
+                        return ' '.join((s or '').split())
+
+                    def _wrap_text_once(soup: BeautifulSoup, needle: str, href: str, external: bool) -> bool:
+                        if not needle:
+                            return False
+                        needle_norm = _collapse_ws(needle)
+                        if len(needle_norm) < 3:
+                            return False
+
+                        for node in soup.find_all(string=True):
+                            if not isinstance(node, NavigableString):
+                                continue
+                            if not node.parent or (isinstance(node.parent, Tag) and node.parent.name in ('script', 'style')):
+                                continue
+                            # Don't double-wrap
+                            if isinstance(node.parent, Tag) and node.parent.name == 'a':
+                                continue
+
+                            s = str(node)
+                            if not s.strip():
+                                continue
+
+                            # Exact match first
+                            idx = s.find(needle)
+                            if idx != -1:
+                                before = s[:idx]
+                                match = s[idx:idx + len(needle)]
+                                after = s[idx + len(needle):]
+
+                                a = soup.new_tag('a', href=href)
+                                if external:
+                                    a['target'] = '_blank'
+                                    a['rel'] = 'noopener noreferrer'
+                                a.string = match
+
+                                new_nodes = []
+                                if before:
+                                    new_nodes.append(NavigableString(before))
+                                new_nodes.append(a)
+                                if after:
+                                    new_nodes.append(NavigableString(after))
+
+                                node.replace_with(*new_nodes)
+                                return True
+
+                            # Fallback: normalized containment (wrap the whole text node)
+                            if needle_norm in _collapse_ws(s):
+                                a = soup.new_tag('a', href=href)
+                                if external:
+                                    a['target'] = '_blank'
+                                    a['rel'] = 'noopener noreferrer'
+                                a.string = s
+                                node.replace_with(a)
+                                return True
+
+                        return False
+
+                    soup = BeautifulSoup(page_html, 'html.parser')
+
+                    # Pick a container: MuPDF often uses <div id="page0">, but fall back to <body> / root.
+                    container = soup.find(id=_re.compile(r'^page\d+$'))
+                    if container is None:
+                        container = soup.body if soup.body else soup
+
+                    # Anchor for internal #page-N navigation when pages are combined
+                    page_anchor_id = f'page-{i + 1}'
+                    if soup.find(id=page_anchor_id) is None:
+                        anchor = soup.new_tag('a', id=page_anchor_id)
+                        if isinstance(container, Tag):
+                            container.insert(0, anchor)
+                        else:
+                            soup.insert(0, anchor)
+
+                    # Build image bbox map for this page (if we extracted images)
+                    page_images = images_by_page.get(i, []) if isinstance(images_by_page, dict) else []
+                    image_boxes = []  # list[(filename, rect_tuple)]
+                    for img in page_images:
+                        try:
+                            fn = img.get('filename')
+                            bb = img.get('bbox')
+                            if fn and bb:
+                                image_boxes.append((fn, _rect_to_tuple(bb)))
+                        except Exception:
+                            continue
+
+                    unresolved = []
+
+                    for ln in (page.get_links() or []):
                         r = ln.get('from')
                         if not r:
                             continue
-                        try:
-                            x0, y0, x1, y1 = float(r.x0), float(r.y0), float(r.x1), float(r.y1)
-                        except Exception:
-                            # r may be a tuple
-                            x0, y0, x1, y1 = r[0], r[1], r[2], r[3]
+                        rt = _rect_to_tuple(r)
+                        if _rect_area(rt) <= 0:
+                            continue
+
                         href = None
+                        external = False
                         if ln.get('page') is not None and ln.get('page') >= 0:
                             href = f'#page-{int(ln["page"]) + 1}'
                         elif ln.get('uri'):
                             href = ln['uri']
+                            external = True
                         if not href:
                             continue
-                        overlays.append(
-                            f'<a class="pdf-link-overlay" href="{href}" style="position:absolute; left:{x0}px; top:{y0}px; width:{x1 - x0}px; height:{y1 - y0}px; display:block; opacity:0; z-index:9999; pointer-events:auto;"></a>'
-                        )
-                    overlays_html = ''.join(overlays)
-                    m = _re.search(r'(<body[^>]*>)', page_html, flags=_re.IGNORECASE)
-                    if m:
-                        page_html = page_html.replace(m.group(1), m.group(1) + anchor + overlays_html, 1)
-                    else:
-                        page_html = anchor + overlays_html + page_html
+
+                        # 1) If this link overlaps an extracted image bbox, wrap that <img>
+                        best_img = None
+                        best_score = 0.0
+                        for fn, ib in image_boxes:
+                            ia = _rect_intersection_area(rt, ib)
+                            if ia <= 0:
+                                continue
+                            score = ia / max(_rect_area(rt), 1e-9)
+                            if score > best_score:
+                                best_score = score
+                                best_img = fn
+
+                        if best_img and best_score >= 0.4:
+                            # Find matching <img> by filename in src
+                            img_tag = soup.find('img', src=_re.compile(_re.escape(best_img) + r'$'))
+                            if img_tag and img_tag.parent and getattr(img_tag.parent, 'name', None) != 'a':
+                                a = soup.new_tag('a', href=href)
+                                if external:
+                                    a['target'] = '_blank'
+                                    a['rel'] = 'noopener noreferrer'
+                                img_tag.replace_with(a)
+                                a.append(img_tag)
+                                continue
+
+                        # 2) Try to wrap the text inside the link rectangle
+                        link_text = ''
+                        try:
+                            link_text = page.get_text('text', clip=fitz.Rect(*rt))
+                        except Exception:
+                            link_text = ''
+                        link_text = _collapse_ws(link_text)
+
+                        if link_text and _wrap_text_once(soup, link_text, href, external):
+                            continue
+
+                        # 3) Fallback: keep the link as a visible list at the end of the page
+                        unresolved.append(href)
+
+                    if unresolved:
+                        uniq = []
+                        seen = set()
+                        for u in unresolved:
+                            if u not in seen:
+                                uniq.append(u)
+                                seen.add(u)
+
+                        links_div = soup.new_tag('div', **{'class': 'pdf-links'})
+                        p = soup.new_tag('p')
+                        p.string = 'Links:'
+                        links_div.append(p)
+                        ul = soup.new_tag('ul')
+                        for u in uniq:
+                            li = soup.new_tag('li')
+                            a = soup.new_tag('a', href=u)
+                            if not u.startswith('#'):
+                                a['target'] = '_blank'
+                                a['rel'] = 'noopener noreferrer'
+                            a.string = u
+                            li.append(a)
+                            ul.append(li)
+                        links_div.append(ul)
+
+                        if isinstance(container, Tag):
+                            container.append(links_div)
+                        else:
+                            soup.append(links_div)
+
+                    page_html = str(soup)
                 except Exception:
                     pass
                 
