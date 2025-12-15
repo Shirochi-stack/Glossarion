@@ -20,7 +20,10 @@ try:
     HAS_GUI = True
 except ImportError:
     HAS_GUI = False
-    QObject = object  # Fallback for non-GUI usage
+    # Fallback dummy classes for non-GUI usage
+    QObject = object
+    QDialog = object
+    QWidget = object
 import json
 import os
 import threading
