@@ -8,15 +8,22 @@ import unicodedata
 from difflib import SequenceMatcher
 from collections import Counter
 
-# PySide6 imports
-from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QCheckBox, QTabWidget, QWidget, QScrollArea, QFrame,
-    QSlider, QSpinBox, QDoubleSpinBox, QRadioButton, QComboBox,
-    QGroupBox, QMessageBox
-)
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QIcon
+# PySide6 imports - optional for non-GUI usage
+try:
+    from PySide6.QtWidgets import (
+        QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+        QCheckBox, QTabWidget, QWidget, QScrollArea, QFrame,
+        QSlider, QSpinBox, QDoubleSpinBox, QRadioButton, QComboBox,
+        QGroupBox, QMessageBox
+    )
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QIcon
+    HAS_GUI = True
+except ImportError:
+    HAS_GUI = False
+    # Dummy classes for non-GUI usage
+    QDialog = object
+    QWidget = object
 
 class AIHunterConfigGUI:
     """GUI for configuring AI Hunter detection parameters"""
