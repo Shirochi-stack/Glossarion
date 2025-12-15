@@ -20,11 +20,53 @@ sys.path.insert(0, src_dir)
 
 # Import Glossarion modules
 try:
+    # Core translation modules
     import TransateKRtoEN
     import extract_glossary_from_epub
+    import extract_glossary_from_txt
     from model_options import get_model_options
     from api_key_encryption import decrypt_config
-    # Don't import TranslatorGUI - it requires Qt/GUI. Just use TransateKRtoEN directly
+    
+    # File processing modules
+    import pdf_extractor
+    import epub_converter
+    import enhanced_text_extractor
+    import txt_processor
+    
+    # Glossary management
+    import GlossaryManager
+    import glossary_compressor
+    
+    # Chapter and text processing
+    import chapter_splitter
+    import Chapter_Extractor
+    import chapter_extraction_manager
+    
+    # API and client modules
+    import unified_api_client
+    import async_api_processor
+    import multi_api_key_manager
+    
+    # Utility modules
+    import history_manager
+    import metadata_batch_translator
+    import google_free_translate
+    
+    # Duplicate detection
+    import advanced_duplicate_detection
+    import duplicate_detection_config
+    
+    # Image translation (may not be used in Discord but import for completeness)
+    try:
+        import image_translator
+        import manga_translator
+        import manga_integration
+    except ImportError:
+        pass  # Image modules may have additional dependencies
+    
+    # Don't import GUI modules - they require Qt/PySide6
+    # (translator_gui, GlossaryManager_GUI, QA_Scanner_GUI, etc.)
+    
     GLOSSARION_AVAILABLE = True
     glossary_main = extract_glossary_from_epub.main
 except ImportError as e:
@@ -185,7 +227,7 @@ async def model_autocomplete(interaction: discord.Interaction, current: str):
     max_output_tokens="Max output tokens (default: 65536)",
     disable_smart_filter="Disable smart glossary filter (default: False)",
     duplicate_algorithm="Duplicate handling: auto/strict/balanced/aggressive/basic (default: balanced)",
-    manual_glossary="Path to manual glossary file (.csv or .json) to use instead of auto-generated",
+    manual_glossary="Manual glossary file (.csv or .json) to upload and use instead of auto-generated",
     enable_auto_glossary="Enable automatic glossary generation (default: True)",
     request_merging="Enable request merging (combine multiple chapters per API call)",
     request_merge_count="Chapters per request when merging enabled (default: 3)",
@@ -210,7 +252,7 @@ async def translate(
     max_output_tokens: int = 65536,
     disable_smart_filter: bool = False,
     duplicate_algorithm: str = "balanced",
-    manual_glossary: str = None,
+    manual_glossary: discord.Attachment = None,
     enable_auto_glossary: bool = True,
     request_merging: bool = False,
     request_merge_count: int = 3,
@@ -416,15 +458,17 @@ async def translate(
         # Disable batch translate headers (metadata translation)
         os.environ['BATCH_TRANSLATE_HEADERS'] = '0'
         
-        # Set manual glossary path if provided
+        # Set manual glossary path if provided (download attachment first)
         if manual_glossary:
-            # Validate glossary file exists and has correct extension
-            if os.path.exists(manual_glossary) and (manual_glossary.endswith('.csv') or manual_glossary.endswith('.json')):
-                os.environ['MANUAL_GLOSSARY'] = manual_glossary
-                sys.stderr.write(f"[CONFIG] Using manual glossary: {os.path.basename(manual_glossary)}\n")
+            # Validate glossary file extension
+            if manual_glossary.filename.endswith('.csv') or manual_glossary.filename.endswith('.json'):
+                glossary_path = os.path.join(temp_dir, manual_glossary.filename)
+                await manual_glossary.save(glossary_path)
+                os.environ['MANUAL_GLOSSARY'] = glossary_path
+                sys.stderr.write(f"[CONFIG] Using manual glossary: {manual_glossary.filename}\n")
                 sys.stderr.flush()
             else:
-                sys.stderr.write(f"[WARNING] Manual glossary path invalid or not .csv/.json: {manual_glossary}\n")
+                sys.stderr.write(f"[WARNING] Manual glossary must be .csv or .json: {manual_glossary.filename}\n")
                 sys.stderr.flush()
         
         # Request merging settings (combine multiple chapters into single API request)
