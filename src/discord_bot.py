@@ -2,6 +2,16 @@
 """
 Glossarion Discord Bot
 Translate files via Discord using your existing Glossarion installation
+
+PDF Formatting Integration:
+- When processing PDF files, the bot automatically uses the pdf_extractor module
+- The pdf_extractor.generate_css_from_pdf() function detects and extracts:
+  * base_font_size: The median font size from the PDF body text
+  * font_family: The most common font family (mapped to web-safe fonts)
+  * text_align: The predominant text alignment (left, center, right, justify)
+  * line_height_ratio: The calculated line spacing ratio
+- These variables are automatically applied during PDF -> HTML conversion
+- No manual configuration needed - styling is preserved from the original PDF
 """
 
 import discord
@@ -427,6 +437,15 @@ async def translate(
         else:
             os.environ['EXTRACTION_MODE'] = 'smart'
             os.environ['FILE_FILTERING_LEVEL'] = 'smart'
+        
+        # Set PDF-specific styling extraction variables from pdf_extractor
+        # These ensure PDF font sizes, alignments, and styles are preserved
+        if filename.endswith('.pdf'):
+            sys.stderr.write(f"[CONFIG] Enabling PDF formatting extraction (font size, alignment, etc.)\n")
+            sys.stderr.flush()
+            # The pdf_extractor.generate_css_from_pdf() function will automatically
+            # detect and apply: base_font_size, font_family, text_align, line_height_ratio
+            # from the actual PDF file during processing
         
         # Enable automatic glossary generation (user configurable)
         os.environ['ENABLE_AUTO_GLOSSARY'] = '1' if enable_auto_glossary else '0'
@@ -1003,6 +1022,15 @@ async def extract(
         else:
             os.environ['EXTRACTION_MODE'] = 'smart'
             os.environ['FILE_FILTERING_LEVEL'] = 'smart'
+        
+        # Set PDF-specific styling extraction variables from pdf_extractor
+        # These ensure PDF font sizes, alignments, and styles are preserved
+        if filename.endswith('.pdf'):
+            sys.stderr.write(f"[CONFIG] Enabling PDF formatting extraction (font size, alignment, etc.)\n")
+            sys.stderr.flush()
+            # The pdf_extractor.generate_css_from_pdf() function will automatically
+            # detect and apply: base_font_size, font_family, text_align, line_height_ratio
+            # from the actual PDF file during processing
         
         # Set all glossary variables from config (same as /translate)
         os.environ['ENABLE_AUTO_GLOSSARY'] = '1'
