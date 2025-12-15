@@ -4,17 +4,23 @@ Multi API Key Manager for Glossarion
 Handles multiple API keys with round-robin load balancing and rate limit management
 """
 
-from PySide6.QtCore import QMetaObject, Q_ARG
-from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QLabel, QPushButton, QLineEdit, 
-    QTextEdit, QScrollArea, QFileDialog, QMessageBox, QComboBox, QCheckBox, 
-    QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QSpinBox,
-    QTreeWidget, QTreeWidgetItem, QAbstractItemView, QHeaderView, QMenu, QFrame,
-    QCompleter
-)
-from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPropertyAnimation, QEasingCurve
-from PySide6.QtGui import QIcon, QFont, QPixmap, QShortcut, QKeySequence, QTransform
-from spinning import create_icon_label, animate_icon
+# GUI imports - optional for Discord bot
+try:
+    from PySide6.QtCore import QMetaObject, Q_ARG
+    from PySide6.QtWidgets import (
+        QApplication, QMainWindow, QWidget, QLabel, QPushButton, QLineEdit, 
+        QTextEdit, QScrollArea, QFileDialog, QMessageBox, QComboBox, QCheckBox, 
+        QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QSpinBox,
+        QTreeWidget, QTreeWidgetItem, QAbstractItemView, QHeaderView, QMenu, QFrame,
+        QCompleter
+    )
+    from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPropertyAnimation, QEasingCurve
+    from PySide6.QtGui import QIcon, QFont, QPixmap, QShortcut, QKeySequence, QTransform
+    from spinning import create_icon_label, animate_icon
+    HAS_GUI = True
+except ImportError:
+    HAS_GUI = False
+    QObject = object  # Fallback for non-GUI usage
 import json
 import os
 import threading
