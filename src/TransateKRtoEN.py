@@ -7555,62 +7555,51 @@ def main(log_callback=None, stop_callback=None):
         
         # Create merge groups if request merging is enabled
         if use_request_merging:
-            merge_groups = RequestMerger.create_merge_groups(chapters_to_translate, config.REQUEST_MERGE_COUNT)
+            # Build proximity runs first (so we never merge far-apart chapters),
+            # then pack each run under the token budget. This avoids patterns like
+            # 2+1, 2+1 when REQUEST_MERGE_COUNT=3 but only 2 chapters fit; instead
+            # we repack into 2+2, 2+2 when possible.
+            proximity_runs = RequestMerger.create_merge_groups(
+                chapters_to_translate,
+                max(1, len(chapters_to_translate)),
+            )
 
-            # Before finalizing batch merge groups, ensure that merged content
-            # for each group fits within a single-chunk token budget. If not,
-            # progressively drop children from the end. Groups that shrink to
-            # a single chapter will simply be processed as normal single-
-            # chapter units and can be chunked by ChapterSplitter.
             max_output_tokens = config.get_effective_output_limit()
             safety_margin_output = 500
             compression_factor = getattr(config, 'COMPRESSION_FACTOR', 1.0) or 1.0
             available_tokens = int((max_output_tokens - safety_margin_output) / compression_factor)
             available_tokens = max(available_tokens, 1000)
 
-            adjusted_merge_groups = []
-            for original_group in merge_groups:
-                if len(original_group) <= 1:
-                    adjusted_merge_groups.append(original_group)
+            merge_groups = []
+            for run in proximity_runs:
+                if len(run) <= 1:
+                    merge_groups.append(run)
                     continue
 
-                working = list(original_group)
-                dropped_chapters = []  # chapters we remove from this group but still need to translate
-                while len(working) > 1:
-                    # Estimate tokens for the merged content of this group
-                    merge_input = [
-                        (ch.get('actual_chapter_num', ch['num']), ch["body"], ch)
-                        for (idx, ch) in working
-                    ]
-                    merged_preview = RequestMerger.merge_chapters(merge_input, log_injections=False)
-                    merged_tokens = chapter_splitter.count_tokens(merged_preview)
+                i = 0
+                while i < len(run):
+                    group = [run[i]]
+                    i += 1
 
-                    if merged_tokens <= available_tokens:
-                        break
+                    # Try to grow the group up to REQUEST_MERGE_COUNT, but stop
+                    # when adding the next chapter would exceed the token budget.
+                    while i < len(run) and len(group) < config.REQUEST_MERGE_COUNT:
+                        candidate = run[i]
+                        merge_input = [
+                            (ch.get('actual_chapter_num', ch['num']), ch["body"], ch)
+                            for (idx, ch) in (group + [candidate])
+                        ]
+                        merged_preview = RequestMerger.merge_chapters(merge_input, log_injections=False)
+                        merged_tokens = chapter_splitter.count_tokens(merged_preview)
 
-                    # Too large for a single request – drop the last child and retry
-                    dropped_idx, dropped_chapter = working.pop()
-                    dropped_chapters.append((dropped_idx, dropped_chapter))
-                    dropped_num = dropped_chapter.get('actual_chapter_num', dropped_chapter['num'])
-                    try:
-                        parent_num_debug = working[0][1].get('actual_chapter_num', working[0][1]['num']) if working else dropped_num
-                    except Exception:
-                        parent_num_debug = dropped_num
-                    print(
-                        f"   ⚠️ Reduced batch merge group starting at chapter {parent_num_debug}: "
-                        f"dropping chapter {dropped_num} (merged ~{merged_tokens:,} tokens exceeds limit {available_tokens:,})"
-                    )
+                        if merged_tokens <= available_tokens:
+                            group.append(candidate)
+                            i += 1
+                        else:
+                            break
 
-                # Keep the (possibly reduced) merge group
-                adjusted_merge_groups.append(working)
+                    merge_groups.append(group)
 
-                # Any dropped chapters should still be translated, just not merged.
-                # Add them back as their own single-chapter groups, preserving
-                # original order (reverse the pop sequence).
-                for dropped_idx, dropped_chapter in reversed(dropped_chapters):
-                    adjusted_merge_groups.append([(dropped_idx, dropped_chapter)])
-
-            merge_groups = adjusted_merge_groups
             print(f"🔗 Created {len(merge_groups)} merge groups from {total_to_process} chapters (after size adjustment)")
 
             units_to_process = merge_groups
@@ -7901,8 +7890,8 @@ def main(log_callback=None, stop_callback=None):
         merge_groups = {}  # Maps parent_idx -> list of child (idx, chapter) tuples
         merged_children = set()  # Set of idx that are merged into another chapter
         
-        # Request merging only for PDF files
-        if config.REQUEST_MERGING_ENABLED and config.REQUEST_MERGE_COUNT > 1 and is_pdf_file:
+        # Request merging for EPUB/PDF (non-text) in non-batch mode
+        if config.REQUEST_MERGING_ENABLED and config.REQUEST_MERGE_COUNT > 1 and (is_pdf_file or not is_text_file):
             print(f"\n🔗 REQUEST MERGING ENABLED: Combining up to {config.REQUEST_MERGE_COUNT} chapters per request")
             
             # Collect chapters that need translation
@@ -7952,51 +7941,46 @@ def main(log_callback=None, stop_callback=None):
                 config.REQUEST_MERGE_COUNT
             )
 
-            # Before finalizing groups, ensure that merged content for each group
-            # fits within a single-chunk token budget. If not, progressively drop
-            # children from the end. If a group shrinks to a single chapter, it
-            # will be processed normally (no request merging) and can be split
-            # into chunks by the ChapterSplitter.
+            # Build proximity runs first (so we never merge far-apart chapters),
+            # then pack each run under the token budget (repacking avoids 2+1,2+1 patterns).
             max_output_tokens = config.get_effective_output_limit()
             safety_margin_output = 500
             compression_factor = getattr(config, 'COMPRESSION_FACTOR', 1.0) or 1.0
             available_tokens = int((max_output_tokens - safety_margin_output) / compression_factor)
             available_tokens = max(available_tokens, 1000)
 
-            adjusted_groups = []
-            for original_group in groups:
-                if len(original_group) <= 1:
-                    adjusted_groups.append(original_group)
+            proximity_runs = RequestMerger.create_merge_groups(
+                chapters_needing_translation,
+                max(1, len(chapters_needing_translation)),
+            )
+
+            groups = []
+            for run in proximity_runs:
+                if len(run) <= 1:
+                    groups.append(run)
                     continue
 
-                working = list(original_group)
-                while len(working) > 1:
-                    # Estimate tokens for the merged content of this group
-                    merge_input = [
-                        (g_actual_num, g_chapter["body"], g_chapter)
-                        for (g_idx, g_chapter, g_actual_num, g_content_hash) in working
-                    ]
-                    merged_preview = RequestMerger.merge_chapters(merge_input, log_injections=False)
-                    merged_tokens = chapter_splitter.count_tokens(merged_preview)
+                i = 0
+                while i < len(run):
+                    group = [run[i]]
+                    i += 1
 
-                    if merged_tokens <= available_tokens:
-                        break
+                    while i < len(run) and len(group) < config.REQUEST_MERGE_COUNT:
+                        candidate = run[i]
+                        merge_input = [
+                            (g_actual_num, g_chapter["body"], g_chapter)
+                            for (g_idx, g_chapter, g_actual_num, g_content_hash) in (group + [candidate])
+                        ]
+                        merged_preview = RequestMerger.merge_chapters(merge_input, log_injections=False)
+                        merged_tokens = chapter_splitter.count_tokens(merged_preview)
 
-                    # Too large for a single request – drop the last child and retry
-                    dropped = working.pop()
-                    dropped_num = dropped[2]
-                    try:
-                        parent_num_debug = working[0][2] if working else dropped_num
-                    except Exception:
-                        parent_num_debug = dropped_num
-                    print(
-                        f"   ⚠️ Reduced merge group starting at chapter {parent_num_debug}: "
-                        f"dropping chapter {dropped_num} (merged ~{merged_tokens:,} tokens exceeds limit {available_tokens:,})"
-                    )
+                        if merged_tokens <= available_tokens:
+                            group.append(candidate)
+                            i += 1
+                        else:
+                            break
 
-                adjusted_groups.append(working)
-
-            groups = adjusted_groups
+                    groups.append(group)
             
             for group in groups:
                 if len(group) > 1:

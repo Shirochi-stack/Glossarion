@@ -437,7 +437,7 @@ async def translate(
         os.environ['APPEND_GLOSSARY'] = '1'
         os.environ['APPEND_GLOSSARY_PROMPT'] = config.get('append_glossary_prompt', '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n')
         # Set all glossary variables from GUI
-        os.environ['GLOSSARY_COMPRESSION_FACTOR'] = str(config.get('glossary_compression_factor', 0.88))
+        os.environ['GLOSSARY_COMPRESSION_FACTOR'] = str(config.get('glossary_compression_factor', 1.0))
         os.environ['GLOSSARY_FILTER_MODE'] = config.get('glossary_filter_mode', 'all')
         os.environ['GLOSSARY_STRIP_HONORIFICS'] = '1' if config.get('glossary_strip_honorifics', True) else '0'
         os.environ['GLOSSARY_FUZZY_THRESHOLD'] = str(config.get('glossary_fuzzy_threshold', 0.90))

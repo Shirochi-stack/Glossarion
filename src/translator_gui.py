@@ -7135,7 +7135,7 @@ Important rules:
                     # Glossary-specific overrides (with fallback to global settings)
                     'GLOSSARY_REQUEST_MERGING_ENABLED': '1' if self.config.get('glossary_request_merging_enabled', False) else '0',
                     'GLOSSARY_REQUEST_MERGE_COUNT': str(self.config.get('glossary_request_merge_count', 10)),
-                    'GLOSSARY_COMPRESSION_FACTOR': str(self.config.get('glossary_compression_factor', getattr(self, 'compression_factor_var', 0.88))),
+                    'GLOSSARY_COMPRESSION_FACTOR': str(self.config.get('glossary_compression_factor', getattr(self, 'compression_factor_var', 1.0))),
                     'GLOSSARY_MAX_OUTPUT_TOKENS': str(self.config.get('glossary_max_output_tokens', self.max_output_tokens)),
                 }
                 
