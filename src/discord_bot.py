@@ -44,12 +44,18 @@ try:
     
     # API and client modules
     import unified_api_client
-    import async_api_processor
+    try:
+        import async_api_processor
+    except ImportError:
+        async_api_processor = None
     import multi_api_key_manager
     
     # Utility modules
     import history_manager
-    import metadata_batch_translator
+    try:
+        import metadata_batch_translator
+    except ImportError:
+        metadata_batch_translator = None
     import google_free_translate
     
     # Duplicate detection
@@ -59,10 +65,16 @@ try:
     # Image translation (may not be used in Discord but import for completeness)
     try:
         import image_translator
+    except ImportError:
+        image_translator = None
+    try:
         import manga_translator
+    except ImportError:
+        manga_translator = None
+    try:
         import manga_integration
     except ImportError:
-        pass  # Image modules may have additional dependencies
+        manga_integration = None
     
     # Don't import GUI modules - they require Qt/PySide6
     # (translator_gui, GlossaryManager_GUI, QA_Scanner_GUI, etc.)
