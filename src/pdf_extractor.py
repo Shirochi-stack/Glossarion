@@ -691,22 +691,10 @@ img {{
     text-justify: inter-word;
 }}
 
-/* Page breaks for proper document flow */
+/* Page breaks disabled - continuous flow */
 .page-break {{
-    page-break-before: always;
-    break-before: page;
-    clear: both;
-    height: 0;
-    margin: 0;
-    padding: 0;
-}}
-
-/* Print-specific page breaks */
-@media print {{
-    .page-break {{
-        page-break-before: always;
-        break-before: page;
-    }}
+    /* Disabled to allow continuous page flow */
+    display: none;
 }}
 
 /* Improve spacing for centered content */
@@ -1640,7 +1628,7 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                 page_html.append('</div><!-- end toc at page end -->')
                 # Don't reset in_toc_section here in case TOC continues on next page
             
-            # Add page content with page break if needed
+            # Add page content without page breaks (continuous flow)
             if page_html:
                 # Insert TOC from outline BEFORE page content only if synthesizing
                 if toc_mode == "synthesize" and toc_from_outline and page_num == toc_page_number:
@@ -1648,11 +1636,6 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                     toc_from_outline = None  # Only insert once
                 
                 page_content = '\n'.join(page_html)
-                
-                # Add page break div for title pages and chapter starts
-                if should_page_break and page_num > 0:
-                    html_parts.append('<div class="page-break"></div>')
-                
                 html_parts.append(page_content)
         
         doc.close()
