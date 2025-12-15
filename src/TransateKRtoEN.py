@@ -7232,8 +7232,10 @@ def main(log_callback=None, stop_callback=None):
                 config._range_skipped_chapters.append(c['actual_chapter_num'])
                 continue
                 
+        # IMPORTANT: pass chapter_obj so ProgressManager can resolve composite keys
+        # (e.g. when multiple spine items share the same chapter number).
         needs_translation, skip_reason, _ = progress_manager.check_chapter_status(
-            idx, actual_num, content_hash, out
+            idx, actual_num, content_hash, out, chapter_obj=c
         )
         
         if not needs_translation:
