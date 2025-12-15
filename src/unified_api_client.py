@@ -7488,11 +7488,14 @@ class UnifiedClient:
             if attempt < max_retries - 1:
                 snippet = _sanitize_for_log(resp.text, 300)
                 
-                # Check for "max_tokens is too large" error before logging
-                # Handle both standard and Groq-specific error messages
-                if status == 400 and ("max_tokens is too large" in resp.text or 
-                                     "supports at most" in resp.text or
-                                     "must be less than or equal to" in resp.text):
+                # Check for token-limit errors before logging
+                # Supports: chat (/chat/completions), legacy completions (/completions), and Responses API (/responses).
+                if status == 400 and (
+                    "max_tokens is too large" in resp.text or
+                    "max_output_tokens" in resp.text or
+                    "supports at most" in resp.text or
+                    "must be less than or equal to" in resp.text
+                ):
                     # Log the original error first
                     print(f"{provider} API error: {status} - {snippet} (attempt {attempt + 1}/{max_retries})")
                     
@@ -7500,38 +7503,40 @@ class UnifiedClient:
                     supported_max = None
                     
                     # Try multiple patterns to extract the max token limit
-                    # Pattern 1: "supports at most X completion tokens" (standard)
-                    match = re.search(r'supports at most (\d+) completion tokens', resp.text)
+                    # Pattern 1: "supports at most X completion/output tokens"
+                    match = re.search(r'supports at most (\d+) (?:completion|output) tokens', resp.text)
                     if match:
                         supported_max = int(match.group(1))
                     
-                    # Pattern 2: "must be less than or equal to X" (Groq format)
-                    if not match:
-                        # Extract all numbers and look for one that appears after "must be less than or equal to"
-                        if 'must be less than or equal to' in resp.text:
-                            # Find the position and extract numbers after it
-                            pos = resp.text.find('must be less than or equal to')
-                            after_text = resp.text[pos:pos+100]  # Look at next 100 chars
-                            numbers = re.findall(r'\d+', after_text)
-                            if numbers:
-                                # Take the first number found (should be the limit)
-                                supported_max = int(numbers[0])
+                    # Pattern 2: "must be less than or equal to X" (common format)
+                    if not match and 'must be less than or equal to' in resp.text:
+                        pos = resp.text.find('must be less than or equal to')
+                        after_text = resp.text[pos:pos+120]
+                        numbers = re.findall(r'\d+', after_text)
+                        if numbers:
+                            supported_max = int(numbers[0])
                     
                     if supported_max:
-                        # Try to find current max_tokens in the request body
-                        current_max = json.get('max_tokens') or json.get('max_completion_tokens') if json else None
+                        # Try to find current output limit in the request body
+                        current_max = None
+                        if json:
+                            current_max = json.get('max_output_tokens') or json.get('max_tokens') or json.get('max_completion_tokens')
                         
                         if current_max and supported_max < current_max:
-                            print(f"    🔧 AUTO-ADJUSTING: max_tokens too large ({current_max:,}) - model supports {supported_max:,}")
+                            print(f"    🔧 AUTO-ADJUSTING: token limit too large ({current_max:,}) - model supports {supported_max:,}")
                             print(f"    🔄 Retrying with adjusted limit: {supported_max:,} tokens")
                             
                             # Update the request body for the retry
-                            if 'max_tokens' in json:
-                                json['max_tokens'] = supported_max
-                                print(f"    ✅ Updated json['max_tokens'] = {supported_max:,}")
-                            if 'max_completion_tokens' in json:
-                                json['max_completion_tokens'] = supported_max
-                                print(f"    ✅ Updated json['max_completion_tokens'] = {supported_max:,}")
+                            if json:
+                                if 'max_output_tokens' in json:
+                                    json['max_output_tokens'] = supported_max
+                                    print(f"    ✅ Updated json['max_output_tokens'] = {supported_max:,}")
+                                if 'max_tokens' in json:
+                                    json['max_tokens'] = supported_max
+                                    print(f"    ✅ Updated json['max_tokens'] = {supported_max:,}")
+                                if 'max_completion_tokens' in json:
+                                    json['max_completion_tokens'] = supported_max
+                                    print(f"    ✅ Updated json['max_completion_tokens'] = {supported_max:,}")
                             
                             # Don't count this as a failed attempt - reset the counter
                             attempt = max(0, attempt - 1)
@@ -7539,14 +7544,14 @@ class UnifiedClient:
                             # Retry immediately
                             print(f"    ⏱️ Sleeping 1s before retry...")
                             time.sleep(1)
-                            print(f"    🚀 Retrying request with adjusted max_tokens...")
+                            print(f"    🚀 Retrying request with adjusted token limit...")
                             continue
                         else:
-                            print(f"    ⚠️ max_tokens error but cannot adjust: current={current_max}, supported={supported_max}")
+                            print(f"    ⚠️ token-limit error but cannot adjust: current={current_max}, supported={supported_max}")
                     else:
-                        print(f"    ⚠️ max_tokens error but couldn't parse limit from error message")
+                        print(f"    ⚠️ token-limit error but couldn't parse limit from error message")
                 else:
-                    # Normal error logging for non-max_tokens errors
+                    # Normal error logging for non-token-limit errors
                     print(f"{provider} API error: {status} - {snippet} (attempt {attempt + 1})")
                 time.sleep(api_delay)
                 continue
@@ -7578,6 +7583,80 @@ class UnifiedClient:
             ct = u.get('completion_tokens', 0)
             tt = u.get('total_tokens', pt + ct)
             usage = {'prompt_tokens': pt, 'completion_tokens': ct, 'total_tokens': tt}
+        return content, finish_reason, usage
+
+    def _extract_openai_responses_json(self, json_resp: dict):
+        """Extract content, finish_reason, and usage from OpenAI Responses API JSON."""
+        content = ""
+        finish_reason = 'stop'
+
+        # Prefer `output_text` if present
+        try:
+            ot = json_resp.get('output_text')
+            if isinstance(ot, str):
+                content = ot
+        except Exception:
+            pass
+
+        # Otherwise, concatenate output message parts
+        if not content:
+            try:
+                output = json_resp.get('output') or []
+                text_parts: list = []
+                if isinstance(output, list):
+                    for item in output:
+                        if not isinstance(item, dict):
+                            continue
+                        if item.get('type') == 'message':
+                            parts = item.get('content') or []
+                            if isinstance(parts, list):
+                                for p in parts:
+                                    if isinstance(p, dict):
+                                        ptype = p.get('type')
+                                        if ptype in ('output_text', 'text'):
+                                            text_parts.append(p.get('text') or "")
+                        # Some variants may emit flat text items
+                        if item.get('type') in ('output_text', 'text') and isinstance(item.get('text'), str):
+                            text_parts.append(item.get('text'))
+                content = ''.join(text_parts)
+            except Exception:
+                content = ""
+
+        # Map status/incomplete -> finish_reason
+        try:
+            if json_resp.get('error'):
+                finish_reason = 'error'
+            else:
+                status = str(json_resp.get('status') or '').lower()
+                if status == 'completed':
+                    finish_reason = 'stop'
+                elif status == 'incomplete':
+                    inc = json_resp.get('incomplete_details') or {}
+                    reason = ''
+                    if isinstance(inc, dict):
+                        reason = str(inc.get('reason') or '').lower()
+                    if 'max_output_tokens' in reason or 'max_tokens' in reason or 'length' in reason or ('max' in reason and 'token' in reason):
+                        finish_reason = 'length'
+                    else:
+                        finish_reason = 'incomplete'
+                elif status in ('failed', 'error'):
+                    finish_reason = 'error'
+                elif status in ('cancelled', 'canceled'):
+                    finish_reason = 'error'
+        except Exception:
+            pass
+
+        usage = None
+        try:
+            u = json_resp.get('usage') or {}
+            if isinstance(u, dict):
+                pt = u.get('input_tokens', u.get('prompt_tokens', 0))
+                ct = u.get('output_tokens', u.get('completion_tokens', 0))
+                tt = u.get('total_tokens', (pt or 0) + (ct or 0))
+                usage = {'prompt_tokens': pt or 0, 'completion_tokens': ct or 0, 'total_tokens': tt or 0}
+        except Exception:
+            usage = None
+
         return content, finish_reason, usage
 
     def _with_sdk_retries(self, provider_name: str, max_retries: int, call):
@@ -10680,52 +10759,155 @@ class UnifiedClient:
             except Exception:
                 pass
 
-            data = {
-                "model": effective_model,
-                "messages": messages,
-                "temperature": req_temperature,
-            }
-            if norm_max_completion_tokens is not None:
-                data["max_completion_tokens"] = norm_max_completion_tokens
-            elif norm_max_tokens is not None:
-                data["max_tokens"] = norm_max_tokens
-            
-            # Inject OpenRouter reasoning configuration (effort/max_tokens)
-            if provider == 'openrouter':
+            # Decide endpoint: chat vs text completions vs Responses API.
+            # - Some models (notably GPT-*-pro on OpenAI) are served via /v1/responses.
+            # - Some instruct-style models are served via /v1/completions.
+            use_responses_api = False
+            use_text_completions = False
+            try:
+                ml = (effective_model or "").lower().strip()
+                model_leaf = ml.split("/")[-1]
+                # NOTE: Do not use the name `re` here; this function has conditional `import re` statements
+                # in other branches which make `re` a local variable and can trigger UnboundLocalError.
+                if provider == 'openai' and model_leaf.startswith("gpt-") and _re.match(r"^gpt-\d+(?:\.\d+)*-pro(?:$|[-_])", model_leaf):
+                    use_responses_api = True
+                elif model_leaf.endswith("-instruct") or "instruct" in model_leaf:
+                    use_text_completions = True
+            except Exception:
+                use_responses_api = False
+                use_text_completions = False
+
+            if use_responses_api:
                 try:
-                    enable_gpt = os.getenv('ENABLE_GPT_THINKING', '0') == '1'
-                    if enable_gpt:
-                        reasoning = {"enabled": True, "exclude": True}
-                        tokens_str = (os.getenv('GPT_REASONING_TOKENS', '') or '').strip()
-                        if tokens_str.isdigit() and int(tokens_str) > 0:
-                            reasoning.pop('effort', None)
-                            reasoning["max_tokens"] = int(tokens_str)
+                    self._log_once(f"OpenAI-compatible: routing model '{effective_model}' to /v1/responses")
+                except Exception:
+                    pass
+                endpoint = "/responses"
+
+                # Build Responses API payload
+                instructions_parts: list = []
+                input_items: list = []
+                try:
+                    for msg in (messages or []):
+                        role = (msg.get('role') or 'user')
+                        content = msg.get('content', '')
+
+                        # Prefer putting system/developer prompts into the dedicated `instructions` field.
+                        if role in ('system', 'developer'):
+                            if isinstance(content, list):
+                                for part in content:
+                                    if isinstance(part, dict) and part.get('type') == 'text':
+                                        instructions_parts.append(str(part.get('text', '')))
+                            else:
+                                instructions_parts.append(str(content))
+                            continue
+
+                        # Convert content to Responses input blocks
+                        blocks: list = []
+                        if isinstance(content, list):
+                            for part in content:
+                                if not isinstance(part, dict):
+                                    continue
+                                ptype = part.get('type')
+                                if ptype == 'text':
+                                    blocks.append({"type": "input_text", "text": str(part.get('text', ''))})
+                                elif ptype == 'image_url':
+                                    image_url = part.get('image_url') or {}
+                                    url = image_url.get('url') if isinstance(image_url, dict) else str(image_url)
+                                    if url:
+                                        blocks.append({"type": "input_image", "image_url": url})
                         else:
-                            effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').lower()
-                            if effort not in ('low', 'medium', 'high'):
-                                effort = 'medium'
-                            reasoning.pop('max_tokens', None)
-                            reasoning["effort"] = effort
-                        data["reasoning"] = reasoning
+                            blocks.append({"type": "input_text", "text": str(content)})
+
+                        if not blocks:
+                            blocks = [{"type": "input_text", "text": ""}]
+
+                        input_items.append({"role": role, "content": blocks})
                 except Exception:
-                    pass
-                
-                # Add provider preference if specified
+                    # Fallback: send as a single text prompt
+                    input_items = [{
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": self._format_prompt(messages, style='ai21')}]
+                    }]
+
+                data = {
+                    "model": effective_model,
+                    "input": input_items,
+                    "temperature": req_temperature,
+                }
+                if instructions_parts:
+                    data["instructions"] = "\n\n".join([p for p in instructions_parts if p is not None])
+
+                # Responses API uses max_output_tokens
+                response_max_tokens = norm_max_completion_tokens if norm_max_completion_tokens is not None else norm_max_tokens
+                if response_max_tokens is not None:
+                    data["max_output_tokens"] = response_max_tokens
+
+            elif use_text_completions:
                 try:
-                    preferred_provider = os.getenv('OPENROUTER_PREFERRED_PROVIDER', 'Auto').strip()
-                    if preferred_provider and preferred_provider != 'Auto':
-                        data["provider"] = {
-                            "order": [preferred_provider]
-                        }
-                        print(f"🔀 OpenRouter: Requesting {preferred_provider} provider")
+                    self._log_once(f"OpenAI-compatible: routing non-chat model '{effective_model}' to /v1/completions")
                 except Exception:
                     pass
-            
-            # Add Perplexity-specific options for Sonar models
-            if provider == 'perplexity' and 'sonar' in effective_model.lower():
-                data['search_domain_filter'] = ['perplexity.ai']
-                data['return_citations'] = True
-                data['search_recency_filter'] = 'month'
+                endpoint = "/completions"
+                prompt = self._format_prompt(messages, style='ai21')
+                data = {
+                    "model": effective_model,
+                    "prompt": prompt,
+                    "temperature": req_temperature,
+                }
+                # Completions endpoint only supports max_tokens (output tokens)
+                completion_max_tokens = norm_max_completion_tokens if norm_max_completion_tokens is not None else norm_max_tokens
+                if completion_max_tokens is not None:
+                    data["max_tokens"] = completion_max_tokens
+
+            else:
+                endpoint = "/chat/completions"
+                data = {
+                    "model": effective_model,
+                    "messages": messages,
+                    "temperature": req_temperature,
+                }
+                if norm_max_completion_tokens is not None:
+                    data["max_completion_tokens"] = norm_max_completion_tokens
+                elif norm_max_tokens is not None:
+                    data["max_tokens"] = norm_max_tokens
+                
+                # Inject OpenRouter reasoning configuration (effort/max_tokens)
+                if provider == 'openrouter':
+                    try:
+                        enable_gpt = os.getenv('ENABLE_GPT_THINKING', '0') == '1'
+                        if enable_gpt:
+                            reasoning = {"enabled": True, "exclude": True}
+                            tokens_str = (os.getenv('GPT_REASONING_TOKENS', '') or '').strip()
+                            if tokens_str.isdigit() and int(tokens_str) > 0:
+                                reasoning.pop('effort', None)
+                                reasoning["max_tokens"] = int(tokens_str)
+                            else:
+                                effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').lower()
+                                if effort not in ('low', 'medium', 'high'):
+                                    effort = 'medium'
+                                reasoning.pop('max_tokens', None)
+                                reasoning["effort"] = effort
+                            data["reasoning"] = reasoning
+                    except Exception:
+                        pass
+                    
+                    # Add provider preference if specified
+                    try:
+                        preferred_provider = os.getenv('OPENROUTER_PREFERRED_PROVIDER', 'Auto').strip()
+                        if preferred_provider and preferred_provider != 'Auto':
+                            data["provider"] = {
+                                "order": [preferred_provider]
+                            }
+                            print(f"🔀 OpenRouter: Requesting {preferred_provider} provider")
+                    except Exception:
+                        pass
+                
+                # Add Perplexity-specific options for Sonar models
+                if provider == 'perplexity' and 'sonar' in effective_model.lower():
+                    data['search_domain_filter'] = ['perplexity.ai']
+                    data['return_citations'] = True
+                    data['search_recency_filter'] = 'month'
             
             # Apply safety flags
             self._apply_openai_safety(provider, disable_safety, data, headers)
@@ -10737,7 +10919,8 @@ class UnifiedClient:
                     "model": effective_model,
                     "safety_disabled": disable_safety,
                     "temperature": temperature,
-                    "max_tokens": max_tokens
+                    "max_tokens": max_tokens,
+                    "endpoint": endpoint,
                 }
                 # Persist reasoning config in saved debug file
                 try:
@@ -10765,8 +10948,7 @@ class UnifiedClient:
                 except Exception:
                     pass
                 self._save_openrouter_config(cfg, response_name)
-            # Endpoint and idempotency
-            endpoint = "/chat/completions"
+            # Idempotency
             headers["Idempotency-Key"] = self._get_idempotency_key()
             
             # For Groq HTTP-only: ensure base_url is set
@@ -10828,10 +11010,13 @@ class UnifiedClient:
                 # Re-raise unknown parsing exceptions
                 raise
             
-            choices = json_resp.get("choices", [])
-            if not choices:
-                raise UnifiedClientError(f"{provider} API returned no choices")
-            content, finish_reason, usage = self._extract_openai_json(json_resp)
+            if endpoint == "/responses":
+                content, finish_reason, usage = self._extract_openai_responses_json(json_resp)
+            else:
+                choices = json_resp.get("choices", [])
+                if not choices:
+                    raise UnifiedClientError(f"{provider} API returned no choices")
+                content, finish_reason, usage = self._extract_openai_json(json_resp)
             
             # Log OpenRouter provider information from response headers and body (HTTP path)
             if provider == 'openrouter':
