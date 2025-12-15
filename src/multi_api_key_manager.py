@@ -24,6 +24,14 @@ except ImportError:
     QObject = object
     QDialog = object
     QWidget = object
+    QComboBox = object
+    QLabel = object
+    QPushButton = object
+    QLineEdit = object
+    QCheckBox = object
+    QSpinBox = object
+    QTreeWidget = object
+    QTreeWidgetItem = object
 import json
 import os
 import threading
