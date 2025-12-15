@@ -3768,7 +3768,7 @@ class MangaTranslator:
                             import hashlib
                             
                             # Cache key based on image content hash
-                            image_hash = hashlib.md5(processed_image_data).hexdigest()
+                            image_hash = hashlib.sha256(processed_image_data).hexdigest()
                             cache_key = f"azure_ocr_{image_hash}"
                             
                             # Check if we have cached results for this exact image

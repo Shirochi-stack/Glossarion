@@ -2498,7 +2498,7 @@ class UnifiedClient:
                         image_data = part.get('image_url', {}).get('url', '')
                         if image_data.startswith('data:'):
                             # Extract just the data part
-                            image_hash = hashlib.md5(image_data.encode()).hexdigest()
+                            image_hash = hashlib.sha256(image_data.encode()).hexdigest()
                             content_parts.append(f"image:{image_hash}")
                         else:
                             content_parts.append(f"image_url:{image_data}")
@@ -2569,7 +2569,7 @@ class UnifiedClient:
                         if image_data.startswith('data:'):
                             # Use first 1000 chars of image data for hash
                             image_sample = image_data[:1000]
-                            image_hash = hashlib.md5(image_sample.encode()).hexdigest()
+                            image_hash = hashlib.sha256(image_sample.encode()).hexdigest()
                             content_parts.append(f"image:{image_hash}")
                         else:
                             content_parts.append(f"image_url:{image_data}")
@@ -2654,7 +2654,7 @@ class UnifiedClient:
                     if isinstance(part, dict) and 'image_url' in part:
                         image_data = part.get('image_url', {}).get('url', '')
                         if image_data.startswith('data:'):
-                            image_hash = hashlib.md5(image_data.encode()).hexdigest()
+                            image_hash = hashlib.sha256(image_data.encode()).hexdigest()
                             content_parts.append(f"image:{image_hash}")
                         else:
                             content_parts.append(f"image_url:{image_data}")
@@ -4410,7 +4410,7 @@ class UnifiedClient:
         if not request_id:
             import hashlib
             msg_str = json.dumps([m.get('content', '')[:100] for m in messages], sort_keys=True)
-            request_id = hashlib.md5(msg_str.encode()).hexdigest()[:16]
+            request_id = hashlib.sha256(msg_str.encode()).hexdigest()[:16]
         
         # Initialize per-request tracking if not exists
         if not hasattr(tls, 'tried_keys_per_request'):
@@ -4688,7 +4688,7 @@ class UnifiedClient:
         if not request_id:
             import hashlib
             msg_str = json.dumps([m.get('content', '')[:100] for m in messages], sort_keys=True)
-            request_id = hashlib.md5(msg_str.encode()).hexdigest()[:16]
+            request_id = hashlib.sha256(msg_str.encode()).hexdigest()[:16]
         
         # Initialize per-request tracking if not exists
         if not hasattr(tls, 'tried_fallback_direct_per_request'):

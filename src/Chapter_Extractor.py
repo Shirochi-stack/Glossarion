@@ -2346,7 +2346,7 @@ def _process_single_html_file(
         
         # Calculate content hash (inline to avoid circular imports)
         import hashlib
-        content_hash = hashlib.md5(content_html.encode('utf-8', errors='ignore')).hexdigest()
+        content_hash = hashlib.sha256(content_html.encode('utf-8', errors='ignore')).hexdigest()
         
         file_size = len(content_text)
         sample_text = content_text[:500] if effective_mode == "smart" else ''

@@ -7805,7 +7805,7 @@ class MangaTranslationTab(QObject):
             onnx_dir = os.path.join(os.path.dirname(path), 'models')
             if os.path.exists(onnx_dir):
                 # Check if ONNX file exists for this model
-                model_hash = hashlib.md5(path.encode()).hexdigest()[:8]
+                model_hash = hashlib.sha256(path.encode()).hexdigest()[:8]
                 onnx_files = [f for f in os.listdir(onnx_dir) if model_hash in f]
                 if onnx_files:
                     self.local_model_status_label.setText("✅ Model ready (ONNX cached)")

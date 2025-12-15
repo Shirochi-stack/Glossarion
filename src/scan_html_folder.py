@@ -443,7 +443,7 @@ def get_cache_info():
 def _get_cache_key(text, max_length=10000):
     """Generate a cache key for text, using hash for long texts"""
     if len(text) > max_length:
-        return hashlib.md5(text.encode('utf-8')).hexdigest()
+        return hashlib.sha256(text.encode('utf-8')).hexdigest()
     return text
     
 def extract_text_from_html(file_path):
@@ -1554,14 +1554,14 @@ def generate_content_hashes(text):
     normalized = normalize_text(text)
     
     # 1. Raw hash
-    raw_hash = hashlib.md5(text.encode('utf-8')).hexdigest()
+    raw_hash = hashlib.sha256(text.encode('utf-8')).hexdigest()
     
     # 2. Normalized hash
-    normalized_hash = hashlib.md5(normalized.encode('utf-8')).hexdigest()
+    normalized_hash = hashlib.sha256(normalized.encode('utf-8')).hexdigest()
     
     # 3. Content fingerprint
     fingerprint = extract_content_fingerprint(text)
-    fingerprint_hash = hashlib.md5(fingerprint.encode('utf-8')).hexdigest() if fingerprint else None
+    fingerprint_hash = hashlib.sha256(fingerprint.encode('utf-8')).hexdigest() if fingerprint else None
     
     # 4. Word frequency hash
     words = re.findall(r'\w+', normalized.lower())
@@ -1569,29 +1569,29 @@ def generate_content_hashes(text):
     significant_words = [(w, c) for w, c in word_freq.most_common(100) 
                         if w not in COMMON_WORDS][:50]
     word_sig = ' '.join([f"{w}:{c}" for w, c in significant_words])
-    word_hash = hashlib.md5(word_sig.encode('utf-8')).hexdigest() if word_sig else None
+    word_hash = hashlib.sha256(word_sig.encode('utf-8')).hexdigest() if word_sig else None
     
     # 5. First chunk hash
     first_chunk = normalized[:1000] if len(normalized) > 1000 else normalized
-    first_chunk_hash = hashlib.md5(first_chunk.encode('utf-8')).hexdigest()
+    first_chunk_hash = hashlib.sha256(first_chunk.encode('utf-8')).hexdigest()
     
     # 6. Semantic fingerprint hash - FIXED
     semantic_result = extract_semantic_fingerprint(text)
     if semantic_result and isinstance(semantic_result, tuple) and len(semantic_result) >= 2:
         semantic_str = semantic_result[0]
-        semantic_hash = hashlib.md5(semantic_str.encode('utf-8')).hexdigest()
+        semantic_hash = hashlib.sha256(semantic_str.encode('utf-8')).hexdigest()
     else:
         # Fallback if function returns unexpected value
-        semantic_hash = hashlib.md5(text[:1000].encode('utf-8')).hexdigest()
+        semantic_hash = hashlib.sha256(text[:1000].encode('utf-8')).hexdigest()
     
     # 7. Structural signature hash
     structural_sig = extract_structural_signature(text)
     if structural_sig:
         structural_str = json.dumps(structural_sig, sort_keys=True)
-        structural_hash = hashlib.md5(structural_str.encode('utf-8')).hexdigest()
+        structural_hash = hashlib.sha256(structural_str.encode('utf-8')).hexdigest()
     else:
         # Fallback
-        structural_hash = hashlib.md5(text[:500].encode('utf-8')).hexdigest()
+        structural_hash = hashlib.sha256(text[:500].encode('utf-8')).hexdigest()
     
     return {
         'raw': raw_hash,
@@ -2023,7 +2023,7 @@ def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence,
         text = result.get('raw_text', '')[:5000]
         text_data[i] = {
             'text': text,
-            'hash': hashlib.md5(text.encode()).hexdigest() if text else None,
+            'hash': hashlib.sha256(text.encode()).hexdigest() if text else None,
             'length': len(text),
             'chapter_num': result.get('chapter_num')
         }
@@ -2032,7 +2032,7 @@ def enhance_duplicate_detection(results, duplicate_groups, duplicate_confidence,
         preview = result.get('raw_text', '')[:1000].strip()
         preview_data[i] = {
             'text': preview,
-            'hash': hashlib.md5(preview.encode()).hexdigest() if preview else None
+            'hash': hashlib.sha256(preview.encode()).hexdigest() if preview else None
         }
     
     # First, normalize all chapter numbers
@@ -2272,7 +2272,7 @@ def detect_duplicates(results, log, should_stop, config):
         text1, text2 = None, None
         for result in results_for_dup_check:
             text = result.get('raw_text', '')[:max_length]
-            text_hash = hashlib.md5(text.encode()).hexdigest()
+            text_hash = hashlib.sha256(text.encode()).hexdigest()
             if text_hash == text1_hash:
                 text1 = text
             if text_hash == text2_hash:
@@ -2287,8 +2287,8 @@ def detect_duplicates(results, log, should_stop, config):
     for idx, result in enumerate(results_for_dup_check):
         text = result.get('raw_text', '')
         text_hashes[idx] = {
-            'hash_2k': hashlib.md5(text[:2000].encode()).hexdigest() if len(text) >= 2000 else None,
-            'hash_5k': hashlib.md5(text[:5000].encode()).hexdigest() if len(text) >= 5000 else None,
+            'hash_2k': hashlib.sha256(text[:2000].encode()).hexdigest() if len(text) >= 2000 else None,
+            'hash_5k': hashlib.sha256(text[:5000].encode()).hexdigest() if len(text) >= 5000 else None,
             'full_text': text
         }
     
@@ -2713,8 +2713,8 @@ def perform_deep_similarity_check(results, duplicate_groups, duplicate_confidenc
             text_samples[idx] = {
                 'sample_5k': text[:5000],
                 'sample_10k': text[:10000],
-                'hash_5k': hashlib.md5(text[:5000].encode()).hexdigest(),
-                'hash_10k': hashlib.md5(text[:10000].encode()).hexdigest()
+                'hash_5k': hashlib.sha256(text[:5000].encode()).hexdigest(),
+                'hash_10k': hashlib.sha256(text[:10000].encode()).hexdigest()
             }
     
     # Determine number of workers
@@ -3826,7 +3826,7 @@ def update_new_format_progress(prog, faulty_chapters, log, folder_path):
                         with open(os.path.join(folder_path, faulty_filename), 'r', encoding='utf-8') as f:
                             content = f.read()
                         import hashlib
-                        content_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
+                        content_hash = hashlib.sha256(content.encode('utf-8')).hexdigest()
                     except:
                         pass
                 
@@ -5954,7 +5954,7 @@ def parallel_ai_hunter_check(results, duplicate_groups, duplicate_confidence, co
     
     for idx, result in enumerate(results):
         text = result.get('normalized_text', '')[:2000]
-        text_hash = hashlib.md5(text.encode()).hexdigest() if text else None
+        text_hash = hashlib.sha256(text.encode()).hexdigest() if text else None
         
         data_entry = {
             'idx': idx,

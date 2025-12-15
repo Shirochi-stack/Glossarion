@@ -2389,11 +2389,11 @@ class ContentProcessor:
             text_content = soup.get_text(separator=' ', strip=True)
             text_content = ' '.join(text_content.split())
             
-            return hashlib.md5(text_content.encode('utf-8')).hexdigest()
+            return hashlib.sha256(text_content.encode('utf-8')).hexdigest()
             
         except Exception as e:
             print(f"[WARNING] Failed to create hash: {e}")
-            return hashlib.md5(html_content.encode('utf-8')).hexdigest()
+            return hashlib.sha256(html_content.encode('utf-8')).hexdigest()
     
     @staticmethod
     def is_meaningful_text_content(html_content):

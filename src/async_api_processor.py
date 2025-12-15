@@ -3642,7 +3642,7 @@ class AsyncProcessingDialog:
                 # Get chapter info
                 chapter_info = chapter_map.get(chapter_num, {})
                 original_basename = chapter_info.get('original_basename', f"{chapter_num:04d}")
-                content_hash = chapter_info.get('content_hash', hashlib.md5(f"chapter_{chapter_num}".encode()).hexdigest())
+                content_hash = chapter_info.get('content_hash', hashlib.sha256(f"chapter_{chapter_num}".encode()).hexdigest())
                 
                 # Save file with correct name (only once!)
                 retain_ext = should_retain_source_extension()

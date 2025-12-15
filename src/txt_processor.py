@@ -330,7 +330,7 @@ class TextFileProcessor:
     
     def _generate_hash(self, content: str) -> str:
         """Generate hash for content"""
-        return hashlib.md5(content.encode('utf-8')).hexdigest()
+        return hashlib.sha256(content.encode('utf-8')).hexdigest()
     
     def save_original_structure(self):
         """Save original text file structure info"""
