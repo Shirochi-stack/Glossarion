@@ -256,7 +256,7 @@ async def model_autocomplete(interaction: discord.Interaction, current: str):
     request_merge_count="Chapters per request (set >=2 to enable request merging; <=1 disables; omit to disable)",
     split_the_merge="Split merged translation output back into separate files (default: True)",
     send_zip="Return output as a ZIP archive instead of individual file (default: False)",
-    compression_factor="Compression factor (overrides auto-compression if set)",
+    compression_factor="Compression factor (1.0-3.0; overrides auto-compression if set)",
     thinking="Enable/disable AI thinking capabilities (GPT/Gemini/DeepSeek) - Default: True",
     gemini_thinking_level="Gemini 3 thinking level (low/high) - Default: high",
     gemini_thinking_budget="Gemini thinking budget (-1=auto, 0=disabled) - Default: -1",
