@@ -8776,7 +8776,7 @@ def main(log_callback=None, stop_callback=None):
                     chunk_context = []
                     memory_msgs = []
 
-                # Build the current system prompt from the original each time, and append the last summary block if present
+                # Build the current system prompt from the original each time.
                 # Apply per-chunk glossary compression if enabled
                 if os.getenv("COMPRESS_GLOSSARY_PROMPT", "0") == "1" and glossary_path and os.path.exists(glossary_path):
                     # Rebuild system prompt with compressed glossary for THIS SPECIFIC CHUNK
@@ -8784,28 +8784,33 @@ def main(log_callback=None, stop_callback=None):
                 else:
                     current_system_content = original_system_prompt
                 
-                if config.USE_ROLLING_SUMMARY and last_summary_block_text:
-                    current_system_content = (
-                        current_system_content
-                        + "\n\n[Rolling Summary of Previous Chapter]\n"
-                        + "(For AI: Use as context only; do not include in output)\n"
-                        + last_summary_block_text
-                        + "\n[End of Rolling Summary]"
-                    )
                 current_base = [{"role": "system", "content": current_system_content}]
-                # If we have a prepared rolling summary from previous chapter, include it as a separate message (do NOT mutate system prompt)
+
+                # If we have a prepared rolling summary from the previous chapter, include it according to SUMMARY_ROLE.
+                # SUMMARY_ROLE values:
+                #   - user:   inject as a user message
+                #   - system: inject as a system message
+                #   - both:   inject as both system + user messages
                 summary_msgs_list = []
                 if config.USE_ROLLING_SUMMARY and last_summary_block_text:
-                    summary_msgs_list = [{
-                        "role": os.getenv("SUMMARY_ROLE", "user"),
-                        "content": (
-                            "CONTEXT ONLY - DO NOT INCLUDE IN TRANSLATION:\n"
-                            "[MEMORY] Previous context summary:\n\n"
-                            f"{last_summary_block_text}\n\n"
-                            "[END MEMORY]\n"
-                            "END OF CONTEXT - BEGIN ACTUAL CONTENT TO TRANSLATE:"
-                        )
-                    }]
+                    summary_role = (os.getenv("SUMMARY_ROLE", "user") or "user").strip().lower()
+                    if summary_role == "both":
+                        roles_to_add = ["system", "user"]
+                    elif summary_role in ("system", "user"):
+                        roles_to_add = [summary_role]
+                    else:
+                        roles_to_add = ["user"]
+
+                    summary_content = (
+                        "CONTEXT ONLY - DO NOT INCLUDE IN TRANSLATION:\n"
+                        "[MEMORY] Previous context summary:\n\n"
+                        f"{last_summary_block_text}\n\n"
+                        "[END MEMORY]\n"
+                        "END OF CONTEXT - BEGIN ACTUAL CONTENT TO TRANSLATE:"
+                    )
+
+                    summary_msgs_list = [{"role": r, "content": summary_content} for r in roles_to_add]
+
                 # Build final message list for this chunk
                 msgs = current_base + summary_msgs_list + chunk_context + memory_msgs + [{"role": "user", "content": user_prompt}]
 

@@ -955,7 +955,11 @@ def _create_context_management_section(self, parent):
     settings_grid.addWidget(role_lbl, 0, 0, alignment=Qt.AlignRight)
     rolling_controls.append(role_lbl)
     role_combo = QComboBox()
-    role_combo.addItems(["user", "system"])
+    # Controls where the rolling summary is injected in the messages.
+    # user   -> send as a user message
+    # system -> send as a system message
+    # both   -> send as both (system + user)
+    role_combo.addItems(["user", "system", "both"])
     role_combo.setFixedWidth(90)
     # Add custom styling with unicode arrow
     role_combo.setStyleSheet("""
@@ -969,12 +973,17 @@ def _create_context_management_section(self, parent):
     self._add_combobox_arrow(role_combo)
     self._disable_combobox_mousewheel(role_combo)
     try:
-        role_combo.setCurrentText(self.summary_role_var)
+        current_role = str(getattr(self, 'summary_role_var', 'user') or 'user').strip().lower()
+        idx = role_combo.findText(current_role)
+        if idx >= 0:
+            role_combo.setCurrentIndex(idx)
+        else:
+            role_combo.setCurrentIndex(0)
     except Exception:
         pass
     def _on_role_changed(text):
         try:
-            self.summary_role_var = text
+            self.summary_role_var = str(text).strip().lower()
         except Exception:
             pass
     role_combo.currentTextChanged.connect(_on_role_changed)

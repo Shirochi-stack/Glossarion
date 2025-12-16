@@ -158,7 +158,7 @@ def print_env_var_status():
     # Rolling summary variables
     rolling_vars = {
         'USE_ROLLING_SUMMARY': 'Enable rolling summary',
-        'SUMMARY_ROLE': 'Summary role (user/system)',
+        'SUMMARY_ROLE': 'Summary injection (user/system/both)',
         'ROLLING_SUMMARY_EXCHANGES': 'Max exchanges before roll',
         'ROLLING_SUMMARY_MODE': 'Rolling mode (append/replace)',
         'ROLLING_SUMMARY_SYSTEM_PROMPT': 'System prompt for rolling summary',
