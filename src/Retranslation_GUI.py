@@ -882,8 +882,9 @@ class RetranslationMixin:
                 output_file = chapter_info.get("output_file", "")
                 status = chapter_info.get("status", "")
                 
-                # Include chapters with output files OR in_progress/failed/qa_failed with null output file (legacy)
-                if output_file or status in ["in_progress", "failed", "qa_failed"]:
+                # Include chapters with output files OR transient statuses with null output file (legacy)
+                # (composite keys like "0_TOC" should still be represented in the UI)
+                if output_file or status in ["in_progress", "pending", "failed", "qa_failed"]:
                     # For merged chapters, use a unique key (chapter_key) instead of output_file
                     # This ensures merged chapters appear as separate entries in the list
                     if status == "merged":
@@ -892,6 +893,8 @@ class RetranslationMixin:
                         file_key = output_file
                     elif status == "in_progress":
                         file_key = f"_in_progress_{chapter_key}"
+                    elif status == "pending":
+                        file_key = f"_pending_{chapter_key}"
                     elif status == "qa_failed":
                         file_key = f"_qa_failed_{chapter_key}"
                     else:  # failed
@@ -906,8 +909,14 @@ class RetranslationMixin:
                 
                 # Get the actual output file (strip placeholder prefix if present)
                 actual_output_file = output_file
-                if output_file.startswith("_merged_") or output_file.startswith("_in_progress_") or output_file.startswith("_failed_") or output_file.startswith("_qa_failed_"):
-                    # For merged/in_progress/failed/qa_failed, get the actual output_file from chapter_info
+                if (
+                    output_file.startswith("_merged_")
+                    or output_file.startswith("_in_progress_")
+                    or output_file.startswith("_pending_")
+                    or output_file.startswith("_failed_")
+                    or output_file.startswith("_qa_failed_")
+                ):
+                    # For merged/in_progress/pending/failed/qa_failed, get the actual output_file from chapter_info
                     actual_output_file = chapter_info.get("output_file", "")
                     if not actual_output_file:
                         # Generate expected filename based on actual_num
