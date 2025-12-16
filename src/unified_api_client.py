@@ -7585,8 +7585,11 @@ class UnifiedClient:
                 
                 # Check for token-limit errors before logging
                 # Supports: chat (/chat/completions), legacy completions (/completions), and Responses API (/responses).
+                # DeepSeek commonly returns: "Invalid max_tokens value, the valid range of max_tokens is [1, 8192]"
                 if status == 400 and (
                     "max_tokens is too large" in resp.text or
+                    "invalid max_tokens value" in resp.text.lower() or
+                    "valid range of max_tokens is" in resp.text.lower() or
                     "max_output_tokens" in resp.text or
                     "supports at most" in resp.text or
                     "must be less than or equal to" in resp.text
@@ -7595,6 +7598,7 @@ class UnifiedClient:
                     print(f"{provider} API error: {status} - {snippet} (attempt {attempt + 1}/{max_retries})")
                     
                     import re
+                    supported_min = None
                     supported_max = None
                     
                     # Try multiple patterns to extract the max token limit
@@ -7604,12 +7608,19 @@ class UnifiedClient:
                         supported_max = int(match.group(1))
                     
                     # Pattern 2: "must be less than or equal to X" (common format)
-                    if not match and 'must be less than or equal to' in resp.text:
+                    if not supported_max and 'must be less than or equal to' in resp.text:
                         pos = resp.text.find('must be less than or equal to')
                         after_text = resp.text[pos:pos+120]
                         numbers = re.findall(r'\d+', after_text)
                         if numbers:
                             supported_max = int(numbers[0])
+                    
+                    # Pattern 3: "valid range of max_tokens is [MIN, MAX]" (DeepSeek)
+                    if not supported_max:
+                        m_range = re.search(r'valid range of max_tokens is \[(\d+)\s*,\s*(\d+)\]', resp.text, re.IGNORECASE)
+                        if m_range:
+                            supported_min = int(m_range.group(1))
+                            supported_max = int(m_range.group(2))
                     
                     if supported_max:
                         # Try to find current output limit in the request body
@@ -7617,21 +7628,45 @@ class UnifiedClient:
                         if json:
                             current_max = json.get('max_output_tokens') or json.get('max_tokens') or json.get('max_completion_tokens')
                         
-                        if current_max and supported_max < current_max:
-                            print(f"    🔧 AUTO-ADJUSTING: token limit too large ({current_max:,}) - model supports {supported_max:,}")
-                            print(f"    🔄 Retrying with adjusted limit: {supported_max:,} tokens")
+                        # Decide the corrected value (clamp to [supported_min, supported_max] when supported_min is known)
+                        new_max = None
+                        if current_max is not None:
+                            try:
+                                current_max = int(current_max)
+                            except Exception:
+                                current_max = None
+                        if current_max is not None:
+                            if supported_min is not None and current_max < supported_min:
+                                new_max = supported_min
+                            elif current_max > supported_max:
+                                new_max = supported_max
+                        
+                        if new_max is not None and new_max != current_max:
+                            print(f"    🔧 AUTO-ADJUSTING: invalid token limit ({current_max:,}) - valid range is [{supported_min or '?':}, {supported_max:,}]")
+                            print(f"    🔄 Retrying with adjusted limit: {new_max:,} tokens")
+                            
+                            # Cache upper bound for this model (best-effort)
+                            try:
+                                model_name = None
+                                if json:
+                                    model_name = json.get('model')
+                                if model_name:
+                                    with self.__class__._model_limits_lock:
+                                        self.__class__._model_token_limits[str(model_name)] = int(supported_max)
+                            except Exception:
+                                pass
                             
                             # Update the request body for the retry
                             if json:
                                 if 'max_output_tokens' in json:
-                                    json['max_output_tokens'] = supported_max
-                                    print(f"    ✅ Updated json['max_output_tokens'] = {supported_max:,}")
+                                    json['max_output_tokens'] = new_max
+                                    print(f"    ✅ Updated json['max_output_tokens'] = {new_max:,}")
                                 if 'max_tokens' in json:
-                                    json['max_tokens'] = supported_max
-                                    print(f"    ✅ Updated json['max_tokens'] = {supported_max:,}")
+                                    json['max_tokens'] = new_max
+                                    print(f"    ✅ Updated json['max_tokens'] = {new_max:,}")
                                 if 'max_completion_tokens' in json:
-                                    json['max_completion_tokens'] = supported_max
-                                    print(f"    ✅ Updated json['max_completion_tokens'] = {supported_max:,}")
+                                    json['max_completion_tokens'] = new_max
+                                    print(f"    ✅ Updated json['max_completion_tokens'] = {new_max:,}")
                             
                             # Don't count this as a failed attempt - reset the counter
                             attempt = max(0, attempt - 1)
@@ -7642,7 +7677,7 @@ class UnifiedClient:
                             print(f"    🚀 Retrying request with adjusted token limit...")
                             continue
                         else:
-                            print(f"    ⚠️ token-limit error but cannot adjust: current={current_max}, supported={supported_max}")
+                            print(f"    ⚠️ token-limit error but cannot adjust: current={current_max}, supported_min={supported_min}, supported_max={supported_max}")
                     else:
                         print(f"    ⚠️ token-limit error but couldn't parse limit from error message")
                 else:
@@ -10751,17 +10786,26 @@ class UnifiedClient:
                 except Exception as e:
                     error_str = str(e).lower()
                     
-                    # Handle "max_tokens is too large" error - auto-adjust and retry
-                    # Handle both standard and Groq-specific error messages
-                    if ("max_tokens is too large" in str(e) or 
+                    # Handle token limit errors (max too high, or provider-enforced valid ranges) - auto-adjust and retry
+                    # Examples:
+                    # - "max_tokens is too large"
+                    # - "supports at most X completion tokens"
+                    # - "must be less than or equal to X"
+                    # - DeepSeek: "Invalid max_tokens value, the valid range of max_tokens is [1, 8192]"
+                    if (
+                        "max_tokens is too large" in str(e) or
                         "supports at most" in str(e) or
-                        "must be less than or equal to" in str(e)):
+                        "must be less than or equal to" in str(e) or
+                        "invalid max_tokens value" in str(e).lower() or
+                        "valid range of max_tokens is" in str(e).lower()
+                    ):
                         
                         # Prevent infinite adjustment loop
                         if max_tokens_adjusted:
                             print(f"    ⚠️ max_tokens already adjusted once, not retrying again to prevent loop")
                         else:
                             import re
+                            supported_min = None
                             supported_max = None
                             
                             # Try multiple patterns to extract the max token limit
@@ -10773,37 +10817,56 @@ class UnifiedClient:
                                 supported_max = int(match.group(1))
                             
                             # Pattern 2: "must be less than or equal to X" (Groq format)
-                            if not match:
-                                # Extract all numbers and look for one that appears after "must be less than or equal to"
+                            if not supported_max:
                                 if 'must be less than or equal to' in error_text:
-                                    # Find the position and extract numbers after it
                                     pos = error_text.find('must be less than or equal to')
                                     after_text = error_text[pos:pos+100]  # Look at next 100 chars
                                     numbers = re.findall(r'\d+', after_text)
                                     if numbers:
-                                        # Take the first number found (should be the limit)
                                         supported_max = int(numbers[0])
+
+                            # Pattern 3: "valid range of max_tokens is [MIN, MAX]" (DeepSeek format)
+                            if not supported_max:
+                                m_range = re.search(r'valid range of max_tokens is \[(\d+)\s*,\s*(\d+)\]', error_text, re.IGNORECASE)
+                                if m_range:
+                                    supported_min = int(m_range.group(1))
+                                    supported_max = int(m_range.group(2))
                             
                             if supported_max:
                                 current_max = max_tokens or norm_max_tokens or 8192
-                                
-                                if supported_max < current_max:
-                                    print(f"    🔧 AUTO-ADJUSTING: max_tokens too large ({current_max:,}) - model supports {supported_max:,}")
-                                    print(f"    🔄 Retrying with supported limit: {supported_max:,} tokens")
+                                try:
+                                    current_max = int(current_max)
+                                except Exception:
+                                    current_max = None
+
+                                # Clamp to range (or upper bound when min is unknown)
+                                new_max = None
+                                if current_max is not None:
+                                    if supported_min is not None and current_max < supported_min:
+                                        new_max = supported_min
+                                    elif current_max > supported_max:
+                                        new_max = supported_max
+
+                                if new_max is not None and new_max != current_max:
+                                    print(f"    🔧 AUTO-ADJUSTING: invalid max_tokens ({current_max:,}) - valid range is [{supported_min or '?':}, {supported_max:,}]")
+                                    print(f"    🔄 Retrying with supported limit: {new_max:,} tokens")
                                     
-                                    # Cache this limit for future requests to this model
-                                    with self.__class__._model_limits_lock:
-                                        self.__class__._model_token_limits[effective_model] = supported_max
+                                    # Cache upper bound for future requests to this model
+                                    try:
+                                        with self.__class__._model_limits_lock:
+                                            self.__class__._model_token_limits[effective_model] = int(supported_max)
+                                    except Exception:
+                                        pass
                                     
                                     # Update max_tokens for the retry
-                                    max_tokens = supported_max
+                                    max_tokens = int(new_max)
                                     max_tokens_adjusted = True
                                     
                                     # Retry immediately
                                     time.sleep(1)
                                     continue
                                 else:
-                                    print(f"    ⚠️ max_tokens error but config ({current_max:,}) <= supported ({supported_max:,})")
+                                    print(f"    ⚠️ token-limit error but cannot adjust: current={current_max}, supported_min={supported_min}, supported_max={supported_max}")
                             else:
                                 print(f"    ⚠️ Could not extract supported max_tokens from error: {str(e)}")
                     
