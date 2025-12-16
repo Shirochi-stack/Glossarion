@@ -1165,13 +1165,6 @@ async def extract(
             os.environ['GPT_EFFORT'] = gpt_effort
         
         # Handle Vertex AI / Google Cloud credentials
-thinking is enabled
-            os.environ['GEMINI_THINKING_LEVEL'] = gemini_thinking_level
-            os.environ['THINKING_BUDGET'] = str(gemini_thinking_budget)
-            os.environ['GPT_REASONING_TOKENS'] = str(or_thinking_tokens)
-            os.environ['GPT_EFFORT'] = gpt_effort
-        
-        # Handle Vertex AI / Google Cloud credentials
         if '@' in model or model.startswith('vertex/'):
             # Use provided credentials path, fallback to config if not provided
             google_creds = google_credentials_path if google_credentials_path else config.get('google_cloud_credentials')
