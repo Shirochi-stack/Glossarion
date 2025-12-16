@@ -403,6 +403,17 @@ async def translate(
             # Fallback to first available profile or basic prompt
             system_prompt = f"Translate to {target_language}. Preserve all formatting."
         
+        # Set Custom OpenAI Endpoint if enabled in config
+        # Disabled by default as requested
+        use_custom_endpoint = config.get('use_custom_openai_endpoint', False)
+        if use_custom_endpoint:
+            os.environ['USE_CUSTOM_OPENAI_ENDPOINT'] = '1'
+            os.environ['OPENAI_CUSTOM_BASE_URL'] = config.get('openai_base_url', '')
+            sys.stderr.write(f"[CONFIG] Custom OpenAI Endpoint enabled: {config.get('openai_base_url', '')}\n")
+        else:
+            os.environ['USE_CUSTOM_OPENAI_ENDPOINT'] = '0'
+            os.environ['OPENAI_CUSTOM_BASE_URL'] = ''
+        
         # Set model and API key
         os.environ['MODEL'] = model
         os.environ['SYSTEM_PROMPT'] = system_prompt
@@ -997,6 +1008,17 @@ async def extract(
         
         # Get glossary prompts from config
         glossary_prompt = config.get('manual_glossary_prompt', '')
+        
+        # Set Custom OpenAI Endpoint if enabled in config
+        # Disabled by default as requested
+        use_custom_endpoint = config.get('use_custom_openai_endpoint', False)
+        if use_custom_endpoint:
+            os.environ['USE_CUSTOM_OPENAI_ENDPOINT'] = '1'
+            os.environ['OPENAI_CUSTOM_BASE_URL'] = config.get('openai_base_url', '')
+            sys.stderr.write(f"[CONFIG] Custom OpenAI Endpoint enabled: {config.get('openai_base_url', '')}\n")
+        else:
+            os.environ['USE_CUSTOM_OPENAI_ENDPOINT'] = '0'
+            os.environ['OPENAI_CUSTOM_BASE_URL'] = ''
         
         # Set model and API key
         os.environ['MODEL'] = model
