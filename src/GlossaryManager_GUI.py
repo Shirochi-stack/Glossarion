@@ -1232,6 +1232,7 @@ class GlossaryManagerMixin:
         prompt_frame_layout.addWidget(self.manual_prompt_text)
         
         # Always reload prompt from config to ensure fresh state
+        # Treat empty strings as missing so users always get a usable default.
         default_manual_prompt = """Extract character names and important terms from the following text.
 
 Output format:
@@ -1245,8 +1246,15 @@ Rules:
 - Do not add generic pronoun only entries (Example: I, you, he, she, etc.) and common nouns (father, mother, etc.)
 - For all fields except 'raw_name', use {language} translation
     """
-        self.manual_glossary_prompt = self.config.get('manual_glossary_prompt', default_manual_prompt)
-        
+        # Keep a copy for later (e.g., when saving and the field was cleared)
+        self.default_manual_glossary_prompt = default_manual_prompt
+
+        manual_prompt_from_config = self.config.get('manual_glossary_prompt', default_manual_prompt)
+        if not manual_prompt_from_config or not manual_prompt_from_config.strip():
+            self.manual_glossary_prompt = default_manual_prompt
+        else:
+            self.manual_glossary_prompt = manual_prompt_from_config
+
         self.manual_prompt_text.setPlainText(self.manual_glossary_prompt)
         
         prompt_controls_widget = QWidget()
@@ -1258,20 +1266,7 @@ Rules:
             reply = QMessageBox.question(parent, "Reset Prompt", "Reset manual glossary prompt to default?",
                                          QMessageBox.Yes | QMessageBox.No)
             if reply == QMessageBox.Yes:
-                default_prompt = """Extract character names and important terms from the following text.
-
-    Output format:
-    {fields}
-
-    Rules:
-    - Output ONLY CSV lines in the exact format shown above
-    - No headers, no extra text, no JSON
-    - One entry per line
-    - Leave gender empty for terms (just end with comma)
-    - Do not add generic pronoun only entries (Example: I, you, he, she, etc.) and common nouns (father, mother, etc.)
-    - For all fields except 'raw_name', use {language} translation
-    """
-                self.manual_prompt_text.setPlainText(default_prompt)
+                self.manual_prompt_text.setPlainText(getattr(self, 'default_manual_glossary_prompt', self.manual_prompt_text.toPlainText()))
         
         reset_btn = QPushButton("Reset to Default")
         reset_btn.clicked.connect(reset_manual_prompt)
@@ -1366,7 +1361,21 @@ Rules:
             debug_enabled = getattr(self, 'config', {}).get('show_debug_buttons', False)
             
             if hasattr(self, 'manual_prompt_text'):
-                self.manual_glossary_prompt = self.manual_prompt_text.toPlainText().strip()
+                manual_text = self.manual_prompt_text.toPlainText()
+                self.manual_glossary_prompt = manual_text.strip()
+
+                # If the prompt was cleared, restore the default so we never persist an empty template.
+                if not self.manual_glossary_prompt:
+                    default_manual = getattr(self, 'default_manual_glossary_prompt', None)
+                    if default_manual:
+                        self.manual_glossary_prompt = default_manual.strip()
+                        # Update the UI to reflect the restored default
+                        try:
+                            self.manual_prompt_text.blockSignals(True)
+                            self.manual_prompt_text.setPlainText(default_manual)
+                        finally:
+                            self.manual_prompt_text.blockSignals(False)
+
                 if debug_enabled:
                     print(f"🔍 [UPDATE] manual_glossary_prompt: {len(self.manual_glossary_prompt)} chars")
             
