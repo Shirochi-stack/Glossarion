@@ -2947,12 +2947,22 @@ class TranslationProcessor:
             if rolling_summary_max_tokens == -1:
                 rolling_summary_max_tokens = int(getattr(self.config, 'MAX_OUTPUT_TOKENS', 8192))
 
-            summary_resp, _ = send_with_interrupt(
+            send_result = send_with_interrupt(
                 summary_msgs, self.client, self.config.TEMP,
                 min(int(rolling_summary_max_tokens), self.config.MAX_OUTPUT_TOKENS),
                 self.check_stop,
                 context='summary'
             )
+            
+            # send_with_interrupt may return:
+            # - a plain string (content)
+            # - (content, finish_reason)
+            # - (content, finish_reason, raw_obj)
+            # We only need the content for rolling summaries.
+            if isinstance(send_result, tuple) and len(send_result) >= 1:
+                summary_resp = send_result[0]
+            else:
+                summary_resp = send_result
             
             # Save the summary to the output folder
             summary_file = os.path.join(self.out_dir, "rolling_summary.txt")
