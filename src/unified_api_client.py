@@ -337,18 +337,54 @@ def _sanitize_for_log(text: str, limit: int = 400) -> str:
         if not isinstance(text, str):
             text = str(text)
         # Remove script/style blocks
-        s = _re.sub(r'(?is)<(script|style)[^>]*>.*?</\1>', '', text)
+        s = _re.sub(r'(?is)<(script|style)[^>]*>.*?</\\1>', '', text)
         # Remove all tags
         s = _re.sub(r'(?s)<[^>]+>', '', s)
         # Unescape entities
         s = _html_mod.unescape(s)
         # Collapse whitespace
-        s = _re.sub(r'\s+', ' ', s).strip()
+        s = _re.sub(r'\\s+', ' ', s).strip()
         if limit and len(s) > limit:
             s = s[:limit] + '…'
         return s
     except Exception:
         return str(text)[:limit] + ('…' if text and len(str(text)) > limit else '')
+
+
+def _analyze_auth_token(token) -> dict:
+    """Return safe, non-secret diagnostics for an auth token (API key or full header value).
+
+    This is used to make 'Invalid header value b\'Bearer ...\'' errors actionable.
+    NEVER returns the token itself.
+    """
+    try:
+        raw_type = type(token).__name__
+        if token is None:
+            s = ""
+        elif isinstance(token, bytes):
+            s = token.decode("utf-8", errors="replace")
+        else:
+            s = str(token)
+
+        stripped = s.strip()
+        whitespace_chars = sorted({repr(ch) for ch in s if isinstance(ch, str) and ch.isspace()})
+
+        return {
+            "type": raw_type,
+            "len": len(s),
+            "is_empty": len(s) == 0,
+            "leading_ws": bool(s) and s[:1].isspace(),
+            "trailing_ws": bool(s) and s[-1:].isspace(),
+            "has_any_whitespace": any(ch.isspace() for ch in s),
+            "has_newline": ("\n" in s),
+            "has_cr": ("\r" in s),
+            "has_tab": ("\t" in s),
+            "startswith_bearer": stripped.lower().startswith("bearer ") or stripped.lower() == "bearer",
+            "would_change_if_stripped": stripped != s,
+            "whitespace_chars": whitespace_chars,
+        }
+    except Exception:
+        return {"type": type(token).__name__}
 
 # Redirect all print() calls in this module to the module logger so GUI can capture them
 # This affects ONLY this module (does not modify global/builtins print)
@@ -493,6 +529,57 @@ class UnifiedClientError(Exception):
 
 class UnifiedClient:
     # ----- Helper methods to reduce duplication -----
+
+    def _log_invalid_authorization_header_error(self, exc: Exception) -> None:
+        """Log actionable, non-secret diagnostics for invalid Authorization header errors."""
+        try:
+            client_type = getattr(self, 'client_type', None)
+            model = getattr(self, 'model', None)
+            key_identifier = getattr(self, 'key_identifier', None)
+            key_index = getattr(self, 'current_key_index', None)
+
+            # Analyze api_key and the derived Authorization value (Bearer + key)
+            api_key_diag = _analyze_auth_token(getattr(self, 'api_key', None))
+            try:
+                bearer_val = f"Bearer {getattr(self, 'api_key', '')}"
+            except Exception:
+                bearer_val = "Bearer "
+            auth_diag = _analyze_auth_token(bearer_val)
+
+            # Base URL hint (SDK)
+            base_url = None
+            try:
+                c = getattr(self, 'openai_client', None)
+                if c is not None and hasattr(c, 'base_url'):
+                    base_url = str(getattr(c, 'base_url'))
+            except Exception:
+                base_url = None
+
+            print("🚨 Invalid Authorization header value detected (request blocked by HTTP client).")
+            print(f"    client_type={client_type} model={model} key_identifier={key_identifier} key_index={key_index} base_url={base_url}")
+            print(
+                "    api_key_diagnostics="
+                f"type={api_key_diag.get('type')} len={api_key_diag.get('len')} empty={api_key_diag.get('is_empty')} "
+                f"leading_ws={api_key_diag.get('leading_ws')} trailing_ws={api_key_diag.get('trailing_ws')} "
+                f"has_newline={api_key_diag.get('has_newline')} has_cr={api_key_diag.get('has_cr')} has_tab={api_key_diag.get('has_tab')} "
+                f"startswith_bearer={api_key_diag.get('startswith_bearer')}"
+            )
+            print(
+                "    authorization_value_diagnostics="
+                f"len={auth_diag.get('len')} has_newline={auth_diag.get('has_newline')} has_cr={auth_diag.get('has_cr')} "
+                f"has_any_whitespace={auth_diag.get('has_any_whitespace')}"
+            )
+            if api_key_diag.get('whitespace_chars'):
+                print(f"    whitespace_chars={api_key_diag.get('whitespace_chars')}")
+            print(
+                "    Fix: ensure the API key is not empty, does not include 'Bearer ', and has no leading/trailing whitespace/newlines. "
+                "If you load it from a file/env, use .strip()."
+            )
+            # Include the original exception type without dumping secrets
+            print(f"    underlying_exception={type(exc).__name__}: {_sanitize_for_log(str(exc), 200)}")
+        except Exception:
+            # Never let diagnostics crash the retry loop
+            pass
     @contextlib.contextmanager
     def _model_lock(self):
         """Context manager for thread-safe model access"""
@@ -4211,6 +4298,14 @@ class UnifiedClient:
                 # COMPREHENSIVE ERROR HANDLING FOR NoneType and other issues
                 error_str = str(e).lower()
                 print(f"Unexpected error: {e}")
+
+                # Make Invalid header value errors actionable (usually bad/empty key or newline in key)
+                if "invalid header value" in error_str and "bearer" in error_str:
+                    try:
+                        self._log_invalid_authorization_header_error(e)
+                    except Exception:
+                        pass
+
                 # Save unexpected error details to Payloads/failed_requests
                 try:
                     self._save_failed_request(messages, e, context)
@@ -7685,11 +7780,27 @@ class UnifiedClient:
                 raise UnifiedClientError(f"{provider_name} SDK error: {e}")
 
     def _build_openai_headers(self, provider: str, api_key: str, headers: Optional[dict]) -> dict:
-        """Construct standard headers for OpenAI-compatible HTTP calls without altering behavior."""
+        """Construct standard headers for OpenAI-compatible HTTP calls.
+
+        Note: We defensively strip leading/trailing whitespace from api_key because it is invalid in HTTP
+        headers and frequently causes 'Invalid header value b\'Bearer ...\'' client-side errors.
+        """
         h = dict(headers) if headers else {}
+
+        # Normalize key for header safety (do not log/return the secret)
+        try:
+            if api_key is None:
+                api_key_clean = ""
+            elif isinstance(api_key, bytes):
+                api_key_clean = api_key.decode("utf-8", errors="replace").strip()
+            else:
+                api_key_clean = str(api_key).strip()
+        except Exception:
+            api_key_clean = api_key
+
         # Only set Authorization if not already present and not Azure special-case (Azure handled earlier)
         if 'Authorization' not in h and provider not in ('azure',):
-            h['Authorization'] = f'Bearer {api_key}'
+            h['Authorization'] = f'Bearer {api_key_clean}'
         # Ensure content type
         if 'Content-Type' not in h:
             h['Content-Type'] = 'application/json'
@@ -7752,7 +7863,13 @@ class UnifiedClient:
         return f"{req_id}-a{attempt}"
 
     def _get_openai_client(self, base_url: str, api_key: str):
-        """Get or create a thread-local OpenAI client for a base_url."""
+        """Get or create a thread-local OpenAI client for a base_url.
+
+        Important:
+        - api_key is normalized (decoded if bytes, stripped) because whitespace/newlines break HTTP headers.
+        - The cache key must vary per api_key in multi-key mode; otherwise a client created with a bad/empty
+          key can be incorrectly reused.
+        """
         if openai is None:
             raise UnifiedClientError("OpenAI SDK not installed. Install with: pip install openai")
             
@@ -7760,11 +7877,40 @@ class UnifiedClient:
         if (hasattr(self, '_individual_endpoint_applied') and self._individual_endpoint_applied and 
             hasattr(self, 'openai_client') and self.openai_client):
             return self.openai_client
-            
+
+        # Normalize key for header safety
+        try:
+            if api_key is None:
+                api_key_clean = ""
+            elif isinstance(api_key, bytes):
+                api_key_clean = api_key.decode("utf-8", errors="replace")
+            else:
+                api_key_clean = str(api_key)
+            if api_key_clean != api_key_clean.strip():
+                # Log once per session to help users self-diagnose without leaking secrets
+                try:
+                    self.__class__._log_once(
+                        "⚠️ API key had leading/trailing whitespace; stripping for Authorization header safety.",
+                        is_debug=True
+                    )
+                except Exception:
+                    pass
+            api_key_clean = api_key_clean.strip()
+        except Exception:
+            api_key_clean = api_key
+
+        # Thread-local cache
         tls = self._get_thread_local_client()
         if not hasattr(tls, "openai_clients"):
             tls.openai_clients = {}
-        map_key = f"{base_url}|{bool(api_key)}"
+
+        # Cache per base_url + key fingerprint (never store the key itself)
+        try:
+            fp = hashlib.sha256((api_key_clean or "").encode("utf-8", errors="ignore")).hexdigest()[:10] if api_key_clean else "empty"
+        except Exception:
+            fp = "unknown"
+        map_key = f"{base_url}|{fp}"
+
         client = tls.openai_clients.get(map_key)
         if client is None:
             timeout_obj = None
@@ -7780,7 +7926,7 @@ class UnifiedClient:
                 _, read = self._get_timeouts()
                 timeout_obj = float(read)
             client = openai.OpenAI(
-                api_key=api_key,
+                api_key=api_key_clean,
                 base_url=base_url,
                 timeout=timeout_obj
             )
