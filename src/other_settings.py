@@ -1387,7 +1387,7 @@ def _create_response_handling_section(self, parent):
     deepseek_h = QHBoxLayout(deepseek_row)
     deepseek_h.setContentsMargins(20, 5, 0, 0)
 
-    deepseek_cb = self._create_styled_checkbox("Enable DeepSeek Thinking (deepseek-chat)")
+    deepseek_cb = self._create_styled_checkbox("Enable DeepSeek Thinking")
     try:
         deepseek_cb.setChecked(bool(getattr(self, 'enable_deepseek_thinking_var', True)))
     except Exception:
@@ -1405,7 +1405,7 @@ def _create_response_handling_section(self, parent):
     deepseek_h.addStretch()
     section_v.addWidget(deepseek_row)
 
-    deepseek_desc = QLabel("Adds extra_body={thinking:{type:enabled}} for DeepSeek OpenAI-compatible requests.\nEnables reasoning_content on deepseek-chat when supported.")
+    deepseek_desc = QLabel("Adds extra_body={thinking:{type:enabled}} for DeepSeek OpenAI-compatible requests.\nEnables reasoning_content when supported.")
     deepseek_desc.setStyleSheet("color: gray; font-size: 10pt;")
     deepseek_desc.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(deepseek_desc)

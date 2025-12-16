@@ -10458,6 +10458,26 @@ class UnifiedClient:
                     if provider == 'deepseek':
                         try:
                             enable_ds = os.getenv('ENABLE_DEEPSEEK_THINKING', '1') == '1'
+
+                            # Log once per-thread per (model,state) so users can tell if it is applied,
+                            # without spamming the console for every chunk.
+                            try:
+                                tls = self._get_thread_local_client()
+                                if not hasattr(tls, 'deepseek_thinking_logged'):
+                                    tls.deepseek_thinking_logged = set()
+                                state_key = (str(effective_model or ''), bool(enable_ds))
+                                if state_key not in tls.deepseek_thinking_logged:
+                                    tls.deepseek_thinking_logged.add(state_key)
+                                    try:
+                                        tname = threading.current_thread().name
+                                    except Exception:
+                                        tname = "unknown-thread"
+                                    self._debug_log(
+                                        f"🧠 [DeepSeek:{tname}] thinking={'ENABLED' if enable_ds else 'DISABLED'} (model={effective_model})"
+                                    )
+                            except Exception:
+                                pass
+
                             if enable_ds:
                                 extra_body["thinking"] = {"type": "enabled"}
                         except Exception:
@@ -10470,7 +10490,20 @@ class UnifiedClient:
                                 extra_body["provider"] = {
                                     "order": [preferred_provider]
                                 }
-                                print(f"🔀 OpenRouter: Requesting {preferred_provider} provider")
+                                # Only emit this log when the *user model string* is explicitly routed via OpenRouter
+                                # (i.e., starts with or/ or openrouter/). This avoids misleading logs when output from
+                                # multiple threads/providers interleaves.
+                                try:
+                                    raw_model_for_log = model_override if model_override is not None else getattr(self, 'model', '')
+                                except Exception:
+                                    raw_model_for_log = ''
+                                raw_model_for_log = str(raw_model_for_log or '')
+                                if raw_model_for_log.startswith(('or/', 'openrouter/')):
+                                    try:
+                                        tname = threading.current_thread().name
+                                    except Exception:
+                                        tname = "unknown-thread"
+                                    print(f"🔀 [OpenRouter:{tname}] Requesting provider={preferred_provider} (model={effective_model})")
                         except Exception:
                             pass
                     
