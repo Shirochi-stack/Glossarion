@@ -1230,6 +1230,20 @@ class GlossaryManagerMixin:
         self.manual_prompt_text.setMinimumHeight(prompt_height)
         self.manual_prompt_text.setLineWrapMode(QTextEdit.WidgetWidth)
         prompt_frame_layout.addWidget(self.manual_prompt_text)
+
+        # If the user clears the prompt and leaves the field, restore the default.
+        # (Avoids persisting an empty template and doesn't interfere with copy/paste while typing.)
+        _orig_focus_out = self.manual_prompt_text.focusOutEvent
+        def _manual_prompt_focus_out(event):
+            try:
+                if not self.manual_prompt_text.toPlainText().strip():
+                    default_manual = getattr(self, 'default_manual_glossary_prompt', None)
+                    if default_manual:
+                        self.manual_prompt_text.setPlainText(default_manual)
+            except Exception:
+                pass
+            return _orig_focus_out(event)
+        self.manual_prompt_text.focusOutEvent = _manual_prompt_focus_out
         
         # Always reload prompt from config to ensure fresh state
         # Treat empty strings as missing so users always get a usable default.
