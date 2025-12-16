@@ -4196,22 +4196,12 @@ class BatchTranslationProcessor:
                     try:
                         cleaned_to_save = cleaned
                         if split_the_merge:
-                            # Robustly remove split markers even if quotes/formatting differ
-                            try:
-                                from bs4 import BeautifulSoup
-                                soup = BeautifulSoup(cleaned_to_save, 'html.parser')
-                                for h1 in soup.find_all('h1'):
-                                    hid = (h1.get('id') or '').strip().lower()
-                                    if hid.startswith('split-') or 'split marker' in h1.get_text(' ', strip=True).lower():
-                                        h1.decompose()
-                                cleaned_to_save = str(soup)
-                            except Exception:
-                                cleaned_to_save = re.sub(
-                                    r"<h1\b[^>]*\bid\s*=\s*(?:\"|')?split-\d+(?:\"|')?[^>]*>.*?</h1>\s*",
-                                    '',
-                                    cleaned_to_save,
-                                    flags=re.IGNORECASE | re.DOTALL,
-                                )
+                            cleaned_to_save = re.sub(
+                                r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
+                                '',
+                                cleaned_to_save,
+                                flags=re.IGNORECASE | re.DOTALL,
+                            )
                         with open(os.path.join(self.out_dir, parent_fname), 'w', encoding='utf-8') as f:
                             f.write(cleaned_to_save)
                     except Exception:
@@ -4264,22 +4254,12 @@ class BatchTranslationProcessor:
                     try:
                         cleaned_to_save = cleaned
                         if split_the_merge:
-                            # Robustly remove split markers even if quotes/formatting differ
-                            try:
-                                from bs4 import BeautifulSoup
-                                soup = BeautifulSoup(cleaned_to_save, 'html.parser')
-                                for h1 in soup.find_all('h1'):
-                                    hid = (h1.get('id') or '').strip().lower()
-                                    if hid.startswith('split-') or 'split marker' in h1.get_text(' ', strip=True).lower():
-                                        h1.decompose()
-                                cleaned_to_save = str(soup)
-                            except Exception:
-                                cleaned_to_save = re.sub(
-                                    r"<h1\b[^>]*\bid\s*=\s*(?:\"|')?split-\d+(?:\"|')?[^>]*>.*?</h1>\s*",
-                                    '',
-                                    cleaned_to_save,
-                                    flags=re.IGNORECASE | re.DOTALL,
-                                )
+                            cleaned_to_save = re.sub(
+                                r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
+                                '',
+                                cleaned_to_save,
+                                flags=re.IGNORECASE | re.DOTALL,
+                            )
                         with open(os.path.join(self.out_dir, parent_fname), 'w', encoding='utf-8') as f:
                             f.write(cleaned_to_save)
                     except Exception:
@@ -4369,22 +4349,12 @@ class BatchTranslationProcessor:
             # If Split-the-Merge was enabled but we couldn't split reliably, remove injected markers
             cleaned_to_save = cleaned
             if split_the_merge and len(chapters_data) > 1:
-                # Robustly remove split markers even if quotes/formatting differ
-                try:
-                    from bs4 import BeautifulSoup
-                    soup = BeautifulSoup(cleaned_to_save, 'html.parser')
-                    for h1 in soup.find_all('h1'):
-                        hid = (h1.get('id') or '').strip().lower()
-                        if hid.startswith('split-') or 'split marker' in h1.get_text(' ', strip=True).lower():
-                            h1.decompose()
-                    cleaned_to_save = str(soup)
-                except Exception:
-                    cleaned_to_save = re.sub(
-                        r"<h1\b[^>]*\bid\s*=\s*(?:\"|')?split-\d+(?:\"|')?[^>]*>.*?</h1>\s*",
-                        '',
-                        cleaned_to_save,
-                        flags=re.IGNORECASE | re.DOTALL,
-                    )
+                cleaned_to_save = re.sub(
+                    r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
+                    '',
+                    cleaned_to_save,
+                    flags=re.IGNORECASE | re.DOTALL,
+                )
             
             # If translating a plain text source, mirror non-merged behavior and write .txt
             if getattr(self, 'is_text_file', False):
@@ -9155,7 +9125,8 @@ def main(log_callback=None, stop_callback=None):
                 if was_truncated:
                     print(f"   ⚠️ Merged response was TRUNCATED (finish_reason: {finish_reason})")
 
-                # Check if Split the Merge is enabled (needed even for QA-failed early exit)
+                # We may exit early on QA failure below, but we still want to strip
+                # injected split markers from any saved merged output when Split-the-Merge is enabled.
                 split_the_merge = os.getenv('SPLIT_THE_MERGE', '0') == '1'
                 
                 # Check for QA failures first (independent of truncation)
@@ -9179,22 +9150,12 @@ def main(log_callback=None, stop_callback=None):
                         try:
                             cleaned_to_save = cleaned
                             if split_the_merge:
-                                # Robustly remove split markers even if quotes/formatting differ
-                                try:
-                                    from bs4 import BeautifulSoup
-                                    soup = BeautifulSoup(cleaned_to_save, 'html.parser')
-                                    for h1 in soup.find_all('h1'):
-                                        hid = (h1.get('id') or '').strip().lower()
-                                        if hid.startswith('split-') or 'split marker' in h1.get_text(' ', strip=True).lower():
-                                            h1.decompose()
-                                    cleaned_to_save = str(soup)
-                                except Exception:
-                                    cleaned_to_save = re.sub(
-                                        r"<h1\b[^>]*\bid\s*=\s*(?:\"|')?split-\d+(?:\"|')?[^>]*>.*?</h1>\s*",
-                                        '',
-                                        cleaned_to_save,
-                                        flags=re.IGNORECASE | re.DOTALL,
-                                    )
+                                cleaned_to_save = re.sub(
+                                    r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
+                                    '',
+                                    cleaned_to_save,
+                                    flags=re.IGNORECASE | re.DOTALL,
+                                )
                             with open(os.path.join(out, parent_fname), 'w', encoding='utf-8') as f:
                                 f.write(cleaned_to_save)
                         except Exception:
@@ -9247,22 +9208,12 @@ def main(log_callback=None, stop_callback=None):
                         try:
                             cleaned_to_save = cleaned
                             if split_the_merge:
-                                # Robustly remove split markers even if quotes/formatting differ
-                                try:
-                                    from bs4 import BeautifulSoup
-                                    soup = BeautifulSoup(cleaned_to_save, 'html.parser')
-                                    for h1 in soup.find_all('h1'):
-                                        hid = (h1.get('id') or '').strip().lower()
-                                        if hid.startswith('split-') or 'split marker' in h1.get_text(' ', strip=True).lower():
-                                            h1.decompose()
-                                    cleaned_to_save = str(soup)
-                                except Exception:
-                                    cleaned_to_save = re.sub(
-                                        r"<h1\b[^>]*\bid\s*=\s*(?:\"|')?split-\d+(?:\"|')?[^>]*>.*?</h1>\s*",
-                                        '',
-                                        cleaned_to_save,
-                                        flags=re.IGNORECASE | re.DOTALL,
-                                    )
+                                cleaned_to_save = re.sub(
+                                    r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
+                                    '',
+                                    cleaned_to_save,
+                                    flags=re.IGNORECASE | re.DOTALL,
+                                )
                             with open(os.path.join(out, parent_fname), 'w', encoding='utf-8') as f:
                                 f.write(cleaned_to_save)
                         except Exception:
@@ -9335,22 +9286,12 @@ def main(log_callback=None, stop_callback=None):
                 # Save entire merged response to parent chapter's file
                 cleaned_to_save = cleaned
                 if split_the_merge and len(merge_info['group']) > 1:
-                    # Robustly remove split markers even if quotes/formatting differ
-                    try:
-                        from bs4 import BeautifulSoup
-                        soup = BeautifulSoup(cleaned_to_save, 'html.parser')
-                        for h1 in soup.find_all('h1'):
-                            hid = (h1.get('id') or '').strip().lower()
-                            if hid.startswith('split-') or 'split marker' in h1.get_text(' ', strip=True).lower():
-                                h1.decompose()
-                        cleaned_to_save = str(soup)
-                    except Exception:
-                        cleaned_to_save = re.sub(
-                            r"<h1\b[^>]*\bid\s*=\s*(?:\"|')?split-\d+(?:\"|')?[^>]*>.*?</h1>\s*",
-                            '',
-                            cleaned_to_save,
-                            flags=re.IGNORECASE | re.DOTALL,
-                        )
+                    cleaned_to_save = re.sub(
+                        r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
+                        '',
+                        cleaned_to_save,
+                        flags=re.IGNORECASE | re.DOTALL,
+                    )
 
                 if is_text_file and not is_pdf_file:
                     parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num).replace('.html', '.txt')
