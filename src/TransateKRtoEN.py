@@ -2935,10 +2935,19 @@ class TranslationProcessor:
         
         try:
             # Get configurable rolling summary token limit
-            rolling_summary_max_tokens = int(os.getenv('ROLLING_SUMMARY_MAX_TOKENS', '8192'))
+            # -1 means: use the main MAX_OUTPUT_TOKENS value
+            raw_max = os.getenv('ROLLING_SUMMARY_MAX_TOKENS', '-1')
+            try:
+                rolling_summary_max_tokens = int(str(raw_max).strip())
+            except Exception:
+                rolling_summary_max_tokens = -1
+            
+            if rolling_summary_max_tokens == -1:
+                rolling_summary_max_tokens = int(getattr(self.config, 'MAX_OUTPUT_TOKENS', 8192))
+
             summary_resp, _ = send_with_interrupt(
-                summary_msgs, self.client, self.config.TEMP, 
-                min(rolling_summary_max_tokens, self.config.MAX_OUTPUT_TOKENS), 
+                summary_msgs, self.client, self.config.TEMP,
+                min(int(rolling_summary_max_tokens), self.config.MAX_OUTPUT_TOKENS),
                 self.check_stop,
                 context='summary'
             )

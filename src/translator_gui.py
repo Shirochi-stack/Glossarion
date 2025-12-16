@@ -1969,7 +1969,8 @@ Recent translations to summarize:
             # New: how many summaries to retain in append mode
             ('rolling_summary_max_entries_var', 'rolling_summary_max_entries', '5'),
             # New: max tokens for rolling summary generation
-            ('rolling_summary_max_tokens_var', 'rolling_summary_max_tokens', '2048'),
+            # -1 means: use the main MAX_OUTPUT_TOKENS value
+            ('rolling_summary_max_tokens_var', 'rolling_summary_max_tokens', '-1'),
             ('reinforcement_freq_var', 'reinforcement_frequency', '10'),
             ('max_retry_tokens_var', 'max_retry_tokens', '65536'),
             ('duplicate_lookback_var', 'duplicate_lookback_chapters', '5'),
@@ -10154,7 +10155,7 @@ Important rules:
                 ('ROLLING_SUMMARY_SYSTEM_PROMPT', getattr(self, 'rolling_summary_system_prompt', getattr(self, 'default_rolling_summary_system_prompt', ''))),
                 ('ROLLING_SUMMARY_USER_PROMPT', getattr(self, 'rolling_summary_user_prompt', getattr(self, 'default_rolling_summary_user_prompt', ''))),
                 ('ROLLING_SUMMARY_MAX_ENTRIES', str(getattr(self, 'rolling_summary_max_entries_var', '10'))),
-                ('ROLLING_SUMMARY_MAX_TOKENS', str(getattr(self, 'rolling_summary_max_tokens_var', '8192'))),
+                ('ROLLING_SUMMARY_MAX_TOKENS', str(getattr(self, 'rolling_summary_max_tokens_var', '-1'))),
 
                 # Retry/network controls
                 ('RETRY_TRUNCATED', '1' if getattr(self, 'retry_truncated_var', False) else '0'),
