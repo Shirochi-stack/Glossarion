@@ -691,10 +691,22 @@ img {{
     text-justify: inter-word;
 }}
 
-/* Page breaks disabled - continuous flow */
+/* Page breaks for proper document flow */
 .page-break {{
-    /* Disabled to allow continuous page flow */
-    display: none;
+    page-break-before: always;
+    break-before: page;
+    clear: both;
+    height: 0;
+    margin: 0;
+    padding: 0;
+}}
+
+/* Print-specific page breaks */
+@media print {{
+    .page-break {{
+        page-break-before: always;
+        break-before: page;
+    }}
 }}
 
 /* Improve spacing for centered content */
@@ -1374,7 +1386,72 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
             if page_by_page:
                 return page_list, images_by_page
             else:
-                combined = "\n\n".join(html for _, html in page_list)
+                # When combining MuPDF-rendered pages, don't concatenate full <html> documents.
+                # Instead, merge body contents into a single HTML document and strip forced page-break styles.
+                try:
+                    from bs4 import BeautifulSoup
+                    import re as __re
+
+                    def _strip_forced_page_breaks(raw: str) -> str:
+                        # Remove CSS that can cause spurious blank pages when documents are concatenated.
+                        # Handles both inline styles and <style> blocks.
+                        if not raw:
+                            return raw
+                        # Inline style attributes
+                        raw = __re.sub(r'(?:page-break-(?:before|after)\s*:\s*always\s*;?)', '', raw, flags=__re.IGNORECASE)
+                        raw = __re.sub(r'(?:break-(?:before|after)\s*:\s*page\s*;?)', '', raw, flags=__re.IGNORECASE)
+                        return raw
+
+                    # Start a clean combined document
+                    combined_soup = BeautifulSoup('<html><head></head><body></body></html>', 'html.parser')
+                    out_body = combined_soup.body
+
+                    for page_no, page_html in page_list:
+                        if not page_html or not str(page_html).strip():
+                            continue
+                        page_html = _strip_forced_page_breaks(str(page_html))
+                        ps = BeautifulSoup(page_html, 'html.parser')
+                        container = ps.body if ps.body else ps
+
+                        # Ensure MuPDF's default per-page IDs (e.g. id="page0") are unique across combined output
+                        for tag in container.find_all(id=__re.compile(r'^page\d+$')):
+                            old_id = tag.get('id')
+                            new_id = f'mupdf-page-{page_no - 1}'
+                            if old_id and old_id != new_id:
+                                # Update any local href="#old_id" references within this page
+                                for a in container.find_all(href=f'#{old_id}'):
+                                    a['href'] = f'#{new_id}'
+                                tag['id'] = new_id
+
+                        # Also strip forced page-break styles from <style> blocks
+                        for st in container.find_all('style'):
+                            txt = st.string or ''
+                            if txt:
+                                txt2 = __re.sub(r'page-break-(?:before|after)\s*:\s*always\s*;?', '', txt, flags=__re.IGNORECASE)
+                                txt2 = __re.sub(r'break-(?:before|after)\s*:\s*page\s*;?', '', txt2, flags=__re.IGNORECASE)
+                                st.string.replace_with(txt2)
+
+                        # Wrap each page in a neutral container; no forced page breaks
+                        wrapper = combined_soup.new_tag('div', **{'class': 'mupdf-page', 'data-page': str(page_no)})
+
+                        # Move children into wrapper (avoid nesting <html>/<body> tags)
+                        frag = BeautifulSoup(container.decode_contents(), 'html.parser')
+                        for child in list(frag.contents):
+                            wrapper.append(child)
+
+                        # Skip empty wrappers (including those that only contain non-breaking spaces)
+                        _txt = wrapper.get_text() or ''
+                        _txt = _txt.replace('\xa0', '').strip()
+                        if not _txt and not wrapper.find('img'):
+                            continue
+
+                        out_body.append(wrapper)
+
+                    combined = str(combined_soup)
+                except Exception:
+                    # Fallback to previous behavior
+                    combined = "\n\n".join(html for _, html in page_list)
+
                 return combined, images_by_page
         
         html_parts = []
@@ -1628,7 +1705,7 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                 page_html.append('</div><!-- end toc at page end -->')
                 # Don't reset in_toc_section here in case TOC continues on next page
             
-            # Add page content without page breaks (continuous flow)
+            # Add page content with page break if needed
             if page_html:
                 # Insert TOC from outline BEFORE page content only if synthesizing
                 if toc_mode == "synthesize" and toc_from_outline and page_num == toc_page_number:
@@ -1636,6 +1713,11 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                     toc_from_outline = None  # Only insert once
                 
                 page_content = '\n'.join(page_html)
+                
+                # Add page break div for title pages and chapter starts
+                if should_page_break and page_num > 0:
+                    html_parts.append('<div class="page-break"></div>')
+                
                 html_parts.append(page_content)
         
         doc.close()
@@ -1739,6 +1821,121 @@ def _embed_images_as_data_uris(html: str, base_path: Optional[str], images_dir: 
         return m.group(0)  # Keep original if not found
     
     return img_re.sub(repl, html)
+
+
+def _remove_blank_pages_from_pdf(
+    pdf_path: str,
+    *,
+    render_scale: float = 0.5,
+    min_nonwhite_ratio: float = 0.0005,
+    inner_margin_ratio: float = 0.04,
+) -> int:
+    """Remove pages that are visually blank.
+
+    A common "blank page" artifact is a page that renders white but contains a hairline/border
+    (often at the bottom). To avoid keeping these, we analyze an *inner* clip region.
+
+    Returns number of pages removed.
+    """
+    try:
+        import fitz
+    except Exception:
+        return 0
+
+    debug = os.getenv('PDF_REMOVE_BLANK_PAGES_DEBUG', '0').lower() in ('1', 'true', 'yes', 'y', 'on')
+
+    try:
+        doc = fitz.open(pdf_path)
+    except Exception:
+        return 0
+
+    blank_pages = []
+    try:
+        for i in range(doc.page_count):
+            page = doc.load_page(i)
+
+            # If there's any selectable text, it's not blank.
+            try:
+                if page.get_text("text").strip():
+                    if debug:
+                        print(f"   • blank-page-scan: keep page {i+1} (has text)")
+                    continue
+            except Exception:
+                pass
+
+            # Render an inner clip (ignore page borders / footer hairlines)
+            try:
+                rect = page.rect
+                mx = rect.width * inner_margin_ratio
+                my = rect.height * inner_margin_ratio
+                clip = fitz.Rect(rect.x0 + mx, rect.y0 + my, rect.x1 - mx, rect.y1 - my)
+
+                mat = fitz.Matrix(render_scale, render_scale)
+                pix = page.get_pixmap(matrix=mat, alpha=False, clip=clip)
+
+                n = pix.n  # components per pixel (typically 3)
+                samples = pix.samples
+                total = pix.width * pix.height
+
+                if total <= 0:
+                    # Nothing to analyze -> consider blank
+                    blank_pages.append(i)
+                    continue
+
+                if n < 3:
+                    # Gray or other formats: treat any non-255 as non-white
+                    nonwhite = sum(1 for b in samples if b < 250)
+                    ratio = (nonwhite / total)
+                else:
+                    nonwhite = 0
+                    # Fast scan: mark non-white if any channel is below threshold
+                    for j in range(0, len(samples), n):
+                        if samples[j] < 250 or samples[j + 1] < 250 or samples[j + 2] < 250:
+                            nonwhite += 1
+                    ratio = (nonwhite / total)
+
+                if debug:
+                    print(f"   • blank-page-scan: page {i+1} nonwhite_ratio={ratio:.6f} (inner clip)")
+
+                if ratio < min_nonwhite_ratio:
+                    blank_pages.append(i)
+            except Exception as e:
+                if debug:
+                    print(f"   • blank-page-scan: page {i+1} scan failed: {e}")
+                continue
+
+        if blank_pages:
+            if debug:
+                print(f"   • blank-page-scan: removing pages {[p+1 for p in blank_pages]}")
+            for i in reversed(blank_pages):
+                doc.delete_page(i)
+
+            # Save to a temporary file first, then atomically replace.
+            # This avoids issues on Windows where saving back to the same path can fail
+            # if the PDF is open in a viewer.
+            tmp_path = pdf_path + ".tmp_noblank.pdf"
+            try:
+                # Ensure doc is optimized and unused objects removed.
+                doc.save(tmp_path, incremental=False, deflate=True, garbage=4)
+                doc.close()
+                os.replace(tmp_path, pdf_path)
+            except Exception as e:
+                # If replace fails (e.g. file locked), keep the tmp file for inspection.
+                if debug:
+                    print(f"   • blank-page-scan: failed to write cleaned PDF (is it open?): {e}")
+                    print(f"   • blank-page-scan: cleaned PDF left at: {tmp_path}")
+                try:
+                    # Try to at least save in-place if possible
+                    doc.save(pdf_path, incremental=False, deflate=True, garbage=4)
+                except Exception:
+                    pass
+
+        return len(blank_pages)
+    finally:
+        try:
+            doc.close()
+        except Exception:
+            pass
 
 
 def create_pdf_from_html(html_content: str, output_path: str, css_path: Optional[str] = None, images_dir: Optional[str] = None) -> bool:
@@ -1858,6 +2055,19 @@ def create_pdf_from_html(html_content: str, output_path: str, css_path: Optional
             
             # Generate PDF
             html_doc.write_pdf(output_path, stylesheets=stylesheets, font_config=font_config)
+
+            # Optional cleanup: remove truly blank pages (common when concatenating many HTML fragments)
+            if os.getenv('PDF_REMOVE_BLANK_PAGES', '1').lower() in ('1', 'true', 'yes', 'y', 'on'):
+                try:
+                    removed = _remove_blank_pages_from_pdf(output_path)
+                    if removed:
+                        print(f"   • Removed {removed} blank page(s) from generated PDF")
+                    else:
+                        if os.getenv('PDF_REMOVE_BLANK_PAGES_DEBUG', '0').lower() in ('1', 'true', 'yes', 'y', 'on'):
+                            print("   • Removed 0 blank pages (debug enabled)")
+                except Exception as e:
+                    if os.getenv('PDF_REMOVE_BLANK_PAGES_DEBUG', '0').lower() in ('1', 'true', 'yes', 'y', 'on'):
+                        print(f"   • Blank-page removal failed: {e}")
             
             print(f"✅ Successfully created PDF with WeasyPrint: {os.path.basename(output_path)}")
             return True
@@ -1925,6 +2135,14 @@ def create_pdf_from_html(html_content: str, output_path: str, css_path: Optional
                 )
             
             if not pisa_status.err:
+                # Optional cleanup: remove truly blank pages
+                if os.getenv('PDF_REMOVE_BLANK_PAGES', '1').lower() in ('1', 'true', 'yes', 'y', 'on'):
+                    try:
+                        removed = _remove_blank_pages_from_pdf(output_path)
+                        if removed:
+                            print(f"   • Removed {removed} blank page(s) from generated PDF")
+                    except Exception:
+                        pass
                 print(f"✅ Successfully created PDF with xhtml2pdf: {os.path.basename(output_path)}")
                 if images_dir and os.path.exists(images_dir):
                     print(f"   • Images embedded in PDF")
@@ -1961,6 +2179,14 @@ def create_pdf_from_html(html_content: str, output_path: str, css_path: Optional
             # Convert from string
             pdfkit.from_string(html_content, output_path, options=options)
             
+            # Optional cleanup: remove truly blank pages
+            if os.getenv('PDF_REMOVE_BLANK_PAGES', '1').lower() in ('1', 'true', 'yes', 'y', 'on'):
+                try:
+                    removed = _remove_blank_pages_from_pdf(output_path)
+                    if removed:
+                        print(f"   • Removed {removed} blank page(s) from generated PDF")
+                except Exception:
+                    pass
             print(f"✅ Successfully created PDF with pdfkit: {os.path.basename(output_path)}")
             return True
             

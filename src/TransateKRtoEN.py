@@ -9359,6 +9359,9 @@ def main(log_callback=None, stop_callback=None):
                     print(f"📄 Creating PDF from HTML with formatting and images...")
                     
                     # Build full HTML content
+                    # NOTE: inserting forced page breaks between pages can sometimes produce a blank page
+                    # depending on the renderer and the source XHTML. Make it opt-in via env var.
+                    insert_pdf_page_breaks = os.getenv('PDF_INSERT_PAGE_BREAKS', '0').lower() in ('1', 'true', 'yes', 'y', 'on')
                     html_parts = []
                     current_main_chapter = None
                     
@@ -9375,6 +9378,17 @@ def main(log_callback=None, stop_callback=None):
                                 # Extract just the body content to avoid nested html/head/body tags
                                 content = ''.join(str(child) for child in body.children)
                         
+                        # De-duplicate MuPDF's per-page wrapper IDs (e.g. id="page0") when concatenating
+                        # to avoid duplicate IDs/anchors confusing HTML->PDF renderers.
+                        try:
+                            from bs4 import BeautifulSoup
+                            frag = BeautifulSoup(content, 'html.parser')
+                            for tag in frag.find_all(id='page0'):
+                                tag['id'] = f'mupdf-page0-{i + 1}'
+                            content = str(frag)
+                        except Exception:
+                            pass
+                        
                         if chapter_data.get('is_chunk'):
                             chunk_info = chapter_data.get('chunk_info', {})
                             original_chapter = chunk_info.get('original_chapter')
@@ -9383,7 +9397,7 @@ def main(log_callback=None, stop_callback=None):
                             
                             if original_chapter != current_main_chapter:
                                 current_main_chapter = original_chapter
-                                if i > 0:
+                                if insert_pdf_page_breaks and i > 0:
                                     html_parts.append('<div class="page-break"></div>\n')
                             
                             html_parts.append(content)
@@ -9391,7 +9405,7 @@ def main(log_callback=None, stop_callback=None):
                                 html_parts.append('\n')
                         else:
                             current_main_chapter = chapter_data['num']
-                            if i > 0:
+                            if insert_pdf_page_breaks and i > 0:
                                 html_parts.append('<div class="page-break"></div>\n')
                             html_parts.append(content)
                     
