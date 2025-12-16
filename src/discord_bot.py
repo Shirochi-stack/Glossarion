@@ -255,6 +255,7 @@ async def model_autocomplete(interaction: discord.Interaction, current: str):
     request_merge_count="Chapters per request when merging enabled (default: 3)",
     split_the_merge="Split merged translation output back into separate files (default: True)",
     send_zip="Return output as a ZIP archive instead of individual file (default: False)",
+    compression_factor="Compression factor (overrides auto-compression if set)",
     target_language="Target language"
 )
 @app_commands.choices(extraction_mode=[
@@ -281,6 +282,7 @@ async def translate(
     request_merge_count: int = 3,
     split_the_merge: bool = True,
     send_zip: bool = False,
+    compression_factor: float = None,
     target_language: str = "English"
 ):
     """Translate file using Glossarion"""
@@ -424,6 +426,22 @@ async def translate(
         os.environ['BATCH_SIZE'] = str(batch_size)
         os.environ['MAX_OUTPUT_TOKENS'] = str(max_output_tokens)
         os.environ['TRANSLATION_TEMPERATURE'] = str(temperature)
+        
+        # Handle compression factor
+        # If user provides a specific factor, disable auto-compression and use the value
+        # If None (default), use the config/env default which typically enables auto-compression
+        if compression_factor is not None:
+            os.environ['COMPRESSION_FACTOR'] = str(compression_factor)
+            os.environ['AUTO_COMPRESSION_FACTOR'] = '0'
+            sys.stderr.write(f"[CONFIG] Manual compression factor: {compression_factor} (Auto-compression disabled)\n")
+        else:
+            # Respect config setting for auto-compression (default True)
+            auto_comp = config.get('auto_compression_factor', True)
+            os.environ['AUTO_COMPRESSION_FACTOR'] = '1' if auto_comp else '0'
+            # Default compression factor if not auto (e.g. 1.0)
+            if not auto_comp:
+                os.environ['COMPRESSION_FACTOR'] = str(config.get('compression_factor', 1.0))
+        
         # Disable contextual translation by default (each batch is independent)
         os.environ['CONTEXTUAL'] = '0'
         # Disable emergency paragraph restoration
