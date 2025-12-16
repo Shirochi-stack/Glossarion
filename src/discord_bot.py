@@ -256,6 +256,7 @@ async def model_autocomplete(interaction: discord.Interaction, current: str):
     split_the_merge="Split merged translation output back into separate files (default: True)",
     send_zip="Return output as a ZIP archive instead of individual file (default: False)",
     compression_factor="Compression factor (overrides auto-compression if set)",
+    thinking="Enable/disable AI thinking capabilities (GPT/Gemini/DeepSeek) - Default: True",
     target_language="Target language"
 )
 @app_commands.choices(extraction_mode=[
@@ -283,6 +284,7 @@ async def translate(
     split_the_merge: bool = True,
     send_zip: bool = False,
     compression_factor: float = None,
+    thinking: bool = True,
     target_language: str = "English"
 ):
     """Translate file using Glossarion"""
@@ -548,6 +550,15 @@ async def translate(
         
         # Disable Gemini safety filter by default (enabled for Discord bot)
         os.environ['DISABLE_GEMINI_SAFETY'] = 'true'
+        
+        # Handle Thinking Toggle
+        # If thinking is True (default), we don't need to do anything as we respect the config/env
+        # If thinking is False, we explicitly disable all thinking features
+        if not thinking:
+            os.environ['ENABLE_GPT_THINKING'] = '0'
+            os.environ['ENABLE_GEMINI_THINKING'] = '0'
+            os.environ['ENABLE_DEEPSEEK_THINKING'] = '0'
+            sys.stderr.write(f"[CONFIG] Thinking capabilities disabled via command\n")
         
         # Handle Vertex AI / Google Cloud credentials
         if '@' in model or model.startswith('vertex/'):
@@ -891,6 +902,7 @@ async def translate(
     merge_count="Number of requests to merge when request merging is enabled (default: 10)",
     duplicate_algorithm="Duplicate handling: auto/strict/balanced/aggressive/basic (default: balanced)",
     send_zip="Return output as a ZIP archive instead of individual file (default: False)",
+    thinking="Enable/disable AI thinking capabilities (GPT/Gemini/DeepSeek) - Default: True",
     target_language="Target language for translations"
 )
 @app_commands.choices(extraction_mode=[
@@ -914,6 +926,7 @@ async def extract(
     merge_count: int = 10,
     duplicate_algorithm: str = "balanced",
     send_zip: bool = False,
+    thinking: bool = True,
     target_language: str = "English"
 ):
     """Extract glossary from file using Glossarion"""
@@ -1103,6 +1116,13 @@ async def extract(
             custom_fields = ['description']
         os.environ['GLOSSARY_CUSTOM_FIELDS'] = json.dumps(custom_fields)
         os.environ['DISABLE_GEMINI_SAFETY'] = 'true'
+        
+        # Handle Thinking Toggle
+        if not thinking:
+            os.environ['ENABLE_GPT_THINKING'] = '0'
+            os.environ['ENABLE_GEMINI_THINKING'] = '0'
+            os.environ['ENABLE_DEEPSEEK_THINKING'] = '0'
+            sys.stderr.write(f"[CONFIG] Thinking capabilities disabled via command\n")
         
         # Handle Vertex AI / Google Cloud credentials
         if '@' in model or model.startswith('vertex/'):
