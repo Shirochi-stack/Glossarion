@@ -9493,14 +9493,7 @@ def main(log_callback=None, stop_callback=None):
                     print(f"📄 Creating PDF from HTML with formatting and images...")
                     
                     # Build full HTML content
-                    # NOTE: inserting forced page breaks between pages can sometimes produce a blank page
-                    # depending on the renderer and the source XHTML. Make it opt-in via env var.
-                    insert_pdf_page_breaks = os.getenv('PDF_INSERT_PAGE_BREAKS', '0').lower() in ('1', 'true', 'yes', 'y', 'on')
-
-                    # Force page breaks for the first N combined pages to avoid them collapsing into one page.
-                    # (This is intentionally scoped to the start of the document to reduce blank-page risk.)
-                    force_page_breaks_first_n = 4
-
+                    # Always insert page breaks between combined pages (one HTML fragment per output PDF page).
                     html_parts = []
                     current_main_chapter = None
                     
@@ -9527,6 +9520,10 @@ def main(log_callback=None, stop_callback=None):
                             content = str(frag)
                         except Exception:
                             pass
+
+                        # Always insert a page break before every combined page after the first.
+                        if i > 0:
+                            html_parts.append('<div class="page-break"></div>\n')
                         
                         if chapter_data.get('is_chunk'):
                             chunk_info = chapter_data.get('chunk_info', {})
@@ -9536,22 +9533,12 @@ def main(log_callback=None, stop_callback=None):
                             
                             if original_chapter != current_main_chapter:
                                 current_main_chapter = original_chapter
-                                if (
-                                    (insert_pdf_page_breaks and i > 0)
-                                    or (0 < i < force_page_breaks_first_n)
-                                ):
-                                    html_parts.append('<div class="page-break"></div>\n')
                             
                             html_parts.append(content)
                             if chunk_idx < total_chunks:
                                 html_parts.append('\n')
                         else:
                             current_main_chapter = chapter_data['num']
-                            if (
-                                (insert_pdf_page_breaks and i > 0)
-                                or (0 < i < force_page_breaks_first_n)
-                            ):
-                                html_parts.append('<div class="page-break"></div>\n')
                             html_parts.append(content)
                     
                     full_html_body = "".join(html_parts)
