@@ -2950,13 +2950,16 @@ class TranslationProcessor:
         user_prompt = user_prompt_template.replace("{translations}", translations_text)
 
         # Optional: provide the previous rolling summary as an assistant message for context.
-        # IMPORTANT: Do NOT re-wrap it here; the previous summary may already contain headers/footers,
-        # and it must never be duplicated into the user message.
+        # IMPORTANT: This MUST NOT be duplicated into the user message.
         prev_summary_msg = None
         if previous_summary_text and isinstance(previous_summary_text, str) and previous_summary_text.strip():
             prev_summary_msg = {
                 "role": "assistant",
-                "content": previous_summary_text.strip(),
+                "content": (
+                    "[PREVIOUS ROLLING SUMMARY — UPDATE THIS]\n"
+                    + previous_summary_text.strip()
+                    + "\n[END PREVIOUS ROLLING SUMMARY]"
+                ),
             }
 
         # SUMMARY_ROLE also controls the rolling-summary generation payload.
@@ -9517,65 +9520,76 @@ def main(log_callback=None, stop_callback=None):
 
                 summary_mode = str(getattr(config, 'ROLLING_SUMMARY_MODE', 'replace') or 'replace').strip().lower()
 
-                # Cache translated chapter text for rolling-summary generation (replace mode).
-                # We DO NOT use translation_history.json for this.
-                summary_sources_file = os.path.join(out, "rolling_summary_sources.txt")
-
-                def _append_summary_source_block(chapter_num, text):
+                def _load_previous_rolling_summary_text() -> str:
+                    """Load the previous rolling summary from rolling_summary.txt to use as assistant context."""
                     try:
-                        header = f"=== Rolling Summary Source of Chapter {chapter_num} ===\n"
-                        footer = "\n=== End Rolling Summary Source ===\n"
-                        with open(summary_sources_file, "a", encoding="utf-8") as f:
-                            f.write(header)
-                            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}]\n")
-                            f.write(text.strip() + "\n")
-                            f.write(footer)
+                        summary_file = os.path.join(out, "rolling_summary.txt")
+                        if not os.path.exists(summary_file):
+                            return ""
+                        with open(summary_file, "r", encoding="utf-8") as f:
+                            content = f.read().strip()
+                        if not content:
+                            return ""
+                        # Best-effort: if the file contains our standard header + timestamp, keep only the summary body.
+                        # (This is not for de-duping; it's to avoid sending file headers as summary content.)
+                        parts = re.split(r"(?m)^\[\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\]\s*$", content, maxsplit=1)
+                        if len(parts) == 2:
+                            body = parts[1].strip()
+                            return body
+                        return content
                     except Exception:
-                        pass
+                        return ""
 
-                def _read_last_source_blocks(n):
+                def _get_last_translated_outputs(n: int) -> str:
+                    """Build the user text from the last N translated chapter outputs (by completed_list)."""
                     try:
-                        if n <= 0 or not os.path.exists(summary_sources_file):
-                            return []
-                        with open(summary_sources_file, "r", encoding="utf-8") as f:
-                            content = f.read()
-                        # Find block headers
-                        headers = [m.start() for m in re.finditer(r"(?m)^===\s*Rolling Summary Source of Chapter\s+\d+\s*===\s*$", content)]
-                        if not headers:
-                            return []
-                        keep_starts = headers[-n:]
+                        n = int(n or 0)
+                        if n <= 0:
+                            return cleaned
+                        # completed_list is saved (sorted) by ProgressManager.save()
+                        completed_list = progress_manager.prog.get("completed_list") or []
+                        if not isinstance(completed_list, list) or not completed_list:
+                            return cleaned
+                        last_items = completed_list[-n:]
                         blocks = []
-                        for i, s in enumerate(keep_starts):
-                            e = keep_starts[i + 1] if i + 1 < len(keep_starts) else len(content)
-                            block = content[s:e].strip()
-                            if block:
-                                blocks.append(block)
-                        return blocks
+                        for item in last_items:
+                            try:
+                                chap_num = item.get("num")
+                                rel_file = item.get("file")
+                                if not rel_file:
+                                    continue
+                                fp = os.path.join(out, rel_file)
+                                if not os.path.exists(fp):
+                                    continue
+                                with open(fp, "r", encoding="utf-8") as f:
+                                    txt = f.read().strip()
+                                if not txt:
+                                    continue
+                                blocks.append(
+                                    f"=== Previous Translated Text: Chapter {chap_num} ===\n"
+                                    f"{txt}\n"
+                                    f"=== End Previous Translated Text ==="
+                                )
+                            except Exception:
+                                continue
+                        return "\n\n".join(blocks) if blocks else cleaned
                     except Exception:
-                        return []
-
-                # Always record the current chapter translation into the source cache.
-                # In replace mode, we also strip any leaked injected [MEMORY] blocks before caching.
-                cache_text = cleaned
-                if summary_mode == 'replace':
-                    try:
-                        cache_text = ContentProcessor.clean_memory_artifacts(cache_text)
-                    except Exception:
-                        pass
-                _append_summary_source_block(actual_num, cache_text)
+                        return cleaned
 
                 if summary_mode == 'replace':
-                    # Summarize the last N cached source blocks (configured by ROLLING_SUMMARY_EXCHANGES)
+                    # In replace mode, update the rolling summary using:
+                    # - assistant: previous rolling summary (from rolling_summary.txt)
+                    # - user: last N translated chapter outputs (configured by ROLLING_SUMMARY_EXCHANGES)
+                    prev_summary = _load_previous_rolling_summary_text()
                     n = int(getattr(config, 'ROLLING_SUMMARY_EXCHANGES', 5) or 5)
-                    blocks = _read_last_source_blocks(n)
-                    combined = "\n\n---\n\n".join(blocks) if blocks else cache_text
+                    user_text = _get_last_translated_outputs(n)
                     summary_text = translation_processor.generate_rolling_summary(
                         history_manager,
                         actual_num,
                         base_system_content,
-                        source_text=combined,
-                        previous_summary_text=last_summary_block_text,
-                        previous_summary_chapter_num=last_summary_chapter_num,
+                        source_text=user_text,
+                        previous_summary_text=prev_summary,
+                        previous_summary_chapter_num=None,
                         prefer_translations_only_user=True,
                     )
                 else:
