@@ -2909,7 +2909,7 @@ class AsyncProcessingDialog:
         # History and summary settings
         env_vars['TRANSLATION_HISTORY_ROLLING'] = "1" if self.gui.translation_history_rolling_var.get() else "0"
         env_vars['USE_ROLLING_SUMMARY'] = "1" if self.gui.config.get('use_rolling_summary') else "0"
-        env_vars['SUMMARY_ROLE'] = self.gui.config.get('summary_role', 'user')
+        env_vars['SUMMARY_ROLE'] = self.gui.config.get('summary_role', 'system')
         env_vars['ROLLING_SUMMARY_EXCHANGES'] = self.gui.rolling_summary_exchanges_var.get()
         env_vars['ROLLING_SUMMARY_MODE'] = self.gui.rolling_summary_mode_var.get()
         env_vars['ROLLING_SUMMARY_SYSTEM_PROMPT'] = self.gui.rolling_summary_system_prompt if hasattr(self.gui, 'rolling_summary_system_prompt') else ''

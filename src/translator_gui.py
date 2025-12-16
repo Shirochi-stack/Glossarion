@@ -1963,7 +1963,7 @@ Recent translations to summarize:
         
         # String variables
         str_vars = [
-            ('summary_role_var', 'summary_role', 'user'),
+            ('summary_role_var', 'summary_role', 'system'),
             ('rolling_summary_exchanges_var', 'rolling_summary_exchanges', '5'),
             ('rolling_summary_mode_var', 'rolling_summary_mode', 'append'),
             # New: how many summaries to retain in append mode
@@ -6017,7 +6017,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 "You are a translator. Respond with only the translated text, nothing else. Do not add any explanation or additional content."),
             'REMOVE_AI_ARTIFACTS': "1" if self.REMOVE_AI_ARTIFACTS_var else "0",
             'USE_ROLLING_SUMMARY': "1" if (hasattr(self, 'rolling_summary_var') and self.rolling_summary_var) else ("1" if self.config.get('use_rolling_summary') else "0"),
-            'SUMMARY_ROLE': self.config.get('summary_role', 'user'),
+            'SUMMARY_ROLE': self.config.get('summary_role', 'system'),
             'ROLLING_SUMMARY_EXCHANGES': str(self.rolling_summary_exchanges_var),
             'ROLLING_SUMMARY_MODE': str(self.rolling_summary_mode_var),
             'ROLLING_SUMMARY_SYSTEM_PROMPT': str(self.rolling_summary_system_prompt),
@@ -10148,7 +10148,7 @@ Important rules:
             extra_env_mappings = [
                 # Rolling summary
                 ('USE_ROLLING_SUMMARY', '1' if getattr(self, 'rolling_summary_var', False) else '0'),
-                ('SUMMARY_ROLE', getattr(self, 'summary_role_var', 'user')),
+                ('SUMMARY_ROLE', getattr(self, 'summary_role_var', 'system')),
                 ('ROLLING_SUMMARY_EXCHANGES', str(getattr(self, 'rolling_summary_exchanges_var', '5'))),
                 ('ROLLING_SUMMARY_MODE', getattr(self, 'rolling_summary_mode_var', 'append')),
                 ('ROLLING_SUMMARY_SYSTEM_PROMPT', getattr(self, 'rolling_summary_system_prompt', getattr(self, 'default_rolling_summary_system_prompt', ''))),

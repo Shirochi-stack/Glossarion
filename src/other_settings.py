@@ -973,7 +973,7 @@ def _create_context_management_section(self, parent):
     self._add_combobox_arrow(role_combo)
     self._disable_combobox_mousewheel(role_combo)
     try:
-        current_role = str(getattr(self, 'summary_role_var', 'user') or 'user').strip().lower()
+        current_role = str(getattr(self, 'summary_role_var', 'system') or 'system').strip().lower()
         idx = role_combo.findText(current_role)
         if idx >= 0:
             role_combo.setCurrentIndex(idx)
