@@ -254,6 +254,7 @@ async def model_autocomplete(interaction: discord.Interaction, current: str):
     request_merging="Enable request merging (combine multiple chapters per API call)",
     request_merge_count="Chapters per request when merging enabled (default: 3)",
     split_the_merge="Split merged translation output back into separate files (default: True)",
+    send_zip="Return output as a ZIP archive instead of individual file (default: False)",
     target_language="Target language"
 )
 @app_commands.choices(extraction_mode=[
@@ -279,6 +280,7 @@ async def translate(
     request_merging: bool = False,
     request_merge_count: int = 3,
     split_the_merge: bool = True,
+    send_zip: bool = False,
     target_language: str = "English"
 ):
     """Translate file using Glossarion"""
@@ -662,173 +664,160 @@ async def translate(
         except asyncio.CancelledError:
             pass
         
-        # Create a zip file of the entire output directory (even if stopped)
-        # This allows users to get partial results
-        # TransateKRtoEN creates a subdirectory with the file's basename
+        # Determine output format and file
+        output_file_path = None
+        output_display_name = None
+        is_zip_output = False
+
+        # Prepare for potential zipping or searching
         output_base = os.path.splitext(filename)[0]  # Use filename variable, not file.filename
-        # Sanitize only problematic characters for filesystem, keep Korean/unicode
         safe_base = output_base.replace('/', '_').replace('\\', '_').replace(':', '_').replace('*', '_').replace('?', '_').replace('"', '_').replace('<', '_').replace('>', '_').replace('|', '_')
-        
-        # Check for the actual output directory created by TransateKRtoEN
-        # It creates a folder named after the input file (without extension)
         output_subdir = os.path.join(temp_dir, safe_base)
-        
-        sys.stderr.write(f"[ZIP] Creating zip archive of output...\n")
-        sys.stderr.write(f"[ZIP] Temp dir: {temp_dir}\n")
-        sys.stderr.write(f"[ZIP] Expected output subdir: {output_subdir}\n")
-        sys.stderr.write(f"[ZIP] Output subdir exists: {os.path.exists(output_subdir)}\n")
-        sys.stderr.flush()
-        
-        # If output subdir exists, zip from there, otherwise zip from temp_dir root
-        if os.path.exists(output_subdir) and os.path.isdir(output_subdir):
-            zip_source_dir = output_subdir
-            sys.stderr.write(f"[ZIP] Using output subdirectory as source\n")
-        else:
-            zip_source_dir = temp_dir
-            sys.stderr.write(f"[ZIP] Using temp dir as source (no subdirectory found)\n")
-        sys.stderr.flush()
-        
-        zip_filename = f"{safe_base}_translated.zip"
-        zip_path = os.path.join(temp_dir, zip_filename)
-        
-        # Update status to show zipping
-        embed = discord.Embed(
-            title="📦 Creating Archive",
-            description="Compressing output files...",
-            color=discord.Color.blue()
-        )
-        try:
-            await message.edit(embed=embed, view=None)
-        except discord.errors.HTTPException:
-            # Interaction expired, we'll send as new message later
-            pass
-        
-        try:
-            # Create zip archive in background thread to avoid blocking Discord
-            def create_zip():
-                sys.stderr.write(f"[ZIP] Starting compression...\n")
-                sys.stderr.write(f"[ZIP] Zip source directory: {zip_source_dir}\n")
-                sys.stderr.flush()
-                
-                # First, list all files in zip_source_dir
-                all_files = []
-                for root, dirs, files in os.walk(zip_source_dir):
-                    for file_item in files:
-                        file_path = os.path.join(root, file_item)
-                        all_files.append(file_path)
-                        sys.stderr.write(f"[ZIP DEBUG] Found file: {file_path} (size: {os.path.getsize(file_path)} bytes)\n")
-                        sys.stderr.flush()
-                
-                sys.stderr.write(f"[ZIP] Total files found: {len(all_files)}\n")
-                sys.stderr.flush()
-                
-                import zipfile
-                files_added = 0
-                with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                    for root, dirs, files in os.walk(zip_source_dir):
-                        for file_item in files:
-                            file_path = os.path.join(root, file_item)
-                            # Skip the zip file itself and the input file
-                            if file_item.endswith('.zip'):
-                                sys.stderr.write(f"[ZIP] Skipping zip file: {file_item}\n")
-                                sys.stderr.flush()
-                                continue
-                            if file_path == input_path:
-                                sys.stderr.write(f"[ZIP] Skipping input file: {file_item}\n")
-                                sys.stderr.flush()
-                                continue
-                            # Use relative path from zip_source_dir, not temp_dir
-                            arcname = os.path.relpath(file_path, zip_source_dir)
-                            sys.stderr.write(f"[ZIP] Adding: {arcname}\n")
-                            sys.stderr.flush()
-                            zipf.write(file_path, arcname)
-                            files_added += 1
-                
-                sys.stderr.write(f"[ZIP] Compression complete! Added {files_added} files\n")
-                sys.stderr.flush()
-                return zip_path
+
+        # If user didn't request zip, try to find the direct file first
+        if not send_zip:
+            sys.stderr.write(f"[OUTPUT] Searching for output file (ignoring zip)...\\n")
+            # We look for .epub first as requested, then the input extension
+            search_exts = ['.epub']
+            input_ext = os.path.splitext(filename)[1].lower()
+            if input_ext not in search_exts:
+                search_exts.append(input_ext)
             
-            loop = asyncio.get_event_loop()
-            zip_result = await loop.run_in_executor(None, create_zip)
-            sys.stderr.write(f"[ZIP] Executor returned, checking file...\n")
-            sys.stderr.flush()
+            search_dirs = []
+            if os.path.exists(output_subdir) and os.path.isdir(output_subdir):
+                search_dirs.append(output_subdir)
+            search_dirs.append(temp_dir)
             
-            if os.path.exists(zip_path):
-                file_size = os.path.getsize(zip_path)
-                max_size = 25 * 1024 * 1024  # 25MB Discord limit
-                
-                sys.stderr.write(f"[SUCCESS] Created zip: {zip_path}\n")
-                sys.stderr.write(f"[SUCCESS] Zip size: {file_size / 1024 / 1024:.2f}MB\n")
-                sys.stderr.flush()
-                
-                if file_size > max_size:
-                    title = "⏹️ Translation Stopped - File Too Large" if state['stop_requested'] else "⚠️ File Too Large"
-                    description = f"Translation output ({file_size / 1024 / 1024:.2f}MB) exceeds Discord's 25MB limit"
-                    embed = discord.Embed(
-                        title=title,
-                        description=description,
-                        color=discord.Color.orange()
-                    )
-                    try:
-                        await message.edit(embed=embed, view=None)
-                    except discord.errors.HTTPException:
-                        # Interaction expired - send as new followup
-                        await interaction.followup.send(embed=embed)
-                else:
-                    if state['stop_requested']:
-                        title = "⏹️ Translation Stopped - Partial Results"
-                        description = f"**File:** {zip_filename}\n**Size:** {file_size / 1024 / 1024:.2f}MB\n\nContains partial translation output."
-                        color = discord.Color.orange()
-                    else:
-                        title = "✅ Translation Complete!"
-                        description = f"**File:** {zip_filename}\n**Size:** {file_size / 1024 / 1024:.2f}MB\n\nContains all translation outputs and glossaries."
-                        color = discord.Color.green()
-                    
-                    embed = discord.Embed(
-                        title=title,
-                        description=description,
-                        color=color
-                    )
-                    try:
-                        await message.edit(embed=embed, view=None)
-                    except discord.errors.HTTPException:
-                        # Interaction expired - send as new followup
-                        await interaction.followup.send(embed=embed)
-                    
-                    try:
-                        message_text = "Here's your partial translation output (zipped)!" if state['stop_requested'] else "Here's your translation output (zipped)!"
-                        await interaction.followup.send(
-                            message_text,
-                            file=discord.File(zip_path),
-                            ephemeral=True
-                        )
-                    except discord.errors.HTTPException as e:
-                        # File too large even though we checked - Discord rejected it
-                        await interaction.followup.send(
-                            f"Translation complete but zip is too large to upload ({file_size / 1024 / 1024:.2f}MB).\n"
-                            f"Please retrieve it from the server.",
-                            ephemeral=True
-                        )
+            for ext in search_exts:
+                for d in search_dirs:
+                    if not os.path.exists(d): continue
+                    for f in os.listdir(d):
+                        if f.endswith(ext):
+                            f_path = os.path.join(d, f)
+                            # Skip input file
+                            if f_path != input_path:
+                                output_file_path = f_path
+                                output_display_name = f
+                                sys.stderr.write(f"[OUTPUT] Found direct file: {output_file_path}\\n")
+                                break
+                    if output_file_path: break
+                if output_file_path: break
+
+        # If zip requested OR file not found, proceed with zipping
+        if send_zip or not output_file_path:
+            is_zip_output = True
+            
+            sys.stderr.write(f"[ZIP] Creating zip archive of output...\\n")
+            sys.stderr.write(f"[ZIP] Temp dir: {temp_dir}\\n")
+            sys.stderr.write(f"[ZIP] Expected output subdir: {output_subdir}\\n")
+            
+            # If output subdir exists, zip from there, otherwise zip from temp_dir root
+            if os.path.exists(output_subdir) and os.path.isdir(output_subdir):
+                zip_source_dir = output_subdir
+                sys.stderr.write(f"[ZIP] Using output subdirectory as source\\n")
             else:
-                raise FileNotFoundError(f"Zip file not created: {zip_path}")
-                
-        except Exception as e:
-            sys.stderr.write(f"[ERROR] Failed to create zip: {e}\n")
-            sys.stderr.flush()
-            # List all files in temp_dir for debugging
-            for root, dirs, files in os.walk(temp_dir):
-                sys.stderr.write(f"[ERROR] {root}: {files}\n")
+                zip_source_dir = temp_dir
+                sys.stderr.write(f"[ZIP] Using temp dir as source (no subdirectory found)\\n")
             sys.stderr.flush()
             
+            zip_filename = f"{safe_base}_translated.zip"
+            zip_path = os.path.join(temp_dir, zip_filename)
+            
+            # Update status to show zipping
             embed = discord.Embed(
-                title="❌ Translation Failed",
-                description=f"Could not create output archive: {e}",
-                color=discord.Color.red()
+                title="📦 Creating Archive",
+                description="Compressing output files...",
+                color=discord.Color.blue()
             )
             try:
                 await message.edit(embed=embed, view=None)
             except discord.errors.HTTPException:
-                await interaction.followup.send(embed=embed)
+                pass
+            
+            try:
+                # Create zip archive in background thread
+                def create_zip():
+                    sys.stderr.write(f"[ZIP] Starting compression...\\n")
+                    # ... (zip logic) ...
+                    import zipfile
+                    files_added = 0
+                    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                        for root, dirs, files in os.walk(zip_source_dir):
+                            for file_item in files:
+                                file_path = os.path.join(root, file_item)
+                                # Skip zip and input
+                                if file_item.endswith('.zip'): continue
+                                if file_path == input_path: continue
+                                
+                                arcname = os.path.relpath(file_path, zip_source_dir)
+                                zipf.write(file_path, arcname)
+                                files_added += 1
+                    return zip_path
+                
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, create_zip)
+                
+                output_file_path = zip_path
+                output_display_name = zip_filename
+                
+            except Exception as e:
+                sys.stderr.write(f"[ERROR] Failed to create zip: {e}\\n")
+                raise e
+
+        # Send the result (either zip or direct file)
+        if os.path.exists(output_file_path):
+            file_size = os.path.getsize(output_file_path)
+            max_size = 25 * 1024 * 1024  # 25MB Discord limit
+            
+            sys.stderr.write(f"[SUCCESS] Ready to send: {output_file_path} ({file_size / 1024 / 1024:.2f}MB)\\n")
+            
+            if file_size > max_size:
+                title = "⏹️ Translation Stopped - File Too Large" if state['stop_requested'] else "⚠️ File Too Large"
+                description = f"Output file ({file_size / 1024 / 1024:.2f}MB) exceeds Discord's 25MB limit"
+                embed = discord.Embed(
+                    title=title,
+                    description=description,
+                    color=discord.Color.orange()
+                )
+                try:
+                    await message.edit(embed=embed, view=None)
+                except discord.errors.HTTPException:
+                    await interaction.followup.send(embed=embed)
+            else:
+                if state['stop_requested']:
+                    title = "⏹️ Translation Stopped - Partial Results"
+                    desc_text = "Contains partial translation output."
+                    color = discord.Color.orange()
+                else:
+                    title = "✅ Translation Complete!"
+                    desc_text = "Translation finished successfully."
+                    color = discord.Color.green()
+                
+                embed = discord.Embed(
+                    title=title,
+                    description=f"**File:** {output_display_name}\\n**Size:** {file_size / 1024 / 1024:.2f}MB\\n\\n{desc_text}",
+                    color=color
+                )
+                try:
+                    await message.edit(embed=embed, view=None)
+                except discord.errors.HTTPException:
+                    await interaction.followup.send(embed=embed)
+                
+                try:
+                    msg_content = f"Here's your {('zipped ' if is_zip_output else '')}translation output!"
+                    await interaction.followup.send(
+                        msg_content,
+                        file=discord.File(output_file_path, filename=output_display_name),
+                        ephemeral=True
+                    )
+                except discord.errors.HTTPException as e:
+                    await interaction.followup.send(
+                        f"Translation complete but file is too large to upload ({file_size / 1024 / 1024:.2f}MB).\\n"
+                        f"Please retrieve it from the server.",
+                        ephemeral=True
+                    )
+        else:
+            raise FileNotFoundError(f"Output file not found: {output_file_path}")
     
     except Exception as e:
         import traceback
@@ -870,6 +859,7 @@ async def translate(
     request_merging="Enable request merging to batch API calls (default: False)",
     merge_count="Number of requests to merge when request merging is enabled (default: 10)",
     duplicate_algorithm="Duplicate handling: auto/strict/balanced/aggressive/basic (default: balanced)",
+    send_zip="Return output as a ZIP archive instead of individual file (default: False)",
     target_language="Target language for translations"
 )
 @app_commands.choices(extraction_mode=[
@@ -892,6 +882,7 @@ async def extract(
     request_merging: bool = False,
     merge_count: int = 10,
     duplicate_algorithm: str = "balanced",
+    send_zip: bool = False,
     target_language: str = "English"
 ):
     """Extract glossary from file using Glossarion"""
@@ -1222,41 +1213,72 @@ async def extract(
         # Find the Glossary output directory
         glossary_dir = os.path.join(temp_dir, 'Glossary')
         
+        output_file_path = None
+        output_display_name = None
+        is_zip_output = False
+        
         if os.path.exists(glossary_dir) and os.path.isdir(glossary_dir):
-            # Create zip of entire Glossary folder
-            output_base = os.path.splitext(filename)[0]
-            zip_filename = f"{output_base}_glossary.zip"
-            zip_path = os.path.join(temp_dir, zip_filename)
             
-            import zipfile
-            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                for root, dirs, files in os.walk(glossary_dir):
-                    for file_item in files:
-                        file_path = os.path.join(root, file_item)
-                        arcname = os.path.relpath(file_path, glossary_dir)
-                        zipf.write(file_path, arcname)
+            if not send_zip:
+                # Search for .csv in glossary_dir
+                for f in os.listdir(glossary_dir):
+                    if f.endswith('.csv'):
+                        output_file_path = os.path.join(glossary_dir, f)
+                        output_display_name = f
+                        break
             
-            file_size = os.path.getsize(zip_path)
-            
-            embed = discord.Embed(
-                title="✅ Glossary Extraction Complete!",
-                description=f"**File:** {zip_filename}\n**Size:** {file_size / 1024:.2f}KB\n\nContains all glossary outputs (CSV, JSON, MD)",
-                color=discord.Color.green()
-            )
-            await message.edit(embed=embed, view=None)
-            
-            try:
-                await interaction.followup.send(
-                    f"Here's your extracted glossary!",
-                    file=discord.File(zip_path),
-                    ephemeral=True
+            # Fallback to ZIP
+            if send_zip or not output_file_path:
+                is_zip_output = True
+                
+                # Create zip of entire Glossary folder
+                output_base = os.path.splitext(filename)[0]
+                zip_filename = f"{output_base}_glossary.zip"
+                zip_path = os.path.join(temp_dir, zip_filename)
+                
+                import zipfile
+                with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                    for root, dirs, files in os.walk(glossary_dir):
+                        for file_item in files:
+                            file_path = os.path.join(root, file_item)
+                            arcname = os.path.relpath(file_path, glossary_dir)
+                            zipf.write(file_path, arcname)
+                
+                output_file_path = zip_path
+                output_display_name = zip_filename
+
+            # Send output
+            if output_file_path and os.path.exists(output_file_path):
+                file_size = os.path.getsize(output_file_path)
+                
+                embed = discord.Embed(
+                    title="✅ Glossary Extraction Complete!",
+                    description=f"**File:** {output_display_name}\\n**Size:** {file_size / 1024:.2f}KB",
+                    color=discord.Color.green()
                 )
-            except discord.errors.HTTPException as e:
-                await interaction.followup.send(
-                    f"Glossary complete but file is too large to upload.\n"
-                    f"Please retrieve it from the server.",
-                    ephemeral=True
+                await message.edit(embed=embed, view=None)
+                
+                try:
+                    await interaction.followup.send(
+                        f"Here's your extracted glossary{(' (zipped)' if is_zip_output else '')}!",
+                        file=discord.File(output_file_path, filename=output_display_name),
+                        ephemeral=True
+                    )
+                except discord.errors.HTTPException as e:
+                    await interaction.followup.send(
+                        f"Glossary complete but file is too large to upload.\\n"
+                        f"Please retrieve it from the server.",
+                        ephemeral=True
+                    )
+            else:
+                 # Should not happen if directory exists
+                embed = discord.Embed(
+                    title="❌ Extraction Failed",
+                    description="Could not prepare output file",
+                    color=discord.Color.red()
                 )
+                await message.edit(embed=embed, view=None)
+                
         else:
             embed = discord.Embed(
                 title="❌ Extraction Failed",
@@ -1327,7 +1349,7 @@ async def help_command(interaction: discord.Interaction):
     
     embed.add_field(
         name="Commands",
-        value="`/translate` - Translate file\n`/extract` - Extract glossary\n`/models` - List models\n`/help` - This message",
+        value="`/translate` - Translate file\\n`/extract` - Extract glossary\\n`/models` - List models\\n`/help` - This message\\n\\nUse `send_zip: True` to force ZIP output.",
         inline=False
     )
     

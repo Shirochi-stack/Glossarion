@@ -4194,8 +4194,16 @@ class BatchTranslationProcessor:
                     # Save for debugging - contains actual translation attempt that failed QA
                     parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                     try:
+                        cleaned_to_save = cleaned
+                        if split_the_merge:
+                            cleaned_to_save = re.sub(
+                                r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
+                                '',
+                                cleaned_to_save,
+                                flags=re.IGNORECASE | re.DOTALL,
+                            )
                         with open(os.path.join(self.out_dir, parent_fname), 'w', encoding='utf-8') as f:
-                            f.write(cleaned)
+                            f.write(cleaned_to_save)
                     except Exception:
                         pass
 
@@ -4244,8 +4252,16 @@ class BatchTranslationProcessor:
                     # Save for debugging - contains actual translation attempt that failed split
                     parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                     try:
+                        cleaned_to_save = cleaned
+                        if split_the_merge:
+                            cleaned_to_save = re.sub(
+                                r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
+                                '',
+                                cleaned_to_save,
+                                flags=re.IGNORECASE | re.DOTALL,
+                            )
                         with open(os.path.join(self.out_dir, parent_fname), 'w', encoding='utf-8') as f:
-                            f.write(cleaned)
+                            f.write(cleaned_to_save)
                     except Exception:
                         pass
 
@@ -4329,22 +4345,32 @@ class BatchTranslationProcessor:
             # Normal merged behavior (split not enabled or header count mismatch)
             # Save entire merged response to parent chapter's file
             fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
+
+            # If Split-the-Merge was enabled but we couldn't split reliably, remove injected markers
+            cleaned_to_save = cleaned
+            if split_the_merge and len(chapters_data) > 1:
+                cleaned_to_save = re.sub(
+                    r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
+                    '',
+                    cleaned_to_save,
+                    flags=re.IGNORECASE | re.DOTALL,
+                )
             
             # If translating a plain text source, mirror non-merged behavior and write .txt
             if getattr(self, 'is_text_file', False):
                 parent_fname = fname.replace('.html', '.txt')
                 from bs4 import BeautifulSoup
-                soup = BeautifulSoup(cleaned, 'html.parser')
+                soup = BeautifulSoup(cleaned_to_save, 'html.parser')
                 text_content = soup.get_text(strip=True)
                 with open(os.path.join(self.out_dir, parent_fname), 'w', encoding='utf-8') as f:
                     f.write(text_content)
                 saved_name = parent_fname
             else:
                 with open(os.path.join(self.out_dir, fname), 'w', encoding='utf-8') as f:
-                    f.write(cleaned)
+                    f.write(cleaned_to_save)
                 saved_name = fname
             
-            print(f"   💾 Saved merged content to Chapter {parent_actual_num}: {saved_name} ({len(cleaned)} chars)")
+            print(f"   💾 Saved merged content to Chapter {parent_actual_num}: {saved_name} ({len(cleaned_to_save)} chars)")
             
             with self.progress_lock:
                 if merged_truncated:
@@ -9118,8 +9144,16 @@ def main(log_callback=None, stop_callback=None):
                         # Save for debugging - contains actual translation attempt that failed QA
                         parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                         try:
+                            cleaned_to_save = cleaned
+                            if split_the_merge:
+                                cleaned_to_save = re.sub(
+                                    r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
+                                    '',
+                                    cleaned_to_save,
+                                    flags=re.IGNORECASE | re.DOTALL,
+                                )
                             with open(os.path.join(out, parent_fname), 'w', encoding='utf-8') as f:
-                                f.write(cleaned)
+                                f.write(cleaned_to_save)
                         except Exception:
                             pass
                     
@@ -9168,8 +9202,16 @@ def main(log_callback=None, stop_callback=None):
                         # Save for debugging - contains actual translation attempt that failed split
                         parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                         try:
+                            cleaned_to_save = cleaned
+                            if split_the_merge:
+                                cleaned_to_save = re.sub(
+                                    r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
+                                    '',
+                                    cleaned_to_save,
+                                    flags=re.IGNORECASE | re.DOTALL,
+                                )
                             with open(os.path.join(out, parent_fname), 'w', encoding='utf-8') as f:
-                                f.write(cleaned)
+                                f.write(cleaned_to_save)
                         except Exception:
                             pass
                     
@@ -9238,10 +9280,19 @@ def main(log_callback=None, stop_callback=None):
                 
                 # Normal merged behavior (split not enabled or header count mismatch)
                 # Save entire merged response to parent chapter's file
+                cleaned_to_save = cleaned
+                if split_the_merge and len(merge_info['group']) > 1:
+                    cleaned_to_save = re.sub(
+                        r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
+                        '',
+                        cleaned_to_save,
+                        flags=re.IGNORECASE | re.DOTALL,
+                    )
+
                 if is_text_file and not is_pdf_file:
                     parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num).replace('.html', '.txt')
                     from bs4 import BeautifulSoup
-                    soup = BeautifulSoup(cleaned, 'html.parser')
+                    soup = BeautifulSoup(cleaned_to_save, 'html.parser')
                     text_content = soup.get_text(strip=True)
                     
                     parent_output_path = os.path.join(out, parent_fname)
@@ -9251,7 +9302,7 @@ def main(log_callback=None, stop_callback=None):
                     parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                     parent_output_path = os.path.join(out, parent_fname)
                     with open(parent_output_path, 'w', encoding='utf-8') as f:
-                        f.write(cleaned)
+                        f.write(cleaned_to_save)
                 
                 # Verify file was actually written before marking as completed
                 if not os.path.exists(parent_output_path):
@@ -9262,7 +9313,7 @@ def main(log_callback=None, stop_callback=None):
                     progress_manager.save()
                     continue
                 
-                print(f"   💾 Saved merged content to Chapter {parent_actual_num}: {parent_fname} ({len(cleaned)} chars)")
+                print(f"   💾 Saved merged content to Chapter {parent_actual_num}: {parent_fname} ({len(cleaned_to_save)} chars)")
                 
                 if was_truncated:
                     # For truncated merged responses, mark ALL chapters as qa_failed
