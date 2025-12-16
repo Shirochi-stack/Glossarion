@@ -2880,7 +2880,16 @@ class TranslationProcessor:
         
         return score
     
-    def generate_rolling_summary(self, history_manager, chapter_num, base_system_content=None, source_text=None):
+    def generate_rolling_summary(
+        self,
+        history_manager,
+        chapter_num,
+        base_system_content=None,
+        source_text=None,
+        previous_summary_text=None,
+        previous_summary_chapter_num=None,
+        prefer_translations_only_user=False,
+    ):
         """Generate rolling summary after a chapter for context continuity.
         Uses a dedicated summary system prompt (with glossary) distinct from translation.
         Writes the summary to rolling_summary.txt and returns the summary string.
@@ -2889,6 +2898,11 @@ class TranslationProcessor:
           - system: send system prompt + user message containing ONLY the translated text
           - user:   send ONLY a user message (configured prompt template + translated text)
           - both:   send system + user (current/legacy behavior)
+
+        Optional:
+          - previous_summary_text: when provided, it is sent as an assistant message for context.
+          - prefer_translations_only_user: when True, the user message will be ONLY the translated text
+            (even if SUMMARY_ROLE would otherwise use the configured user template).
         """
         if not self.config.USE_ROLLING_SUMMARY:
             return None
@@ -2923,7 +2937,7 @@ class TranslationProcessor:
         # This allows COMPRESS_GLOSSARY_PROMPT to work for rolling summaries too.
         system_prompt = build_system_prompt(summary_system_template, glossary_path, source_text=source_text)
         # Add explicit instruction for clarity
-        system_prompt += "\n\n[Instruction: Generate a concise rolling summary of the previous chapter. Use glossary terms consistently. Do not include warnings or explanations.]"
+        system_prompt += "\n\n[Instruction: Update the rolling summary using any prior summary context provided, plus the newly provided translated text. Use glossary terms consistently. Do not include warnings or explanations.]"
 
         user_prompt_template = os.getenv(
             "ROLLING_SUMMARY_USER_PROMPT",
@@ -2935,26 +2949,46 @@ class TranslationProcessor:
         translations_text = "\n---\n".join(assistant_responses)
         user_prompt = user_prompt_template.replace("{translations}", translations_text)
 
-        # SUMMARY_ROLE also controls the rolling-summary generation payload (not just translation injection).
+        # Optional: provide the previous rolling summary as an assistant message for context.
+        prev_summary_msg = None
+        if previous_summary_text and isinstance(previous_summary_text, str) and previous_summary_text.strip():
+            prev_header = (
+                f"[Rolling Summary of Chapter {previous_summary_chapter_num}]"
+                if previous_summary_chapter_num is not None
+                else "[Rolling Summary]"
+            )
+            prev_footer = "[End of Rolling Summary]"
+            prev_summary_msg = {
+                "role": "assistant",
+                "content": f"{prev_header}\n{previous_summary_text.strip()}\n{prev_footer}",
+            }
+
+        # SUMMARY_ROLE also controls the rolling-summary generation payload.
         # Default to 'both' to preserve legacy behavior when the env var isn't set.
         summary_role = (os.getenv("SUMMARY_ROLE", "both") or "both").strip().lower()
+
+        # When requested, force the user message to be ONLY the translated text.
+        if prefer_translations_only_user:
+            summary_role = "system"  # ensures we include system prompt + translations-only user message
+
         if summary_role == "system":
             # System prompt + user content containing ONLY the translated text
-            summary_msgs = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": translations_text}
-            ]
+            summary_msgs = [{"role": "system", "content": system_prompt}]
+            if prev_summary_msg:
+                summary_msgs.append(prev_summary_msg)
+            summary_msgs.append({"role": "user", "content": translations_text})
         elif summary_role == "user":
             # User prompt only (as configured) with translated text inside it
-            summary_msgs = [
-                {"role": "user", "content": user_prompt}
-            ]
+            summary_msgs = []
+            if prev_summary_msg:
+                summary_msgs.append(prev_summary_msg)
+            summary_msgs.append({"role": "user", "content": user_prompt})
         else:
             # both (current behavior)
-            summary_msgs = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"[Rolling Summary of Chapter {chapter_num}]\n" + user_prompt}
-            ]
+            summary_msgs = [{"role": "system", "content": system_prompt}]
+            if prev_summary_msg:
+                summary_msgs.append(prev_summary_msg)
+            summary_msgs.append({"role": "user", "content": f"[Rolling Summary of Chapter {chapter_num}]\n" + user_prompt})
 
         try:
             # Get configurable rolling summary token limit
@@ -2987,7 +3021,7 @@ class TranslationProcessor:
             
             # Save the summary to the output folder
             summary_file = os.path.join(self.out_dir, "rolling_summary.txt")
-            header = f"=== Rolling Summary of Chapter {chapter_num} ===\n(This is a summary of the previous chapter for context)\n"
+            header = f"=== Rolling Summary of Chapter {chapter_num} ===\n(Updated rolling summary — use prior summary context when provided)\n"
             
             mode = "a" if self.config.ROLLING_SUMMARY_MODE == "append" else "w"
             with open(summary_file, mode, encoding="utf-8") as sf:
@@ -9485,19 +9519,75 @@ def main(log_callback=None, stop_callback=None):
                 # Use the original system prompt to build the summary system prompt
                 base_system_content = original_system_prompt
 
-                # IMPORTANT: In replace mode, prevent the next summary from "summarizing the summary".
-                # We do this by ensuring the summary generator only sees the chapter translation text,
-                # not any injected [MEMORY] rolling-summary context that may have leaked into output.
-                summary_source_text = cleaned
-                try:
-                    if str(getattr(config, 'ROLLING_SUMMARY_MODE', 'replace') or 'replace').strip().lower() == 'replace':
-                        summary_source_text = ContentProcessor.clean_memory_artifacts(summary_source_text)
-                except Exception:
-                    pass
+                summary_mode = str(getattr(config, 'ROLLING_SUMMARY_MODE', 'replace') or 'replace').strip().lower()
 
-                summary_text = translation_processor.generate_rolling_summary(
-                    history_manager, actual_num, base_system_content, source_text=summary_source_text
-                )
+                # Cache translated chapter text for rolling-summary generation (replace mode).
+                # We DO NOT use translation_history.json for this.
+                summary_sources_file = os.path.join(out, "rolling_summary_sources.txt")
+
+                def _append_summary_source_block(chapter_num, text):
+                    try:
+                        header = f"=== Rolling Summary Source of Chapter {chapter_num} ===\n"
+                        footer = "\n=== End Rolling Summary Source ===\n"
+                        with open(summary_sources_file, "a", encoding="utf-8") as f:
+                            f.write(header)
+                            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}]\n")
+                            f.write(text.strip() + "\n")
+                            f.write(footer)
+                    except Exception:
+                        pass
+
+                def _read_last_source_blocks(n):
+                    try:
+                        if n <= 0 or not os.path.exists(summary_sources_file):
+                            return []
+                        with open(summary_sources_file, "r", encoding="utf-8") as f:
+                            content = f.read()
+                        # Find block headers
+                        headers = [m.start() for m in re.finditer(r"(?m)^===\s*Rolling Summary Source of Chapter\s+\d+\s*===\s*$", content)]
+                        if not headers:
+                            return []
+                        keep_starts = headers[-n:]
+                        blocks = []
+                        for i, s in enumerate(keep_starts):
+                            e = keep_starts[i + 1] if i + 1 < len(keep_starts) else len(content)
+                            block = content[s:e].strip()
+                            if block:
+                                blocks.append(block)
+                        return blocks
+                    except Exception:
+                        return []
+
+                # Always record the current chapter translation into the source cache.
+                # In replace mode, we also strip any leaked injected [MEMORY] blocks before caching.
+                cache_text = cleaned
+                if summary_mode == 'replace':
+                    try:
+                        cache_text = ContentProcessor.clean_memory_artifacts(cache_text)
+                    except Exception:
+                        pass
+                _append_summary_source_block(actual_num, cache_text)
+
+                if summary_mode == 'replace':
+                    # Summarize the last N cached source blocks (configured by ROLLING_SUMMARY_EXCHANGES)
+                    n = int(getattr(config, 'ROLLING_SUMMARY_EXCHANGES', 5) or 5)
+                    blocks = _read_last_source_blocks(n)
+                    combined = "\n\n---\n\n".join(blocks) if blocks else cache_text
+                    summary_text = translation_processor.generate_rolling_summary(
+                        history_manager,
+                        actual_num,
+                        base_system_content,
+                        source_text=combined,
+                        previous_summary_text=last_summary_block_text,
+                        previous_summary_chapter_num=last_summary_chapter_num,
+                        prefer_translations_only_user=True,
+                    )
+                else:
+                    # append (and any unknown value): summarize only this chapter's translated output
+                    summary_text = translation_processor.generate_rolling_summary(
+                        history_manager, actual_num, base_system_content, source_text=cleaned
+                    )
+
                 if summary_text:
                     last_summary_block_text = summary_text
                     last_summary_chapter_num = actual_num
