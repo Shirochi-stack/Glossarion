@@ -10453,6 +10453,42 @@ class UnifiedClient:
                         except Exception:
                             pass
 
+                        # OpenRouter: Provider preference
+                        preferred_provider = None
+                        try:
+                            preferred_provider = os.getenv('OPENROUTER_PREFERRED_PROVIDER', 'Auto').strip()
+                            if preferred_provider and preferred_provider != 'Auto':
+                                extra_body["provider"] = {"order": [preferred_provider]}
+                        except Exception:
+                            preferred_provider = None
+
+                        # Always emit an OpenRouter routing log (once per thread/model) so it is visible when using OpenRouter.
+                        try:
+                            tls = self._get_thread_local_client()
+                            if not hasattr(tls, 'openrouter_route_logged'):
+                                tls.openrouter_route_logged = set()
+                            # normalize for logging
+                            try:
+                                raw_model_for_log = model_override if model_override is not None else getattr(self, 'model', '')
+                            except Exception:
+                                raw_model_for_log = ''
+                            raw_model_for_log = str(raw_model_for_log or '')
+                            pp = (preferred_provider or 'Auto').strip() or 'Auto'
+                            state_key = (str(raw_model_for_log), str(effective_model or ''), str(pp))
+                            if state_key not in tls.openrouter_route_logged:
+                                tls.openrouter_route_logged.add(state_key)
+                                try:
+                                    tname = threading.current_thread().name
+                                except Exception:
+                                    tname = "unknown-thread"
+                                sent = 'yes' if (pp and pp != 'Auto') else 'no'
+                                print(
+                                    f"🔀 OpenRouter route: preferred_provider={pp} (provider_order_sent={sent}) "
+                                    f"(thread={tname}, raw_model={raw_model_for_log}, model={effective_model})"
+                                )
+                        except Exception:
+                            pass
+
                     # DeepSeek thinking via extra_body
                     # (per DeepSeek docs: extra_body={"thinking":{"type":"enabled"}})
                     if provider == 'deepseek':
@@ -10480,30 +10516,6 @@ class UnifiedClient:
 
                             if enable_ds:
                                 extra_body["thinking"] = {"type": "enabled"}
-                        except Exception:
-                            pass
-                        
-                        # Add provider preference if specified
-                        try:
-                            preferred_provider = os.getenv('OPENROUTER_PREFERRED_PROVIDER', 'Auto').strip()
-                            if preferred_provider and preferred_provider != 'Auto':
-                                extra_body["provider"] = {
-                                    "order": [preferred_provider]
-                                }
-                                # Only emit this log when the *user model string* is explicitly routed via OpenRouter
-                                # (i.e., starts with or/ or openrouter/). This avoids misleading logs when output from
-                                # multiple threads/providers interleaves.
-                                try:
-                                    raw_model_for_log = model_override if model_override is not None else getattr(self, 'model', '')
-                                except Exception:
-                                    raw_model_for_log = ''
-                                raw_model_for_log = str(raw_model_for_log or '')
-                                if raw_model_for_log.startswith(('or/', 'openrouter/')):
-                                    try:
-                                        tname = threading.current_thread().name
-                                    except Exception:
-                                        tname = "unknown-thread"
-                                    print(f"🔀 [OpenRouter:{tname}] Requesting provider={preferred_provider} (model={effective_model})")
                         except Exception:
                             pass
                     
@@ -11082,13 +11094,39 @@ class UnifiedClient:
                         pass
                     
                     # Add provider preference if specified
+                    preferred_provider = None
                     try:
                         preferred_provider = os.getenv('OPENROUTER_PREFERRED_PROVIDER', 'Auto').strip()
                         if preferred_provider and preferred_provider != 'Auto':
                             data["provider"] = {
                                 "order": [preferred_provider]
                             }
-                            print(f"🔀 OpenRouter: Requesting {preferred_provider} provider")
+                    except Exception:
+                        preferred_provider = None
+
+                    # Always emit an OpenRouter routing log (once per thread/model) so it is visible when using OpenRouter.
+                    try:
+                        tls = self._get_thread_local_client()
+                        if not hasattr(tls, 'openrouter_route_logged_http'):
+                            tls.openrouter_route_logged_http = set()
+                        try:
+                            raw_model_for_log = model_override if model_override is not None else getattr(self, 'model', '')
+                        except Exception:
+                            raw_model_for_log = ''
+                        raw_model_for_log = str(raw_model_for_log or '')
+                        pp = (preferred_provider or 'Auto').strip() or 'Auto'
+                        state_key = (str(raw_model_for_log), str(effective_model or ''), str(pp))
+                        if state_key not in tls.openrouter_route_logged_http:
+                            tls.openrouter_route_logged_http.add(state_key)
+                            try:
+                                tname = threading.current_thread().name
+                            except Exception:
+                                tname = "unknown-thread"
+                            sent = 'yes' if (pp and pp != 'Auto') else 'no'
+                            print(
+                                f"🔀 OpenRouter route: preferred_provider={pp} (provider_order_sent={sent}) "
+                                f"(thread={tname}, raw_model={raw_model_for_log}, model={effective_model})"
+                            )
                     except Exception:
                         pass
                 

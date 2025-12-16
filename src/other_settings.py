@@ -4739,8 +4739,19 @@ def _create_processing_options_section(self, parent):
     section_v.addWidget(accept_identity_desc)
     
     # OpenRouter: Provider preference
+    # Default to 'Auto' when missing or blank
     if not hasattr(self, 'openrouter_preferred_provider_var'):
-        self.openrouter_preferred_provider_var = self.config.get('openrouter_preferred_provider', 'DeepInfra')
+        try:
+            v = self.config.get('openrouter_preferred_provider', 'Auto')
+            v = (v or '').strip() or 'Auto'
+        except Exception:
+            v = 'Auto'
+        self.openrouter_preferred_provider_var = v
+        # Keep config aligned so it won't come back blank next time
+        try:
+            self.config['openrouter_preferred_provider'] = v
+        except Exception:
+            pass
     
     provider_w = QWidget()
     provider_h = QHBoxLayout(provider_w)

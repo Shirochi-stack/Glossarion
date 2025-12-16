@@ -739,6 +739,19 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
             self.openrouter_accept_identity_var = self.config.get('openrouter_accept_identity', False)
         except Exception:
             self.openrouter_accept_identity_var = False
+
+        # Initialize OpenRouter preferred provider early (avoid blank UI when config key is missing/empty)
+        try:
+            _orp = self.config.get('openrouter_preferred_provider', 'Auto')
+            self.openrouter_preferred_provider_var = (_orp or '').strip() or 'Auto'
+            # Keep config aligned
+            self.config['openrouter_preferred_provider'] = self.openrouter_preferred_provider_var
+        except Exception:
+            self.openrouter_preferred_provider_var = 'Auto'
+            try:
+                self.config['openrouter_preferred_provider'] = 'Auto'
+            except Exception:
+                pass
             
         # Initialize retain_source_extension env var on startup
         try:
@@ -9454,7 +9467,7 @@ Important rules:
                 # OpenRouter
                 ('openrouter_use_http_only', ['openrouter_http_only_var'], False, bool),
                 ('openrouter_accept_identity', ['openrouter_accept_identity_var'], False, bool),
-                ('openrouter_preferred_provider', ['openrouter_preferred_provider_var', ('config', 'openrouter_preferred_provider')], '', str),
+                ('openrouter_preferred_provider', ['openrouter_preferred_provider_var', ('config', 'openrouter_preferred_provider')], 'Auto', lambda v: (str(v).strip() if v is not None else '') or 'Auto'),
 
                 # Environment-backed settings
                 ('retain_source_extension', ['retain_source_extension_var'], False, bool),
@@ -9608,7 +9621,7 @@ Important rules:
             # Standard env vars
             env_vars_set.append(_update_env('OPENROUTER_USE_HTTP_ONLY', self.config.get('openrouter_use_http_only'), is_bool=True))
             env_vars_set.append(_update_env('OPENROUTER_ACCEPT_IDENTITY', self.config.get('openrouter_accept_identity'), is_bool=True))
-            env_vars_set.append(_update_env('OPENROUTER_PREFERRED_PROVIDER', self.config.get('openrouter_preferred_provider', '')))
+            env_vars_set.append(_update_env('OPENROUTER_PREFERRED_PROVIDER', (str(self.config.get('openrouter_preferred_provider', 'Auto') or '').strip() or 'Auto')))
             env_vars_set.append(_update_env('RETAIN_SOURCE_EXTENSION', self.config.get('retain_source_extension'), is_bool=True))
             env_vars_set.append(_update_env('ENABLE_GUI_YIELD', self.config.get('enable_gui_yield'), is_bool=True))
 
@@ -9690,7 +9703,7 @@ Important rules:
                 critical_vars_to_check = [
                     ('OPENROUTER_USE_HTTP_ONLY', '1' if self.config.get('openrouter_use_http_only') else '0'),
                     ('OPENROUTER_ACCEPT_IDENTITY', '1' if self.config.get('openrouter_accept_identity') else '0'),
-                    ('OPENROUTER_PREFERRED_PROVIDER', self.config.get('openrouter_preferred_provider', '')),
+                    ('OPENROUTER_PREFERRED_PROVIDER', (str(self.config.get('openrouter_preferred_provider', 'Auto') or '').strip() or 'Auto')),
                     ('EXTRACTION_WORKERS', str(self.config.get('extraction_workers')) if self.config.get('enable_parallel_extraction') else '1'),
                     ('ENABLE_GUI_YIELD', '1' if self.config.get('enable_gui_yield') else '0'),
                     ('RETAIN_SOURCE_EXTENSION', '1' if self.config.get('retain_source_extension') else '0'),
@@ -10017,7 +10030,7 @@ Important rules:
                 # OpenRouter settings
                 ('OPENROUTER_USE_HTTP_ONLY', '1' if self.config.get('openrouter_use_http_only', False) else '0'),
                 ('OPENROUTER_ACCEPT_IDENTITY', '1' if self.config.get('openrouter_accept_identity', False) else '0'),
-                ('OPENROUTER_PREFERRED_PROVIDER', self.config.get('openrouter_preferred_provider', '')),
+                ('OPENROUTER_PREFERRED_PROVIDER', (str(self.config.get('openrouter_preferred_provider', 'Auto') or '').strip() or 'Auto')),
 
                 # Thinking toggles
                 ('ENABLE_DEEPSEEK_THINKING', '1' if self.config.get('enable_deepseek_thinking', True) else '0'),
