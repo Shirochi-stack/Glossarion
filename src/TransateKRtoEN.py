@@ -2950,17 +2950,13 @@ class TranslationProcessor:
         user_prompt = user_prompt_template.replace("{translations}", translations_text)
 
         # Optional: provide the previous rolling summary as an assistant message for context.
+        # IMPORTANT: Do NOT re-wrap it here; the previous summary may already contain headers/footers,
+        # and it must never be duplicated into the user message.
         prev_summary_msg = None
         if previous_summary_text and isinstance(previous_summary_text, str) and previous_summary_text.strip():
-            prev_header = (
-                f"[Rolling Summary of Chapter {previous_summary_chapter_num}]"
-                if previous_summary_chapter_num is not None
-                else "[Rolling Summary]"
-            )
-            prev_footer = "[End of Rolling Summary]"
             prev_summary_msg = {
                 "role": "assistant",
-                "content": f"{prev_header}\n{previous_summary_text.strip()}\n{prev_footer}",
+                "content": previous_summary_text.strip(),
             }
 
         # SUMMARY_ROLE also controls the rolling-summary generation payload.
