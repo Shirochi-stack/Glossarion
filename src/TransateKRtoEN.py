@@ -2883,14 +2883,18 @@ class TranslationProcessor:
         """Generate rolling summary after a chapter for context continuity.
         Uses a dedicated summary system prompt (with glossary) distinct from translation.
         Writes the summary to rolling_summary.txt and returns the summary string.
+
+        IMPORTANT: The SUMMARY_ROLE setting controls what is sent to the summary API:
+          - system: send system prompt + user message containing ONLY the translated text
+          - user:   send ONLY a user message (configured prompt template + translated text)
+          - both:   send system + user (current/legacy behavior)
         """
         if not self.config.USE_ROLLING_SUMMARY:
             return None
-        
-            
+
         current_history = history_manager.load_history()
         messages_to_include = self.config.ROLLING_SUMMARY_EXCHANGES * 2
-        
+
         # Prefer directly provided source text (e.g., just-translated chapter) when available
         assistant_responses = []
         if source_text and isinstance(source_text, str) and source_text.strip():
@@ -2901,11 +2905,11 @@ class TranslationProcessor:
                 for h in recent_messages:
                     if h.get("role") == "assistant":
                         assistant_responses.append(h["content"])
-        
+
         # If still empty, skip quietly
         if not assistant_responses:
             return None
-        
+
         # Build a dedicated summary system prompt (do NOT reuse main translation system prompt)
         # Append glossary to keep terminology consistent
         summary_system_template = os.getenv("ROLLING_SUMMARY_SYSTEM_PROMPT", "You create concise summaries for continuity.").strip()
@@ -2913,28 +2917,44 @@ class TranslationProcessor:
             glossary_path = find_glossary_file(self.out_dir)
         except Exception:
             glossary_path = None
+
         # Use the just-translated chapter text (source_text) as the reference text for glossary compression.
         # This allows COMPRESS_GLOSSARY_PROMPT to work for rolling summaries too.
         system_prompt = build_system_prompt(summary_system_template, glossary_path, source_text=source_text)
         # Add explicit instruction for clarity
         system_prompt += "\n\n[Instruction: Generate a concise rolling summary of the previous chapter. Use glossary terms consistently. Do not include warnings or explanations.]"
-        
+
         user_prompt_template = os.getenv(
             "ROLLING_SUMMARY_USER_PROMPT",
             "Summarize the key events, characters, tone, and important details from these translations. "
             "Focus on: character names/relationships, plot developments, and any special terminology used.\n\n"
             "{translations}"
         )
-        
+
         translations_text = "\n---\n".join(assistant_responses)
         user_prompt = user_prompt_template.replace("{translations}", translations_text)
-        
-        summary_msgs = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"[Rolling Summary of Chapter {chapter_num}]\n" + user_prompt}
-        ]
-        
-        
+
+        # SUMMARY_ROLE also controls the rolling-summary generation payload (not just translation injection).
+        # Default to 'both' to preserve legacy behavior when the env var isn't set.
+        summary_role = (os.getenv("SUMMARY_ROLE", "both") or "both").strip().lower()
+        if summary_role == "system":
+            # System prompt + user content containing ONLY the translated text
+            summary_msgs = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": translations_text}
+            ]
+        elif summary_role == "user":
+            # User prompt only (as configured) with translated text inside it
+            summary_msgs = [
+                {"role": "user", "content": user_prompt}
+            ]
+        else:
+            # both (current behavior)
+            summary_msgs = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"[Rolling Summary of Chapter {chapter_num}]\n" + user_prompt}
+            ]
+
         try:
             # Get configurable rolling summary token limit
             # -1 means: use the main MAX_OUTPUT_TOKENS value
@@ -8807,21 +8827,10 @@ def main(log_callback=None, stop_callback=None):
                 
                 current_base = [{"role": "system", "content": current_system_content}]
 
-                # If we have a prepared rolling summary from the previous chapter, include it according to SUMMARY_ROLE.
-                # SUMMARY_ROLE values:
-                #   - user:   inject as a user message
-                #   - system: inject as a system message
-                #   - both:   inject as both system + user messages
+                # If we have a prepared rolling summary from the previous chapter, inject it as an assistant message.
+                # IMPORTANT: This injection is ALWAYS assistant-role (independent of any UI dropdown).
                 summary_msgs_list = []
                 if config.USE_ROLLING_SUMMARY and last_summary_block_text:
-                    summary_role = (os.getenv("SUMMARY_ROLE", "user") or "user").strip().lower()
-                    if summary_role == "both":
-                        roles_to_add = ["system", "user"]
-                    elif summary_role in ("system", "user"):
-                        roles_to_add = [summary_role]
-                    else:
-                        roles_to_add = ["user"]
-
                     summary_content = (
                         "CONTEXT ONLY - DO NOT INCLUDE IN TRANSLATION:\n"
                         "[MEMORY] Previous context summary:\n\n"
@@ -8829,8 +8838,7 @@ def main(log_callback=None, stop_callback=None):
                         "[END MEMORY]\n"
                         "END OF CONTEXT - BEGIN ACTUAL CONTENT TO TRANSLATE:"
                     )
-
-                    summary_msgs_list = [{"role": r, "content": summary_content} for r in roles_to_add]
+                    summary_msgs_list = [{"role": "assistant", "content": summary_content}]
 
                 # Build final message list for this chunk
                 msgs = current_base + summary_msgs_list + chunk_context + memory_msgs + [{"role": "user", "content": user_prompt}]

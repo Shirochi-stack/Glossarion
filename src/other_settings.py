@@ -955,10 +955,12 @@ def _create_context_management_section(self, parent):
     settings_grid.addWidget(role_lbl, 0, 0, alignment=Qt.AlignRight)
     rolling_controls.append(role_lbl)
     role_combo = QComboBox()
-    # Controls where the rolling summary is injected in the messages.
-    # user   -> send as a user message
-    # system -> send as a system message
-    # both   -> send as both (system + user)
+    # Controls how the rolling-summary GENERATION request is built (summary API call).
+    # NOTE: The rolling summary is always injected into translation as an assistant message.
+    #
+    # user   -> send user prompt only (configured summary user prompt + translated text)
+    # system -> send system prompt + user message containing ONLY the translated text
+    # both   -> send both system + user (legacy/current behavior)
     role_combo.addItems(["user", "system", "both"])
     role_combo.setFixedWidth(90)
     # Add custom styling with unicode arrow
