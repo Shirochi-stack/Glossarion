@@ -1904,12 +1904,13 @@ class ProgressManager:
             if status == "merged":
                 continue
             
-            # QA_FAILED / FAILED / IN_PROGRESS FIX:
-            # Don't delete entries that have failed QA/translation, or are actively being
-            # translated, even if their output file is missing.
-            # - qa_failed/failed: should remain visible in retranslation UI
+            # QA_FAILED / FAILED / IN_PROGRESS / PENDING FIX:
+            # Don't delete entries that are meant to be visible in the retranslation UI
+            # even when their output file is missing.
+            # - qa_failed/failed: should remain visible for investigation/retry
             # - in_progress: file doesn't exist yet because translation is ongoing
-            if status in ["qa_failed", "failed", "in_progress"]:
+            # - pending: user explicitly marked for retranslation; file may have been deleted on purpose
+            if status in ["qa_failed", "failed", "in_progress", "pending"]:
                 continue
             
             if output_file:
@@ -7278,6 +7279,7 @@ def main(log_callback=None, stop_callback=None):
     # Preserve the original system prompt to avoid in-place mutations
     original_system_prompt = system
     last_summary_block_text = None  # Will hold the last rolling summary text for the NEXT chapter only
+    last_summary_chapter_num = None  # Chapter number associated with last_summary_block_text
     
     image_translator = None
 
@@ -8831,10 +8833,21 @@ def main(log_callback=None, stop_callback=None):
                 # IMPORTANT: This injection is ALWAYS assistant-role (independent of any UI dropdown).
                 summary_msgs_list = []
                 if config.USE_ROLLING_SUMMARY and last_summary_block_text:
+                    # Wrap the injected rolling summary with an explicit header/footer so it can't
+                    # accidentally chain into future summaries unnoticed.
+                    try:
+                        _rs_ch = last_summary_chapter_num
+                    except Exception:
+                        _rs_ch = None
+                    summary_header = f"[Rolling Summary of Chapter {_rs_ch}]" if _rs_ch is not None else "[Rolling Summary]"
+                    summary_footer = "[End of Rolling Summary]"
+
                     summary_content = (
                         "CONTEXT ONLY - DO NOT INCLUDE IN TRANSLATION:\n"
                         "[MEMORY] Previous context summary:\n\n"
-                        f"{last_summary_block_text}\n\n"
+                        f"{summary_header}\n"
+                        f"{last_summary_block_text}\n"
+                        f"{summary_footer}\n\n"
                         "[END MEMORY]\n"
                         "END OF CONTEXT - BEGIN ACTUAL CONTENT TO TRANSLATE:"
                     )
@@ -9471,11 +9484,23 @@ def main(log_callback=None, stop_callback=None):
             if config.USE_ROLLING_SUMMARY:
                 # Use the original system prompt to build the summary system prompt
                 base_system_content = original_system_prompt
+
+                # IMPORTANT: In replace mode, prevent the next summary from "summarizing the summary".
+                # We do this by ensuring the summary generator only sees the chapter translation text,
+                # not any injected [MEMORY] rolling-summary context that may have leaked into output.
+                summary_source_text = cleaned
+                try:
+                    if str(getattr(config, 'ROLLING_SUMMARY_MODE', 'replace') or 'replace').strip().lower() == 'replace':
+                        summary_source_text = ContentProcessor.clean_memory_artifacts(summary_source_text)
+                except Exception:
+                    pass
+
                 summary_text = translation_processor.generate_rolling_summary(
-                    history_manager, actual_num, base_system_content, source_text=cleaned
+                    history_manager, actual_num, base_system_content, source_text=summary_source_text
                 )
                 if summary_text:
                     last_summary_block_text = summary_text
+                    last_summary_chapter_num = actual_num
             
             chapters_completed += 1
 

@@ -2108,7 +2108,7 @@ class RetranslationMixin:
                 if entries:
                     _, chapter_info = entries[0]
                     status = chapter_info.get('status', '')
-                    if status in ['in_progress', 'failed', 'qa_failed']:
+                    if status in ['in_progress', 'failed', 'qa_failed', 'pending']:
                         if chapter_info.get('actual_num') == chapter_num:
                             matched_info = chapter_info
                     else:
@@ -2120,7 +2120,7 @@ class RetranslationMixin:
                 if entries:
                     _, chapter_info = entries[0]
                     status = chapter_info.get('status', '')
-                    if status in ['in_progress', 'failed', 'qa_failed']:
+                    if status in ['in_progress', 'failed', 'qa_failed', 'pending']:
                         if chapter_info.get('actual_num') == chapter_num:
                             matched_info = chapter_info
                     else:
@@ -2132,7 +2132,7 @@ class RetranslationMixin:
                     out_file = chapter_info.get('output_file')
                     if out_file == expected_response or _opf_names_equal(out_file, expected_response):
                         status = chapter_info.get('status', '')
-                        if status in ['in_progress', 'failed', 'qa_failed']:
+                        if status in ['in_progress', 'failed', 'qa_failed', 'pending']:
                             if chapter_info.get('actual_num') == chapter_num:
                                 matched_info = chapter_info
                                 break
@@ -2164,7 +2164,7 @@ class RetranslationMixin:
                             if parent_key in prog.get("chapters", {}):
                                 matched_info = chapter_info
                     # Other statuses
-                    elif status in ['in_progress', 'failed']:
+                    elif status in ['in_progress', 'failed', 'pending']:
                         if chapter_info.get('actual_num') == chapter_num and (
                             out_file == expected_response or _opf_names_equal(out_file, expected_response)
                         ):
@@ -2202,7 +2202,7 @@ class RetranslationMixin:
                                 matched_info = chapter_info
                                 break
                         # In-progress/failed: require both actual_num and output_file
-                        elif status in ['in_progress', 'failed']:
+                        elif status in ['in_progress', 'failed', 'pending']:
                             if actual_num == chapter_num and (
                                 out_file == expected_response or _opf_names_equal(out_file, expected_response)
                             ):
@@ -2231,9 +2231,9 @@ class RetranslationMixin:
             if matched_info:
                 status = matched_info.get('status', 'unknown')
                 
-                # CRITICAL: For failed/in_progress/qa_failed, ALWAYS use progress status
+                # CRITICAL: For failed/in_progress/qa_failed/pending, ALWAYS use progress status
                 # Never let file existence override these statuses
-                if status in ['failed', 'in_progress', 'qa_failed']:
+                if status in ['failed', 'in_progress', 'qa_failed', 'pending']:
                     spine_ch['status'] = status
                     spine_ch['output_file'] = matched_info.get('output_file') or expected_response
                     spine_ch['progress_entry'] = matched_info
