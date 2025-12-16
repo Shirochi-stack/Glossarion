@@ -1377,6 +1377,38 @@ def _create_response_handling_section(self, parent):
     
     # Initialize enabled state for Gemini controls
     self.toggle_thinking_budget()
+
+    # DeepSeek Thinking Mode
+    deepseek_title = QLabel("DeepSeek Thinking Mode")
+    deepseek_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    section_v.addWidget(deepseek_title)
+
+    deepseek_row = QWidget()
+    deepseek_h = QHBoxLayout(deepseek_row)
+    deepseek_h.setContentsMargins(20, 5, 0, 0)
+
+    deepseek_cb = self._create_styled_checkbox("Enable DeepSeek Thinking (deepseek-chat)")
+    try:
+        deepseek_cb.setChecked(bool(getattr(self, 'enable_deepseek_thinking_var', True)))
+    except Exception:
+        deepseek_cb.setChecked(True)
+
+    def _on_deepseek_thinking_toggle(checked):
+        try:
+            self.enable_deepseek_thinking_var = bool(checked)
+            os.environ['ENABLE_DEEPSEEK_THINKING'] = '1' if self.enable_deepseek_thinking_var else '0'
+        except Exception:
+            pass
+
+    deepseek_cb.toggled.connect(_on_deepseek_thinking_toggle)
+    deepseek_h.addWidget(deepseek_cb)
+    deepseek_h.addStretch()
+    section_v.addWidget(deepseek_row)
+
+    deepseek_desc = QLabel("Adds extra_body={thinking:{type:enabled}} for DeepSeek OpenAI-compatible requests.\nEnables reasoning_content on deepseek-chat when supported.")
+    deepseek_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    deepseek_desc.setContentsMargins(20, 0, 0, 10)
+    section_v.addWidget(deepseek_desc)
     
     # Separator
     sep1 = QFrame()

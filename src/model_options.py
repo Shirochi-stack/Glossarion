@@ -66,7 +66,7 @@ def get_model_options() -> List[str]:
         "chutes/moonshotai/Kimi-K2-Thinking",
         
         # DeepSeek Models
-        "deepseek-chat", "deepseek-coder", "deepseek-coder-33b-instruct",
+        "deepseek-chat","deepseek-reasoner", "deepseek-coder", "deepseek-coder-33b-instruct",
         
         # Mistral Models
         "mistral-large", "mistral-medium", "mistral-small", "mistral-tiny",

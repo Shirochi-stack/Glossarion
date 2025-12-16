@@ -632,7 +632,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 65536
         self.proc = self.glossary_proc = None
-        __version__ = "6.6.7"
+        __version__ = "6.6.8"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -760,6 +760,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.enable_gpt_thinking_var = self.config.get('enable_gpt_thinking', True)
         self.gpt_reasoning_tokens_var = str(self.config.get('gpt_reasoning_tokens', '2000'))
         self.gpt_effort_var = self.config.get('gpt_effort', 'medium')
+        # NEW: DeepSeek thinking (OpenAI-compatible extra_body)
+        self.enable_deepseek_thinking_var = self.config.get('enable_deepseek_thinking', True)
         self.thread_delay_var = str(self.config.get('thread_submission_delay', 0.5))
         self.remove_ai_artifacts = os.getenv("REMOVE_AI_ARTIFACTS", "0") == "1"
         print(f"   🎨 Remove AI Artifacts: {'ENABLED' if self.remove_ai_artifacts else 'DISABLED'}")
@@ -2096,7 +2098,7 @@ Recent translations to summarize:
             # Set the initial active profile for autosave
             self._active_profile_for_autosave = self.profile_var
         
-        self.append_log("🚀 Glossarion v6.6.7 - Ready to use!")
+        self.append_log("🚀 Glossarion v6.6.8 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -6113,6 +6115,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'ENABLE_GPT_THINKING': "1" if self.enable_gpt_thinking_var else "0",
             'GPT_REASONING_TOKENS': self.gpt_reasoning_tokens_var if self.enable_gpt_thinking_var else '',
             'GPT_EFFORT': self.gpt_effort_var,
+            # DeepSeek thinking (DeepSeek OpenAI-compatible API)
+            'ENABLE_DEEPSEEK_THINKING': "1" if getattr(self, 'enable_deepseek_thinking_var', True) else "0",
             'OPENROUTER_EXCLUDE': '1',
             'OPENROUTER_PREFERRED_PROVIDER': self.config.get('openrouter_preferred_provider', 'Auto'),
             # Custom API endpoints
@@ -9358,13 +9362,14 @@ Important rules:
                 ('batch_size', ['batch_size_entry', 'batch_size_var'], 3, lambda v: safe_int(v, 3)),
                 ('headers_per_batch', ['headers_per_batch_var'], 10, int),
 
-                # Gemini/GPT Thinking
+                # Gemini/GPT/DeepSeek Thinking
                 ('enable_gemini_thinking', ['enable_gemini_thinking_var'], False, bool),
                 ('thinking_budget', ['thinking_budget_var'], 0, lambda v: int(v) if str(v).lstrip('-').isdigit() else 0),
                 ('thinking_level', ['thinking_level_var'], 'high', str),
                 ('enable_gpt_thinking', ['enable_gpt_thinking_var'], False, bool),
                 ('gpt_reasoning_tokens', ['gpt_reasoning_tokens_var'], 0, lambda v: int(v) if str(v).lstrip('-').isdigit() else 0),
                 ('gpt_effort', ['gpt_effort_var'], 'auto', str),
+                ('enable_deepseek_thinking', ['enable_deepseek_thinking_var'], True, bool),
                 
                 # Chapter processing
                 ('chapter_number_offset', ['chapter_number_offset_var'], 0, lambda v: safe_int(v, 0)),
@@ -9794,6 +9799,7 @@ Important rules:
             'ENABLE_GPT_THINKING': 'Enable GPT-4o reasoning',
             'GPT_REASONING_TOKENS': 'GPT reasoning effort tokens',
             'GPT_EFFORT': 'GPT reasoning effort level',
+            'ENABLE_DEEPSEEK_THINKING': 'Enable DeepSeek thinking mode',
             
             # API Endpoints
             'OPENAI_CUSTOM_BASE_URL': 'Custom OpenAI API base URL',
@@ -10012,6 +10018,9 @@ Important rules:
                 ('OPENROUTER_USE_HTTP_ONLY', '1' if self.config.get('openrouter_use_http_only', False) else '0'),
                 ('OPENROUTER_ACCEPT_IDENTITY', '1' if self.config.get('openrouter_accept_identity', False) else '0'),
                 ('OPENROUTER_PREFERRED_PROVIDER', self.config.get('openrouter_preferred_provider', '')),
+
+                # Thinking toggles
+                ('ENABLE_DEEPSEEK_THINKING', '1' if self.config.get('enable_deepseek_thinking', True) else '0'),
                 
                 # General settings
                 ('EXTRACTION_WORKERS', str(self.config.get('extraction_workers', 1)) if self.config.get('enable_parallel_extraction', False) else '1'),
@@ -10457,7 +10466,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v6.6.7...")
+    print("🚀 Starting Glossarion v6.6.8...")
     
     # Initialize splash screen
     splash_manager = None

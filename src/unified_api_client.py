@@ -10452,6 +10452,16 @@ class UnifiedClient:
                                 extra_body["reasoning"] = reasoning
                         except Exception:
                             pass
+
+                    # DeepSeek thinking via extra_body
+                    # (per DeepSeek docs: extra_body={"thinking":{"type":"enabled"}})
+                    if provider == 'deepseek':
+                        try:
+                            enable_ds = os.getenv('ENABLE_DEEPSEEK_THINKING', '1') == '1'
+                            if enable_ds:
+                                extra_body["thinking"] = {"type": "enabled"}
+                        except Exception:
+                            pass
                         
                         # Add provider preference if specified
                         try:
