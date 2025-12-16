@@ -2935,9 +2935,20 @@ class TranslationProcessor:
 
         # Use the just-translated chapter text (source_text) as the reference text for glossary compression.
         # This allows COMPRESS_GLOSSARY_PROMPT to work for rolling summaries too.
-        system_prompt = build_system_prompt(summary_system_template, glossary_path, source_text=source_text)
-        # Add explicit instruction for clarity
-        system_prompt += "\n\n[Instruction: Update the rolling summary using any prior summary context provided, plus the newly provided translated text. Use glossary terms consistently. Do not include warnings or explanations.]"
+        # IMPORTANT: Rolling summaries should ALWAYS include the glossary (if present), regardless of
+        # the translation-time APPEND_GLOSSARY toggle.
+        _prev_append_glossary_env = os.environ.get("APPEND_GLOSSARY")
+        try:
+            os.environ["APPEND_GLOSSARY"] = "1"
+            system_prompt = build_system_prompt(summary_system_template, glossary_path, source_text=source_text)
+        finally:
+            if _prev_append_glossary_env is None:
+                os.environ.pop("APPEND_GLOSSARY", None)
+            else:
+                os.environ["APPEND_GLOSSARY"] = _prev_append_glossary_env
+
+        # Add explicit instruction for clarity (glossary usage instructions come from APPEND_GLOSSARY_PROMPT).
+        system_prompt += "\n\n[Instruction: Update the rolling summary using any prior summary context provided, plus the newly provided translated text. Do not include warnings or explanations.]"
 
         user_prompt_template = os.getenv(
             "ROLLING_SUMMARY_USER_PROMPT",
