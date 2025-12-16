@@ -257,11 +257,24 @@ async def model_autocomplete(interaction: discord.Interaction, current: str):
     send_zip="Return output as a ZIP archive instead of individual file (default: False)",
     compression_factor="Compression factor (overrides auto-compression if set)",
     thinking="Enable/disable AI thinking capabilities (GPT/Gemini/DeepSeek) - Default: True",
+    gemini_thinking_level="Gemini 3 thinking level (low/high) - Default: high",
+    gemini_thinking_budget="Gemini thinking budget (-1=auto, 0=disabled) - Default: -1",
+    or_thinking_tokens="OpenRouter thinking tokens - Default: 2000",
+    gpt_effort="GPT-5/OpenAI thinking effort (low/medium/high) - Default: medium",
     target_language="Target language"
 )
 @app_commands.choices(extraction_mode=[
     app_commands.Choice(name="Enhanced (html2text)", value="enhanced"),
     app_commands.Choice(name="Standard (BeautifulSoup)", value="standard"),
+])
+@app_commands.choices(gemini_thinking_level=[
+    app_commands.Choice(name="High", value="high"),
+    app_commands.Choice(name="Low", value="low"),
+])
+@app_commands.choices(gpt_effort=[
+    app_commands.Choice(name="Low", value="low"),
+    app_commands.Choice(name="Medium", value="medium"),
+    app_commands.Choice(name="High", value="high"),
 ])
 @app_commands.autocomplete(model=model_autocomplete)
 async def translate(
@@ -285,6 +298,10 @@ async def translate(
     send_zip: bool = False,
     compression_factor: float = None,
     thinking: bool = True,
+    gemini_thinking_level: str = "high",
+    gemini_thinking_budget: int = -1,
+    or_thinking_tokens: int = 2000,
+    gpt_effort: str = "medium",
     target_language: str = "English"
 ):
     """Translate file using Glossarion"""
@@ -903,11 +920,24 @@ async def translate(
     duplicate_algorithm="Duplicate handling: auto/strict/balanced/aggressive/basic (default: balanced)",
     send_zip="Return output as a ZIP archive instead of individual file (default: False)",
     thinking="Enable/disable AI thinking capabilities (GPT/Gemini/DeepSeek) - Default: True",
+    gemini_thinking_level="Gemini 3 thinking level (low/high) - Default: high",
+    gemini_thinking_budget="Gemini thinking budget (-1=auto, 0=disabled) - Default: -1",
+    or_thinking_tokens="OpenRouter thinking tokens - Default: 2000",
+    gpt_effort="GPT-5/OpenAI thinking effort (low/medium/high) - Default: medium",
     target_language="Target language for translations"
 )
 @app_commands.choices(extraction_mode=[
     app_commands.Choice(name="Enhanced (html2text)", value="enhanced"),
     app_commands.Choice(name="Standard (BeautifulSoup)", value="standard"),
+])
+@app_commands.choices(gemini_thinking_level=[
+    app_commands.Choice(name="High", value="high"),
+    app_commands.Choice(name="Low", value="low"),
+])
+@app_commands.choices(gpt_effort=[
+    app_commands.Choice(name="Low", value="low"),
+    app_commands.Choice(name="Medium", value="medium"),
+    app_commands.Choice(name="High", value="high"),
 ])
 @app_commands.autocomplete(model=model_autocomplete)
 async def extract(
@@ -927,6 +957,10 @@ async def extract(
     duplicate_algorithm: str = "balanced",
     send_zip: bool = False,
     thinking: bool = True,
+    gemini_thinking_level: str = "high",
+    gemini_thinking_budget: int = -1,
+    or_thinking_tokens: int = 2000,
+    gpt_effort: str = "medium",
     target_language: str = "English"
 ):
     """Extract glossary from file using Glossarion"""
@@ -1123,6 +1157,19 @@ async def extract(
             os.environ['ENABLE_GEMINI_THINKING'] = '0'
             os.environ['ENABLE_DEEPSEEK_THINKING'] = '0'
             sys.stderr.write(f"[CONFIG] Thinking capabilities disabled via command\n")
+        else:
+            # Set specific thinking variables if thinking is enabled
+            os.environ['GEMINI_THINKING_LEVEL'] = gemini_thinking_level
+            os.environ['THINKING_BUDGET'] = str(gemini_thinking_budget)
+            os.environ['GPT_REASONING_TOKENS'] = str(or_thinking_tokens)
+            os.environ['GPT_EFFORT'] = gpt_effort
+        
+        # Handle Vertex AI / Google Cloud credentials
+thinking is enabled
+            os.environ['GEMINI_THINKING_LEVEL'] = gemini_thinking_level
+            os.environ['THINKING_BUDGET'] = str(gemini_thinking_budget)
+            os.environ['GPT_REASONING_TOKENS'] = str(or_thinking_tokens)
+            os.environ['GPT_EFFORT'] = gpt_effort
         
         # Handle Vertex AI / Google Cloud credentials
         if '@' in model or model.startswith('vertex/'):
