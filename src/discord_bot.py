@@ -23,6 +23,7 @@ import asyncio
 import tempfile
 import shutil
 import json
+from typing import Optional
 
 # Add src directory to path
 src_dir = os.path.join(os.path.dirname(__file__), "src")
@@ -251,8 +252,7 @@ async def model_autocomplete(interaction: discord.Interaction, current: str):
     duplicate_algorithm="Duplicate handling: auto/strict/balanced/aggressive/basic (default: balanced)",
     manual_glossary="Manual glossary file (.csv or .json) to upload and use instead of auto-generated",
     enable_auto_glossary="Enable automatic glossary generation (default: True)",
-    request_merging="Enable request merging (combine multiple chapters per API call)",
-    request_merge_count="Chapters per request when merging enabled (default: 3)",
+    request_merge_count="Chapters per request (set >=2 to enable request merging; <=1 disables; omit to disable)",
     split_the_merge="Split merged translation output back into separate files (default: True)",
     send_zip="Return output as a ZIP archive instead of individual file (default: False)",
     compression_factor="Compression factor (overrides auto-compression if set)",
@@ -292,8 +292,7 @@ async def translate(
     duplicate_algorithm: str = "balanced",
     manual_glossary: discord.Attachment = None,
     enable_auto_glossary: bool = True,
-    request_merging: bool = False,
-    request_merge_count: int = 3,
+    request_merge_count: Optional[int] = None,
     split_the_merge: bool = True,
     send_zip: bool = False,
     compression_factor: float = None,
@@ -340,6 +339,14 @@ async def translate(
     if not (filename.endswith('.epub') or filename.endswith('.txt') or filename.endswith('.pdf')):
         await interaction.response.send_message(
             "❌ File must be EPUB, TXT, or PDF format", 
+            ephemeral=True
+        )
+        return
+
+    # Validate request merge count early (if explicitly provided)
+    if request_merge_count is not None and request_merge_count < 0:
+        await interaction.response.send_message(
+            "❌ request_merge_count must be >= 0",
             ephemeral=True
         )
         return
@@ -559,8 +566,20 @@ async def translate(
                 sys.stderr.flush()
         
         # Request merging settings (combine multiple chapters into single API request)
-        os.environ['REQUEST_MERGING_ENABLED'] = '1' if request_merging else '0'
-        os.environ['REQUEST_MERGE_COUNT'] = str(request_merge_count)
+        # Single source of truth: request_merge_count
+        if request_merge_count is None:
+            # If omitted, keep merging disabled
+            request_merging_enabled = False
+            request_merge_count_raw = 1
+        else:
+            request_merge_count_raw = int(request_merge_count)
+            request_merging_enabled = request_merge_count_raw >= 2
+
+        # Keep the count safe for downstream code (even when disabled)
+        request_merge_count_effective = max(1, request_merge_count_raw)
+
+        os.environ['REQUEST_MERGING_ENABLED'] = '1' if request_merging_enabled else '0'
+        os.environ['REQUEST_MERGE_COUNT'] = str(request_merge_count_effective)
         os.environ['SPLIT_THE_MERGE'] = '1' if split_the_merge else '0'
         os.environ['DISABLE_MERGE_FALLBACK'] = '1'  # Mark as qa_failed if split fails
         os.environ['SYNTHETIC_MERGE_HEADERS'] = '1'  # Use synthetic headers for better splitting
@@ -915,8 +934,7 @@ async def translate(
     batch_size="Paragraphs per batch (default: 10)",
     max_output_tokens="Max output tokens (default: 65536)",
     glossary_compression_factor="Glossary compression factor (default: 1.0)",
-    request_merging="Enable request merging to batch API calls (default: False)",
-    merge_count="Number of requests to merge when request merging is enabled (default: 10)",
+    merge_count="Chapters per request (set >=2 to enable request merging; <=1 disables; omit to disable)",
     duplicate_algorithm="Duplicate handling: auto/strict/balanced/aggressive/basic (default: balanced)",
     send_zip="Return output as a ZIP archive instead of individual file (default: False)",
     thinking="Enable/disable AI thinking capabilities (GPT/Gemini/DeepSeek) - Default: True",
@@ -952,8 +970,7 @@ async def extract(
     batch_size: int = 10,
     max_output_tokens: int = 65536,
     glossary_compression_factor: float = 1.0,
-    request_merging: bool = False,
-    merge_count: int = 10,
+    merge_count: Optional[int] = None,
     duplicate_algorithm: str = "balanced",
     send_zip: bool = False,
     thinking: bool = True,
@@ -998,6 +1015,14 @@ async def extract(
     if not (filename.endswith('.epub') or filename.endswith('.txt') or filename.endswith('.pdf')):
         await interaction.response.send_message(
             "❌ File must be EPUB, TXT, or PDF format", 
+            ephemeral=True
+        )
+        return
+
+    # Validate request merge count early (if explicitly provided)
+    if merge_count is not None and merge_count < 0:
+        await interaction.response.send_message(
+            "❌ merge_count must be >= 0",
             ephemeral=True
         )
         return
@@ -1138,8 +1163,22 @@ async def extract(
         os.environ['GLOSSARY_USE_LEGACY_CSV'] = '0'
         os.environ['GLOSSARY_DUPLICATE_KEY_MODE'] = 'skip'
         os.environ['GLOSSARY_DISABLE_HONORIFICS_FILTER'] = '1' if config.get('glossary_disable_honorifics_filter', False) else '0'
-        os.environ['GLOSSARY_REQUEST_MERGING_ENABLED'] = '1' if request_merging else '0'
-        os.environ['GLOSSARY_REQUEST_MERGE_COUNT'] = str(merge_count)
+
+        # Glossary request merging settings
+        # Single source of truth: merge_count
+        if merge_count is None:
+            # If omitted, keep merging disabled
+            glossary_request_merging_enabled = False
+            glossary_request_merge_count_raw = 1
+        else:
+            glossary_request_merge_count_raw = int(merge_count)
+            glossary_request_merging_enabled = glossary_request_merge_count_raw >= 2
+
+        # Keep the count safe for downstream code (even when disabled)
+        glossary_request_merge_count_effective = max(1, glossary_request_merge_count_raw)
+
+        os.environ['GLOSSARY_REQUEST_MERGING_ENABLED'] = '1' if glossary_request_merging_enabled else '0'
+        os.environ['GLOSSARY_REQUEST_MERGE_COUNT'] = str(glossary_request_merge_count_effective)
         os.environ['GLOSSARY_DUPLICATE_ALGORITHM'] = duplicate_algorithm
         # Use config defaults for gender context and description (manual glossary extraction)
         os.environ['GLOSSARY_INCLUDE_GENDER_CONTEXT'] = '1' if config.get('include_gender_context', True) else '0'
