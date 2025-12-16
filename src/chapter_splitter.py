@@ -44,7 +44,8 @@ class ChapterSplitter:
         
         # Check for break split configuration (skip for PDF files)
         # Check both the filename parameter and if it looks like a path ending in .pdf
-        is_pdf_file = filename and filename.lower().endswith('.pdf')
+        # Also check if '.pdf' is anywhere in the filename (case-insensitive) to catch PDF chapters
+        is_pdf_file = filename and (filename.lower().endswith('.pdf') or '.pdf' in filename.lower())
         break_split = os.getenv('BREAK_SPLIT_COUNT', '')
         max_elements = None
         if break_split and break_split.isdigit() and not is_pdf_file:

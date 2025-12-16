@@ -2361,6 +2361,10 @@ def _process_single_html_file(
             "title": chapter_title or f"Chapter {chapter_num}",
             "body": content_html,
             "filename": file_path,
+            # IMPORTANT: For PDFs, we must preserve the original filename including extension
+            # so that chapter_splitter.py can detect it as PDF content.
+            # But we also want to preserve the basename for display/logging.
+            "source_file": os.path.basename(zip_file_path) if zip_file_path else file_path,
             "original_filename": os.path.basename(file_path),
             "original_basename": os.path.splitext(os.path.basename(file_path))[0],
             "content_hash": content_hash,

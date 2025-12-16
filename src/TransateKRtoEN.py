@@ -233,7 +233,12 @@ def _merge_image_only_pages(html_body: str) -> str:
         return html_body
 
 
-def _keep_text_with_following_image(html_body: str, *, min_text_chars: int = 40) -> str:
+def _keep_text_with_following_image(
+    html_body: str,
+    *,
+    min_text_chars: int = 40,
+    skip_first_pages: int = 3,
+) -> str:
     """Reduce image-only PDF pages by keeping the last text block together with the following image.
 
     If an image doesn't fit at the bottom of a page, renderers will push it to the next page,
@@ -241,12 +246,24 @@ def _keep_text_with_following_image(html_body: str, *, min_text_chars: int = 40)
     immediately before an image together with that image in a container that avoids page breaks
     inside, the renderer will move BOTH to the next page when needed.
 
-    This intentionally trades some extra whitespace on the previous page to avoid image-only pages.
+    Set `skip_first_pages` to avoid applying this heuristic to the first N extracted PDF pages.
     """
     try:
         from bs4 import BeautifulSoup
+        import re as _re
 
         soup = BeautifulSoup(html_body, 'html.parser')
+
+        # Identify per-page containers (IDs produced by our pipeline / MuPDF)
+        id_pat = _re.compile(r'^(?:mupdf-page0-\d+|page\d+|page0)$')
+        page_divs = soup.find_all('div', id=id_pat)
+        page_index_by_obj_id = {id(div): idx for idx, div in enumerate(page_divs)}
+
+        def _page_index_for(node) -> int | None:
+            div = node.find_parent('div', id=id_pat)
+            if not div:
+                return None
+            return page_index_by_obj_id.get(id(div))
 
         # Target <p><img ...></p> blocks (most of your extracted images are in this shape)
         for p in soup.find_all('p'):
@@ -262,6 +279,17 @@ def _keep_text_with_following_image(html_body: str, *, min_text_chars: int = 40)
             prev = p.find_previous_sibling(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p'])
             if not prev:
                 continue
+
+            # Do not apply this heuristic to the first N pages
+            if skip_first_pages > 0:
+                p_page_idx = _page_index_for(p)
+                prev_page_idx = _page_index_for(prev)
+                if (
+                    (p_page_idx is not None and p_page_idx < skip_first_pages)
+                    or (prev_page_idx is not None and prev_page_idx < skip_first_pages)
+                ):
+                    continue
+
             prev_txt = (prev.get_text(' ', strip=True) or '').replace('\xa0', '').strip()
             if len(prev_txt) < min_text_chars:
                 continue
@@ -7378,8 +7406,8 @@ def main(log_callback=None, stop_callback=None):
         
         # For mixed content chapters, calculate on clean text
         # For mixed content chapters, calculate on clean text
-        # Get filename for content type detection
-        chapter_filename = c.get('filename') or c.get('original_basename', '')
+        # Get filename for content type detection (prefer source_file to detect PDF context)
+        chapter_filename = c.get('source_file') or c.get('filename') or c.get('original_basename', '')
         
         if c.get('has_images', False) and ContentProcessor.is_meaningful_text_content(c["body"]):
             # Don't modify c["body"] at all during chunk calculation
@@ -9468,6 +9496,11 @@ def main(log_callback=None, stop_callback=None):
                     # NOTE: inserting forced page breaks between pages can sometimes produce a blank page
                     # depending on the renderer and the source XHTML. Make it opt-in via env var.
                     insert_pdf_page_breaks = os.getenv('PDF_INSERT_PAGE_BREAKS', '0').lower() in ('1', 'true', 'yes', 'y', 'on')
+
+                    # Force page breaks for the first N combined pages to avoid them collapsing into one page.
+                    # (This is intentionally scoped to the start of the document to reduce blank-page risk.)
+                    force_page_breaks_first_n = 4
+
                     html_parts = []
                     current_main_chapter = None
                     
@@ -9503,7 +9536,10 @@ def main(log_callback=None, stop_callback=None):
                             
                             if original_chapter != current_main_chapter:
                                 current_main_chapter = original_chapter
-                                if insert_pdf_page_breaks and i > 0:
+                                if (
+                                    (insert_pdf_page_breaks and i > 0)
+                                    or (0 < i < force_page_breaks_first_n)
+                                ):
                                     html_parts.append('<div class="page-break"></div>\n')
                             
                             html_parts.append(content)
@@ -9511,7 +9547,10 @@ def main(log_callback=None, stop_callback=None):
                                 html_parts.append('\n')
                         else:
                             current_main_chapter = chapter_data['num']
-                            if insert_pdf_page_breaks and i > 0:
+                            if (
+                                (insert_pdf_page_breaks and i > 0)
+                                or (0 < i < force_page_breaks_first_n)
+                            ):
                                 html_parts.append('<div class="page-break"></div>\n')
                             html_parts.append(content)
                     
@@ -9544,6 +9583,7 @@ def main(log_callback=None, stop_callback=None):
   h2 { margin: 1.2em 0 0.6em 0; }
   img { margin: 0.6em auto; display: block; max-width: 100%; height: auto; }
   .keep-with-image { break-inside: avoid; page-break-inside: avoid; }
+  .page-break { page-break-before: always; break-before: page; clear: both; height: 0; margin: 0; padding: 0; }
 </style>
 """
 
