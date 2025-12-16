@@ -233,12 +233,7 @@ def _merge_image_only_pages(html_body: str) -> str:
         return html_body
 
 
-def _keep_text_with_following_image(
-    html_body: str,
-    *,
-    min_text_chars: int = 40,
-    skip_first_pages: int = 3,
-) -> str:
+def _keep_text_with_following_image(html_body: str, *, min_text_chars: int = 40) -> str:
     """Reduce image-only PDF pages by keeping the last text block together with the following image.
 
     If an image doesn't fit at the bottom of a page, renderers will push it to the next page,
@@ -246,24 +241,12 @@ def _keep_text_with_following_image(
     immediately before an image together with that image in a container that avoids page breaks
     inside, the renderer will move BOTH to the next page when needed.
 
-    Set `skip_first_pages` to avoid applying this heuristic to the first N extracted PDF pages.
+    This intentionally trades some extra whitespace on the previous page to avoid image-only pages.
     """
     try:
         from bs4 import BeautifulSoup
-        import re as _re
 
         soup = BeautifulSoup(html_body, 'html.parser')
-
-        # Identify per-page containers (IDs produced by our pipeline / MuPDF)
-        id_pat = _re.compile(r'^(?:mupdf-page0-\d+|page\d+|page0)$')
-        page_divs = soup.find_all('div', id=id_pat)
-        page_index_by_obj_id = {id(div): idx for idx, div in enumerate(page_divs)}
-
-        def _page_index_for(node) -> int | None:
-            div = node.find_parent('div', id=id_pat)
-            if not div:
-                return None
-            return page_index_by_obj_id.get(id(div))
 
         # Target <p><img ...></p> blocks (most of your extracted images are in this shape)
         for p in soup.find_all('p'):
@@ -279,17 +262,6 @@ def _keep_text_with_following_image(
             prev = p.find_previous_sibling(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p'])
             if not prev:
                 continue
-
-            # Do not apply this heuristic to the first N pages
-            if skip_first_pages > 0:
-                p_page_idx = _page_index_for(p)
-                prev_page_idx = _page_index_for(prev)
-                if (
-                    (p_page_idx is not None and p_page_idx < skip_first_pages)
-                    or (prev_page_idx is not None and prev_page_idx < skip_first_pages)
-                ):
-                    continue
-
             prev_txt = (prev.get_text(' ', strip=True) or '').replace('\xa0', '').strip()
             if len(prev_txt) < min_text_chars:
                 continue
