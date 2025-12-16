@@ -174,6 +174,112 @@ def _merge_split_paragraphs(html_body: str) -> str:
     # Use decode() instead of str() to preserve original formatting and attributes
     return soup.decode(formatter='minimal')
 
+def _merge_image_only_pages(html_body: str) -> str:
+    """Merge image-only extracted PDF page containers into the previous container.
+
+    Motivation: When PDFs are extracted page-by-page, some pages contain only a single image.
+    Keeping them as a standalone container often produces large wasted whitespace in the final
+    PDF/HTML output. This pass moves the image(s) into the previous page container.
+
+    We treat a container as "image-only" if:
+      - it contains at least one <img>
+      - its visible text (after stripping whitespace/nbsp) is empty
+
+    This is a best-effort layout hint; the renderer may still paginate based on available space.
+    """
+    try:
+        from bs4 import BeautifulSoup
+        import re as _re
+
+        soup = BeautifulSoup(html_body, 'html.parser')
+
+        # Common page wrapper IDs produced by our pipeline / MuPDF
+        id_pat = _re.compile(r'^(?:mupdf-page0-\d+|page\d+|page0)$')
+
+        def _is_image_only(div) -> bool:
+            if not div:
+                return False
+            imgs = div.find_all('img')
+            if not imgs:
+                return False
+            txt = (div.get_text(' ', strip=True) or '').replace('\xa0', '').strip()
+            return txt == ''
+
+        changed = True
+        while changed:
+            changed = False
+            divs = soup.find_all('div', id=id_pat)
+            for idx in range(1, len(divs)):
+                div = divs[idx]
+                if not _is_image_only(div):
+                    continue
+                prev = div.find_previous('div', id=id_pat)
+                if not prev:
+                    continue
+
+                # Move children into previous container
+                for child in list(div.contents):
+                    try:
+                        prev.append(child.extract())
+                    except Exception:
+                        prev.append(child)
+
+                div.decompose()
+                changed = True
+                break  # restart scan since tree changed
+
+        return soup.decode(formatter='minimal')
+    except Exception:
+        return html_body
+
+
+def _keep_text_with_following_image(html_body: str, *, min_text_chars: int = 40) -> str:
+    """Reduce image-only PDF pages by keeping the last text block together with the following image.
+
+    If an image doesn't fit at the bottom of a page, renderers will push it to the next page,
+    sometimes resulting in a page that contains only the image. By wrapping the last text block
+    immediately before an image together with that image in a container that avoids page breaks
+    inside, the renderer will move BOTH to the next page when needed.
+
+    This intentionally trades some extra whitespace on the previous page to avoid image-only pages.
+    """
+    try:
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(html_body, 'html.parser')
+
+        # Target <p><img ...></p> blocks (most of your extracted images are in this shape)
+        for p in soup.find_all('p'):
+            imgs = p.find_all('img')
+            if len(imgs) != 1:
+                continue
+            # Ensure this <p> is basically image-only
+            txt = (p.get_text(' ', strip=True) or '').replace('\xa0', '').strip()
+            if txt:
+                continue
+
+            # Find a preceding text block sibling (h1-h6 or p with text)
+            prev = p.find_previous_sibling(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p'])
+            if not prev:
+                continue
+            prev_txt = (prev.get_text(' ', strip=True) or '').replace('\xa0', '').strip()
+            if len(prev_txt) < min_text_chars:
+                continue
+
+            # Wrap prev + image-paragraph together
+            wrapper = soup.new_tag('div')
+            wrapper['class'] = (wrapper.get('class', []) or []) + ['keep-with-image']
+            wrapper['style'] = 'break-inside:avoid; page-break-inside:avoid;'
+
+            prev.insert_before(wrapper)
+            wrapper.append(prev.extract())
+            wrapper.append(p.extract())
+
+        return soup.decode(formatter='minimal')
+    except Exception:
+        return html_body
+
+
 def _generate_and_replace_toc(html_body: str) -> str:
     """Generate a proper table of contents from headers and replace any existing broken TOC.
     
@@ -9413,6 +9519,13 @@ def main(log_callback=None, stop_callback=None):
                     
                     # Post-process: merge paragraphs that span across pages
                     full_html_body = _merge_split_paragraphs(full_html_body)
+
+                    # Post-process: merge image-only page containers into the previous page
+                    # (reduces wasted whitespace for "image-only" pages)
+                    full_html_body = _merge_image_only_pages(full_html_body)
+
+                    # Post-process: wrap last text block with a following image to reduce image-only pages
+                    full_html_body = _keep_text_with_following_image(full_html_body)
                     
                     # Replace/insert a clean Table of Contents built from h1/h2 headers
                     full_html_body = _generate_and_replace_toc(full_html_body)
@@ -9421,13 +9534,27 @@ def main(log_callback=None, stop_callback=None):
                     css_path = os.path.join(out, 'styles.css')
                     css_link = '<link rel="stylesheet" href="styles.css">' if os.path.exists(css_path) else ''
                     
+                    # Extra inline CSS for PDF-derived HTML:
+                    # - h3 is used as body text in our PDF extraction; normalize it to paragraph-like styling
+                    # - reduce margins around images
+                    # - keep-with-image wrapper helps reduce image-only PDF pages
+                    extra_css = """
+<style>
+  h3 { font-size: 1em; font-weight: normal; margin: 0.6em 0; }
+  h2 { margin: 1.2em 0 0.6em 0; }
+  img { margin: 0.6em auto; display: block; max-width: 100%; height: auto; }
+  .keep-with-image { break-inside: avoid; page-break-inside: avoid; }
+</style>
+"""
+
                     full_html = f"""<!DOCTYPE html>
-<html lang="en">
+<html lang=\"en\">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta charset=\"UTF-8\">
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
     <title>{txt_processor.file_base} - Translated</title>
     {css_link}
+    {extra_css}
 </head>
 <body>
 {full_html_body}
