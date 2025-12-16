@@ -2913,7 +2913,9 @@ class TranslationProcessor:
             glossary_path = find_glossary_file(self.out_dir)
         except Exception:
             glossary_path = None
-        system_prompt = build_system_prompt(summary_system_template, glossary_path)
+        # Use the just-translated chapter text (source_text) as the reference text for glossary compression.
+        # This allows COMPRESS_GLOSSARY_PROMPT to work for rolling summaries too.
+        system_prompt = build_system_prompt(summary_system_template, glossary_path, source_text=source_text)
         # Add explicit instruction for clarity
         system_prompt += "\n\n[Instruction: Generate a concise rolling summary of the previous chapter. Use glossary terms consistently. Do not include warnings or explanations.]"
         
