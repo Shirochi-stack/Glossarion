@@ -243,6 +243,7 @@ async def model_autocomplete(interaction: discord.Interaction, current: str):
     model="AI model to use (or type custom model name)",
     file="EPUB, TXT, or PDF file to translate (optional if using url)",
     url="Google Drive or Dropbox link to file (optional if using file attachment)",
+    custom_endpoint_url="Custom OpenAI-compatible base URL (auto-enables when set; omit to disable)",
     google_credentials_path="Path to Google Cloud credentials JSON (for Vertex AI models)",
     extraction_mode="Text extraction method (default: Enhanced/html2text)",
     temperature="Translation temperature 0.0-1.0 (default: 0.3)",
@@ -283,6 +284,7 @@ async def translate(
     model: str,
     file: discord.Attachment = None,
     url: str = None,
+    custom_endpoint_url: Optional[str] = None,
     google_credentials_path: str = None,
     extraction_mode: str = "enhanced",
     temperature: float = 0.3,
@@ -350,6 +352,16 @@ async def translate(
             ephemeral=True
         )
         return
+
+    # Validate custom endpoint URL early (if provided)
+    if custom_endpoint_url is not None:
+        custom_endpoint_url = custom_endpoint_url.strip()
+        if custom_endpoint_url and not (custom_endpoint_url.startswith('http://') or custom_endpoint_url.startswith('https://')):
+            await interaction.response.send_message(
+                "❌ custom_endpoint_url must start with http:// or https://",
+                ephemeral=True
+            )
+            return
     
     # Initial response (ephemeral - only visible to user)
     embed = discord.Embed(
@@ -431,13 +443,12 @@ async def translate(
             # Fallback to first available profile or basic prompt
             system_prompt = f"Translate to {target_language}. Preserve all formatting."
         
-        # Set Custom OpenAI Endpoint if enabled in config
-        # Disabled by default as requested
-        use_custom_endpoint = config.get('use_custom_openai_endpoint', False)
-        if use_custom_endpoint:
+        # Custom OpenAI Endpoint (single source of truth: custom_endpoint_url)
+        # If omitted, keep disabled.
+        if custom_endpoint_url:
             os.environ['USE_CUSTOM_OPENAI_ENDPOINT'] = '1'
-            os.environ['OPENAI_CUSTOM_BASE_URL'] = config.get('openai_base_url', '')
-            sys.stderr.write(f"[CONFIG] Custom OpenAI Endpoint enabled: {config.get('openai_base_url', '')}\n")
+            os.environ['OPENAI_CUSTOM_BASE_URL'] = custom_endpoint_url
+            sys.stderr.write(f"[CONFIG] Custom OpenAI Endpoint enabled: {custom_endpoint_url}\n")
         else:
             os.environ['USE_CUSTOM_OPENAI_ENDPOINT'] = '0'
             os.environ['OPENAI_CUSTOM_BASE_URL'] = ''
@@ -928,6 +939,7 @@ async def translate(
     model="AI model to use (or type custom model name)",
     file="EPUB, TXT, or PDF file to extract glossary from (optional if using url)",
     url="Google Drive or Dropbox link to file (optional if using file attachment)",
+    custom_endpoint_url="Custom OpenAI-compatible base URL (auto-enables when set; omit to disable)",
     google_credentials_path="Path to Google Cloud credentials JSON (for Vertex AI models)",
     extraction_mode="Text extraction method (default: Enhanced/html2text)",
     temperature="Glossary extraction temperature 0.0-1.0 (default: 0.1)",
@@ -964,6 +976,7 @@ async def extract(
     model: str,
     file: discord.Attachment = None,
     url: str = None,
+    custom_endpoint_url: Optional[str] = None,
     google_credentials_path: str = None,
     extraction_mode: str = "enhanced",
     temperature: float = 0.1,
@@ -1026,6 +1039,16 @@ async def extract(
             ephemeral=True
         )
         return
+
+    # Validate custom endpoint URL early (if provided)
+    if custom_endpoint_url is not None:
+        custom_endpoint_url = custom_endpoint_url.strip()
+        if custom_endpoint_url and not (custom_endpoint_url.startswith('http://') or custom_endpoint_url.startswith('https://')):
+            await interaction.response.send_message(
+                "❌ custom_endpoint_url must start with http:// or https://",
+                ephemeral=True
+            )
+            return
     
     # Initial response
     embed = discord.Embed(
@@ -1099,13 +1122,12 @@ async def extract(
         # Get glossary prompts from config
         glossary_prompt = config.get('manual_glossary_prompt', '')
         
-        # Set Custom OpenAI Endpoint if enabled in config
-        # Disabled by default as requested
-        use_custom_endpoint = config.get('use_custom_openai_endpoint', False)
-        if use_custom_endpoint:
+        # Custom OpenAI Endpoint (single source of truth: custom_endpoint_url)
+        # If omitted, keep disabled.
+        if custom_endpoint_url:
             os.environ['USE_CUSTOM_OPENAI_ENDPOINT'] = '1'
-            os.environ['OPENAI_CUSTOM_BASE_URL'] = config.get('openai_base_url', '')
-            sys.stderr.write(f"[CONFIG] Custom OpenAI Endpoint enabled: {config.get('openai_base_url', '')}\n")
+            os.environ['OPENAI_CUSTOM_BASE_URL'] = custom_endpoint_url
+            sys.stderr.write(f"[CONFIG] Custom OpenAI Endpoint enabled: {custom_endpoint_url}\n")
         else:
             os.environ['USE_CUSTOM_OPENAI_ENDPOINT'] = '0'
             os.environ['OPENAI_CUSTOM_BASE_URL'] = ''
