@@ -3020,7 +3020,14 @@ class TranslationProcessor:
             
             # Save the summary to the output folder
             summary_file = os.path.join(self.out_dir, "rolling_summary.txt")
-            header = f"=== Rolling Summary of Chapter {chapter_num} ===\n(Updated rolling summary — use prior summary context when provided)\n"
+            # Header describes what the rolling summary represents (last N retained entries),
+            # not a single chapter.
+            try:
+                _n = int(getattr(self.config, 'ROLLING_SUMMARY_MAX_ENTRIES', 0) or 0)
+            except Exception:
+                _n = 0
+            header_title = f"=== Rolling Summary of Last {_n} Chapters ===" if _n > 0 else "=== Rolling Summary ==="
+            header = header_title + "\n(Updated rolling summary — use prior summary context when provided)\n"
             
             mode = "a" if self.config.ROLLING_SUMMARY_MODE == "append" else "w"
             with open(summary_file, mode, encoding="utf-8") as sf:
@@ -8872,8 +8879,16 @@ def main(log_callback=None, stop_callback=None):
                         _rs_ch = last_summary_chapter_num
                     except Exception:
                         _rs_ch = None
-                    summary_header = f"[Rolling Summary of Chapter {_rs_ch}]" if _rs_ch is not None else "[Rolling Summary]"
-                    summary_footer = "[End of Rolling Summary]"
+                    # Header should describe what the rolling summary represents (last N retained entries),
+                    # not the last single chapter number.
+                    try:
+                        _n = int(getattr(config, 'ROLLING_SUMMARY_MAX_ENTRIES', 0) or 0)
+                    except Exception:
+                        _n = 0
+                    summary_header = (
+                        f"=== Rolling Summary of Last {_n} Chapters ===" if _n > 0 else "=== Rolling Summary ==="
+                    )
+                    summary_footer = "=== End Rolling Summary ==="
 
                     summary_content = (
                         "CONTEXT ONLY - DO NOT INCLUDE IN TRANSLATION:\n"
