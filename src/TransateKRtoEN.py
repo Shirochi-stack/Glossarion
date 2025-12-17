@@ -2883,7 +2883,7 @@ class TranslationProcessor:
     def generate_rolling_summary(
         self,
         history_manager,
-        chapter_num,
+        actual_num,
         base_system_content=None,
         source_text=None,
         previous_summary_text=None,
@@ -2996,7 +2996,7 @@ class TranslationProcessor:
             summary_msgs = [{"role": "system", "content": system_prompt}]
             if prev_summary_msg:
                 summary_msgs.append(prev_summary_msg)
-            summary_msgs.append({"role": "user", "content": f"[Rolling Summary of Chapter {chapter_num}]\n" + user_prompt})
+            summary_msgs.append({"role": "user", "content": f"[Rolling Summary of Chapter {actual_num}]\n" + user_prompt})
 
         try:
             # Get configurable rolling summary token limit
@@ -3036,7 +3036,7 @@ class TranslationProcessor:
             # - append mode: each appended block corresponds to a specific chapter → keep chapter-specific header
             # - replace mode: file is overwritten and represents the current rolling window → label as "Last N Chapters"
             if mode == "a":
-                header_title = f"=== Rolling Summary of Chapter {chapter_num} ==="
+                header_title = f"=== Rolling Summary of Chapter {actual_num} ==="
             else:
                 try:
                     _n = int(getattr(self.config, 'ROLLING_SUMMARY_MAX_ENTRIES', 0) or 0)
@@ -3086,10 +3086,10 @@ class TranslationProcessor:
             
             # Log to GUI if available, otherwise console
             try:
-                self._log(f"📝 Generated rolling summary for Chapter {chapter_num} ({'append' if mode=='a' else 'replace'} mode)")
+                self._log(f"📝 Generated rolling summary for Chapter {actual_num} ({'append' if mode=='a' else 'replace'} mode)")
                 self._log(f"   ➜ Saved to: {summary_file} ({len(summary_resp.strip())} chars)")
             except Exception:
-                print(f"📝 Generated rolling summary for Chapter {chapter_num} ({'append' if mode=='a' else 'replace'} mode)")
+                print(f"📝 Generated rolling summary for Chapter {actual_num} ({'append' if mode=='a' else 'replace'} mode)")
                 print(f"   ➜ Saved to: {summary_file} ({len(summary_resp.strip())} chars)")
             return summary_resp.strip()
             
