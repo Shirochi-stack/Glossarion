@@ -3466,11 +3466,32 @@ class BatchTranslationProcessor:
         self.is_text_file = is_text_file
         # Optional shared HistoryManager for contextual translation across chapters
         self.history_manager = history_manager
+
+        # Rolling summary support (batch mode): inject a snapshot per batch.
+        # This is updated by the main thread between batches.
+        import threading
+        self._batch_rolling_summary_lock = threading.Lock()
+        self._batch_rolling_summary_text = ""  # exact rolling_summary.txt contents for current batch
         
        # Optionally log multi-key status
         if hasattr(self.client, 'use_multi_keys') and self.client.use_multi_keys:
             stats = self.client.get_stats()
             print(f"🔑 Batch processor using multi-key mode: {stats.get('total_keys', 0)} keys")
+
+    def set_batch_rolling_summary_text(self, text: str) -> None:
+        """Set the rolling summary snapshot to be injected for the current batch."""
+        try:
+            if text is None:
+                text = ""
+        except Exception:
+            text = ""
+        with self._batch_rolling_summary_lock:
+            self._batch_rolling_summary_text = text
+
+    def get_batch_rolling_summary_text(self) -> str:
+        """Get the rolling summary snapshot (thread-safe)."""
+        with self._batch_rolling_summary_lock:
+            return self._batch_rolling_summary_text
     
     def process_single_chapter(self, chapter_data):
         """Process a single chapter (runs in thread)"""
@@ -3756,9 +3777,29 @@ class BatchTranslationProcessor:
                         print(f"⚠️ Failed to build contextual memory for batch chunk: {e}")
                         memory_msgs = []
                 
-                # Build messages for this chunk (system + optional memory + user)
+                # Build messages for this chunk (system + optional rolling summary + optional memory + user)
+                rolling_summary_msgs = []
+                if getattr(self.config, 'USE_ROLLING_SUMMARY', False):
+                    try:
+                        rs_text = self.get_batch_rolling_summary_text()
+                    except Exception:
+                        rs_text = ""
+                    if isinstance(rs_text, str) and rs_text:
+                        # Do not strip/parse the file content. Only wrap to prevent accidental translation.
+                        rolling_summary_msgs = [{
+                            "role": "assistant",
+                            "content": (
+                                "CONTEXT ONLY - DO NOT INCLUDE IN TRANSLATION:\n"
+                                "[MEMORY] Previous context summary:\n\n"
+                                + rs_text + "\n\n"
+                                "[END MEMORY]\n"
+                                "END OF CONTEXT - BEGIN ACTUAL CONTENT TO TRANSLATE:"
+                            )
+                        }]
+
                 chapter_msgs = (
                     [{"role": "system", "content": chapter_system_prompt}]
+                    + rolling_summary_msgs
                     + memory_msgs
                     + [{"role": "user", "content": user_prompt}]
                 )
@@ -4129,6 +4170,24 @@ class BatchTranslationProcessor:
             )
             
             # Build messages
+            rolling_summary_msgs = []
+            if getattr(self.config, 'USE_ROLLING_SUMMARY', False):
+                try:
+                    rs_text = self.get_batch_rolling_summary_text()
+                except Exception:
+                    rs_text = ""
+                if isinstance(rs_text, str) and rs_text:
+                    rolling_summary_msgs = [{
+                        "role": "assistant",
+                        "content": (
+                            "CONTEXT ONLY - DO NOT INCLUDE IN TRANSLATION:\n"
+                            "[MEMORY] Previous context summary:\n\n"
+                            + rs_text + "\n\n"
+                            "[END MEMORY]\n"
+                            "END OF CONTEXT - BEGIN ACTUAL CONTENT TO TRANSLATE:"
+                        )
+                    }]
+
             memory_msgs = []
             if (self.config.CONTEXTUAL 
                 and self.history_manager is not None 
@@ -4152,7 +4211,7 @@ class BatchTranslationProcessor:
                 except Exception as e:
                     print(f"   ⚠️ Failed to load history for merged group: {e}")
             
-            msgs = [{"role": "system", "content": chapter_system_prompt}] + memory_msgs + [
+            msgs = [{"role": "system", "content": chapter_system_prompt}] + rolling_summary_msgs + memory_msgs + [
                 {"role": "user", "content": merged_content}
             ]
 
@@ -7770,6 +7829,15 @@ def main(log_callback=None, stop_callback=None):
             is_text_file=is_text_file,
             history_manager=history_manager
         )
+
+        # Batch-mode rolling summary: updated once per batch and injected into the NEXT batch.
+        rolling_summary_for_next_batch = ""  # exact rolling_summary.txt contents
+        import threading
+        rolling_summary_update_lock = threading.Lock()
+        summary_translation_processor = None
+        if config.USE_ROLLING_SUMMARY:
+            # Dedicated processor for summarization between batches (no concurrency with translation threads).
+            summary_translation_processor = TranslationProcessor(config, client, out, log_callback, check_stop, uses_zero_based, is_text_file)
         
         total_to_process = len(chapters_to_translate)
         processed = 0
@@ -7858,6 +7926,13 @@ def main(log_callback=None, stop_callback=None):
                 else:
                     print(f"\n📦 Submitting batch {batch_number}: {chapters_in_batch} chapters")
                 
+                # Set the rolling summary snapshot to be injected for THIS batch.
+                # First batch has empty summary; subsequent batches get the previous batch's summary.
+                if config.USE_ROLLING_SUMMARY:
+                    batch_processor.set_batch_rolling_summary_text(rolling_summary_for_next_batch)
+                    # micro-delay to reduce contention spikes across threads
+                    time.sleep(0.000001)
+
                 # Submit work units (either single chapters or merge groups)
                 if is_merged_mode:
                     future_to_unit = {
@@ -7955,6 +8030,86 @@ def main(log_callback=None, stop_callback=None):
                                 actual_num_for_log = chapter.get('actual_chapter_num', chapter.get('num'))
                                 print(f"⚠️ Failed to append Chapter {actual_num_for_log} to translation history (batch): {e}")
                 
+                # After the batch completes, update rolling_summary.txt ONCE (for the next batch).
+                if config.USE_ROLLING_SUMMARY and summary_translation_processor is not None:
+                    try:
+                        # Build a concatenated translation text for the chapters in THIS batch, in stable order.
+                        batch_items = []
+                        for unit in current_batch_units:
+                            batch_items.extend(unit)
+                        batch_items = sorted(batch_items, key=lambda x: x[0])  # sort by idx
+
+                        translated_blocks = []
+                        last_actual_num_in_batch = None
+                        for idx, chapter in batch_items:
+                            try:
+                                actual_num = chapter.get('actual_chapter_num', chapter.get('num'))
+                                last_actual_num_in_batch = actual_num
+                                # Try to read the saved output file for this chapter.
+                                fname_guess = FileUtilities.create_chapter_filename(chapter, actual_num)
+                                candidates = [fname_guess]
+                                # Text mode sometimes uses .txt; also tolerate html/txt mismatch.
+                                if isinstance(fname_guess, str) and fname_guess.endswith('.html'):
+                                    candidates.insert(0, fname_guess.replace('.html', '.txt'))
+                                elif isinstance(fname_guess, str) and fname_guess.endswith('.txt'):
+                                    candidates.append(fname_guess.replace('.txt', '.html'))
+
+                                content = ""
+                                for cand in candidates:
+                                    fp = os.path.join(out, cand)
+                                    if os.path.exists(fp):
+                                        with open(fp, 'r', encoding='utf-8') as f:
+                                            content = f.read()
+                                        if content:
+                                            break
+
+                                if isinstance(content, str) and content:
+                                    translated_blocks.append(content)
+                            except Exception:
+                                continue
+
+                        batch_translations_text = "\n\n---\n\n".join(translated_blocks)
+
+                        if batch_translations_text:
+                            # Force replace semantics for batch-mode rolling summary.
+                            old_mode = getattr(config, 'ROLLING_SUMMARY_MODE', 'replace')
+                            old_max_entries = getattr(config, 'ROLLING_SUMMARY_MAX_ENTRIES', 0)
+                            try:
+                                config.ROLLING_SUMMARY_MODE = 'replace'
+                                # Show "Last N" where N ~= batch size (chapters in batch)
+                                try:
+                                    config.ROLLING_SUMMARY_MAX_ENTRIES = int(chapters_in_batch or 0)
+                                except Exception:
+                                    config.ROLLING_SUMMARY_MAX_ENTRIES = 0
+
+                                with rolling_summary_update_lock:
+                                    # micro-delay before summarization to avoid contention with filesystem
+                                    time.sleep(0.000001)
+                                    summary_translation_processor.generate_rolling_summary(
+                                        history_manager,
+                                        last_actual_num_in_batch,
+                                        base_system_content=None,
+                                        source_text=batch_translations_text,
+                                        previous_summary_text=None,
+                                        previous_summary_chapter_num=None,
+                                        prefer_translations_only_user=True,
+                                    )
+                                    # Load the file verbatim for the next batch injection
+                                    summary_file = os.path.join(out, 'rolling_summary.txt')
+                                    if os.path.exists(summary_file):
+                                        with open(summary_file, 'r', encoding='utf-8') as sf:
+                                            rolling_summary_for_next_batch = (sf.read() or "")
+                                    else:
+                                        rolling_summary_for_next_batch = ""
+                            finally:
+                                config.ROLLING_SUMMARY_MODE = old_mode
+                                config.ROLLING_SUMMARY_MAX_ENTRIES = old_max_entries
+                        else:
+                            rolling_summary_for_next_batch = ""
+                    except Exception as e:
+                        print(f"⚠️ Batch rolling summary update failed: {e}")
+                        rolling_summary_for_next_batch = ""
+
                 print(f"\n📦 Batch Summary:")
                 print(f"   ✅ Successful: {completed_in_batch}")
                 print(f"   ❌ Failed: {failed_in_batch}")
