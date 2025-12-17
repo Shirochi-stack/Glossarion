@@ -3044,7 +3044,7 @@ class TranslationProcessor:
                     _n = 0
                 header_title = f"=== Rolling Summary of Last {_n} Chapters ===" if _n > 0 else "=== Rolling Summary ==="
 
-            header = header_title + "\n(Updated rolling summary — use prior summary context when provided)\n"
+            header = header_title + "\n"
 
             with open(summary_file, mode, encoding="utf-8") as sf:
                 if mode == "a":
