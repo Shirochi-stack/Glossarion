@@ -1965,7 +1965,7 @@ Recent translations to summarize:
         str_vars = [
             ('summary_role_var', 'summary_role', 'system'),
             ('rolling_summary_exchanges_var', 'rolling_summary_exchanges', '5'),
-            ('rolling_summary_mode_var', 'rolling_summary_mode', 'append'),
+            ('rolling_summary_mode_var', 'rolling_summary_mode', 'replace'),
             # New: how many summaries to retain in append mode
             ('rolling_summary_max_entries_var', 'rolling_summary_max_entries', '5'),
             # New: max tokens for rolling summary generation
@@ -9442,7 +9442,7 @@ Important rules:
                 
                 # Rolling summary
                 ('rolling_summary_exchanges', ['rolling_summary_exchanges_var'], 5, lambda v: safe_int(v, 5)),
-                ('rolling_summary_mode', ['rolling_summary_mode_var'], 'chapter', str),
+                ('rolling_summary_mode', ['rolling_summary_mode_var'], 'replace', str),
                 ('rolling_summary_max_entries', ['rolling_summary_max_entries_var'], 10, lambda v: safe_int(v, 10)),
                 ('rolling_summary_max_tokens', ['rolling_summary_max_tokens_var'], 8192, lambda v: safe_int(v, 8192)),
 
@@ -10151,7 +10151,7 @@ Important rules:
                 ('USE_ROLLING_SUMMARY', '1' if getattr(self, 'rolling_summary_var', False) else '0'),
                 ('SUMMARY_ROLE', getattr(self, 'summary_role_var', 'system')),
                 ('ROLLING_SUMMARY_EXCHANGES', str(getattr(self, 'rolling_summary_exchanges_var', '5'))),
-                ('ROLLING_SUMMARY_MODE', getattr(self, 'rolling_summary_mode_var', 'append')),
+                ('ROLLING_SUMMARY_MODE', getattr(self, 'rolling_summary_mode_var', 'replace')),
                 ('ROLLING_SUMMARY_SYSTEM_PROMPT', getattr(self, 'rolling_summary_system_prompt', getattr(self, 'default_rolling_summary_system_prompt', ''))),
                 ('ROLLING_SUMMARY_USER_PROMPT', getattr(self, 'rolling_summary_user_prompt', getattr(self, 'default_rolling_summary_user_prompt', ''))),
                 ('ROLLING_SUMMARY_MAX_ENTRIES', str(getattr(self, 'rolling_summary_max_entries_var', '10'))),
