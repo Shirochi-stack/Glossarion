@@ -917,12 +917,19 @@ def _create_context_management_section(self, parent):
     section_v.addWidget(include_source_cb)
 
     # Rolling summary toggle
-    rolling_cb = self._create_styled_checkbox("Use Rolling Summary (Memory, Do not use with contextual translation)")
+    rolling_cb = self._create_styled_checkbox("Use Rolling Summary (Memory)")
     try:
         rolling_cb.setChecked(bool(self.rolling_summary_var))
     except Exception:
         pass
-    
+
+    # Warning label (separate so it's visually distinct)
+    rolling_warn = QLabel("⚠ Do not use with contextual translation")
+    rolling_warn.setStyleSheet(
+        "color: #f59e0b; font-style: italic; font-size: 9pt;"
+    )
+    rolling_warn.setContentsMargins(24, 0, 0, 4)
+
     # Store references to controls that should be enabled/disabled
     rolling_controls = []
     
@@ -936,6 +943,7 @@ def _create_context_management_section(self, parent):
             pass
     rolling_cb.toggled.connect(_on_rolling_toggled)
     section_v.addWidget(rolling_cb)
+    section_v.addWidget(rolling_warn)
 
     # Description
     desc = QLabel("AI-powered memory system that maintains story context")
