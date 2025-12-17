@@ -917,7 +917,7 @@ def _create_context_management_section(self, parent):
     section_v.addWidget(include_source_cb)
 
     # Rolling summary toggle
-    rolling_cb = self._create_styled_checkbox("Use Rolling Summary (Memory)")
+    rolling_cb = self._create_styled_checkbox("Use Rolling Summary (Memory, Do not use with contextual translation)")
     try:
         rolling_cb.setChecked(bool(self.rolling_summary_var))
     except Exception:
