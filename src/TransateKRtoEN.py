@@ -8898,11 +8898,11 @@ def main(log_callback=None, stop_callback=None):
                         rolling_summary_text = ""
 
                     # Only inject if the file has content
-                    if isinstance(rolling_summary_text, str) and rolling_summary_text.strip():
+                    if isinstance(rolling_summary_text, str) and rolling_summary_text:
                         summary_content = (
                             "CONTEXT ONLY - DO NOT INCLUDE IN TRANSLATION:\n"
                             "[MEMORY] Previous context summary:\n\n"
-                            + rolling_summary_text.rstrip() + "\n\n"
+                            + rolling_summary_text + "\n\n"
                             "[END MEMORY]\n"
                             "END OF CONTEXT - BEGIN ACTUAL CONTENT TO TRANSLATE:"
                         )
