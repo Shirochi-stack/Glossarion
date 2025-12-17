@@ -3050,7 +3050,6 @@ class TranslationProcessor:
                 if mode == "a":
                     sf.write("\n\n")
                 sf.write(header)
-                sf.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}]\n")
                 sf.write(summary_resp.strip())
 
             # If in append mode, trim to retain only the last N entries if configured
