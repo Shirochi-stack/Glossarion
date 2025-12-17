@@ -903,7 +903,7 @@ def _create_context_management_section(self, parent):
     section_v.setSpacing(4)  # Compact spacing between widgets
 
     # Include previous source text toggle (controls whether source-side history is reused)
-    include_source_cb = self._create_styled_checkbox("Include previous source text in history/memory (Not Recommended")
+    include_source_cb = self._create_styled_checkbox("Include previous source text in history/memory (Not Recommended)")
     try:
         include_source_cb.setChecked(bool(self.include_source_in_history_var))
     except Exception:
@@ -923,12 +923,12 @@ def _create_context_management_section(self, parent):
     except Exception:
         pass
 
-    # Warning label (separate so it's visually distinct)
+    # Warning label (kept visually distinct, but on the same row)
     rolling_warn = QLabel("⚠ Do not use with contextual translation")
     rolling_warn.setStyleSheet(
         "color: #f59e0b; font-style: italic; font-size: 9pt;"
     )
-    rolling_warn.setContentsMargins(24, 0, 0, 4)
+    rolling_warn.setContentsMargins(0, 0, 0, 0)
 
     # Store references to controls that should be enabled/disabled
     rolling_controls = []
@@ -942,8 +942,16 @@ def _create_context_management_section(self, parent):
         except Exception:
             pass
     rolling_cb.toggled.connect(_on_rolling_toggled)
-    section_v.addWidget(rolling_cb)
-    section_v.addWidget(rolling_warn)
+
+    # Put checkbox + warning on the same line
+    rolling_row = QWidget()
+    rolling_row_l = QHBoxLayout(rolling_row)
+    rolling_row_l.setContentsMargins(0, 0, 0, 0)
+    rolling_row_l.setSpacing(8)
+    rolling_row_l.addWidget(rolling_cb)
+    rolling_row_l.addWidget(rolling_warn)
+    rolling_row_l.addStretch(1)
+    section_v.addWidget(rolling_row)
 
     # Description
     desc = QLabel("AI-powered memory system that maintains story context")

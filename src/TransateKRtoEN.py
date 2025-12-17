@@ -9556,28 +9556,13 @@ def main(log_callback=None, stop_callback=None):
                 summary_mode = str(getattr(config, 'ROLLING_SUMMARY_MODE', 'replace') or 'replace').strip().lower()
 
                 def _load_previous_rolling_summary_text(*, full_file: bool = False) -> str:
-                    """Load the previous rolling summary from rolling_summary.txt to use as assistant context."""
+                    """Load rolling_summary.txt to use as assistant context (no parsing)."""
                     try:
                         summary_file = os.path.join(out, "rolling_summary.txt")
                         if not os.path.exists(summary_file):
                             return ""
                         with open(summary_file, "r", encoding="utf-8") as f:
                             content = f.read().strip()
-                        if not content:
-                            return ""
-
-                        # Append mode: send the entire file (it already contains the retained entries)
-                        if full_file:
-                            return content
-
-                        # Replace mode: best-effort keep only the summary body (avoid repeating header/timestamp)
-                        parts = re.split(
-                            r"(?m)^\[\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\]\s*$",
-                            content,
-                            maxsplit=1,
-                        )
-                        if len(parts) == 2:
-                            return parts[1].strip()
                         return content
                     except Exception:
                         return ""
