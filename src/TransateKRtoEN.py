@@ -3033,16 +3033,16 @@ class TranslationProcessor:
             mode = "a" if self.config.ROLLING_SUMMARY_MODE == "append" else "w"
 
             # Header formatting:
-            # - append mode: file is a rolling log trimmed to last N entries → label as "Last N Chapters"
-            # - replace mode: file is overwritten per chapter → keep chapter-specific header
+            # - append mode: each appended block corresponds to a specific chapter → keep chapter-specific header
+            # - replace mode: file is overwritten and represents the current rolling window → label as "Last N Chapters"
             if mode == "a":
+                header_title = f"=== Rolling Summary of Chapter {chapter_num} ==="
+            else:
                 try:
                     _n = int(getattr(self.config, 'ROLLING_SUMMARY_MAX_ENTRIES', 0) or 0)
                 except Exception:
                     _n = 0
                 header_title = f"=== Rolling Summary of Last {_n} Chapters ===" if _n > 0 else "=== Rolling Summary ==="
-            else:
-                header_title = f"=== Rolling Summary of Chapter {chapter_num} ==="
 
             header = header_title + "\n(Updated rolling summary — use prior summary context when provided)\n"
 
@@ -9556,7 +9556,7 @@ def main(log_callback=None, stop_callback=None):
 
                 summary_mode = str(getattr(config, 'ROLLING_SUMMARY_MODE', 'replace') or 'replace').strip().lower()
 
-                def _load_previous_rolling_summary_text() -> str:
+                def _load_previous_rolling_summary_text(*, full_file: bool = False) -> str:
                     """Load the previous rolling summary from rolling_summary.txt to use as assistant context."""
                     try:
                         summary_file = os.path.join(out, "rolling_summary.txt")
@@ -9566,12 +9566,19 @@ def main(log_callback=None, stop_callback=None):
                             content = f.read().strip()
                         if not content:
                             return ""
-                        # Best-effort: if the file contains our standard header + timestamp, keep only the summary body.
-                        # (This is not for de-duping; it's to avoid sending file headers as summary content.)
-                        parts = re.split(r"(?m)^\[\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\]\s*$", content, maxsplit=1)
+
+                        # Append mode: send the entire file (it already contains the retained entries)
+                        if full_file:
+                            return content
+
+                        # Replace mode: best-effort keep only the summary body (avoid repeating header/timestamp)
+                        parts = re.split(
+                            r"(?m)^\[\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\]\s*$",
+                            content,
+                            maxsplit=1,
+                        )
                         if len(parts) == 2:
-                            body = parts[1].strip()
-                            return body
+                            return parts[1].strip()
                         return content
                     except Exception:
                         return ""
@@ -9629,9 +9636,16 @@ def main(log_callback=None, stop_callback=None):
                         prefer_translations_only_user=True,
                     )
                 else:
-                    # append (and any unknown value): summarize only this chapter's translated output
+                    # append (and any unknown value): summarize this chapter's translated output,
+                    # while providing the full rolling_summary.txt as assistant context.
+                    prev_summary = _load_previous_rolling_summary_text(full_file=True)
                     summary_text = translation_processor.generate_rolling_summary(
-                        history_manager, actual_num, base_system_content, source_text=cleaned
+                        history_manager,
+                        actual_num,
+                        base_system_content,
+                        source_text=cleaned,
+                        previous_summary_text=prev_summary,
+                        previous_summary_chapter_num=None,
                     )
 
                 if summary_text:
