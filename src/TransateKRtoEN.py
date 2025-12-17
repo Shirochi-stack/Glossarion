@@ -8884,42 +8884,29 @@ def main(log_callback=None, stop_callback=None):
                 
                 current_base = [{"role": "system", "content": current_system_content}]
 
-                # If we have a prepared rolling summary from the previous chapter, inject it as an assistant message.
-                # IMPORTANT: This injection is ALWAYS assistant-role (independent of any UI dropdown).
+                # Inject rolling_summary.txt verbatim as an assistant message.
+                # IMPORTANT: Do NOT parse, re-header, or otherwise modify rolling_summary.txt here.
                 summary_msgs_list = []
-                if config.USE_ROLLING_SUMMARY and last_summary_block_text:
-                    # Wrap the injected rolling summary with an explicit header/footer so it can't
-                    # accidentally chain into future summaries unnoticed.
+                if config.USE_ROLLING_SUMMARY:
+                    rolling_summary_text = ""
                     try:
-                        _rs_ch = last_summary_chapter_num
+                        summary_file = os.path.join(out, "rolling_summary.txt")
+                        if os.path.exists(summary_file):
+                            with open(summary_file, "r", encoding="utf-8") as sf:
+                                rolling_summary_text = (sf.read() or "")
                     except Exception:
-                        _rs_ch = None
-                    # Header depends on rolling-summary mode:
-                    # - append: the injected summary corresponds to a specific previous chapter
-                    # - replace: the injected summary represents a rolling window (last N retained entries)
-                    if str(getattr(config, 'ROLLING_SUMMARY_MODE', 'replace') or 'replace').strip().lower() == 'append':
-                        summary_header = f"[Rolling Summary of Chapter {_rs_ch}]" if _rs_ch is not None else "[Rolling Summary]"
-                        summary_footer = "[End of Rolling Summary]"
-                    else:
-                        try:
-                            _n = int(getattr(config, 'ROLLING_SUMMARY_MAX_ENTRIES', 0) or 0)
-                        except Exception:
-                            _n = 0
-                        summary_header = (
-                            f"=== Rolling Summary of Last {_n} Chapters ===" if _n > 0 else "=== Rolling Summary ==="
-                        )
-                        summary_footer = "=== End Rolling Summary ==="
+                        rolling_summary_text = ""
 
-                    summary_content = (
-                        "CONTEXT ONLY - DO NOT INCLUDE IN TRANSLATION:\n"
-                        "[MEMORY] Previous context summary:\n\n"
-                        f"{summary_header}\n"
-                        f"{last_summary_block_text}\n"
-                        f"{summary_footer}\n\n"
-                        "[END MEMORY]\n"
-                        "END OF CONTEXT - BEGIN ACTUAL CONTENT TO TRANSLATE:"
-                    )
-                    summary_msgs_list = [{"role": "assistant", "content": summary_content}]
+                    # Only inject if the file has content
+                    if isinstance(rolling_summary_text, str) and rolling_summary_text.strip():
+                        summary_content = (
+                            "CONTEXT ONLY - DO NOT INCLUDE IN TRANSLATION:\n"
+                            "[MEMORY] Previous context summary:\n\n"
+                            + rolling_summary_text.rstrip() + "\n\n"
+                            "[END MEMORY]\n"
+                            "END OF CONTEXT - BEGIN ACTUAL CONTENT TO TRANSLATE:"
+                        )
+                        summary_msgs_list = [{"role": "assistant", "content": summary_content}]
 
                 # Build final message list for this chunk
                 msgs = current_base + summary_msgs_list + chunk_context + memory_msgs + [{"role": "user", "content": user_prompt}]
@@ -9620,15 +9607,14 @@ def main(log_callback=None, stop_callback=None):
                         prefer_translations_only_user=True,
                     )
                 else:
-                    # append (and any unknown value): summarize this chapter's translated output,
-                    # while providing the full rolling_summary.txt as assistant context.
-                    prev_summary = _load_previous_rolling_summary_text(full_file=True)
+                    # append (and any unknown value): summarize ONLY this chapter's translated output.
+                    # Do NOT send the previous rolling summary in append mode.
                     summary_text = translation_processor.generate_rolling_summary(
                         history_manager,
                         actual_num,
                         base_system_content,
                         source_text=cleaned,
-                        previous_summary_text=prev_summary,
+                        previous_summary_text=None,
                         previous_summary_chapter_num=None,
                     )
 
