@@ -2933,13 +2933,11 @@ class TranslationProcessor:
         except Exception:
             glossary_path = None
 
-        # Use the just-translated chapter text (source_text) as the reference text for glossary compression.
-        # This allows COMPRESS_GLOSSARY_PROMPT to work for rolling summaries too.
-        # IMPORTANT: Rolling summaries should ALWAYS include the glossary (if present), regardless of
-        # the translation-time APPEND_GLOSSARY toggle.
+        # Rolling summary generation is a summarization-only call; do NOT append glossary here.
+        # (This keeps prompts smaller and avoids glossary-compression logic for summaries.)
         _prev_append_glossary_env = os.environ.get("APPEND_GLOSSARY")
         try:
-            os.environ["APPEND_GLOSSARY"] = "1"
+            os.environ["APPEND_GLOSSARY"] = "0"
             system_prompt = build_system_prompt(summary_system_template, glossary_path, source_text=source_text)
         finally:
             if _prev_append_glossary_env is None:
