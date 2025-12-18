@@ -1436,8 +1436,9 @@ async def extract(
                 sys.stderr.flush()
         
         loop = asyncio.get_event_loop()
-        output_filename = await loop.run_in_executor(None, run_extraction)
-        
+        extraction_future = loop.run_in_executor(None, run_extraction)
+        output_filename = await extraction_future
+
         update_task.cancel()
         try:
             await update_task
@@ -1541,12 +1542,37 @@ async def extract(
         await message.edit(embed=embed, view=None)
     
     finally:
+        # Ensure the background extraction thread has finished before removing temp_dir.
+        # If we delete early, the executor thread can crash with FileNotFoundError.
+        try:
+            if 'state' in locals():
+                state['stop_requested'] = True
+        except Exception:
+            pass
+
+        try:
+            if 'update_task' in locals() and update_task:
+                update_task.cancel()
+        except Exception:
+            pass
+
+        try:
+            if 'extraction_future' in locals() and extraction_future and not extraction_future.done():
+                try:
+                    await asyncio.wait_for(extraction_future, timeout=10)
+                except Exception:
+                    # If it doesn't finish quickly, don't delete the directory out from under it.
+                    pass
+        except Exception:
+            pass
+
         if user_id in translation_states:
             del translation_states[user_id]
-        
+
         try:
-            shutil.rmtree(temp_dir)
-        except:
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+        except Exception:
             pass
 
 
