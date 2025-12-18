@@ -12,6 +12,7 @@ requests
 tqdm
 langdetect
 PySide6
+# discord
 
 # AI/API Clients
 openai==1.94.0
@@ -24,7 +25,7 @@ poe-api-wrapper
 google-genai
 google-cloud-aiplatform>=1.60.0
 deepl
-vertexai  # ADD THIS
+vertexai
 
 # Data processing
 datasketch
@@ -56,6 +57,7 @@ html2text
 markdown2
 rapidfuzz
 pymupdf
+jellyfish
 
 # PDF Generation (optional - for HTML to PDF with images/formatting)
 weasyprint  # Recommended for best PDF output quality (requires MSYS2 DLLs)
