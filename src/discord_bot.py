@@ -561,7 +561,16 @@ async def translate(
         os.environ['GLOSSARY_MAX_NAMES'] = str(config.get('glossary_max_names', 50))
         os.environ['GLOSSARY_MAX_TITLES'] = str(config.get('glossary_max_titles', 30))
         os.environ['APPEND_GLOSSARY'] = '1'
-        os.environ['APPEND_GLOSSARY_PROMPT'] = config.get('append_glossary_prompt', '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n')
+
+        # IMPORTANT: Treat empty-string config values as missing.
+        # TransateKRtoEN.build_system_prompt() hard-fails if APPEND_GLOSSARY_PROMPT is blank.
+        append_prompt = (config.get('append_glossary_prompt') or '').strip()
+        if not append_prompt:
+            append_prompt = '- Follow this reference glossary for consistent translation (Do not output any raw entries):'
+        if not append_prompt.endswith('\n'):
+            append_prompt += '\n'
+        os.environ['APPEND_GLOSSARY_PROMPT'] = append_prompt
+
         # CRITICAL: Auto glossary uses AUTO_GLOSSARY_PROMPT (unified prompt used by the GUI).
         # If this is missing, GlossaryManager falls back to the legacy honorific/title regex scanner.
         os.environ['AUTO_GLOSSARY_PROMPT'] = (
