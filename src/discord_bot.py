@@ -167,6 +167,111 @@ def _ephemeral(interaction: discord.Interaction) -> bool:
     return interaction.guild is not None
 
 
+async def _safe_defer(interaction: discord.Interaction, *, ephemeral: bool) -> bool:
+    """Acknowledge a slash-command interaction ASAP.
+
+    Discord requires an initial acknowledgement quickly (or the interaction expires).
+    We defer immediately, then we can safely edit the original response.
+
+    Returns True if we successfully acknowledged, False if the interaction is already gone.
+    """
+    try:
+        if interaction.response.is_done():
+            return True
+        await interaction.response.defer(ephemeral=ephemeral)
+        return True
+    except discord.NotFound as e:
+        if getattr(e, "code", None) == 10062:
+            return False
+        raise
+    except discord.HTTPException as e:
+        if getattr(e, "code", None) in (10062, 40060):
+            return False
+        raise
+
+
+async def _safe_edit_original_response(
+    interaction: discord.Interaction,
+    *,
+    content: Optional[str] = None,
+    embed: Optional[discord.Embed] = None,
+    view: Optional[discord.ui.View] = None,
+):
+    try:
+        return await interaction.edit_original_response(content=content, embed=embed, view=view)
+    except discord.NotFound as e:
+        if getattr(e, "code", None) == 10062:
+            return None
+        raise
+    except discord.HTTPException as e:
+        if getattr(e, "code", None) in (10062, 40060):
+            return None
+        raise
+
+
+async def _safe_send_message(
+    interaction: discord.Interaction,
+    content: Optional[str] = None,
+    *,
+    embed: Optional[discord.Embed] = None,
+    ephemeral: bool = False,
+    **kwargs,
+):
+    """Send a message for an interaction without crashing on common interaction races.
+
+    NOTE: discord.NotFound (10062) is a subclass of discord.HTTPException, so we must
+    handle it *before* the generic HTTPException handler.
+
+    Returns a discord.Message when possible, otherwise None.
+    """
+    try:
+        if interaction.response.is_done():
+            return await interaction.followup.send(
+                content=content,
+                embed=embed,
+                ephemeral=ephemeral,
+                wait=True,
+                **kwargs,
+            )
+
+        await interaction.response.send_message(
+            content=content,
+            embed=embed,
+            ephemeral=ephemeral,
+            **kwargs,
+        )
+        try:
+            return await interaction.original_response()
+        except Exception:
+            return None
+
+    except discord.NotFound as e:
+        # Interaction expired/cancelled (common under load).
+        if getattr(e, "code", None) == 10062:
+            return None
+        raise
+
+    except discord.HTTPException as e:
+        # If the interaction was already acknowledged, fall back to followup.
+        if getattr(e, "code", None) == 40060:
+            try:
+                return await interaction.followup.send(
+                    content=content,
+                    embed=embed,
+                    ephemeral=ephemeral,
+                    wait=True,
+                    **kwargs,
+                )
+            except Exception:
+                return None
+
+        # Some platforms return 10062 as HTTPException; treat it as non-fatal.
+        if getattr(e, "code", None) == 10062:
+            return None
+
+        raise
+
+
 class LogView(discord.ui.View):
     """View with buttons to toggle log display and stop translation"""
     def __init__(self, user_id: int):
@@ -178,7 +283,7 @@ class LogView(discord.ui.View):
         """Toggle between compact and full log view"""
         state = translation_states.get(self.user_id)
         if not state:
-            await interaction.response.send_message("❌ Translation session expired", ephemeral=_ephemeral(interaction))
+            await _safe_send_message(interaction, "❌ Translation session expired", ephemeral=_ephemeral(interaction))
             return
         
         try:
@@ -217,7 +322,7 @@ class LogView(discord.ui.View):
         except Exception as e:
             sys.stderr.write(f"[BUTTON ERROR] {e}\n")
             try:
-                await interaction.response.send_message(f"❌ Error: {e}", ephemeral=_ephemeral(interaction))
+                await _safe_send_message(interaction, f"❌ Error: {e}", ephemeral=_ephemeral(interaction))
             except:
                 pass
     
@@ -226,7 +331,7 @@ class LogView(discord.ui.View):
         """Stop the translation process"""
         state = translation_states.get(self.user_id)
         if not state:
-            await interaction.response.send_message("❌ Translation session expired", ephemeral=_ephemeral(interaction))
+            await _safe_send_message(interaction, "❌ Translation session expired", ephemeral=_ephemeral(interaction))
             return
         
         try:
@@ -240,7 +345,7 @@ class LogView(discord.ui.View):
         except Exception as e:
             sys.stderr.write(f"[BUTTON ERROR] {e}\n")
             try:
-                await interaction.response.send_message(f"❌ Error: {e}", ephemeral=_ephemeral(interaction))
+                await _safe_send_message(interaction, f"❌ Error: {e}", ephemeral=_ephemeral(interaction))
             except:
                 pass
 
@@ -365,19 +470,17 @@ async def translate(
 ):
     """Translate file using Glossarion"""
     
+    # Acknowledge ASAP to avoid 10062 Unknown interaction under load.
+    if not await _safe_defer(interaction, ephemeral=_ephemeral(interaction)):
+        return
+
     if not GLOSSARION_AVAILABLE:
-        await interaction.response.send_message(
-            "❌ Glossarion not available", 
-            ephemeral=_ephemeral(interaction)
-        )
+        await _safe_edit_original_response(interaction, content="❌ Glossarion not available")
         return
     
     # Validate input - must have either file or URL
     if not file and not url:
-        await interaction.response.send_message(
-            "❌ Please provide either a file attachment or a URL", 
-            ephemeral=_ephemeral(interaction)
-        )
+        await _safe_edit_original_response(interaction, content="❌ Please provide either a file attachment or a URL")
         return
     
     # Get filename and validate extension
@@ -401,28 +504,19 @@ async def translate(
 
     # Validate file extension
     if not (filename.endswith('.epub') or filename.endswith('.txt') or filename.endswith('.pdf')):
-        await interaction.response.send_message(
-            "❌ File must be EPUB, TXT, or PDF format", 
-            ephemeral=_ephemeral(interaction)
-        )
+        await _safe_edit_original_response(interaction, content="❌ File must be EPUB, TXT, or PDF format")
         return
 
     # Validate request merge count early (if explicitly provided)
     if request_merge_count is not None and request_merge_count < 0:
-        await interaction.response.send_message(
-            "❌ request_merge_count must be >= 0",
-            ephemeral=_ephemeral(interaction)
-        )
+        await _safe_edit_original_response(interaction, content="❌ request_merge_count must be >= 0")
         return
 
     # Validate custom endpoint URL early (if provided)
     if custom_endpoint_url is not None:
         custom_endpoint_url = custom_endpoint_url.strip()
         if custom_endpoint_url and not (custom_endpoint_url.startswith('http://') or custom_endpoint_url.startswith('https://')):
-            await interaction.response.send_message(
-                "❌ custom_endpoint_url must start with http:// or https://",
-                ephemeral=_ephemeral(interaction)
-            )
+            await _safe_edit_original_response(interaction, content="❌ custom_endpoint_url must start with http:// or https://")
             return
 
     # Load config early so we can default the model without relying on autocomplete.
@@ -431,14 +525,21 @@ async def translate(
     # Default model: prefer explicit user input, otherwise config.json, then env var, then a safe fallback.
     model = (model or '').strip() or (config.get('model') or '').strip() or (os.getenv('MODEL') or '').strip() or 'gpt-4o'
 
-    # Initial response (ephemeral - only visible to user)
+    # Initial response (we already deferred; now edit the original response)
     embed = discord.Embed(
         title="📚 Translation Started",
         description=f"**File:** {filename}\n**Model:** {model}\n**Target:** {target_language}",
         color=discord.Color.blue()
     )
-    await interaction.response.send_message(embed=embed, ephemeral=_ephemeral(interaction))
-    message = await interaction.original_response()
+    msg_obj = await _safe_edit_original_response(interaction, embed=embed)
+    if msg_obj is None:
+        return
+    try:
+        message = await interaction.original_response()
+    except Exception:
+        message = None
+    if message is None:
+        return
     
     # Create temp directory
     temp_dir = tempfile.mkdtemp(prefix=f"discord_translate_{interaction.user.id}_")
@@ -1156,19 +1257,17 @@ async def extract(
 ):
     """Extract glossary from file using Glossarion"""
     
+    # Acknowledge ASAP to avoid 10062 Unknown interaction under load.
+    if not await _safe_defer(interaction, ephemeral=_ephemeral(interaction)):
+        return
+
     if not GLOSSARION_AVAILABLE or not glossary_main:
-        await interaction.response.send_message(
-            "❌ Glossarion glossary extraction not available", 
-            ephemeral=_ephemeral(interaction)
-        )
+        await _safe_edit_original_response(interaction, content="❌ Glossarion glossary extraction not available")
         return
     
     # Validate input - must have either file or URL
     if not file and not url:
-        await interaction.response.send_message(
-            "❌ Please provide either a file attachment or a URL", 
-            ephemeral=_ephemeral(interaction)
-        )
+        await _safe_edit_original_response(interaction, content="❌ Please provide either a file attachment or a URL")
         return
     
     # Get filename and validate extension
@@ -1191,28 +1290,19 @@ async def extract(
 
     # Validate file extension
     if not (filename.endswith('.epub') or filename.endswith('.txt') or filename.endswith('.pdf')):
-        await interaction.response.send_message(
-            "❌ File must be EPUB, TXT, or PDF format", 
-            ephemeral=_ephemeral(interaction)
-        )
+        await _safe_edit_original_response(interaction, content="❌ File must be EPUB, TXT, or PDF format")
         return
 
     # Validate request merge count early (if explicitly provided)
     if merge_count is not None and merge_count < 0:
-        await interaction.response.send_message(
-            "❌ merge_count must be >= 0",
-            ephemeral=_ephemeral(interaction)
-        )
+        await _safe_edit_original_response(interaction, content="❌ merge_count must be >= 0")
         return
 
     # Validate custom endpoint URL early (if provided)
     if custom_endpoint_url is not None:
         custom_endpoint_url = custom_endpoint_url.strip()
         if custom_endpoint_url and not (custom_endpoint_url.startswith('http://') or custom_endpoint_url.startswith('https://')):
-            await interaction.response.send_message(
-                "❌ custom_endpoint_url must start with http:// or https://",
-                ephemeral=_ephemeral(interaction)
-            )
+            await _safe_edit_original_response(interaction, content="❌ custom_endpoint_url must start with http:// or https://")
             return
 
     # Load config early so we can default the model without relying on autocomplete.
@@ -1221,14 +1311,21 @@ async def extract(
     # Default model: prefer explicit user input, otherwise config.json, then env var, then a safe fallback.
     model = (model or '').strip() or (config.get('model') or '').strip() or (os.getenv('MODEL') or '').strip() or 'gpt-4o'
 
-    # Initial response
+    # Initial response (we already deferred; now edit the original response)
     embed = discord.Embed(
         title="📚 Glossary Extraction Started",
         description=f"**File:** {filename}\n**Model:** {model}\n**Target:** {target_language}",
         color=discord.Color.blue()
     )
-    await interaction.response.send_message(embed=embed, ephemeral=_ephemeral(interaction))
-    message = await interaction.original_response()
+    msg_obj = await _safe_edit_original_response(interaction, embed=embed)
+    if msg_obj is None:
+        return
+    try:
+        message = await interaction.original_response()
+    except Exception:
+        message = None
+    if message is None:
+        return
     
     # Create temp directory
     temp_dir = tempfile.mkdtemp(prefix=f"discord_extract_{interaction.user.id}_")
@@ -1742,9 +1839,9 @@ async def models(interaction: discord.Interaction):
                 text += f"\n• ... +{len(mods) - 5} more"
             embed.add_field(name=provider.upper(), value=text, inline=True)
         
-        await interaction.response.send_message(embed=embed, ephemeral=_ephemeral(interaction))
+        await _safe_send_message(interaction, embed=embed, ephemeral=_ephemeral(interaction))
     else:
-        await interaction.response.send_message("❌ Not available", ephemeral=_ephemeral(interaction))
+        await _safe_send_message(interaction, "❌ Not available", ephemeral=_ephemeral(interaction))
 
 
 @bot.tree.command(name="help", description="Show help")
@@ -1774,7 +1871,7 @@ async def help_command(interaction: discord.Interaction):
         inline=False
     )
     
-    await interaction.response.send_message(embed=embed, ephemeral=_ephemeral(interaction))
+    await _safe_send_message(interaction, embed=embed, ephemeral=_ephemeral(interaction))
 
 
 def main():
