@@ -39,6 +39,62 @@ else:
 
 sys.path.insert(0, src_dir)
 
+
+def _pick_bot_tmpdir() -> str:
+    """Pick a temp directory that exists and is writable.
+
+    Some hosts run with TMPDIR/TEMP pointing at a directory that can disappear
+    (e.g. cleaned up between runs). tempfile.mkdtemp() will then raise
+    FileNotFoundError: [Errno 2] No such file or directory.
+
+    We prefer a stable project-local directory to avoid that class of failure.
+    """
+    candidates = []
+
+    # User override
+    override = (os.getenv("GLOSSARION_BOT_TMPDIR") or "").strip()
+    if override:
+        candidates.append(override)
+
+    # Project-local temp dir (most stable)
+    try:
+        project_root = os.path.dirname(src_dir)
+        candidates.append(os.path.join(project_root, "bot_tmp"))
+    except Exception:
+        pass
+
+    # System temp fallbacks
+    for k in ("TMPDIR", "TEMP", "TMP"):
+        v = (os.getenv(k) or "").strip()
+        if v:
+            candidates.append(v)
+
+    # Common unix temp dirs
+    candidates.extend(["/tmp", "/var/tmp"])
+
+    # Last resort: current working directory
+    try:
+        candidates.append(os.getcwd())
+    except Exception:
+        pass
+
+    for d in candidates:
+        try:
+            os.makedirs(d, exist_ok=True)
+            if os.path.isdir(d) and os.access(d, os.W_OK):
+                return d
+        except Exception:
+            continue
+
+    # If everything fails, let tempfile decide (may still error, but nothing else we can do here)
+    return ""
+
+
+BOT_TMPDIR = _pick_bot_tmpdir()
+if BOT_TMPDIR:
+    sys.stderr.write(f"[CONFIG] Bot temp dir: {BOT_TMPDIR}\n")
+    sys.stderr.flush()
+
 # Import Glossarion modules
 try:
     # Core translation modules
@@ -542,7 +598,10 @@ async def translate(
         return
     
     # Create temp directory
-    temp_dir = tempfile.mkdtemp(prefix=f"discord_translate_{interaction.user.id}_")
+    temp_dir = tempfile.mkdtemp(
+        prefix=f"discord_translate_{interaction.user.id}_",
+        dir=BOT_TMPDIR or None,
+    )
     input_path = os.path.join(temp_dir, filename)
     
     try:
@@ -1328,7 +1387,10 @@ async def extract(
         return
     
     # Create temp directory
-    temp_dir = tempfile.mkdtemp(prefix=f"discord_extract_{interaction.user.id}_")
+    temp_dir = tempfile.mkdtemp(
+        prefix=f"discord_extract_{interaction.user.id}_",
+        dir=BOT_TMPDIR or None,
+    )
     input_path = os.path.join(temp_dir, filename)
     
     try:
