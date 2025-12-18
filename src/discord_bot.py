@@ -543,6 +543,30 @@ async def translate(
         os.environ['GLOSSARY_MAX_TITLES'] = str(config.get('glossary_max_titles', 30))
         os.environ['APPEND_GLOSSARY'] = '1'
         os.environ['APPEND_GLOSSARY_PROMPT'] = config.get('append_glossary_prompt', '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n')
+        # CRITICAL: Auto glossary uses AUTO_GLOSSARY_PROMPT (unified prompt used by the GUI).
+        # If this is missing, GlossaryManager falls back to the legacy honorific/title regex scanner.
+        os.environ['AUTO_GLOSSARY_PROMPT'] = (
+            config.get('unified_auto_glossary_prompt', '')
+            or config.get('auto_glossary_prompt', '')
+            or ''
+        )
+        # Ensure glossary translations target the same language as the main translation
+        os.environ['GLOSSARY_TARGET_LANGUAGE'] = target_language
+        os.environ['OUTPUT_LANGUAGE'] = target_language
+        # Align throttling/timeouts with config defaults (matches GUI behavior)
+        os.environ['SEND_INTERVAL_SECONDS'] = str(config.get('delay', 2.0))
+        os.environ['THREAD_SUBMISSION_DELAY_SECONDS'] = str(config.get('thread_submission_delay', 0.5))
+        os.environ['RETRY_TIMEOUT'] = '1' if config.get('retry_timeout', False) else '0'
+        os.environ['CHUNK_TIMEOUT'] = str(config.get('chunk_timeout', 900))
+        os.environ['ENABLE_HTTP_TUNING'] = '1' if config.get('enable_http_tuning', False) else '0'
+        os.environ['CONNECT_TIMEOUT'] = str(config.get('connect_timeout', 10))
+        # Don't set READ_TIMEOUT for the bot; chunk timeout is the single source of truth.
+        os.environ.pop('READ_TIMEOUT', None)
+        os.environ['HTTP_POOL_CONNECTIONS'] = str(config.get('http_pool_connections', 20))
+        os.environ['HTTP_POOL_MAXSIZE'] = str(config.get('http_pool_maxsize', 50))
+        os.environ['IGNORE_RETRY_AFTER'] = '1' if config.get('ignore_retry_after', False) else '0'
+        # Cap retries for the Discord bot to keep runs predictable.
+        os.environ['MAX_RETRIES'] = '3'
         # Set all glossary variables from GUI
         os.environ['GLOSSARY_COMPRESSION_FACTOR'] = str(config.get('glossary_compression_factor', 1.0))
         # Enable glossary prompt compression (filtering unused entries) by default
@@ -551,7 +575,9 @@ async def translate(
         os.environ['GLOSSARY_STRIP_HONORIFICS'] = '1' if config.get('glossary_strip_honorifics', True) else '0'
         os.environ['GLOSSARY_FUZZY_THRESHOLD'] = str(config.get('glossary_fuzzy_threshold', 0.90))
         os.environ['GLOSSARY_MAX_TEXT_SIZE'] = str(config.get('glossary_max_text_size', 50000))
-        os.environ['GLOSSARY_MAX_SENTENCES'] = str(config.get('glossary_max_sentences', 200))
+        # Cap glossary max sentences for the Discord bot to keep prompts small/predictable.
+        # (GlossaryManager reads this via GLOSSARY_MAX_SENTENCES)
+        os.environ['GLOSSARY_MAX_SENTENCES'] = '200'
         os.environ['GLOSSARY_CHAPTER_SPLIT_THRESHOLD'] = str(config.get('glossary_chapter_split_threshold', 50000))
         os.environ['GLOSSARY_SKIP_FREQUENCY_CHECK'] = '0'  # Enable frequency checking
         os.environ['CONTEXT_WINDOW_SIZE'] = str(config.get('glossary_context_window', 2))
@@ -1195,7 +1221,9 @@ async def extract(
         os.environ['GLOSSARY_STRIP_HONORIFICS'] = '1' if config.get('glossary_strip_honorifics', True) else '0'
         os.environ['GLOSSARY_FUZZY_THRESHOLD'] = str(config.get('glossary_fuzzy_threshold', 0.90))
         os.environ['GLOSSARY_MAX_TEXT_SIZE'] = str(config.get('glossary_max_text_size', 50000))
-        os.environ['GLOSSARY_MAX_SENTENCES'] = str(config.get('glossary_max_sentences', 200))
+        # Cap glossary max sentences for the Discord bot to keep prompts small/predictable.
+        # (GlossaryManager reads this via GLOSSARY_MAX_SENTENCES)
+        os.environ['GLOSSARY_MAX_SENTENCES'] = '200'
         os.environ['GLOSSARY_CHAPTER_SPLIT_THRESHOLD'] = str(config.get('glossary_chapter_split_threshold', 50000))
         os.environ['GLOSSARY_SKIP_FREQUENCY_CHECK'] = '0'
         os.environ['CONTEXT_WINDOW_SIZE'] = str(config.get('glossary_context_window', 2))
@@ -1203,6 +1231,23 @@ async def extract(
         os.environ['GLOSSARY_USE_LEGACY_CSV'] = '0'
         os.environ['GLOSSARY_DUPLICATE_KEY_MODE'] = 'skip'
         os.environ['GLOSSARY_DISABLE_HONORIFICS_FILTER'] = '1' if config.get('glossary_disable_honorifics_filter', False) else '0'
+        # Ensure glossary output language matches the command's target_language
+        os.environ['GLOSSARY_TARGET_LANGUAGE'] = target_language
+        os.environ['OUTPUT_LANGUAGE'] = target_language
+        # Align throttling/timeouts with config defaults (matches GUI behavior)
+        os.environ['SEND_INTERVAL_SECONDS'] = str(config.get('delay', 2.0))
+        os.environ['THREAD_SUBMISSION_DELAY_SECONDS'] = str(config.get('thread_submission_delay', 0.5))
+        os.environ['RETRY_TIMEOUT'] = '1' if config.get('retry_timeout', False) else '0'
+        os.environ['CHUNK_TIMEOUT'] = str(config.get('chunk_timeout', 900))
+        os.environ['ENABLE_HTTP_TUNING'] = '1' if config.get('enable_http_tuning', False) else '0'
+        os.environ['CONNECT_TIMEOUT'] = str(config.get('connect_timeout', 10))
+        # Don't set READ_TIMEOUT for the bot; chunk timeout is the single source of truth.
+        os.environ.pop('READ_TIMEOUT', None)
+        os.environ['HTTP_POOL_CONNECTIONS'] = str(config.get('http_pool_connections', 20))
+        os.environ['HTTP_POOL_MAXSIZE'] = str(config.get('http_pool_maxsize', 50))
+        os.environ['IGNORE_RETRY_AFTER'] = '1' if config.get('ignore_retry_after', False) else '0'
+        # Cap retries for the Discord bot to keep runs predictable.
+        os.environ['MAX_RETRIES'] = '3'
 
         # Glossary request merging settings
         # Single source of truth: merge_count
