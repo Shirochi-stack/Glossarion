@@ -120,6 +120,11 @@ bot = commands.Bot(command_prefix="/", intents=intents)
 translation_states = {}
 
 
+def _ephemeral(interaction: discord.Interaction) -> bool:
+    """Use ephemeral responses in guilds; in DMs, send normal messages."""
+    return interaction.guild is not None
+
+
 class LogView(discord.ui.View):
     """View with buttons to toggle log display and stop translation"""
     def __init__(self, user_id: int):
@@ -131,7 +136,7 @@ class LogView(discord.ui.View):
         """Toggle between compact and full log view"""
         state = translation_states.get(self.user_id)
         if not state:
-            await interaction.response.send_message("❌ Translation session expired", ephemeral=True)
+            await interaction.response.send_message("❌ Translation session expired", ephemeral=_ephemeral(interaction))
             return
         
         try:
@@ -170,7 +175,7 @@ class LogView(discord.ui.View):
         except Exception as e:
             sys.stderr.write(f"[BUTTON ERROR] {e}\n")
             try:
-                await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
+                await interaction.response.send_message(f"❌ Error: {e}", ephemeral=_ephemeral(interaction))
             except:
                 pass
     
@@ -179,7 +184,7 @@ class LogView(discord.ui.View):
         """Stop the translation process"""
         state = translation_states.get(self.user_id)
         if not state:
-            await interaction.response.send_message("❌ Translation session expired", ephemeral=True)
+            await interaction.response.send_message("❌ Translation session expired", ephemeral=_ephemeral(interaction))
             return
         
         try:
@@ -189,11 +194,11 @@ class LogView(discord.ui.View):
             button.style = discord.ButtonStyle.secondary
             
             await interaction.response.edit_message(view=self)
-            await interaction.followup.send("⏹️ Translation stop requested...", ephemeral=True)
+            await interaction.followup.send("⏹️ Translation stop requested...", ephemeral=_ephemeral(interaction))
         except Exception as e:
             sys.stderr.write(f"[BUTTON ERROR] {e}\n")
             try:
-                await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
+                await interaction.response.send_message(f"❌ Error: {e}", ephemeral=_ephemeral(interaction))
             except:
                 pass
 
@@ -321,7 +326,7 @@ async def translate(
     if not GLOSSARION_AVAILABLE:
         await interaction.response.send_message(
             "❌ Glossarion not available", 
-            ephemeral=True
+            ephemeral=_ephemeral(interaction)
         )
         return
     
@@ -329,7 +334,7 @@ async def translate(
     if not file and not url:
         await interaction.response.send_message(
             "❌ Please provide either a file attachment or a URL", 
-            ephemeral=True
+            ephemeral=_ephemeral(interaction)
         )
         return
     
@@ -352,7 +357,7 @@ async def translate(
     if not (filename.endswith('.epub') or filename.endswith('.txt') or filename.endswith('.pdf')):
         await interaction.response.send_message(
             "❌ File must be EPUB, TXT, or PDF format", 
-            ephemeral=True
+            ephemeral=_ephemeral(interaction)
         )
         return
 
@@ -360,7 +365,7 @@ async def translate(
     if request_merge_count is not None and request_merge_count < 0:
         await interaction.response.send_message(
             "❌ request_merge_count must be >= 0",
-            ephemeral=True
+            ephemeral=_ephemeral(interaction)
         )
         return
 
@@ -370,7 +375,7 @@ async def translate(
         if custom_endpoint_url and not (custom_endpoint_url.startswith('http://') or custom_endpoint_url.startswith('https://')):
             await interaction.response.send_message(
                 "❌ custom_endpoint_url must start with http:// or https://",
-                ephemeral=True
+                ephemeral=_ephemeral(interaction)
             )
             return
     
@@ -380,7 +385,7 @@ async def translate(
         description=f"**File:** {filename}\n**Model:** {model}\n**Target:** {target_language}",
         color=discord.Color.blue()
     )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.response.send_message(embed=embed, ephemeral=_ephemeral(interaction))
     message = await interaction.original_response()
     
     # Create temp directory
@@ -908,13 +913,13 @@ async def translate(
                     await interaction.followup.send(
                         msg_content,
                         file=discord.File(output_file_path, filename=output_display_name),
-                        ephemeral=True
+                        ephemeral=_ephemeral(interaction)
                     )
                 except discord.errors.HTTPException as e:
                     await interaction.followup.send(
-                        f"Translation complete but file is too large to upload ({file_size / 1024 / 1024:.2f}MB).\\n"
+                        f"Translation complete but file is too large to upload ({file_size / 1024 / 1024:.2f}MB).\n"
                         f"Please retrieve it from the server.",
-                        ephemeral=True
+                        ephemeral=_ephemeral(interaction)
                     )
         else:
             raise FileNotFoundError(f"Output file not found: {output_file_path}")
@@ -1011,7 +1016,7 @@ async def extract(
     if not GLOSSARION_AVAILABLE or not glossary_main:
         await interaction.response.send_message(
             "❌ Glossarion glossary extraction not available", 
-            ephemeral=True
+            ephemeral=_ephemeral(interaction)
         )
         return
     
@@ -1019,7 +1024,7 @@ async def extract(
     if not file and not url:
         await interaction.response.send_message(
             "❌ Please provide either a file attachment or a URL", 
-            ephemeral=True
+            ephemeral=_ephemeral(interaction)
         )
         return
     
@@ -1041,7 +1046,7 @@ async def extract(
     if not (filename.endswith('.epub') or filename.endswith('.txt') or filename.endswith('.pdf')):
         await interaction.response.send_message(
             "❌ File must be EPUB, TXT, or PDF format", 
-            ephemeral=True
+            ephemeral=_ephemeral(interaction)
         )
         return
 
@@ -1049,7 +1054,7 @@ async def extract(
     if merge_count is not None and merge_count < 0:
         await interaction.response.send_message(
             "❌ merge_count must be >= 0",
-            ephemeral=True
+            ephemeral=_ephemeral(interaction)
         )
         return
 
@@ -1059,7 +1064,7 @@ async def extract(
         if custom_endpoint_url and not (custom_endpoint_url.startswith('http://') or custom_endpoint_url.startswith('https://')):
             await interaction.response.send_message(
                 "❌ custom_endpoint_url must start with http:// or https://",
-                ephemeral=True
+                ephemeral=_ephemeral(interaction)
             )
             return
     
@@ -1069,7 +1074,7 @@ async def extract(
         description=f"**File:** {filename}\n**Model:** {model}\n**Target:** {target_language}",
         color=discord.Color.blue()
     )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.response.send_message(embed=embed, ephemeral=_ephemeral(interaction))
     message = await interaction.original_response()
     
     # Create temp directory
@@ -1438,13 +1443,13 @@ async def extract(
                     await interaction.followup.send(
                         f"Here's your extracted glossary{(' (zipped)' if is_zip_output else '')}!",
                         file=discord.File(output_file_path, filename=output_display_name),
-                        ephemeral=True
+                        ephemeral=_ephemeral(interaction)
                     )
                 except discord.errors.HTTPException as e:
                     await interaction.followup.send(
-                        f"Glossary complete but file is too large to upload.\\n"
+                        f"Glossary complete but file is too large to upload.\n"
                         f"Please retrieve it from the server.",
-                        ephemeral=True
+                        ephemeral=_ephemeral(interaction)
                     )
             else:
                  # Should not happen if directory exists
@@ -1509,9 +1514,9 @@ async def models(interaction: discord.Interaction):
                 text += f"\n• ... +{len(mods) - 5} more"
             embed.add_field(name=provider.upper(), value=text, inline=True)
         
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.send_message(embed=embed, ephemeral=_ephemeral(interaction))
     else:
-        await interaction.response.send_message("❌ Not available", ephemeral=True)
+        await interaction.response.send_message("❌ Not available", ephemeral=_ephemeral(interaction))
 
 
 @bot.tree.command(name="help", description="Show help")
@@ -1541,7 +1546,7 @@ async def help_command(interaction: discord.Interaction):
         inline=False
     )
     
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.response.send_message(embed=embed, ephemeral=_ephemeral(interaction))
 
 
 def main():
