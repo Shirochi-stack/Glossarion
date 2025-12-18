@@ -6366,7 +6366,17 @@ def main(log_callback=None, stop_callback=None):
         epub_base = os.path.splitext(os.path.basename(input_path))[0]
         file_base = epub_base
         
-    out = file_base
+    # Allow callers (e.g. Discord bot) to control where outputs are written.
+    # This avoids relying on process-wide cwd changes (os.chdir), which is unsafe in multi-threaded apps.
+    output_root = (os.getenv("OUTPUT_DIRECTORY") or os.getenv("OUTPUT_DIR") or "").strip()
+    if output_root:
+        try:
+            os.makedirs(output_root, exist_ok=True)
+        except Exception:
+            # If we can't create the root, fall back to relative output.
+            output_root = ""
+
+    out = os.path.join(output_root, file_base) if output_root else file_base
     os.makedirs(out, exist_ok=True)
     print(f"[DEBUG] Created output folder → {out}")
     

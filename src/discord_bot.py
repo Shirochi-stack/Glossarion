@@ -101,14 +101,26 @@ if BOT_TMPDIR:
     except Exception:
         pass
 
-# Ensure our process isn't running with a deleted working directory.
-try:
-    os.getcwd()
-except FileNotFoundError:
+def _ensure_stable_cwd() -> None:
+    """Ensure process CWD exists.
+
+    If the current working directory was deleted (common if something chdir()'d into a temp dir
+    that later got cleaned), os.getcwd() raises FileNotFoundError and many unrelated operations
+    can start failing with Errno 2.
+
+    We recover by chdir()'ing to the project root.
+    """
     try:
-        os.chdir(os.path.dirname(src_dir))
-    except Exception:
-        pass
+        os.getcwd()
+    except FileNotFoundError:
+        try:
+            os.chdir(os.path.dirname(src_dir))
+        except Exception:
+            pass
+
+
+# Ensure our process isn't running with a deleted working directory at startup.
+_ensure_stable_cwd()
 
 # Import Glossarion modules
 try:
@@ -544,6 +556,8 @@ async def translate(
     # Acknowledge ASAP to avoid 10062 Unknown interaction under load.
     if not await _safe_defer(interaction, ephemeral=_ephemeral(interaction)):
         return
+
+    _ensure_stable_cwd()
 
     if not GLOSSARION_AVAILABLE:
         await _safe_edit_original_response(interaction, content="❌ Glossarion not available")
@@ -1026,57 +1040,27 @@ async def translate(
         update_task = asyncio.create_task(periodic_update_check())
         
         def run_translation():
-            sys.stderr.write(f"[TRANSLATE] Starting translation for: {input_path}\n")
-            sys.stderr.write(f"[TRANSLATE] Temp directory: {temp_dir}\n")
+            # Ensure we aren't running inside a deleted directory.
+            _ensure_stable_cwd()
+
+            sys.stderr.write(f"[TRANSLATE] Starting translation for: {input_path}\\n")
+            sys.stderr.write(f"[TRANSLATE] Temp directory: {temp_dir}\\n")
             sys.stderr.flush()
 
-            # CRITICAL: Change to temp directory so TransateKRtoEN creates output there
-            # But do it defensively: if cwd is deleted (e.g. from a prior run), os.getcwd() raises.
-            try:
-                original_cwd = os.getcwd()
-            except FileNotFoundError:
-                original_cwd = src_dir
-                try:
-                    os.chdir(original_cwd)
-                except Exception:
-                    pass
-
+            # IMPORTANT: Do NOT chdir() in a multi-command Discord bot.
+            # chdir() is process-wide and can break other concurrent interactions.
+            # TransateKRtoEN is patched to respect OUTPUT_DIRECTORY for absolute output paths.
             original_argv = sys.argv[:]
             try:
-                os.chdir(temp_dir)
-                try:
-                    cwd_now = os.getcwd()
-                except FileNotFoundError:
-                    cwd_now = "<cwd-missing>"
-                sys.stderr.write(f"[TRANSLATE] Changed working directory to: {cwd_now}\n")
-                sys.stderr.flush()
-
                 sys.argv = ['discord_bot.py', input_path]
                 result = TransateKRtoEN.main(log_callback=log_callback, stop_callback=stop_callback)
 
-                sys.stderr.write(f"[TRANSLATE] Translation completed\n")
+                sys.stderr.write(f"[TRANSLATE] Translation completed\\n")
                 sys.stderr.flush()
                 return result
             finally:
                 # Prevent leaking argv changes across commands.
                 sys.argv = original_argv
-
-                # Restore original working directory; if that fails, fall back to src_dir
-                try:
-                    os.chdir(original_cwd)
-                except Exception as e:
-                    try:
-                        os.chdir(src_dir)
-                    except Exception:
-                        pass
-                    sys.stderr.write(f"[TRANSLATE] Failed to restore cwd ({original_cwd}): {e}\n")
-
-                try:
-                    cwd_restored = os.getcwd()
-                except FileNotFoundError:
-                    cwd_restored = "<cwd-missing>"
-                sys.stderr.write(f"[TRANSLATE] Restored working directory to: {cwd_restored}\n")
-                sys.stderr.flush()
         
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, run_translation)
@@ -1350,6 +1334,8 @@ async def extract(
     # Acknowledge ASAP to avoid 10062 Unknown interaction under load.
     if not await _safe_defer(interaction, ephemeral=_ephemeral(interaction)):
         return
+
+    _ensure_stable_cwd()
 
     if not GLOSSARION_AVAILABLE or not glossary_main:
         await _safe_edit_original_response(interaction, content="❌ Glossarion glossary extraction not available")
@@ -1729,8 +1715,10 @@ async def extract(
         update_task = asyncio.create_task(periodic_update_check())
         
         def run_extraction():
-            sys.stderr.write(f"[EXTRACT] Starting glossary extraction for: {input_path}\n")
-            sys.stderr.write(f"[EXTRACT] Temp directory: {temp_dir}\n")
+            _ensure_stable_cwd()
+
+            sys.stderr.write(f"[EXTRACT] Starting glossary extraction for: {input_path}\\n")
+            sys.stderr.write(f"[EXTRACT] Temp directory: {temp_dir}\\n")
             sys.stderr.flush()
 
             # Defensive checks: if these fail, raise an explicit error instead of a generic Errno 2.
