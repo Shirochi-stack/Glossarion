@@ -254,7 +254,7 @@ async def model_autocomplete(interaction: discord.Interaction, current: str):
 @bot.tree.command(name="translate", description="Translate EPUB, TXT, or PDF file")
 @app_commands.describe(
     api_key="Your API key",
-    model="AI model to use (or type custom model name)",
+    model="AI model to use (optional; defaults to config.json if omitted)",
     file="EPUB, TXT, or PDF file to translate (optional if using url)",
     url="Google Drive or Dropbox link to file (optional if using file attachment)",
     custom_endpoint_url="Custom OpenAI-compatible base URL (auto-enables when set; omit to disable)",
@@ -293,11 +293,10 @@ async def model_autocomplete(interaction: discord.Interaction, current: str):
     app_commands.Choice(name="High", value="high"),
     app_commands.Choice(name="XHigh", value="xhigh"),
 ])
-@app_commands.autocomplete(model=model_autocomplete)
 async def translate(
     interaction: discord.Interaction,
     api_key: str,
-    model: str,
+    model: Optional[str] = None,
     file: discord.Attachment = None,
     url: str = None,
     custom_endpoint_url: Optional[str] = None,
@@ -382,7 +381,13 @@ async def translate(
                 ephemeral=_ephemeral(interaction)
             )
             return
-    
+
+    # Load config early so we can default the model without relying on autocomplete.
+    config = load_config()
+
+    # Default model: prefer explicit user input, otherwise config.json, then env var, then a safe fallback.
+    model = (model or '').strip() or (config.get('model') or '').strip() or (os.getenv('MODEL') or '').strip() or 'gpt-4o'
+
     # Initial response (ephemeral - only visible to user)
     embed = discord.Embed(
         title="📚 Translation Started",
@@ -467,9 +472,6 @@ async def translate(
             ))
             return
 
-        # Load config
-        config = load_config()
-        
         # Get system prompt from config
         prompt_profiles = config.get('prompt_profiles', {})
         if 'Universal' in prompt_profiles:
@@ -1050,7 +1052,7 @@ async def translate(
 @bot.tree.command(name="extract", description="Extract glossary from EPUB, TXT, or PDF file")
 @app_commands.describe(
     api_key="Your API key",
-    model="AI model to use (or type custom model name)",
+    model="AI model to use (optional; defaults to config.json if omitted)",
     file="EPUB, TXT, or PDF file to extract glossary from (optional if using url)",
     url="Google Drive or Dropbox link to file (optional if using file attachment)",
     custom_endpoint_url="Custom OpenAI-compatible base URL (auto-enables when set; omit to disable)",
@@ -1085,11 +1087,10 @@ async def translate(
     app_commands.Choice(name="High", value="high"),
     app_commands.Choice(name="XHigh", value="xhigh"),
 ])
-@app_commands.autocomplete(model=model_autocomplete)
 async def extract(
     interaction: discord.Interaction,
     api_key: str,
-    model: str,
+    model: Optional[str] = None,
     file: discord.Attachment = None,
     url: str = None,
     custom_endpoint_url: Optional[str] = None,
@@ -1169,7 +1170,13 @@ async def extract(
                 ephemeral=_ephemeral(interaction)
             )
             return
-    
+
+    # Load config early so we can default the model without relying on autocomplete.
+    config = load_config()
+
+    # Default model: prefer explicit user input, otherwise config.json, then env var, then a safe fallback.
+    model = (model or '').strip() or (config.get('model') or '').strip() or (os.getenv('MODEL') or '').strip() or 'gpt-4o'
+
     # Initial response
     embed = discord.Embed(
         title="📚 Glossary Extraction Started",
@@ -1250,9 +1257,6 @@ async def extract(
             ))
             return
 
-        # Load config
-        config = load_config()
-        
         # Get glossary prompts from config
         glossary_prompt = config.get('manual_glossary_prompt', '')
         
