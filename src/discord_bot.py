@@ -23,6 +23,7 @@ import asyncio
 import tempfile
 import shutil
 import json
+import logging
 from typing import Optional
 
 # Add src directory to path
@@ -115,6 +116,47 @@ CONFIG_FILE = os.path.join(src_dir, "config.json")
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="/", intents=intents)
+
+
+class _SuppressExpectedAutocompleteErrors(logging.Filter):
+    """Suppress noisy, expected autocomplete failures.
+
+    Discord autocomplete interactions are short-lived and are frequently cancelled/expired
+    while a user types. When that happens, responding with autocomplete choices can raise:
+      - 10062 Unknown interaction
+      - 40060 Interaction has already been acknowledged
+
+    These are not actionable for us and just spam logs.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            if record.name != "discord.app_commands.tree":
+                return True
+
+            # Only filter the specific "Ignoring exception in autocomplete" log lines.
+            msg = record.getMessage() or ""
+            if "Ignoring exception in autocomplete" not in msg:
+                return True
+
+            exc = None
+            if record.exc_info and len(record.exc_info) >= 2:
+                exc = record.exc_info[1]
+
+            if isinstance(exc, discord.NotFound) and getattr(exc, "code", None) == 10062:
+                return False
+
+            if isinstance(exc, discord.HTTPException) and getattr(exc, "code", None) == 40060:
+                return False
+
+            return True
+        except Exception:
+            # Never break logging.
+            return True
+
+
+# Install the filter early so it applies as soon as CommandTree logs anything.
+logging.getLogger("discord.app_commands.tree").addFilter(_SuppressExpectedAutocompleteErrors())
 
 # Global storage for translation state
 translation_states = {}
@@ -293,6 +335,7 @@ async def model_autocomplete(interaction: discord.Interaction, current: str):
     app_commands.Choice(name="High", value="high"),
     app_commands.Choice(name="XHigh", value="xhigh"),
 ])
+@app_commands.autocomplete(model=model_autocomplete)
 async def translate(
     interaction: discord.Interaction,
     api_key: str,
@@ -1087,6 +1130,7 @@ async def translate(
     app_commands.Choice(name="High", value="high"),
     app_commands.Choice(name="XHigh", value="xhigh"),
 ])
+@app_commands.autocomplete(model=model_autocomplete)
 async def extract(
     interaction: discord.Interaction,
     api_key: str,
