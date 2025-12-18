@@ -1067,7 +1067,11 @@ async def extract(
             from urllib.parse import urlparse, unquote
             parsed = urlparse(url)
             filename = unquote(os.path.basename(parsed.path)) or 'downloaded_file.epub'
-    
+
+    # Never trust user/remote-provided names to be a safe path.
+    # Keep /extract isolated from path traversal and accidental subdirectories.
+    filename = os.path.basename(filename)
+
     # Validate file extension
     if not (filename.endswith('.epub') or filename.endswith('.txt') or filename.endswith('.pdf')):
         await interaction.response.send_message(
@@ -1147,7 +1151,7 @@ async def extract(
                             content_disp = response.headers['content-disposition']
                             fname_match = re.findall('filename="(.+)"', content_disp)
                             if fname_match:
-                                actual_filename = fname_match[0]
+                                actual_filename = os.path.basename(fname_match[0])
                                 new_input_path = os.path.join(temp_dir, actual_filename)
                                 os.rename(input_path, new_input_path)
                                 input_path = new_input_path
@@ -1159,7 +1163,21 @@ async def extract(
                             color=discord.Color.red()
                         ))
                         return
-        
+
+        # Ensure the input file actually exists before starting the executor thread.
+        try:
+            if not os.path.isfile(input_path):
+                raise FileNotFoundError(f"Downloaded/attached file not found on disk: {input_path}")
+            if os.path.getsize(input_path) <= 0:
+                raise FileNotFoundError(f"Downloaded/attached file is empty: {input_path}")
+        except Exception as e:
+            await interaction.edit_original_response(embed=discord.Embed(
+                title="❌ Input File Error",
+                description=str(e),
+                color=discord.Color.red()
+            ))
+            return
+
         # Load config
         config = load_config()
         
@@ -1390,50 +1408,52 @@ async def extract(
             sys.stderr.write(f"[EXTRACT] Starting glossary extraction for: {input_path}\n")
             sys.stderr.write(f"[EXTRACT] Temp directory: {temp_dir}\n")
             sys.stderr.flush()
-            
-            original_cwd = os.getcwd()
+
+            # Defensive checks: if these fail, raise an explicit error instead of a generic Errno 2.
+            if not os.path.isdir(temp_dir):
+                raise FileNotFoundError(f"Temp directory does not exist: {temp_dir}")
+            if not os.path.isfile(input_path):
+                raise FileNotFoundError(f"Input file does not exist: {input_path}")
+
+            # Avoid chdir() to eliminate CWD-dependent bugs and races.
+            # Use absolute output/config paths so the extractor is deterministic.
+            output_base = os.path.splitext(os.path.basename(filename))[0] or "glossary"
+            output_path = os.path.join(temp_dir, f"{output_base}_glossary.json")
+
+            # Bot-only deployments often don't ship a config.json (it's gitignored).
+            # The extractor currently expects a file path, so if one isn't present,
+            # create a minimal config in the temp dir and rely on env vars (API_KEY, MODEL, etc.).
+            config_path = CONFIG_FILE
+            if not os.path.exists(config_path):
+                config_path = os.path.join(temp_dir, "config.json")
+                try:
+                    if not os.path.exists(config_path):
+                        with open(config_path, "w", encoding="utf-8") as f:
+                            json.dump({}, f)
+                except Exception as e:
+                    # If we can't write a temp config for any reason, fall back to the original path
+                    # so the error message is explicit.
+                    sys.stderr.write(f"[EXTRACT] Failed to create temp config.json: {e}\n")
+                    sys.stderr.flush()
+                    config_path = CONFIG_FILE
+
+            original_argv = sys.argv[:]
             try:
-                os.chdir(temp_dir)
-                sys.stderr.write(f"[EXTRACT] Changed working directory to: {os.getcwd()}\n")
-                sys.stderr.flush()
-                
-                # Set up sys.argv for glossary extraction
-                output_base = os.path.splitext(filename)[0]
-                output_path = f"{output_base}_glossary.json"
-
-                # Bot-only deployments often don't ship a config.json (it's gitignored).
-                # The extractor currently expects a file path, so if one isn't present,
-                # create a minimal config in the temp dir and rely on env vars (API_KEY, MODEL, etc.).
-                config_path = CONFIG_FILE
-                if not os.path.exists(config_path):
-                    config_path = os.path.join(temp_dir, "config.json")
-                    try:
-                        if not os.path.exists(config_path):
-                            with open(config_path, "w", encoding="utf-8") as f:
-                                json.dump({}, f)
-                    except Exception as e:
-                        # If we can't write a temp config for any reason, fall back to the original path
-                        # so the error message is explicit.
-                        sys.stderr.write(f"[EXTRACT] Failed to create temp config.json: {e}\n")
-                        sys.stderr.flush()
-                        config_path = CONFIG_FILE
-
                 sys.argv = [
                     'extract_glossary_from_epub.py',
                     '--epub', input_path,
                     '--output', output_path,
                     '--config', config_path
                 ]
-                
-                result = glossary_main(log_callback=log_callback, stop_callback=stop_callback)
-                
+
+                glossary_main(log_callback=log_callback, stop_callback=stop_callback)
+
                 sys.stderr.write(f"[EXTRACT] Glossary extraction completed\n")
                 sys.stderr.flush()
                 return output_path
             finally:
-                os.chdir(original_cwd)
-                sys.stderr.write(f"[EXTRACT] Restored working directory to: {os.getcwd()}\n")
-                sys.stderr.flush()
+                # Prevent leaking argv changes across commands.
+                sys.argv = original_argv
         
         loop = asyncio.get_event_loop()
         extraction_future = loop.run_in_executor(None, run_extraction)

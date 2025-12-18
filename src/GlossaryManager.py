@@ -13,6 +13,40 @@ from bs4 import BeautifulSoup
 import PatternManager as PM
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
+# Default unified auto-glossary prompt (used when AUTO_GLOSSARY_PROMPT is unset/empty).
+# NOTE: This matches the GUI's default_unified_prompt in GlossaryManager_GUI.py.
+DEFAULT_AUTO_GLOSSARY_PROMPT = """You are a novel glossary extraction assistant.
+
+You must strictly return ONLY CSV format with 3-5 columns in this exact order: type,raw_name,translated_name,gender,description.
+For character entries, determine gender from context, leave empty if context is insufficient.
+For non-character entries, leave gender empty.
+The description column is optional and can contain brief context (role, location, significance).
+Only include terms that actually appear in the text.
+Do not use quotes around values unless they contain commas.
+
+CRITICAL EXTRACTION RULES:
+- Extract ONLY: Character names, Location names, Ability/Skill names, Item names, Organization names, Titles/Ranks
+- Do NOT extract sentences, dialogue, actions, questions, or statements as glossary entries
+- The raw_name and translated_name must be SHORT NOUNS ONLY (1-5 words max)
+- REJECT entries that contain verbs or end with punctuation (?, !, .)
+- REJECT entries starting with: "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But". (The description column is excluded from this restriction)
+- If unsure whether something is a proper noun/name, skip it
+- The description column must contain detailed context/explanation
+
+Critical Requirement: The translated name column should be in {language}.
+
+For example:
+character,ᫀ뢔사난,Kim Sang-hyu,male
+character,ᫀ간편헤,Gale Hardest  
+character,ᫀ이히리ᄐ 나애,Dihirit Ade,female
+
+Focus on identifying:
+1. Character names with their honorifics
+2. Important titles and ranks
+3. Frequently mentioned terms (min frequency: {min_frequency})
+
+Extract up to {max_names} character names and {max_titles} titles.
+Prioritize names that appear with honorifics or in important contexts."""
 
 
 # Class-level shared lock for API submission timing
@@ -243,6 +277,13 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     
     # Get custom prompt from environment
     custom_prompt = os.getenv("AUTO_GLOSSARY_PROMPT", "").strip()
+
+    # Initialize to the default unified prompt when unset/empty.
+    # Pattern-based extraction remains disabled elsewhere.
+    if not custom_prompt:
+        custom_prompt = DEFAULT_AUTO_GLOSSARY_PROMPT.strip()
+        os.environ["AUTO_GLOSSARY_PROMPT"] = custom_prompt
+        print("📑 AUTO_GLOSSARY_PROMPT not set - initialized to default unified prompt")
     
     def clean_html(html_text):
         """Remove HTML tags to get clean text"""
@@ -515,12 +556,9 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
                             strip_honorifics, fuzzy_threshold, filter_mode, max_sentences, log_callback
                         )
                     else:
-                        chunk_glossary = _extract_with_patterns(
-                            chunk_text, language, min_frequency, 
-                            max_names, max_titles, batch_size, 
-                            None, output_dir,  # Don't pass existing glossary to chunks
-                            strip_honorifics, fuzzy_threshold, filter_mode
-                        )
+                        # Pattern fallback disabled
+                        print("📑 AUTO_GLOSSARY_PROMPT is empty - skipping chunk glossary extraction (pattern fallback disabled)")
+                        chunk_glossary = {}
                     
                     # Normalize to CSV lines and aggregate
                     chunk_lines = []
@@ -781,10 +819,9 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
             if already_filtered:
                 os.environ.pop("_TEXT_ALREADY_FILTERED", None)
     else:
-        return _extract_with_patterns(all_text, language, min_frequency, 
-                                         max_names, max_titles, batch_size, 
-                                         existing_glossary, output_dir, 
-                                         strip_honorifics, fuzzy_threshold, filter_mode)
+        # Pattern fallback disabled
+        print("📑 AUTO_GLOSSARY_PROMPT is empty - skipping automatic glossary generation (pattern fallback disabled)")
+        return {}
 
     total_time = time.time() - total_start_time
     print(f"\n📑 ========== GLOSSARY GENERATION COMPLETE ==========")
@@ -1158,12 +1195,9 @@ def _process_single_chunk(chunk_idx, chunk_text, custom_prompt, language,
                 os.environ["GLOSSARY_DEFER_SAVE"] = _prev_defer
         return result
     else:
-        return _extract_with_patterns(
-            chunk_text, language, min_frequency, 
-            max_names, max_titles, batch_size, 
-            None, output_dir,
-            strip_honorifics, fuzzy_threshold, filter_mode
-        )
+        # Pattern fallback disabled
+        print("📑 AUTO_GLOSSARY_PROMPT is empty - skipping chunk glossary extraction (pattern fallback disabled)")
+        return {}
 
 def _apply_final_filter(entries, filter_mode):
     """Apply final filtering based on mode to ensure only requested types are included"""
@@ -2409,14 +2443,14 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                    os.getenv("GEMINI_API_KEY"))
         
         if is_traditional_translation_api(MODEL):
-            return _translate_chunk_traditional(chunk_text, chunk_index, total_chunks, chapter_title)
+            # Pattern fallback disabled; traditional translation APIs can't run AI extraction.
+            print("📑 Traditional translation API selected - skipping automatic glossary extraction (pattern fallback disabled)")
+            return {}
         
         elif not API_KEY:
-            print(f"📑 No API key found, falling back to pattern-based extraction")
-            return _extract_with_patterns(all_text, language, min_frequency, 
-                                             max_names, max_titles, 50,
-                                             existing_glossary, output_dir, 
-                                             strip_honorifics, fuzzy_threshold, filter_mode)
+            # Pattern fallback disabled; without an API key we can't run AI extraction.
+            print("📑 No API key found - skipping automatic glossary extraction (pattern fallback disabled)")
+            return {}
         else:
             print(f"📑 Using AI-assisted extraction with custom prompt")
             
