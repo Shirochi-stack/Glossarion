@@ -102,14 +102,19 @@ if BOT_TMPDIR:
         pass
 
 def _ensure_stable_cwd() -> None:
-    """Ensure process CWD exists.
+    """Ensure process CWD exists and tempfile has a stable base directory.
 
-    If the current working directory was deleted (common if something chdir()'d into a temp dir
-    that later got cleaned), os.getcwd() raises FileNotFoundError and many unrelated operations
-    can start failing with Errno 2.
+    On some hosts, TMPDIR can point at a directory that gets cleaned up, and the process CWD can
+    also become invalid if something chdir()'d into a temp dir that later disappears.
 
-    We recover by chdir()'ing to the project root.
+    When that happens, unrelated code can start failing with:
+      FileNotFoundError: [Errno 2] No such file or directory
+
+    We recover by:
+    - chdir() to the project root if CWD is missing
+    - re-asserting TMPDIR + tempfile.tempdir to a stable directory
     """
+    # Ensure CWD exists
     try:
         os.getcwd()
     except FileNotFoundError:
@@ -117,6 +122,15 @@ def _ensure_stable_cwd() -> None:
             os.chdir(os.path.dirname(src_dir))
         except Exception:
             pass
+
+    # Re-assert stable tempdir (helps libraries that call tempfile.gettempdir())
+    try:
+        if BOT_TMPDIR:
+            os.makedirs(BOT_TMPDIR, exist_ok=True)
+            os.environ['TMPDIR'] = BOT_TMPDIR
+            tempfile.tempdir = BOT_TMPDIR
+    except Exception:
+        pass
 
 
 # Ensure our process isn't running with a deleted working directory at startup.
@@ -734,19 +748,22 @@ async def translate(
         os.environ['TRANSLATION_TEMPERATURE'] = str(temperature)
         
         # Handle compression factor
-        # If user provides a specific factor, disable auto-compression and use the value
-        # If None (default), use the config/env default which typically enables auto-compression
+        # TransateKRtoEN ultimately uses COMPRESSION_FACTOR; "AUTO_COMPRESSION_FACTOR" is treated
+        # as a UI/bot toggle only.
         if compression_factor is not None:
+            # Explicit override from the slash command.
             os.environ['COMPRESSION_FACTOR'] = str(compression_factor)
             os.environ['AUTO_COMPRESSION_FACTOR'] = '0'
             sys.stderr.write(f"[CONFIG] Manual compression factor: {compression_factor} (Auto-compression disabled)\n")
         else:
-            # Respect config setting for auto-compression (default True)
-            auto_comp = config.get('auto_compression_factor', True)
+            # Respect config setting for auto-compression.
+            # (config.json uses auto_compress_enabled; older variants may use auto_compression_factor)
+            auto_comp = bool(config.get('auto_compress_enabled', config.get('auto_compression_factor', True)))
             os.environ['AUTO_COMPRESSION_FACTOR'] = '1' if auto_comp else '0'
-            # Default compression factor if not auto (e.g. 1.0)
-            if not auto_comp:
-                os.environ['COMPRESSION_FACTOR'] = str(config.get('compression_factor', 1.0))
+
+            # Always set a deterministic COMPRESSION_FACTOR so downstream code doesn't fall back
+            # to a different default unexpectedly.
+            os.environ['COMPRESSION_FACTOR'] = str(config.get('compression_factor', 3.0))
         
         # Disable contextual translation by default (each batch is independent)
         os.environ['CONTEXTUAL'] = '0'
