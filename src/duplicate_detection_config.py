@@ -2,8 +2,28 @@
 """
 Configuration helper for duplicate detection algorithms.
 Maps user selection to actual algorithm settings.
+
+Performance note:
+This module is used in tight loops during glossary deduplication. Optional dependencies
+are imported once at module import time to avoid repeated ImportError exceptions.
 """
 import os
+
+# Optional dependencies (imported once to avoid per-comparison ImportError overhead)
+try:
+    from rapidfuzz import fuzz as _rf_fuzz  # type: ignore
+    _HAS_RAPIDFUZZ = True
+except (ImportError, OSError):
+    _rf_fuzz = None
+    _HAS_RAPIDFUZZ = False
+
+try:
+    import jellyfish as _jellyfish  # type: ignore
+    _HAS_JELLYFISH = True
+except (ImportError, OSError):
+    _jellyfish = None
+    _HAS_JELLYFISH = False
+
 
 def get_duplicate_detection_config():
     """
@@ -51,7 +71,22 @@ def get_duplicate_detection_config():
         }
     }
     
-    return configs.get(selected, configs['auto'])
+    config = configs.get(selected, configs['auto'])
+
+    # Filter out algorithms that aren't available in this environment.
+    # This avoids misleading config and prevents slow per-comparison ImportError handling.
+    algorithms = list(config.get('algorithms', []))
+    if not _HAS_RAPIDFUZZ:
+        algorithms = [a for a in algorithms if a not in ('token_sort', 'partial')]
+    if not _HAS_JELLYFISH:
+        algorithms = [a for a in algorithms if a != 'jaro_winkler']
+    if not algorithms:
+        algorithms = ['basic']
+
+    # Return a copy so callers can safely mutate without affecting defaults.
+    resolved = dict(config)
+    resolved['algorithms'] = algorithms
+    return resolved
 
 
 def calculate_similarity_with_config(name1, name2, config=None):
@@ -68,76 +103,58 @@ def calculate_similarity_with_config(name1, name2, config=None):
     """
     if not name1 or not name2:
         return 0.0
-    
+
+    # Normalize once (hot path)
+    n1 = str(name1)
+    n2 = str(name2)
+    n1_lower = n1.lower()
+    n2_lower = n2.lower()
+
     # Quick exact match
-    if name1.lower() == name2.lower():
+    if n1_lower == n2_lower:
         return 1.0
-    
+
     # Get config if not provided
     if config is None:
         config = get_duplicate_detection_config()
-    
-    algorithms = config['algorithms']
-    scores = []
-    
-    # Basic ratio (Levenshtein)
+
+    algorithms = config.get('algorithms', [])
+    best = 0.0
+
+    # Basic ratio (Levenshtein-like)
     if 'basic' in algorithms:
-        try:
-            from rapidfuzz import fuzz
-            score = fuzz.ratio(name1.lower(), name2.lower()) / 100.0
-            scores.append(score)
-        except ImportError:
+        if _HAS_RAPIDFUZZ:
+            best = max(best, _rf_fuzz.ratio(n1_lower, n2_lower) / 100.0)
+        else:
             from difflib import SequenceMatcher
-            score = SequenceMatcher(None, name1.lower(), name2.lower()).ratio()
-            scores.append(score)
-    
-    # Token sort (word order insensitive)
-    if 'token_sort' in algorithms:
-        try:
-            from rapidfuzz import fuzz
-            score = fuzz.token_sort_ratio(name1.lower(), name2.lower()) / 100.0
-            scores.append(score)
-        except (ImportError, AttributeError):
-            pass
-    
-    # Partial ratio (substring matching)
-    if 'partial' in algorithms:
-        try:
-            from rapidfuzz import fuzz
-            score = fuzz.partial_ratio(name1.lower(), name2.lower()) / 100.0
-            scores.append(score)
-        except (ImportError, AttributeError):
-            pass
-    
+            best = max(best, SequenceMatcher(None, n1_lower, n2_lower).ratio())
+
+    # Token sort (word order insensitive) + partial ratio (substring matching)
+    if _HAS_RAPIDFUZZ:
+        if 'token_sort' in algorithms:
+            best = max(best, _rf_fuzz.token_sort_ratio(n1_lower, n2_lower) / 100.0)
+        if 'partial' in algorithms:
+            best = max(best, _rf_fuzz.partial_ratio(n1_lower, n2_lower) / 100.0)
+
     # Jaro-Winkler (designed for names)
-    if 'jaro_winkler' in algorithms:
-        try:
-            import jellyfish
-            score = jellyfish.jaro_winkler_similarity(name1, name2)
-            scores.append(score)
-        except ImportError:
-            pass
-    
-    # Return best score
-    return max(scores) if scores else 0.0
+    if 'jaro_winkler' in algorithms and _HAS_JELLYFISH:
+        best = max(best, _jellyfish.jaro_winkler_similarity(n1, n2))
+
+    return best
 
 
 def get_algorithm_display_info():
     """Get information about which algorithms are actually available."""
     available = []
-    
-    try:
-        import rapidfuzz
+
+    if _HAS_RAPIDFUZZ:
         available.append("RapidFuzz")
-    except ImportError:
+    else:
         available.append("difflib (fallback)")
-    
-    try:
-        import jellyfish
+
+    if _HAS_JELLYFISH:
         available.append("Jaro-Winkler")
-    except ImportError:
-        pass
-    
+
     return available
 
 
