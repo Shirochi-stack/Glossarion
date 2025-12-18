@@ -95,6 +95,21 @@ if BOT_TMPDIR:
     sys.stderr.write(f"[CONFIG] Bot temp dir: {BOT_TMPDIR}\n")
     sys.stderr.flush()
 
+    # Ensure all stdlib tempfile users (and many third-party libs) use the stable temp root.
+    try:
+        tempfile.tempdir = BOT_TMPDIR
+    except Exception:
+        pass
+
+# Ensure our process isn't running with a deleted working directory.
+try:
+    os.getcwd()
+except FileNotFoundError:
+    try:
+        os.chdir(os.path.dirname(src_dir))
+    except Exception:
+        pass
+
 # Import Glossarion modules
 try:
     # Core translation modules
@@ -461,7 +476,7 @@ async def model_autocomplete(interaction: discord.Interaction, current: str):
     file="EPUB, TXT, or PDF file to translate (optional if using url)",
     url="Google Drive or Dropbox link to file (optional if using file attachment)",
     custom_endpoint_url="Custom OpenAI-compatible base URL (auto-enables when set; omit to disable)",
-    google_credentials_path="Path to Google Cloud credentials JSON (for Vertex AI models)",
+    google_credentials_file="Google Cloud credentials JSON file upload (for Vertex AI models)",
     extraction_mode="Text extraction method (default: Enhanced/html2text)",
     temperature="Translation temperature 0.0-1.0 (default: 0.3)",
     batch_size="Paragraphs per batch (default: 10)",
@@ -504,7 +519,7 @@ async def translate(
     file: discord.Attachment = None,
     url: str = None,
     custom_endpoint_url: Optional[str] = None,
-    google_credentials_path: str = None,
+    google_credentials_file: discord.Attachment = None,
     extraction_mode: str = "enhanced",
     temperature: float = 0.3,
     batch_size: int = 10,
@@ -884,22 +899,38 @@ async def translate(
         
         # Handle Vertex AI / Google Cloud credentials
         if '@' in model or model.startswith('vertex/'):
-            # Use provided credentials path, fallback to config if not provided
-            google_creds = google_credentials_path if google_credentials_path else config.get('google_cloud_credentials')
+            # Prefer an uploaded credentials file; otherwise fall back to config.json.
+            google_creds = None
+            if google_credentials_file is not None:
+                # Save uploaded creds into the job temp dir.
+                # Discord provides the filename; ensure it's safe.
+                creds_name = os.path.basename(getattr(google_credentials_file, 'filename', '') or 'google_credentials.json')
+                if not creds_name.lower().endswith('.json'):
+                    creds_name = 'google_credentials.json'
+                google_creds = os.path.join(temp_dir, creds_name)
+                try:
+                    await google_credentials_file.save(google_creds)
+                except Exception as e:
+                    sys.stderr.write(f"[CONFIG] Failed to save uploaded Google credentials: {e}\n")
+                    google_creds = None
+
+            if google_creds is None:
+                google_creds = config.get('google_cloud_credentials')
+
             if google_creds and os.path.exists(google_creds):
                 os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = google_creds
                 sys.stderr.write(f"[CONFIG] Using Google Cloud credentials: {os.path.basename(google_creds)}\n")
                 sys.stderr.flush()
-                
+
                 # Extract project ID from credentials
                 try:
-                    with open(google_creds, 'r') as f:
+                    with open(google_creds, 'r', encoding='utf-8') as f:
                         creds_data = json.load(f)
                         project_id = creds_data.get('project_id', 'vertex-ai-project')
                         os.environ['GOOGLE_CLOUD_PROJECT'] = project_id
                         if not api_key:
                             api_key = project_id
-                except:
+                except Exception:
                     pass
         
         # Set API key - TransateKRtoEN checks multiple env vars
@@ -1259,7 +1290,7 @@ async def translate(
     file="EPUB, TXT, or PDF file to extract glossary from (optional if using url)",
     url="Google Drive or Dropbox link to file (optional if using file attachment)",
     custom_endpoint_url="Custom OpenAI-compatible base URL (auto-enables when set; omit to disable)",
-    google_credentials_path="Path to Google Cloud credentials JSON (for Vertex AI models)",
+    google_credentials_file="Google Cloud credentials JSON file upload (for Vertex AI models)",
     extraction_mode="Text extraction method (default: Enhanced/html2text)",
     temperature="Glossary extraction temperature 0.0-1.0 (default: 0.1)",
     batch_size="Paragraphs per batch (default: 10)",
@@ -1298,7 +1329,7 @@ async def extract(
     file: discord.Attachment = None,
     url: str = None,
     custom_endpoint_url: Optional[str] = None,
-    google_credentials_path: str = None,
+    google_credentials_file: discord.Attachment = None,
     extraction_mode: str = "enhanced",
     temperature: float = 0.1,
     batch_size: int = 10,
@@ -1587,21 +1618,35 @@ async def extract(
         
         # Handle Vertex AI / Google Cloud credentials
         if '@' in model or model.startswith('vertex/'):
-            # Use provided credentials path, fallback to config if not provided
-            google_creds = google_credentials_path if google_credentials_path else config.get('google_cloud_credentials')
+            # Prefer an uploaded credentials file; otherwise fall back to config.json.
+            google_creds = None
+            if google_credentials_file is not None:
+                creds_name = os.path.basename(getattr(google_credentials_file, 'filename', '') or 'google_credentials.json')
+                if not creds_name.lower().endswith('.json'):
+                    creds_name = 'google_credentials.json'
+                google_creds = os.path.join(temp_dir, creds_name)
+                try:
+                    await google_credentials_file.save(google_creds)
+                except Exception as e:
+                    sys.stderr.write(f"[CONFIG] Failed to save uploaded Google credentials: {e}\n")
+                    google_creds = None
+
+            if google_creds is None:
+                google_creds = config.get('google_cloud_credentials')
+
             if google_creds and os.path.exists(google_creds):
                 os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = google_creds
                 sys.stderr.write(f"[CONFIG] Using Google Cloud credentials: {os.path.basename(google_creds)}\n")
                 sys.stderr.flush()
-                
+
                 try:
-                    with open(google_creds, 'r') as f:
+                    with open(google_creds, 'r', encoding='utf-8') as f:
                         creds_data = json.load(f)
                         project_id = creds_data.get('project_id', 'vertex-ai-project')
                         os.environ['GOOGLE_CLOUD_PROJECT'] = project_id
                         if not api_key:
                             api_key = project_id
-                except:
+                except Exception:
                     pass
         
         # Set API key
