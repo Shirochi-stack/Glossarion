@@ -1400,12 +1400,29 @@ async def extract(
                 # Set up sys.argv for glossary extraction
                 output_base = os.path.splitext(filename)[0]
                 output_path = f"{output_base}_glossary.json"
-                
+
+                # Bot-only deployments often don't ship a config.json (it's gitignored).
+                # The extractor currently expects a file path, so if one isn't present,
+                # create a minimal config in the temp dir and rely on env vars (API_KEY, MODEL, etc.).
+                config_path = CONFIG_FILE
+                if not os.path.exists(config_path):
+                    config_path = os.path.join(temp_dir, "config.json")
+                    try:
+                        if not os.path.exists(config_path):
+                            with open(config_path, "w", encoding="utf-8") as f:
+                                json.dump({}, f)
+                    except Exception as e:
+                        # If we can't write a temp config for any reason, fall back to the original path
+                        # so the error message is explicit.
+                        sys.stderr.write(f"[EXTRACT] Failed to create temp config.json: {e}\n")
+                        sys.stderr.flush()
+                        config_path = CONFIG_FILE
+
                 sys.argv = [
                     'extract_glossary_from_epub.py',
                     '--epub', input_path,
                     '--output', output_path,
-                    '--config', CONFIG_FILE
+                    '--config', config_path
                 ]
                 
                 result = glossary_main(log_callback=log_callback, stop_callback=stop_callback)
