@@ -352,7 +352,11 @@ async def translate(
             from urllib.parse import urlparse, unquote
             parsed = urlparse(url)
             filename = unquote(os.path.basename(parsed.path)) or 'downloaded_file.epub'
-    
+
+    # Never trust user/remote-provided names to be a safe path.
+    # Keep /translate isolated from path traversal and accidental subdirectories.
+    filename = os.path.basename(filename)
+
     # Validate file extension
     if not (filename.endswith('.epub') or filename.endswith('.txt') or filename.endswith('.pdf')):
         await interaction.response.send_message(
@@ -447,7 +451,22 @@ async def translate(
                             color=discord.Color.red()
                         ))
                         return
-        
+
+        # Ensure the input file actually exists before starting the executor thread.
+        # If this fails, /translate can end up in a bad state (e.g. cwd inside a deleted temp dir).
+        try:
+            if not os.path.isfile(input_path):
+                raise FileNotFoundError(f"Downloaded/attached file not found on disk: {input_path}")
+            if os.path.getsize(input_path) <= 0:
+                raise FileNotFoundError(f"Downloaded/attached file is empty: {input_path}")
+        except Exception as e:
+            await interaction.edit_original_response(embed=discord.Embed(
+                title="❌ Input File Error",
+                description=str(e),
+                color=discord.Color.red()
+            ))
+            return
+
         # Load config
         config = load_config()
         
@@ -765,24 +784,53 @@ async def translate(
             sys.stderr.write(f"[TRANSLATE] Starting translation for: {input_path}\n")
             sys.stderr.write(f"[TRANSLATE] Temp directory: {temp_dir}\n")
             sys.stderr.flush()
-            
+
             # CRITICAL: Change to temp directory so TransateKRtoEN creates output there
-            original_cwd = os.getcwd()
+            # But do it defensively: if cwd is deleted (e.g. from a prior run), os.getcwd() raises.
+            try:
+                original_cwd = os.getcwd()
+            except FileNotFoundError:
+                original_cwd = src_dir
+                try:
+                    os.chdir(original_cwd)
+                except Exception:
+                    pass
+
+            original_argv = sys.argv[:]
             try:
                 os.chdir(temp_dir)
-                sys.stderr.write(f"[TRANSLATE] Changed working directory to: {os.getcwd()}\n")
+                try:
+                    cwd_now = os.getcwd()
+                except FileNotFoundError:
+                    cwd_now = "<cwd-missing>"
+                sys.stderr.write(f"[TRANSLATE] Changed working directory to: {cwd_now}\n")
                 sys.stderr.flush()
-                
+
                 sys.argv = ['discord_bot.py', input_path]
                 result = TransateKRtoEN.main(log_callback=log_callback, stop_callback=stop_callback)
-                
+
                 sys.stderr.write(f"[TRANSLATE] Translation completed\n")
                 sys.stderr.flush()
                 return result
             finally:
-                # Restore original working directory
-                os.chdir(original_cwd)
-                sys.stderr.write(f"[TRANSLATE] Restored working directory to: {os.getcwd()}\n")
+                # Prevent leaking argv changes across commands.
+                sys.argv = original_argv
+
+                # Restore original working directory; if that fails, fall back to src_dir
+                try:
+                    os.chdir(original_cwd)
+                except Exception as e:
+                    try:
+                        os.chdir(src_dir)
+                    except Exception:
+                        pass
+                    sys.stderr.write(f"[TRANSLATE] Failed to restore cwd ({original_cwd}): {e}\n")
+
+                try:
+                    cwd_restored = os.getcwd()
+                except FileNotFoundError:
+                    cwd_restored = "<cwd-missing>"
+                sys.stderr.write(f"[TRANSLATE] Restored working directory to: {cwd_restored}\n")
                 sys.stderr.flush()
         
         loop = asyncio.get_event_loop()
@@ -967,11 +1015,26 @@ async def translate(
         # Cleanup translation state
         if user_id in translation_states:
             del translation_states[user_id]
-        
+
+        # Ensure we are not sitting inside the temp dir (or a deleted cwd) before deleting it.
+        try:
+            cwd = os.getcwd()
+        except FileNotFoundError:
+            try:
+                os.chdir(src_dir)
+            except Exception:
+                pass
+        else:
+            try:
+                if os.path.commonpath([os.path.abspath(cwd), os.path.abspath(temp_dir)]) == os.path.abspath(temp_dir):
+                    os.chdir(src_dir)
+            except Exception:
+                pass
+
         # Cleanup temp directory
         try:
             shutil.rmtree(temp_dir)
-        except:
+        except Exception:
             pass
 
 
