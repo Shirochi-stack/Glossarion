@@ -261,7 +261,7 @@ async def model_autocomplete(interaction: discord.Interaction, current: str):
     gemini_thinking_level="Gemini 3 thinking level (low/high) - Default: high",
     gemini_thinking_budget="Gemini thinking budget (-1=auto, 0=disabled) - Default: -1",
     or_thinking_tokens="OpenRouter thinking tokens - Default: 2000",
-    gpt_effort="GPT-5/OpenAI thinking effort (low/medium/high) - Default: medium",
+    gpt_effort="GPT-5/OpenAI thinking effort (none/low/medium/high/xhigh) - Default: medium",
     target_language="Target language"
 )
 @app_commands.choices(extraction_mode=[
@@ -273,9 +273,11 @@ async def model_autocomplete(interaction: discord.Interaction, current: str):
     app_commands.Choice(name="Low", value="low"),
 ])
 @app_commands.choices(gpt_effort=[
+    app_commands.Choice(name="None", value="none"),
     app_commands.Choice(name="Low", value="low"),
     app_commands.Choice(name="Medium", value="medium"),
     app_commands.Choice(name="High", value="high"),
+    app_commands.Choice(name="XHigh", value="xhigh"),
 ])
 @app_commands.autocomplete(model=model_autocomplete)
 async def translate(
@@ -953,7 +955,7 @@ async def translate(
     gemini_thinking_level="Gemini 3 thinking level (low/high) - Default: high",
     gemini_thinking_budget="Gemini thinking budget (-1=auto, 0=disabled) - Default: -1",
     or_thinking_tokens="OpenRouter thinking tokens - Default: 2000",
-    gpt_effort="GPT-5/OpenAI thinking effort (low/medium/high) - Default: medium",
+    gpt_effort="GPT-5/OpenAI thinking effort (none/low/medium/high/xhigh) - Default: medium",
     target_language="Target language for translations"
 )
 @app_commands.choices(extraction_mode=[
@@ -965,9 +967,11 @@ async def translate(
     app_commands.Choice(name="Low", value="low"),
 ])
 @app_commands.choices(gpt_effort=[
+    app_commands.Choice(name="None", value="none"),
     app_commands.Choice(name="Low", value="low"),
     app_commands.Choice(name="Medium", value="medium"),
     app_commands.Choice(name="High", value="high"),
+    app_commands.Choice(name="XHigh", value="xhigh"),
 ])
 @app_commands.autocomplete(model=model_autocomplete)
 async def extract(

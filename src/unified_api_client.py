@@ -10480,7 +10480,7 @@ class UnifiedClient:
                                     reasoning["max_tokens"] = int(tokens_str)
                                 else:
                                     effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').lower()
-                                    if effort not in ('low', 'medium', 'high'):
+                                    if effort not in ('none', 'low', 'medium', 'high', 'xhigh'):
                                         effort = 'medium'
                                     reasoning.pop('max_tokens', None)
                                     reasoning["effort"] = effort
@@ -10912,7 +10912,7 @@ class UnifiedClient:
                                         reasoning["max_tokens"] = int(tokens_str)
                                     else:
                                         effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').lower()
-                                        if effort not in ('low', 'medium', 'high'):
+                                        if effort not in ('none', 'low', 'medium', 'high', 'xhigh'):
                                             effort = 'medium'
                                         reasoning["effort"] = effort
                                     body["reasoning"] = reasoning
@@ -11148,7 +11148,7 @@ class UnifiedClient:
                                 reasoning["max_tokens"] = int(tokens_str)
                             else:
                                 effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').lower()
-                                if effort not in ('low', 'medium', 'high'):
+                                if effort not in ('none', 'low', 'medium', 'high', 'xhigh'):
                                     effort = 'medium'
                                 reasoning.pop('max_tokens', None)
                                 reasoning["effort"] = effort
@@ -11223,7 +11223,7 @@ class UnifiedClient:
                             reasoning["max_tokens"] = int(tokens_str)
                         else:
                             effort = (os.getenv('GPT_EFFORT', 'medium') or 'medium').lower()
-                            if effort not in ('low', 'medium', 'high'):
+                            if effort not in ('none', 'low', 'medium', 'high', 'xhigh'):
                                 effort = 'medium'
                             reasoning.pop('max_tokens', None)
                             reasoning["effort"] = effort

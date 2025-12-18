@@ -1256,7 +1256,8 @@ def _create_response_handling_section(self, parent):
     self.gpt_effort_label = QLabel("Effort:")
     gpt_h1.addWidget(self.gpt_effort_label)
     self.gpt_effort_combo = QComboBox()
-    self.gpt_effort_combo.addItems(["low", "medium", "high"])
+    # GPT thinking effort now supports "none" (disable) and "xhigh" in addition to low/medium/high
+    self.gpt_effort_combo.addItems(["none", "low", "medium", "high", "xhigh"])
     self.gpt_effort_combo.setFixedWidth(100)
     # Add custom styling with unicode arrow
     self.gpt_effort_combo.setStyleSheet("""
@@ -1311,7 +1312,7 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(gpt_row2)
     
     # Store reference to description label for enable/disable
-    self.gpt_desc_label = QLabel("Controls GPT-5 and OpenRouter reasoning.\nProvide Tokens to force a max token budget for other models,\n GPT-5 only uses Effort (low/medium/high).")
+    self.gpt_desc_label = QLabel("Controls GPT-5 and OpenRouter reasoning.\nProvide Tokens to force a max token budget for other models,\n GPT-5 uses Effort (none/low/medium/high/xhigh).")
     self.gpt_desc_label.setStyleSheet("color: gray; font-size: 10pt;")
     self.gpt_desc_label.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(self.gpt_desc_label)
