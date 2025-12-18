@@ -26,7 +26,16 @@ import json
 from typing import Optional
 
 # Add src directory to path
-src_dir = os.path.join(os.path.dirname(__file__), "src")
+# In this repo layout, `discord_bot.py` typically lives inside the `src/` directory.
+# Older deployments may have a nested `src/src` structure, so detect the correct one.
+_base_dir = os.path.dirname(__file__)
+_nested_src_dir = os.path.join(_base_dir, "src")
+
+if os.path.isdir(_nested_src_dir) and os.path.exists(os.path.join(_nested_src_dir, "config.json")):
+    src_dir = _nested_src_dir
+else:
+    src_dir = _base_dir
+
 sys.path.insert(0, src_dir)
 
 # Import Glossarion modules
