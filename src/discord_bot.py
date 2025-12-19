@@ -112,16 +112,36 @@ def _ensure_stable_cwd() -> None:
 
     We recover by:
     - chdir() to the project root if CWD is missing
+    - proactively avoiding running inside volatile temp directories
     - re-asserting TMPDIR + tempfile.tempdir to a stable directory
     """
+
+    project_root = os.path.dirname(src_dir)
+
+    def _is_within(child: str, parent: str) -> bool:
+        try:
+            child_abs = os.path.abspath(child)
+            parent_abs = os.path.abspath(parent)
+            return os.path.commonpath([child_abs, parent_abs]) == parent_abs
+        except Exception:
+            return False
+
     # Ensure CWD exists
     try:
-        os.getcwd()
+        cwd = os.getcwd()
     except FileNotFoundError:
         try:
-            os.chdir(os.path.dirname(src_dir))
+            os.chdir(project_root)
+            cwd = os.getcwd()
         except Exception:
-            pass
+            cwd = ""
+
+    # Even if CWD exists, don't run inside a temp root (process-wide chdir() is a footgun).
+    try:
+        if cwd and BOT_TMPDIR and _is_within(cwd, BOT_TMPDIR):
+            os.chdir(project_root)
+    except Exception:
+        pass
 
     # Re-assert stable tempdir (helps libraries that call tempfile.gettempdir())
     try:
@@ -1094,55 +1114,111 @@ async def translate(
         output_display_name = None
         is_zip_output = False
 
-        # Prepare for potential zipping or searching
-        output_base = os.path.splitext(filename)[0]  # Use filename variable, not file.filename
+        # Prefer deterministic output selection from the translation output folder.
+        # TransateKRtoEN writes into: OUTPUT_DIRECTORY/<file_base>/...
+        output_base = os.path.splitext(os.path.basename(filename))[0]
         safe_base = output_base.replace('/', '_').replace('\\', '_').replace(':', '_').replace('*', '_').replace('?', '_').replace('"', '_').replace('<', '_').replace('>', '_').replace('|', '_')
-        output_subdir = os.path.join(temp_dir, safe_base)
 
-        # If user didn't request zip, try to find the direct file first
+        # The translator historically used the raw base name; keep both candidates for compatibility.
+        output_dir_candidates = [
+            os.path.join(temp_dir, output_base),
+            os.path.join(temp_dir, safe_base),
+        ]
+        output_subdir = None
+        for d in output_dir_candidates:
+            if os.path.exists(d) and os.path.isdir(d):
+                output_subdir = d
+                break
+        if output_subdir is None:
+            output_subdir = os.path.join(temp_dir, safe_base)
+
+        def _pick_newest(d: str, exts: list[str], must_contain: Optional[str] = None) -> Optional[str]:
+            try:
+                if not os.path.exists(d) or not os.path.isdir(d):
+                    return None
+                candidates = []
+                for name in os.listdir(d):
+                    p = os.path.join(d, name)
+                    if p == input_path:
+                        continue
+                    if name.lower().endswith('.zip'):
+                        continue
+                    nlow = name.lower()
+                    if exts and not any(nlow.endswith(e) for e in exts):
+                        continue
+                    if must_contain and must_contain.lower() not in nlow:
+                        continue
+                    if os.path.isfile(p):
+                        try:
+                            mtime = os.path.getmtime(p)
+                        except Exception:
+                            mtime = 0
+                        candidates.append((mtime, p))
+                if not candidates:
+                    return None
+                candidates.sort(key=lambda t: t[0], reverse=True)
+                return candidates[0][1]
+            except Exception:
+                return None
+
+        input_ext = os.path.splitext(filename)[1].lower()
+
+        # If user didn't request zip, try to pick the most likely final artifact.
         if not send_zip:
-            sys.stderr.write(f"[OUTPUT] Searching for output file (ignoring zip)...\\n")
-            # We look for .epub first as requested, then the input extension
-            search_exts = ['.epub']
-            input_ext = os.path.splitext(filename)[1].lower()
-            if input_ext not in search_exts:
-                search_exts.append(input_ext)
-            
-            search_dirs = []
-            if os.path.exists(output_subdir) and os.path.isdir(output_subdir):
-                search_dirs.append(output_subdir)
-            search_dirs.append(temp_dir)
-            
-            for ext in search_exts:
-                for d in search_dirs:
-                    if not os.path.exists(d): continue
-                    for f in os.listdir(d):
-                        if f.endswith(ext):
-                            f_path = os.path.join(d, f)
-                            # Skip input file
-                            if f_path != input_path:
-                                output_file_path = f_path
-                                output_display_name = f
-                                sys.stderr.write(f"[OUTPUT] Found direct file: {output_file_path}\\n")
-                                break
-                    if output_file_path: break
-                if output_file_path: break
+            sys.stderr.write(f"[OUTPUT] Selecting output from: {output_subdir}\\n")
+            sys.stderr.flush()
+
+            # Prefer translated-named artifacts for text/PDF flows.
+            if input_ext == '.epub':
+                output_file_path = _pick_newest(output_subdir, exts=['.epub'])
+            elif input_ext == '.pdf':
+                output_file_path = (
+                    _pick_newest(output_subdir, exts=['.pdf'], must_contain='_translated')
+                    or _pick_newest(output_subdir, exts=['.html'], must_contain='_translated')
+                    or _pick_newest(output_subdir, exts=['.txt'], must_contain='_translated')
+                    or _pick_newest(output_subdir, exts=['.pdf', '.html', '.txt'])
+                )
+            else:
+                # .txt and other text-like inputs
+                output_file_path = (
+                    _pick_newest(output_subdir, exts=['.txt'], must_contain='_translated')
+                    or _pick_newest(output_subdir, exts=['.pdf'], must_contain='_translated')
+                    or _pick_newest(output_subdir, exts=['.html'], must_contain='_translated')
+                    or _pick_newest(output_subdir, exts=[input_ext])
+                    or _pick_newest(output_subdir, exts=['.pdf', '.html', '.txt'])
+                )
+
+            if output_file_path:
+                output_display_name = os.path.basename(output_file_path)
+                sys.stderr.write(f"[OUTPUT] Selected output file: {output_file_path}\\n")
+                sys.stderr.flush()
+
+        # If we selected a file but it doesn't exist, treat it as a miss and fall back to ZIP.
+        try:
+            if output_file_path and not os.path.exists(output_file_path):
+                sys.stderr.write(f"[OUTPUT] Selected file missing on disk, falling back to ZIP: {output_file_path}\\n")
+                sys.stderr.flush()
+                output_file_path = None
+                output_display_name = None
+        except Exception:
+            output_file_path = None
+            output_display_name = None
 
         # If zip requested OR file not found, proceed with zipping
         if send_zip or not output_file_path:
             is_zip_output = True
-            
+
             sys.stderr.write(f"[ZIP] Creating zip archive of output...\\n")
             sys.stderr.write(f"[ZIP] Temp dir: {temp_dir}\\n")
-            sys.stderr.write(f"[ZIP] Expected output subdir: {output_subdir}\\n")
-            
-            # If output subdir exists, zip from there, otherwise zip from temp_dir root
+            sys.stderr.write(f"[ZIP] Output dir: {output_subdir}\\n")
+
+            # Zip the translation output folder if it exists; otherwise zip the whole temp dir.
             if os.path.exists(output_subdir) and os.path.isdir(output_subdir):
                 zip_source_dir = output_subdir
-                sys.stderr.write(f"[ZIP] Using output subdirectory as source\\n")
+                sys.stderr.write(f"[ZIP] Using output directory as source\\n")
             else:
                 zip_source_dir = temp_dir
-                sys.stderr.write(f"[ZIP] Using temp dir as source (no subdirectory found)\\n")
+                sys.stderr.write(f"[ZIP] Using temp dir as source (no output dir found)\\n")
             sys.stderr.flush()
             
             zip_filename = f"{safe_base}_translated.zip"
@@ -1803,79 +1879,79 @@ async def extract(
             await message.edit(embed=embed, view=None)
             return
         
-        # Find the Glossary output directory
-        glossary_dir = os.path.join(temp_dir, 'Glossary')
-        
+        # Prefer the explicit output path returned by the extractor thread.
+        # This avoids brittle "find the right file" scanning.
         output_file_path = None
         output_display_name = None
         is_zip_output = False
-        
-        if os.path.exists(glossary_dir) and os.path.isdir(glossary_dir):
-            
-            if not send_zip:
-                # Search for .csv in glossary_dir
-                for f in os.listdir(glossary_dir):
-                    if f.endswith('.csv'):
-                        output_file_path = os.path.join(glossary_dir, f)
-                        output_display_name = f
-                        break
-            
-            # Fallback to ZIP
-            if send_zip or not output_file_path:
-                is_zip_output = True
-                
-                # Create zip of entire Glossary folder
-                output_base = os.path.splitext(filename)[0]
-                zip_filename = f"{output_base}_glossary.zip"
-                zip_path = os.path.join(temp_dir, zip_filename)
-                
-                import zipfile
-                with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+
+        try:
+            if output_filename and os.path.isfile(output_filename):
+                output_file_path = output_filename
+                output_display_name = os.path.basename(output_filename)
+        except Exception:
+            pass
+
+        glossary_dir = os.path.join(temp_dir, 'Glossary')
+
+        # If a ZIP was requested, prefer zipping the Glossary directory if present;
+        # otherwise, zip whatever single output file we produced.
+        if send_zip:
+            is_zip_output = True
+            output_base = os.path.splitext(os.path.basename(filename))[0] or "glossary"
+            zip_filename = f"{output_base}_glossary.zip"
+            zip_path = os.path.join(temp_dir, zip_filename)
+
+            import zipfile
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                if os.path.exists(glossary_dir) and os.path.isdir(glossary_dir):
                     for root, dirs, files in os.walk(glossary_dir):
                         for file_item in files:
                             file_path = os.path.join(root, file_item)
                             arcname = os.path.relpath(file_path, glossary_dir)
                             zipf.write(file_path, arcname)
-                
-                output_file_path = zip_path
-                output_display_name = zip_filename
+                elif output_file_path and os.path.exists(output_file_path):
+                    zipf.write(output_file_path, os.path.basename(output_file_path))
 
-            # Send output
-            if output_file_path and os.path.exists(output_file_path):
-                file_size = os.path.getsize(output_file_path)
-                
-                embed = discord.Embed(
-                    title="✅ Glossary Extraction Complete!",
-                    description=f"**File:** {output_display_name}\\n**Size:** {file_size / 1024:.2f}KB",
-                    color=discord.Color.green()
+            output_file_path = zip_path
+            output_display_name = zip_filename
+
+        # Legacy fallback: if we didn't get an explicit output file, try the historical Glossary/ folder.
+        if not output_file_path:
+            if os.path.exists(glossary_dir) and os.path.isdir(glossary_dir):
+                for f in os.listdir(glossary_dir):
+                    if f.endswith('.csv'):
+                        output_file_path = os.path.join(glossary_dir, f)
+                        output_display_name = f
+                        break
+
+        # Send output
+        if output_file_path and os.path.exists(output_file_path):
+            file_size = os.path.getsize(output_file_path)
+
+            embed = discord.Embed(
+                title="✅ Glossary Extraction Complete!",
+                description=f"**File:** {output_display_name}\\n**Size:** {file_size / 1024:.2f}KB",
+                color=discord.Color.green()
+            )
+            await message.edit(embed=embed, view=None)
+
+            try:
+                await interaction.followup.send(
+                    f"Here's your extracted glossary{(' (zipped)' if is_zip_output else '')}!",
+                    file=discord.File(output_file_path, filename=output_display_name),
+                    ephemeral=_ephemeral(interaction)
                 )
-                await message.edit(embed=embed, view=None)
-                
-                try:
-                    await interaction.followup.send(
-                        f"Here's your extracted glossary{(' (zipped)' if is_zip_output else '')}!",
-                        file=discord.File(output_file_path, filename=output_display_name),
-                        ephemeral=_ephemeral(interaction)
-                    )
-                except discord.errors.HTTPException as e:
-                    await interaction.followup.send(
-                        f"Glossary complete but file is too large to upload.\n"
-                        f"Please retrieve it from the server.",
-                        ephemeral=_ephemeral(interaction)
-                    )
-            else:
-                 # Should not happen if directory exists
-                embed = discord.Embed(
-                    title="❌ Extraction Failed",
-                    description="Could not prepare output file",
-                    color=discord.Color.red()
+            except discord.errors.HTTPException:
+                await interaction.followup.send(
+                    f"Glossary complete but file is too large to upload.\n"
+                    f"Please retrieve it from the server.",
+                    ephemeral=_ephemeral(interaction)
                 )
-                await message.edit(embed=embed, view=None)
-                
         else:
             embed = discord.Embed(
                 title="❌ Extraction Failed",
-                description="Could not find Glossary output directory",
+                description="Could not find or prepare glossary output file",
                 color=discord.Color.red()
             )
             await message.edit(embed=embed, view=None)
