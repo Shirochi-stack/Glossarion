@@ -1148,7 +1148,7 @@ class UnifiedClient:
                 return int(tls.max_retries_override)
         except Exception:
             pass
-        return int(os.getenv('MAX_RETRIES', '7'))
+        return int(os.getenv('MAX_RETRIES', '3'))
     
     # Class-level cancellation flag for all instances
     _global_cancelled = False

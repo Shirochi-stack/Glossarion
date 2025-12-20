@@ -9431,7 +9431,7 @@ Important rules:
                 ('http_pool_connections', ['http_pool_connections_entry', 'http_pool_connections_var'], 20, lambda v: safe_int(v, 20)),
                 ('http_pool_maxsize', ['http_pool_maxsize_entry', 'http_pool_maxsize_var'], 50, lambda v: safe_int(v, 50)),
                 ('ignore_retry_after', ['ignore_retry_after_checkbox', 'ignore_retry_after_var'], False, bool),
-                ('max_retries', ['max_retries_var'], 7, lambda v: safe_int(v, 7)),
+                ('max_retries', ['max_retries_var'], 3, lambda v: safe_int(v, 3)),
                 ('indefinite_rate_limit_retry', ['indefinite_rate_limit_retry_var'], False, bool),
 
                 # Retry settings
@@ -10170,7 +10170,7 @@ Important rules:
                 ('HTTP_POOL_CONNECTIONS', str(getattr(self, 'http_pool_connections_var', '20'))),
                 ('HTTP_POOL_MAXSIZE', str(getattr(self, 'http_pool_maxsize_var', '50'))),
                 ('IGNORE_RETRY_AFTER', '1' if self.config.get('ignore_retry_after', False) else '0'),
-                ('MAX_RETRIES', str(getattr(self, 'max_retries_var', '7'))),
+                ('MAX_RETRIES', str(getattr(self, 'max_retries_var', '3'))),
 
                 # QA/meta preferences
                 ('QA_AUTO_SEARCH_OUTPUT', '1' if getattr(self, 'qa_auto_search_output_var', True) else '0'),

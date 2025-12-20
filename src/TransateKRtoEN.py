@@ -3301,6 +3301,18 @@ class TranslationProcessor:
                     print(f"    ⏭️ TRUNCATION DETECTED: Auto-retry is DISABLED - accepting truncated response")
                 elif finish_reason == "length":
                     print(f"    ⚠️ TRUNCATION DETECTED: Unexpected condition - check logic")
+
+                # Treat split failures like truncation for auto-retry
+                split_failed_in_finish = bool(finish_reason and 'split' in str(finish_reason).lower())
+                split_failed_in_body = bool(isinstance(result, str) and 'SPLIT_FAILED' in result)
+                if not retry_needed and (split_failed_in_finish or split_failed_in_body) and (retry_truncated_enabled or self.config.RETRY_TRUNCATED):
+                    if retry_count < max_retries:
+                        retry_needed = True
+                        retry_reason = "split failed"
+                        retry_count += 1
+                        print(f"    🔄 SPLIT FAILED RETRY: Attempt {retry_count}/{max_retries}")
+                    else:
+                        print(f"    ⚠️ SPLIT FAILED: Max retries ({max_retries}) reached - accepting response")
                 
                 if not retry_needed:
                     # Force re-read the environment variable to ensure we have current setting
