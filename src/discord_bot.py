@@ -24,7 +24,13 @@ import tempfile
 import shutil
 import json
 import logging
+import time
+import uuid
+import functools
+from urllib.parse import quote as urlquote
 from typing import Optional
+
+from aiohttp import web
 
 # Add src directory to path
 # In this repo layout, `discord_bot.py` typically lives inside the `src/` directory.
@@ -38,6 +44,151 @@ else:
     src_dir = _base_dir
 
 sys.path.insert(0, src_dir)
+
+PROJECT_ROOT = os.path.dirname(src_dir)
+HOSTED_FILES_DIR = os.path.join(PROJECT_ROOT, "hosted_files")
+HOSTED_TTL_SECONDS = 24 * 60 * 60  # 24 hours
+HOSTED_MAX_BYTES = 5 * 1024 * 1024 * 1024  # 5 GB
+MAX_DISCORD_UPLOAD = 25 * 1024 * 1024  # 25 MB
+FILE_HOST_PORT = int(os.getenv("FILE_HOST_PORT", "8080"))
+FILE_HOST_BASE_URL = (os.getenv("FILE_HOST_BASE_URL") or f"http://localhost:{FILE_HOST_PORT}").rstrip("/")
+
+_file_host_runner: Optional[web.AppRunner] = None
+_file_host_site: Optional[web.TCPSite] = None
+_file_host_started = False
+
+
+def _safe_filename(name: str) -> str:
+    name = os.path.basename(name or "file")
+    keep = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_."
+    cleaned = ''.join(ch if ch in keep else '_' for ch in name)
+    return cleaned or "file"
+
+
+def _cleanup_hosted_files() -> int:
+    """Remove expired files and enforce the 5GB cap. Returns current total bytes."""
+    os.makedirs(HOSTED_FILES_DIR, exist_ok=True)
+    now = time.time()
+    entries = []  # (mtime, size, path)
+    total = 0
+    for fname in list(os.listdir(HOSTED_FILES_DIR)):
+        path = os.path.join(HOSTED_FILES_DIR, fname)
+        try:
+            st = os.stat(path)
+        except FileNotFoundError:
+            continue
+        if not os.path.isfile(path):
+            continue
+        # Drop empty files proactively
+        if st.st_size <= 0 or now - st.st_mtime > HOSTED_TTL_SECONDS:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+            continue
+        total += st.st_size
+        entries.append((st.st_mtime, st.st_size, path))
+
+    # Enforce quota by deleting oldest first
+    if total > HOSTED_MAX_BYTES:
+        entries.sort(key=lambda t: t[0])  # oldest first
+        for mtime, size, path in entries:
+            if total <= HOSTED_MAX_BYTES:
+                break
+            try:
+                os.remove(path)
+                total -= size
+            except Exception:
+                continue
+    return total
+
+
+def _hosted_download_url(stored_name: str) -> str:
+    return f"{FILE_HOST_BASE_URL}/files/{urlquote(stored_name)}"
+
+
+def _ensure_space(effective_bytes: int) -> None:
+    total = _cleanup_hosted_files()
+    if effective_bytes > HOSTED_MAX_BYTES:
+        raise ValueError("File exceeds 5GB host capacity")
+    if total + effective_bytes <= HOSTED_MAX_BYTES:
+        return
+
+    # Delete oldest files until there is room
+    entries = []
+    for fname in list(os.listdir(HOSTED_FILES_DIR)):
+        path = os.path.join(HOSTED_FILES_DIR, fname)
+        try:
+            st = os.stat(path)
+        except Exception:
+            continue
+        if not os.path.isfile(path):
+            continue
+        entries.append((st.st_mtime, st.st_size, path))
+    entries.sort(key=lambda t: t[0])
+    for mtime, size, path in entries:
+        if total + effective_bytes <= HOSTED_MAX_BYTES:
+            break
+        try:
+            os.remove(path)
+            total -= size
+        except Exception:
+            continue
+    if total + effective_bytes > HOSTED_MAX_BYTES:
+        raise ValueError("Insufficient space in hosted storage (5GB cap)")
+
+
+def _store_hosted_file(file_path: str, display_name: str, *, send_zip: bool) -> str:
+    file_size = os.path.getsize(file_path)
+    effective_size = file_size * (2 if send_zip else 1)
+    _ensure_space(effective_size)
+
+    safe_name = _safe_filename(display_name)
+    stored_name = f"{int(time.time())}_{uuid.uuid4().hex[:8]}_{safe_name}"
+    dest_path = os.path.join(HOSTED_FILES_DIR, stored_name)
+    shutil.copy2(file_path, dest_path)
+    return stored_name
+
+
+async def _ensure_file_host_server():
+    global _file_host_runner, _file_host_site, _file_host_started
+    if _file_host_started:
+        return
+
+    async def serve_file(request: web.Request):
+        fname = request.match_info.get("name", "")
+        # Prevent path traversal
+        safe = _safe_filename(fname)
+        if safe != fname:
+            raise web.HTTPNotFound()
+        path = os.path.join(HOSTED_FILES_DIR, fname)
+        if not os.path.isfile(path):
+            raise web.HTTPNotFound()
+        return web.FileResponse(path)
+
+    os.makedirs(HOSTED_FILES_DIR, exist_ok=True)
+    app = web.Application()
+    app.add_routes([web.get('/files/{name}', serve_file)])
+
+    _file_host_runner = web.AppRunner(app)
+    await _file_host_runner.setup()
+    _file_host_site = web.TCPSite(_file_host_runner, host='0.0.0.0', port=FILE_HOST_PORT)
+    await _file_host_site.start()
+    _file_host_started = True
+    sys.stderr.write(f"[FILE HOST] Serving {HOSTED_FILES_DIR} at {FILE_HOST_BASE_URL}/files/<name>\n")
+    sys.stderr.flush()
+
+
+def _effective_discord_size(bytes_len: int, send_zip: bool) -> int:
+    return int(bytes_len * (2 if send_zip else 1))
+
+def _should_offload(bytes_len: int, send_zip: bool) -> bool:
+    return _effective_discord_size(bytes_len, send_zip) > MAX_DISCORD_UPLOAD
+
+
+def _offload_path_blocking(file_path: str, display_name: str, *, send_zip: bool) -> str:
+    stored_name = _store_hosted_file(file_path, display_name, send_zip=send_zip)
+    return _hosted_download_url(stored_name)
 
 
 def _pick_bot_tmpdir() -> str:
@@ -485,6 +636,11 @@ async def on_ready():
         print(f"✅ Synced {len(synced)} command(s)")
     except Exception as e:
         print(f"❌ Failed to sync commands: {e}")
+    # Start lightweight file host for oversized outputs (best effort)
+    try:
+        await _ensure_file_host_server()
+    except Exception as e:
+        print(f"⚠️ File host not started: {e}")
 
 
 async def model_autocomplete(interaction: discord.Interaction, current: str):
@@ -1268,22 +1424,45 @@ async def translate(
         # Send the result (either zip or direct file)
         if os.path.exists(output_file_path):
             file_size = os.path.getsize(output_file_path)
-            max_size = 25 * 1024 * 1024  # 25MB Discord limit
-            
             sys.stderr.write(f"[SUCCESS] Ready to send: {output_file_path} ({file_size / 1024 / 1024:.2f}MB)\\n")
-            
-            if file_size > max_size:
-                title = "⏹️ Translation Stopped - File Too Large" if state['stop_requested'] else "⚠️ File Too Large"
-                description = f"Output file ({file_size / 1024 / 1024:.2f}MB) exceeds Discord's 25MB limit"
-                embed = discord.Embed(
-                    title=title,
-                    description=description,
-                    color=discord.Color.orange()
-                )
+
+            if _should_offload(file_size, send_zip):
+                # Host file on the bot's instance for 24h (5GB rolling cap)
                 try:
-                    await message.edit(embed=embed, view=None)
-                except discord.errors.HTTPException:
-                    await interaction.followup.send(embed=embed)
+                    await _ensure_file_host_server()
+                    loop = asyncio.get_event_loop()
+                    download_url = await loop.run_in_executor(
+                        None,
+                        functools.partial(_offload_path_blocking, output_file_path, output_display_name, send_zip=send_zip),
+                    )
+                    embed = discord.Embed(
+                        title="✅ Translation Complete! (Hosted)",
+                        description=(
+                            f"**File:** {output_display_name}\\n"
+                            f"**Size:** {file_size / 1024 / 1024:.2f}MB\\n"
+                            f"**Download:** {download_url}\\n"
+                            f"Hosted for 24 hours (shared 5GB cap)."
+                        ),
+                        color=discord.Color.green()
+                    )
+                    try:
+                        await message.edit(embed=embed, view=None)
+                    except discord.errors.HTTPException:
+                        await interaction.followup.send(embed=embed)
+                except Exception as e:
+                    sys.stderr.write(f"[HOST ERROR] {e}\\n")
+                    embed = discord.Embed(
+                        title="⚠️ File Too Large",
+                        description=(
+                            f"Output file is over Discord's 25MB limit (effective size { _effective_discord_size(file_size, send_zip)/1024/1024:.2f}MB).\\n"
+                            f"Hosting also failed: {e}"
+                        ),
+                        color=discord.Color.orange()
+                    )
+                    try:
+                        await message.edit(embed=embed, view=None)
+                    except discord.errors.HTTPException:
+                        await interaction.followup.send(embed=embed)
             else:
                 if state['stop_requested']:
                     title = "⏹️ Translation Stopped - Partial Results"
@@ -1311,12 +1490,25 @@ async def translate(
                         file=discord.File(output_file_path, filename=output_display_name),
                         ephemeral=_ephemeral(interaction)
                     )
-                except discord.errors.HTTPException as e:
-                    await interaction.followup.send(
-                        f"Translation complete but file is too large to upload ({file_size / 1024 / 1024:.2f}MB).\n"
-                        f"Please retrieve it from the server.",
-                        ephemeral=_ephemeral(interaction)
-                    )
+                except discord.errors.HTTPException:
+                    # As a fallback, attempt to host even if upload failed for other reasons
+                    try:
+                        await _ensure_file_host_server()
+                        loop = asyncio.get_event_loop()
+                        download_url = await loop.run_in_executor(
+                            None,
+                            functools.partial(_offload_path_blocking, output_file_path, output_display_name, send_zip=send_zip),
+                        )
+                        await interaction.followup.send(
+                            f"Upload failed. Download here (24h): {download_url}",
+                            ephemeral=_ephemeral(interaction)
+                        )
+                    except Exception:
+                        await interaction.followup.send(
+                            f"Translation complete but file is too large to upload ({file_size / 1024 / 1024:.2f}MB).\n"
+                            f"Please retrieve it from the server.",
+                            ephemeral=_ephemeral(interaction)
+                        )
         else:
             raise FileNotFoundError(f"Output file not found: {output_file_path}")
     
@@ -1929,25 +2121,63 @@ async def extract(
         if output_file_path and os.path.exists(output_file_path):
             file_size = os.path.getsize(output_file_path)
 
-            embed = discord.Embed(
-                title="✅ Glossary Extraction Complete!",
-                description=f"**File:** {output_display_name}\\n**Size:** {file_size / 1024:.2f}KB",
-                color=discord.Color.green()
-            )
-            await message.edit(embed=embed, view=None)
+            if _should_offload(file_size, send_zip):
+                try:
+                    await _ensure_file_host_server()
+                    loop = asyncio.get_event_loop()
+                    download_url = await loop.run_in_executor(
+                        None,
+                        functools.partial(_offload_path_blocking, output_file_path, output_display_name, send_zip=send_zip),
+                    )
+                    embed = discord.Embed(
+                        title="✅ Glossary Extraction Complete! (Hosted)",
+                        description=(
+                            f"**File:** {output_display_name}\n"
+                            f"**Size:** {file_size / 1024 / 1024:.2f}MB\n"
+                            f"**Download:** {download_url}\n"
+                            f"Hosted for 24 hours (shared 5GB cap)."
+                        ),
+                        color=discord.Color.green()
+                    )
+                    await message.edit(embed=embed, view=None)
+                except Exception as e:
+                    sys.stderr.write(f"[HOST ERROR] {e}\n")
+                    await interaction.followup.send(
+                        f"Glossary complete but file is too large to upload ({_effective_discord_size(file_size, send_zip)/1024/1024:.2f}MB) and hosting failed: {e}",
+                        ephemeral=_ephemeral(interaction)
+                    )
+            else:
+                embed = discord.Embed(
+                    title="✅ Glossary Extraction Complete!",
+                    description=f"**File:** {output_display_name}\n**Size:** {file_size / 1024:.2f}KB",
+                    color=discord.Color.green()
+                )
+                await message.edit(embed=embed, view=None)
 
-            try:
-                await interaction.followup.send(
-                    f"Here's your extracted glossary{(' (zipped)' if is_zip_output else '')}!",
-                    file=discord.File(output_file_path, filename=output_display_name),
-                    ephemeral=_ephemeral(interaction)
-                )
-            except discord.errors.HTTPException:
-                await interaction.followup.send(
-                    f"Glossary complete but file is too large to upload.\n"
-                    f"Please retrieve it from the server.",
-                    ephemeral=_ephemeral(interaction)
-                )
+                try:
+                    await interaction.followup.send(
+                        f"Here's your extracted glossary{(' (zipped)' if is_zip_output else '')}!",
+                        file=discord.File(output_file_path, filename=output_display_name),
+                        ephemeral=_ephemeral(interaction)
+                    )
+                except discord.errors.HTTPException:
+                    try:
+                        await _ensure_file_host_server()
+                        loop = asyncio.get_event_loop()
+                        download_url = await loop.run_in_executor(
+                            None,
+                            functools.partial(_offload_path_blocking, output_file_path, output_display_name, send_zip=send_zip),
+                        )
+                        await interaction.followup.send(
+                            f"Upload failed. Download here (24h): {download_url}",
+                            ephemeral=_ephemeral(interaction)
+                        )
+                    except Exception:
+                        await interaction.followup.send(
+                            f"Glossary complete but file is too large to upload.\n"
+                            f"Please retrieve it from the server.",
+                            ephemeral=_ephemeral(interaction)
+                        )
         else:
             embed = discord.Embed(
                 title="❌ Extraction Failed",
@@ -2055,7 +2285,11 @@ async def help_command(interaction: discord.Interaction):
     
     embed.add_field(
         name="Notes",
-        value="• Max file size: 25MB\n• Uses your Glossarion config\n• API key not stored",
+        value=(
+            "• Files over 25MB auto-hosted for 24h (shared 5GB cap)\n"
+            "• Uses your Glossarion config\n"
+            "• API key not stored"
+        ),
         inline=False
     )
     
