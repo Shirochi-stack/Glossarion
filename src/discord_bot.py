@@ -1421,6 +1421,20 @@ async def translate(
                 sys.stderr.write(f"[ERROR] Failed to create zip: {e}\\n")
                 raise e
 
+        async def _dm_or_channel(content: str = None, embed: Optional[discord.Embed] = None, file: Optional[discord.File] = None):
+            # Always prefer DM; fall back to channel if DMs blocked.
+            try:
+                await interaction.user.send(content=content, embed=embed, file=file)
+                return True
+            except discord.Forbidden:
+                try:
+                    await interaction.channel.send(content=content, embed=embed, file=file)
+                    return True
+                except Exception:
+                    return False
+            except Exception:
+                return False
+
         # Send the result (either zip or direct file)
         if os.path.exists(output_file_path):
             file_size = os.path.getsize(output_file_path)
@@ -1445,24 +1459,12 @@ async def translate(
                         ),
                         color=discord.Color.green()
                     )
-                    try:
-                        await message.edit(embed=embed, view=None)
-                    except discord.errors.HTTPException:
-                        await interaction.followup.send(embed=embed)
+                    await _dm_or_channel(embed=embed)
                 except Exception as e:
                     sys.stderr.write(f"[HOST ERROR] {e}\\n")
-                    embed = discord.Embed(
-                        title="⚠️ File Too Large",
-                        description=(
-                            f"Output file is over Discord's 25MB limit (effective size { _effective_discord_size(file_size, send_zip)/1024/1024:.2f}MB).\\n"
-                            f"Hosting also failed: {e}"
-                        ),
-                        color=discord.Color.orange()
+                    await _dm_or_channel(
+                        content="Could not host the output file right now. Please try again later."
                     )
-                    try:
-                        await message.edit(embed=embed, view=None)
-                    except discord.errors.HTTPException:
-                        await interaction.followup.send(embed=embed)
             else:
                 if state['stop_requested']:
                     title = "⏹️ Translation Stopped - Partial Results"
@@ -1478,19 +1480,15 @@ async def translate(
                     description=f"**File:** {output_display_name}\\n**Size:** {file_size / 1024 / 1024:.2f}MB\\n\\n{desc_text}",
                     color=color
                 )
-                try:
-                    await message.edit(embed=embed, view=None)
-                except discord.errors.HTTPException:
-                    await interaction.followup.send(embed=embed)
+                sent = await _dm_or_channel(embed=embed)
                 
                 try:
                     msg_content = f"Here's your {('zipped ' if is_zip_output else '')}translation output!"
-                    await interaction.followup.send(
-                        msg_content,
+                    await _dm_or_channel(
+                        content=msg_content,
                         file=discord.File(output_file_path, filename=output_display_name),
-                        ephemeral=_ephemeral(interaction)
                     )
-                except discord.errors.HTTPException:
+                except Exception:
                     # As a fallback, attempt to host even if upload failed for other reasons
                     try:
                         await _ensure_file_host_server()
@@ -1499,15 +1497,12 @@ async def translate(
                             None,
                             functools.partial(_offload_path_blocking, output_file_path, output_display_name, send_zip=send_zip),
                         )
-                        await interaction.followup.send(
-                            f"Upload failed. Download here (24h): {download_url}",
-                            ephemeral=_ephemeral(interaction)
+                        await _dm_or_channel(
+                            content=f"Download (24h): {download_url}",
                         )
                     except Exception:
-                        await interaction.followup.send(
-                            f"Translation complete but file is too large to upload ({file_size / 1024 / 1024:.2f}MB).\n"
-                            f"Please retrieve it from the server.",
-                            ephemeral=_ephemeral(interaction)
+                        await _dm_or_channel(
+                            content="Upload failed and hosting is unavailable right now."
                         )
         else:
             raise FileNotFoundError(f"Output file not found: {output_file_path}")
@@ -2117,6 +2112,19 @@ async def extract(
                         output_display_name = f
                         break
 
+        async def _dm_or_channel(content: str = None, embed: Optional[discord.Embed] = None, file: Optional[discord.File] = None):
+            try:
+                await interaction.user.send(content=content, embed=embed, file=file)
+                return True
+            except discord.Forbidden:
+                try:
+                    await interaction.channel.send(content=content, embed=embed, file=file)
+                    return True
+                except Exception:
+                    return False
+            except Exception:
+                return False
+
         # Send output
         if output_file_path and os.path.exists(output_file_path):
             file_size = os.path.getsize(output_file_path)
@@ -2139,12 +2147,11 @@ async def extract(
                         ),
                         color=discord.Color.green()
                     )
-                    await message.edit(embed=embed, view=None)
+                    await _dm_or_channel(embed=embed)
                 except Exception as e:
-                    sys.stderr.write(f"[HOST ERROR] {e}\n")
-                    await interaction.followup.send(
-                        f"Glossary complete but file is too large to upload ({_effective_discord_size(file_size, send_zip)/1024/1024:.2f}MB) and hosting failed: {e}",
-                        ephemeral=_ephemeral(interaction)
+                    sys.stderr.write(f"[HOST ERROR] {e}\\n")
+                    await _dm_or_channel(
+                        content="Could not host the glossary output right now. Please try again later."
                     )
             else:
                 embed = discord.Embed(
@@ -2152,15 +2159,14 @@ async def extract(
                     description=f"**File:** {output_display_name}\n**Size:** {file_size / 1024:.2f}KB",
                     color=discord.Color.green()
                 )
-                await message.edit(embed=embed, view=None)
+                await _dm_or_channel(embed=embed)
 
                 try:
-                    await interaction.followup.send(
-                        f"Here's your extracted glossary{(' (zipped)' if is_zip_output else '')}!",
+                    await _dm_or_channel(
+                        content=f"Here's your extracted glossary{(' (zipped)' if is_zip_output else '')}!",
                         file=discord.File(output_file_path, filename=output_display_name),
-                        ephemeral=_ephemeral(interaction)
                     )
-                except discord.errors.HTTPException:
+                except Exception:
                     try:
                         await _ensure_file_host_server()
                         loop = asyncio.get_event_loop()
@@ -2168,15 +2174,12 @@ async def extract(
                             None,
                             functools.partial(_offload_path_blocking, output_file_path, output_display_name, send_zip=send_zip),
                         )
-                        await interaction.followup.send(
-                            f"Upload failed. Download here (24h): {download_url}",
-                            ephemeral=_ephemeral(interaction)
+                        await _dm_or_channel(
+                            content=f"Download (24h): {download_url}",
                         )
                     except Exception:
-                        await interaction.followup.send(
-                            f"Glossary complete but file is too large to upload.\n"
-                            f"Please retrieve it from the server.",
-                            ephemeral=_ephemeral(interaction)
+                        await _dm_or_channel(
+                            content="Upload failed and hosting is unavailable right now."
                         )
         else:
             embed = discord.Embed(
@@ -2184,7 +2187,7 @@ async def extract(
                 description="Could not find or prepare glossary output file",
                 color=discord.Color.red()
             )
-            await message.edit(embed=embed, view=None)
+            await _dm_or_channel(embed=embed)
     
     except Exception as e:
         import traceback
