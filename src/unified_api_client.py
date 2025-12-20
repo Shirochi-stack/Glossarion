@@ -4119,8 +4119,6 @@ class UnifiedClient:
                                 print(f"  📊 Already at max retry tokens ({current_max_tokens}) and retry already attempted, not retrying")
                     else:
                         print(f"  📋 RETRY_TRUNCATED disabled - accepting truncated response")
-                    else:
-                        print(f"  📋 RETRY_TRUNCATED disabled - accepting truncated response")
                 
                 # Apply API delay after successful call (even if truncated)
                 # SKIP DELAY DURING CLEANUP
