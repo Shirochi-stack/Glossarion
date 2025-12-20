@@ -30,6 +30,7 @@ import functools
 from urllib.parse import quote as urlquote
 from typing import Optional
 
+import requests
 from aiohttp import web
 
 # Add src directory to path
@@ -52,6 +53,8 @@ HOSTED_MAX_BYTES = 5 * 1024 * 1024 * 1024  # 5 GB
 MAX_DISCORD_UPLOAD = 25 * 1024 * 1024  # 25 MB
 FILE_HOST_PORT = int(os.getenv("FILE_HOST_PORT", "8080"))
 FILE_HOST_BASE_URL = (os.getenv("FILE_HOST_BASE_URL") or f"http://localhost:{FILE_HOST_PORT}").rstrip("/")
+GOFILE_TOKEN = os.getenv("GOFILE_TOKEN")
+ORACLE_PAR_BASE = os.getenv("ORACLE_PAR_BASE", "")  # PAR base ending with /o/
 
 _file_host_runner: Optional[web.AppRunner] = None
 _file_host_site: Optional[web.TCPSite] = None
@@ -189,6 +192,45 @@ def _should_offload(bytes_len: int, send_zip: bool) -> bool:
 def _offload_path_blocking(file_path: str, display_name: str, *, send_zip: bool) -> str:
     stored_name = _store_hosted_file(file_path, display_name, send_zip=send_zip)
     return _hosted_download_url(stored_name)
+
+
+def _upload_to_oracle_par(path: str, display_name: str | None) -> str:
+    base = ORACLE_PAR_BASE
+    if not base:
+        raise RuntimeError("ORACLE_PAR_BASE not set")
+    base = base.rstrip('/') + '/'
+    fname = display_name or os.path.basename(path)
+    url = base + requests.utils.quote(fname)
+    with open(path, "rb") as f:
+        resp = requests.put(url, data=f, headers={"Content-Type": "application/octet-stream"}, timeout=180)
+    if resp.status_code not in (200, 201, 204):
+        raise RuntimeError(f"Oracle upload failed HTTP {resp.status_code}: {resp.text[:200]}")
+    return url
+
+
+def _upload_to_gofile(path: str, display_name: str | None) -> str:
+    """Upload file to Gofile and return a direct link."""
+    server_resp = requests.get("https://api.gofile.io/getServer", timeout=15)
+    server_json = server_resp.json()
+    server = server_json.get("data", {}).get("server")
+    if not server:
+        raise RuntimeError("Failed to get Gofile server")
+
+    name = display_name or os.path.basename(path)
+    with open(path, "rb") as f:
+        files = {"file": (name, f, "application/octet-stream")}
+        headers = {"Authorization": f"Bearer {GOFILE_TOKEN}"} if GOFILE_TOKEN else {}
+        upload_resp = requests.post(f"https://{server}.gofile.io/uploadFile",
+                                    files=files,
+                                    headers=headers,
+                                    timeout=300)
+        data = upload_resp.json()
+    if upload_resp.status_code != 200 or data.get("status") != "ok":
+        raise RuntimeError(f"Gofile upload failed: {data}")
+    link = data.get("data", {}).get("directLink") or data.get("data", {}).get("downloadPage")
+    if not link:
+        raise RuntimeError("Gofile response missing link")
+    return link
 
 
 def _pick_bot_tmpdir() -> str:
@@ -636,11 +678,6 @@ async def on_ready():
         print(f"✅ Synced {len(synced)} command(s)")
     except Exception as e:
         print(f"❌ Failed to sync commands: {e}")
-    # Start lightweight file host for oversized outputs (best effort)
-    try:
-        await _ensure_file_host_server()
-    except Exception as e:
-        print(f"⚠️ File host not started: {e}")
 
 
 async def model_autocomplete(interaction: discord.Interaction, current: str):
@@ -1441,30 +1478,45 @@ async def translate(
             sys.stderr.write(f"[SUCCESS] Ready to send: {output_file_path} ({file_size / 1024 / 1024:.2f}MB)\\n")
 
             if _should_offload(file_size, send_zip):
-                # Host file on the bot's instance for 24h (5GB rolling cap)
                 try:
-                    await _ensure_file_host_server()
                     loop = asyncio.get_event_loop()
                     download_url = await loop.run_in_executor(
                         None,
-                        functools.partial(_offload_path_blocking, output_file_path, output_display_name, send_zip=send_zip),
+                        functools.partial(_upload_to_oracle_par, output_file_path, output_display_name),
                     )
                     embed = discord.Embed(
-                        title="✅ Translation Complete! (Hosted)",
+                        title="✅ Translation Complete! (Oracle)",
                         description=(
                             f"**File:** {output_display_name}\\n"
                             f"**Size:** {file_size / 1024 / 1024:.2f}MB\\n"
-                            f"**Download:** {download_url}\\n"
-                            f"Hosted for 24 hours (shared 5GB cap)."
+                            f"**Download:** {download_url}"
                         ),
                         color=discord.Color.green()
                     )
                     await _dm_or_channel(embed=embed)
                 except Exception as e:
-                    sys.stderr.write(f"[HOST ERROR] {e}\\n")
-                    await _dm_or_channel(
-                        content="Could not host the output file right now. Please try again later."
-                    )
+                    sys.stderr.write(f"[HOST ERROR] Oracle upload failed: {e}\\n")
+                    try:
+                        loop = asyncio.get_event_loop()
+                        download_url = await loop.run_in_executor(
+                            None,
+                            functools.partial(_upload_to_gofile, output_file_path, output_display_name),
+                        )
+                        embed = discord.Embed(
+                            title="✅ Translation Complete! (Gofile)",
+                            description=(
+                                f"**File:** {output_display_name}\\n"
+                                f"**Size:** {file_size / 1024 / 1024:.2f}MB\\n"
+                                f"**Download:** {download_url}"
+                            ),
+                            color=discord.Color.green()
+                        )
+                        await _dm_or_channel(embed=embed)
+                    except Exception as e2:
+                        sys.stderr.write(f"[HOST ERROR] {e2}\\n")
+                        await _dm_or_channel(
+                            content="Could not upload the output file right now. Please try again later."
+                        )
             else:
                 if state['stop_requested']:
                     title = "⏹️ Translation Stopped - Partial Results"
@@ -1489,20 +1541,19 @@ async def translate(
                         file=discord.File(output_file_path, filename=output_display_name),
                     )
                 except Exception:
-                    # As a fallback, attempt to host even if upload failed for other reasons
+                    # Fallback: try uploading to Gofile if direct send fails
                     try:
-                        await _ensure_file_host_server()
                         loop = asyncio.get_event_loop()
                         download_url = await loop.run_in_executor(
                             None,
-                            functools.partial(_offload_path_blocking, output_file_path, output_display_name, send_zip=send_zip),
+                            functools.partial(_upload_to_gofile, output_file_path, output_display_name),
                         )
                         await _dm_or_channel(
-                            content=f"Download (24h): {download_url}",
+                            content=f"Download: {download_url}",
                         )
                     except Exception:
                         await _dm_or_channel(
-                            content="Upload failed and hosting is unavailable right now."
+                            content="Upload failed and Gofile is unavailable right now."
                         )
         else:
             raise FileNotFoundError(f"Output file not found: {output_file_path}")
@@ -2131,28 +2182,44 @@ async def extract(
 
             if _should_offload(file_size, send_zip):
                 try:
-                    await _ensure_file_host_server()
                     loop = asyncio.get_event_loop()
                     download_url = await loop.run_in_executor(
                         None,
-                        functools.partial(_offload_path_blocking, output_file_path, output_display_name, send_zip=send_zip),
+                        functools.partial(_upload_to_oracle_par, output_file_path, output_display_name),
                     )
                     embed = discord.Embed(
-                        title="✅ Glossary Extraction Complete! (Hosted)",
+                        title="✅ Glossary Extraction Complete! (Oracle)",
                         description=(
-                            f"**File:** {output_display_name}\n"
-                            f"**Size:** {file_size / 1024 / 1024:.2f}MB\n"
-                            f"**Download:** {download_url}\n"
-                            f"Hosted for 24 hours (shared 5GB cap)."
+                            f"**File:** {output_display_name}\\n"
+                            f"**Size:** {file_size / 1024 / 1024:.2f}MB\\n"
+                            f"**Download:** {download_url}"
                         ),
                         color=discord.Color.green()
                     )
                     await _dm_or_channel(embed=embed)
                 except Exception as e:
-                    sys.stderr.write(f"[HOST ERROR] {e}\\n")
-                    await _dm_or_channel(
-                        content="Could not host the glossary output right now. Please try again later."
-                    )
+                    sys.stderr.write(f"[HOST ERROR] Oracle upload failed: {e}\\n")
+                    try:
+                        loop = asyncio.get_event_loop()
+                        download_url = await loop.run_in_executor(
+                            None,
+                            functools.partial(_upload_to_gofile, output_file_path, output_display_name),
+                        )
+                        embed = discord.Embed(
+                            title="✅ Glossary Extraction Complete! (Gofile)",
+                            description=(
+                                f"**File:** {output_display_name}\\n"
+                                f"**Size:** {file_size / 1024 / 1024:.2f}MB\\n"
+                                f"**Download:** {download_url}"
+                            ),
+                            color=discord.Color.green()
+                        )
+                        await _dm_or_channel(embed=embed)
+                    except Exception as e2:
+                        sys.stderr.write(f"[HOST ERROR] {e2}\\n")
+                        await _dm_or_channel(
+                            content="Could not upload the glossary output right now. Please try again later."
+                        )
             else:
                 embed = discord.Embed(
                     title="✅ Glossary Extraction Complete!",
@@ -2168,18 +2235,17 @@ async def extract(
                     )
                 except Exception:
                     try:
-                        await _ensure_file_host_server()
                         loop = asyncio.get_event_loop()
                         download_url = await loop.run_in_executor(
                             None,
-                            functools.partial(_offload_path_blocking, output_file_path, output_display_name, send_zip=send_zip),
+                            functools.partial(_upload_to_gofile, output_file_path, output_display_name),
                         )
                         await _dm_or_channel(
-                            content=f"Download (24h): {download_url}",
+                            content=f"Download: {download_url}",
                         )
                     except Exception:
                         await _dm_or_channel(
-                            content="Upload failed and hosting is unavailable right now."
+                            content="Upload failed and Gofile is unavailable right now."
                         )
         else:
             embed = discord.Embed(
