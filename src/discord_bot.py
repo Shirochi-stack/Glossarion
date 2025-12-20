@@ -208,6 +208,40 @@ def _upload_to_oracle_par(path: str, display_name: str | None) -> str:
     return url
 
 
+def _upload_to_tmpfiles(path: str, display_name: str | None) -> str:
+    fname = display_name or os.path.basename(path)
+    with open(path, "rb") as f:
+        files = {"file": (fname, f, "application/octet-stream")}
+        resp = requests.post("https://tmpfiles.org/api/v1/upload", files=files, timeout=60)
+    if resp.status_code != 200:
+        raise RuntimeError(f"tmpfiles HTTP {resp.status_code}")
+    try:
+        data = resp.json()
+    except Exception:
+        data = {}
+    link = data.get("data", {}).get("url") if isinstance(data.get("data"), dict) else None
+    if not link:
+        text = resp.text.strip()
+        if text.startswith("http"):
+            link = text
+    if not link:
+        raise RuntimeError(f"tmpfiles response invalid: {resp.text[:200]}")
+    return link
+
+
+def _upload_to_tempsh(path: str, display_name: str | None) -> str:
+    fname = display_name or os.path.basename(path)
+    with open(path, "rb") as f:
+        files = {"file": (fname, f, "application/octet-stream")}
+        resp = requests.post("https://temp.sh/upload", files=files, timeout=60)
+    if resp.status_code != 200:
+        raise RuntimeError(f"temp.sh HTTP {resp.status_code}")
+    link = resp.text.strip()
+    if not link.startswith("http"):
+        raise RuntimeError(f"temp.sh response invalid: {link[:200]}")
+    return link
+
+
 def _upload_to_gofile(path: str, display_name: str | None) -> str:
     """Upload file to Gofile and return a direct link."""
     server_resp = requests.get("https://api.gofile.io/getServer", timeout=15)
@@ -1484,8 +1518,23 @@ async def translate(
                         None,
                         functools.partial(_upload_to_oracle_par, output_file_path, output_display_name),
                     )
+                except Exception as e:
+                    sys.stderr.write(f"[HOST ERROR] Oracle upload failed: {e}\\n")
+                    download_url = None
+                if not download_url:
+                    for uploader, name in (( _upload_to_tmpfiles, "tmpfiles"), (_upload_to_tempsh, "temp.sh"), (_upload_to_gofile, "gofile")):
+                        try:
+                            download_url = await loop.run_in_executor(
+                                None,
+                                functools.partial(uploader, output_file_path, output_display_name),
+                            )
+                            break
+                        except Exception as e2:
+                            sys.stderr.write(f"[HOST ERROR] {name}: {e2}\\n")
+                            continue
+                if download_url:
                     embed = discord.Embed(
-                        title="✅ Translation Complete! (Oracle)",
+                        title="✅ Translation Complete!",
                         description=(
                             f"**File:** {output_display_name}\\n"
                             f"**Size:** {file_size / 1024 / 1024:.2f}MB\\n"
@@ -1494,29 +1543,10 @@ async def translate(
                         color=discord.Color.green()
                     )
                     await _dm_or_channel(embed=embed)
-                except Exception as e:
-                    sys.stderr.write(f"[HOST ERROR] Oracle upload failed: {e}\\n")
-                    try:
-                        loop = asyncio.get_event_loop()
-                        download_url = await loop.run_in_executor(
-                            None,
-                            functools.partial(_upload_to_gofile, output_file_path, output_display_name),
-                        )
-                        embed = discord.Embed(
-                            title="✅ Translation Complete! (Gofile)",
-                            description=(
-                                f"**File:** {output_display_name}\\n"
-                                f"**Size:** {file_size / 1024 / 1024:.2f}MB\\n"
-                                f"**Download:** {download_url}"
-                            ),
-                            color=discord.Color.green()
-                        )
-                        await _dm_or_channel(embed=embed)
-                    except Exception as e2:
-                        sys.stderr.write(f"[HOST ERROR] {e2}\\n")
-                        await _dm_or_channel(
-                            content="Could not upload the output file right now. Please try again later."
-                        )
+                else:
+                    await _dm_or_channel(
+                        content="Could not upload the output file right now. Please try again later."
+                    )
             else:
                 if state['stop_requested']:
                     title = "⏹️ Translation Stopped - Partial Results"
@@ -2187,8 +2217,23 @@ async def extract(
                         None,
                         functools.partial(_upload_to_oracle_par, output_file_path, output_display_name),
                     )
+                except Exception as e:
+                    sys.stderr.write(f"[HOST ERROR] Oracle upload failed: {e}\\n")
+                    download_url = None
+                if not download_url:
+                    for uploader, name in (( _upload_to_tmpfiles, "tmpfiles"), (_upload_to_tempsh, "temp.sh"), (_upload_to_gofile, "gofile")):
+                        try:
+                            download_url = await loop.run_in_executor(
+                                None,
+                                functools.partial(uploader, output_file_path, output_display_name),
+                            )
+                            break
+                        except Exception as e2:
+                            sys.stderr.write(f"[HOST ERROR] {name}: {e2}\\n")
+                            continue
+                if download_url:
                     embed = discord.Embed(
-                        title="✅ Glossary Extraction Complete! (Oracle)",
+                        title="✅ Glossary Extraction Complete!",
                         description=(
                             f"**File:** {output_display_name}\\n"
                             f"**Size:** {file_size / 1024 / 1024:.2f}MB\\n"
@@ -2197,29 +2242,10 @@ async def extract(
                         color=discord.Color.green()
                     )
                     await _dm_or_channel(embed=embed)
-                except Exception as e:
-                    sys.stderr.write(f"[HOST ERROR] Oracle upload failed: {e}\\n")
-                    try:
-                        loop = asyncio.get_event_loop()
-                        download_url = await loop.run_in_executor(
-                            None,
-                            functools.partial(_upload_to_gofile, output_file_path, output_display_name),
-                        )
-                        embed = discord.Embed(
-                            title="✅ Glossary Extraction Complete! (Gofile)",
-                            description=(
-                                f"**File:** {output_display_name}\\n"
-                                f"**Size:** {file_size / 1024 / 1024:.2f}MB\\n"
-                                f"**Download:** {download_url}"
-                            ),
-                            color=discord.Color.green()
-                        )
-                        await _dm_or_channel(embed=embed)
-                    except Exception as e2:
-                        sys.stderr.write(f"[HOST ERROR] {e2}\\n")
-                        await _dm_or_channel(
-                            content="Could not upload the glossary output right now. Please try again later."
-                        )
+                else:
+                    await _dm_or_channel(
+                        content="Could not upload the glossary output right now. Please try again later."
+                    )
             else:
                 embed = discord.Embed(
                     title="✅ Glossary Extraction Complete!",
