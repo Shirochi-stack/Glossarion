@@ -1538,7 +1538,7 @@ async def translate(
                         description=(
                             f"**File:** {output_display_name}\\n"
                             f"**Size:** {file_size / 1024 / 1024:.2f}MB\\n"
-                            f"**Download:** {download_url}"
+                            f"**Download:** <{download_url}>"
                         ),
                         color=discord.Color.green()
                     )
@@ -2237,7 +2237,7 @@ async def extract(
                         description=(
                             f"**File:** {output_display_name}\\n"
                             f"**Size:** {file_size / 1024 / 1024:.2f}MB\\n"
-                            f"**Download:** {download_url}"
+                            f"**Download:** <{download_url}>"
                         ),
                         color=discord.Color.green()
                     )
