@@ -3590,66 +3590,47 @@ Prioritize names that appear with honorifics or in important contexts."""
         browse_btn.clicked.connect(browse_glossary)
         browse_btn.setStyleSheet("background-color: #495057; color: white; padding: 8px; font-weight: bold;")
         file_layout.addWidget(browse_btn)
-        
-        # Editor control buttons
-        editor_layout.addSpacing(10)
-        
-        # Row 1
-        row1_layout = QHBoxLayout()
-        editor_layout.addLayout(row1_layout)
-        editor_layout.addSpacing(2)
-       
-        buttons_row1 = [
-           ("Reload", load_glossary_for_editing, "#0891b2"),
-           ("Delete Selected", delete_selected_entries, "#991b1b"),
-           ("Clean Empty Fields", clean_empty_fields, "#b45309"),
-           ("Remove Duplicates", remove_duplicates, "#b45309"),
-           ("Backup Settings", backup_settings_dialog, "#15803d")
-        ]
-       
-        for text, cmd, color in buttons_row1:
+
+        # Advanced editing toggle and button grid placed above the tree
+        advanced_toggle_widget = QWidget()
+        advanced_toggle_layout = QHBoxLayout(advanced_toggle_widget)
+        advanced_toggle_layout.setContentsMargins(0, 4, 0, 4)
+        advanced_toggle_layout.addStretch()
+        advanced_checkbox = QCheckBox("Advanced editing")
+        advanced_checkbox.setChecked(False)
+        advanced_toggle_layout.addWidget(advanced_checkbox)
+        content_frame_layout.insertWidget(1, advanced_toggle_widget)
+
+        advanced_tools_widget = QWidget()
+        advanced_tools_layout = QGridLayout(advanced_tools_widget)
+        advanced_tools_layout.setContentsMargins(0, 0, 0, 4)
+        advanced_tools_layout.setHorizontalSpacing(10)
+        advanced_tools_layout.setVerticalSpacing(8)
+
+        def add_adv_btn(row, col, text, handler, color, width=150):
             btn = QPushButton(text)
-            btn.setFixedWidth(135)
-            btn.clicked.connect(cmd)
+            btn.setFixedWidth(width)
+            btn.clicked.connect(handler)
             btn.setStyleSheet(f"background-color: {color}; color: white; padding: 8px; font-weight: bold;")
-            row1_layout.addWidget(btn)
-       
-        # Row 2
-        row2_layout = QHBoxLayout()
-        editor_layout.addLayout(row2_layout)
-        editor_layout.addSpacing(2)
+            advanced_tools_layout.addWidget(btn, row, col)
 
-        buttons_row2 = [
-           ("Trim Entries", smart_trim_dialog, "#1e40af"),
-           ("Filter Entries", filter_entries_dialog, "#1e40af"),
-           ("Convert Format", lambda: self.convert_glossary_format(load_glossary_for_editing), "#0891b2"),
-           ("Export Selection", export_selection, "#4b5563"),
-           ("About Format", duplicate_detection_settings, "#0891b2")
-        ]
+        add_adv_btn(0, 0, "Reload", load_glossary_for_editing, "#0891b2")
+        add_adv_btn(0, 1, "Clean Empty Fields", clean_empty_fields, "#b45309")
+        add_adv_btn(0, 2, "Remove Duplicates", remove_duplicates, "#b45309")
+        add_adv_btn(0, 3, "Backup Settings", backup_settings_dialog, "#15803d")
 
-        for text, cmd, color in buttons_row2:
-            btn = QPushButton(text)
-            btn.setFixedWidth(135)
-            btn.clicked.connect(cmd)
-            btn.setStyleSheet(f"background-color: {color}; color: white; padding: 8px; font-weight: bold;")
-            row2_layout.addWidget(btn)
+        add_adv_btn(1, 0, "Trim Entries", smart_trim_dialog, "#1e40af")
+        add_adv_btn(1, 1, "Filter Entries", filter_entries_dialog, "#1e40af")
+        add_adv_btn(1, 2, "Convert Format", lambda: self.convert_glossary_format(load_glossary_for_editing), "#0891b2")
+        add_adv_btn(1, 3, "Export Selection", export_selection, "#4b5563")
+        add_adv_btn(1, 4, "About Format", duplicate_detection_settings, "#0891b2")
 
-        # Row 3
-        row3_layout = QHBoxLayout()
-        editor_layout.addLayout(row3_layout)
-        editor_layout.addSpacing(2)
+        advanced_tools_widget.setVisible(False)
+        content_frame_layout.insertWidget(2, advanced_tools_widget)
 
-        save_btn = QPushButton("Save Changes")
-        save_btn.setFixedWidth(165)
-        save_btn.clicked.connect(save_edited_glossary)
-        save_btn.setStyleSheet("background-color: #15803d; color: white; padding: 8px; font-weight: bold;")
-        row3_layout.addWidget(save_btn)
-        
-        save_as_btn = QPushButton("Save As...")
-        save_as_btn.setFixedWidth(165)
-        save_as_btn.clicked.connect(save_as_glossary)
-        save_as_btn.setStyleSheet("background-color: #15803d; color: white; padding: 8px; font-weight: bold; border: 1px solid #15803d;")
-        row3_layout.addWidget(save_as_btn)
+        def toggle_advanced(state):
+            advanced_tools_widget.setVisible(bool(state))
+        advanced_checkbox.stateChanged.connect(toggle_advanced)
 
         # Keyboard shortcuts
         QShortcut(QKeySequence.Save, self.dialog, activated=save_edited_glossary)
