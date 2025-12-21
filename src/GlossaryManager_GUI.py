@@ -3269,6 +3269,31 @@ Prioritize names that appear with honorifics or in important contexts."""
                
            except Exception as e:
                QMessageBox.critical(self.dialog, "Error", f"Failed to save: {e}")
+
+        # Automatically load the currently auto-loaded glossary (CSV preferred) when opening the tab
+        def auto_select_current_glossary():
+            try:
+                auto_path = getattr(self, 'auto_loaded_glossary_path', None)
+                manual_path = getattr(self, 'manual_glossary_path', None)
+
+                # Prefer the auto-loaded glossary if it exists and is a CSV
+                if auto_path and os.path.exists(auto_path):
+                    self.editor_file_entry.setText(auto_path)
+                    load_glossary_for_editing()
+                    return
+
+                # Fallback to any currently loaded manual glossary
+                if manual_path and os.path.exists(manual_path):
+                    self.editor_file_entry.setText(manual_path)
+                    load_glossary_for_editing()
+            except Exception as e:
+                # Fail silently but log for debugging
+                try:
+                    self.append_log(f"⚠️ Failed to auto-select glossary for editor: {e}")
+                except Exception:
+                    pass
+
+        auto_select_current_glossary()
        
         # Buttons
         browse_btn = QPushButton("Browse")
