@@ -268,3 +268,24 @@ Use this if you have multiple keys or hit rate limits often.
    - You can set "Fallback Keys" for specific models.
 
 ---
+
+## 8️⃣ Custom API Endpoints & Local LLMs
+
+You can connect Glossarion to local AI models (via Ollama, vLLM, LM Studio) or use custom OpenAI-compatible endpoints.
+
+### 🔌 Configuring a Custom Endpoint
+1. Go to **Other Settings** -> Scroll down to **Custom API Endpoints**.
+2. **Enable Custom OpenAI Endpoint**: Check this box.
+3. **Override API Endpoint**: Enter your full API base URL.
+   - **Ollama**: `http://localhost:11434/v1`
+   - **LM Studio**: `http://localhost:1234/v1`
+   - **vLLM**: `http://localhost:8000/v1`
+4. **API Key**: In the main window, you can usually enter any dummy key (e.g., `sk-dummy`) if running locally, or your actual key if using a private server.
+5. **Model Name**: In the main window's **Model** box, type the name of your local model exactly as it appears in your runner (e.g., `llama3`, `mistral:instruct`).
+
+### ⚙️ Advanced Endpoint Settings
+Click **▼ Show More Fields** in the Custom Endpoints section to see additional options:
+*   **Groq/Local Base URL**: Dedicated field for Groq or specific local setups if separate from the main override.
+*   **Azure API Version**: Select the API version if connecting to Azure OpenAI.
+
+---
