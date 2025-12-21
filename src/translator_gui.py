@@ -490,6 +490,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
     trigger_qa_scan_signal = Signal()
     # Qt Signal for triggering image preview refresh from background thread
     refresh_preview_signal = Signal()
+    # Qt Signal to request Progress Manager open on main thread
+    open_progress_manager_signal = Signal()
     
     def __init__(self, parent=None):
         # Initialize QMainWindow
@@ -503,6 +505,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.trigger_qa_scan_signal.connect(self._trigger_qa_scan_on_main_thread)
         # Connect refresh preview signal
         self.refresh_preview_signal.connect(self._refresh_image_preview_on_main_thread)
+        # Progress Manager open request
+        self.open_progress_manager_signal.connect(self._open_progress_manager_on_main_thread)
         
         # Store master reference for compatibility (will be self now)
         self.master = self
@@ -4038,7 +4042,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             "secondary": "#95a5a6", # Modern gray
             "primary": "#9b59b6",   # Modern purple
             "success": "#27ae60",   # Modern green
-            "glossary": "#f39c12"   # Yellow/gold for glossary
+            "glossary": "#f39c12",  # Yellow/gold for glossary
+            "progress": "#c2185b"   # Dark pink for Progress Manager
         }
         
         toolbar_items = [
@@ -4055,7 +4060,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
         toolbar_items.append(("Async Translation", self.open_async_processing, "success"))
         
         toolbar_items.extend([
-            ("Retranslate", self.force_retranslation, "warning"),
+            ("Progress Manager", self.open_progress_manager, "progress"),
             ("Save Config", self.save_config, "secondary"),
             ("Load Glossary", self.load_glossary, "glossary"),
             ("Import Profiles", self.import_profiles, "secondary"),
@@ -4183,6 +4188,85 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self.epub_button = btn
             elif lbl == "Async Processing (50% Off)":
                 self.async_button = btn
+            elif lbl == "Progress Manager":
+                # Build a custom button with spinning Halgakos icon and label
+                pm_widget = QWidget()
+                pm_layout = QHBoxLayout(pm_widget)
+                pm_layout.setContentsMargins(0, 0, 0, 0)
+                pm_layout.setSpacing(6)
+                pm_layout.setAlignment(Qt.AlignCenter)
+
+                icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+
+                class RotatableLabel(QLabel):
+                    def __init__(self, parent=None):
+                        super().__init__(parent)
+                        self._rotation = 0
+                        self._original_pixmap = None
+                    def set_rotation(self, angle):
+                        self._rotation = angle
+                        if self._original_pixmap:
+                            transform = QTransform(); transform.rotate(angle)
+                            rotated = self._original_pixmap.transformed(transform, Qt.SmoothTransformation)
+                            self.setPixmap(rotated)
+                    def get_rotation(self):
+                        return self._rotation
+                    rotation = Property(float, get_rotation, set_rotation)
+                    def set_original_pixmap(self, pixmap):
+                        self._original_pixmap = pixmap
+                        self.setPixmap(pixmap)
+
+                self.pm_button_icon = RotatableLabel()
+                self.pm_button_icon.setStyleSheet("background-color: transparent;")
+                if os.path.exists(icon_path):
+                    icon = QIcon(icon_path)
+                    sizes = icon.availableSizes()
+                    pixmap = icon.pixmap(max(sizes, key=lambda s: s.width()*s.height())) if sizes else QPixmap(icon_path)
+                    self.pm_button_icon.set_original_pixmap(pixmap.scaled(24, 24, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                self.pm_button_icon.setFixedSize(32, 32)
+                self.pm_button_icon.setAlignment(Qt.AlignCenter)
+
+                # Animations
+                self.pm_icon_spin_animation = QPropertyAnimation(self.pm_button_icon, b"rotation")
+                self.pm_icon_spin_animation.setDuration(900)
+                self.pm_icon_spin_animation.setStartValue(0)
+                self.pm_icon_spin_animation.setEndValue(360)
+                self.pm_icon_spin_animation.setLoopCount(-1)
+                self.pm_icon_spin_animation.setEasingCurve(QEasingCurve.Linear)
+
+                self.pm_icon_stop_animation = QPropertyAnimation(self.pm_button_icon, b"rotation")
+                self.pm_icon_stop_animation.setDuration(800)
+                self.pm_icon_stop_animation.setEasingCurve(QEasingCurve.OutCubic)
+
+                self.pm_text_label = QLabel("Progress Manager")
+                self.pm_text_label.setStyleSheet("color: white; font-weight: bold; background-color: transparent;")
+                self.pm_text_label.setAlignment(Qt.AlignCenter)
+
+                pm_layout.addWidget(self.pm_button_icon)
+                pm_layout.addWidget(self.pm_text_label)
+                btn.setText("")
+                btn.setLayout(pm_layout)
+                btn.setMinimumWidth(170)
+                # Dark pink color from style_colors
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background-color: {color};
+                        color: white;
+                        padding: 6px;
+                        font-weight: bold;
+                    }}
+                    QPushButton:disabled {{
+                        background-color: #555555;
+                        color: #888888;
+                    }}
+                """)
+                # Replace default connection to wrap with spinner + instant restore
+                try:
+                    btn.clicked.disconnect()
+                except Exception:
+                    pass
+                btn.clicked.connect(self.open_progress_manager)
+                self.pm_button = btn
         
         # Add QA button at the end
         btn_layout.addWidget(self.qa_button)
@@ -4192,6 +4276,161 @@ If you see multiple p-b cookies, use the one with the longest value."""
         return btn_frame
 
  
+    # ===== Progress Manager (Retranslation) fast opener =====
+    def _show_cached_progress_manager_if_any(self) -> bool:
+        """Bring any cached Progress Manager dialog to front instantly. Returns True if shown."""
+        try:
+            # Single-file cache
+            if hasattr(self, 'entry_epub') and hasattr(self.entry_epub, 'text'):
+                p = self.entry_epub.text().strip()
+                if p:
+                    key = os.path.abspath(p)
+                    cache = getattr(self, '_retranslation_dialog_cache', None)
+                    if isinstance(cache, dict) and key in cache and cache[key].get('dialog'):
+                        dlg = cache[key]['dialog']
+                        try:
+                            dlg.setWindowState((dlg.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
+                            dlg.show(); dlg.raise_(); dlg.activateWindow()
+                            return True
+                        except Exception:
+                            pass
+            # Multi-file
+            if hasattr(self, '_multi_file_retranslation_dialog') and self._multi_file_retranslation_dialog:
+                dlg = self._multi_file_retranslation_dialog
+                try:
+                    dlg.setWindowState((dlg.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
+                    dlg.show(); dlg.raise_(); dlg.activateWindow()
+                    return True
+                except Exception:
+                    pass
+            # Image folder cache
+            if hasattr(self, '_image_retranslation_dialog_cache') and hasattr(self, 'selected_files') and self.selected_files:
+                first = self.selected_files[0]
+                folder_key = os.path.abspath(first if os.path.isdir(first) else os.path.dirname(first))
+                cache = getattr(self, '_image_retranslation_dialog_cache', None)
+                if isinstance(cache, dict) and folder_key in cache and cache[folder_key]:
+                    dlg = cache[folder_key]
+                    try:
+                        dlg.setWindowState((dlg.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
+                        dlg.show(); dlg.raise_(); dlg.activateWindow()
+                        return True
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return False
+
+    def _stop_pm_spin(self):
+        if hasattr(self, 'pm_icon_spin_animation') and hasattr(self, 'pm_button_icon') and hasattr(self, 'pm_icon_stop_animation'):
+            if self.pm_icon_spin_animation.state() == QPropertyAnimation.Running:
+                self.pm_icon_spin_animation.stop()
+                try:
+                    current = self.pm_button_icon.get_rotation() % 360
+                except Exception:
+                    current = 0
+                target = 360 if current > 180 else 0
+                self.pm_icon_stop_animation.setStartValue(current)
+                self.pm_icon_stop_animation.setEndValue(target)
+                self.pm_icon_stop_animation.start()
+
+    def open_progress_manager(self):
+        """User clicked Progress Manager. Show instantly if cached; otherwise show a tiny loader and open lazily."""
+        # Start spin now
+        if hasattr(self, 'pm_icon_spin_animation') and self.pm_icon_spin_animation.state() != QPropertyAnimation.Running:
+            self.pm_icon_spin_animation.start()
+        # If cached, just show
+        if self._show_cached_progress_manager_if_any():
+            self._stop_pm_spin()
+            return
+        # Show lightweight loading dialog immediately
+        try:
+            from PySide6.QtWidgets import QDialog, QVBoxLayout
+            self._pm_loading = QDialog(self)
+            self._pm_loading.setWindowTitle("Progress Manager — Loading…")
+            try:
+                base_dir = getattr(self, 'base_dir', os.path.dirname(os.path.abspath(__file__)))
+                ico_path = os.path.join(base_dir, 'Halgakos.ico')
+                if os.path.exists(ico_path):
+                    self._pm_loading.setWindowIcon(QIcon(ico_path))
+            except Exception:
+                pass
+            self._pm_loading.setModal(False)
+            self._pm_loading.resize(320, 140)
+            lay = QVBoxLayout(self._pm_loading)
+            # Add icon inside dialog content
+            try:
+                from PySide6.QtGui import QIcon, QPixmap
+                from PySide6.QtCore import QSize
+                if os.path.exists(ico_path):
+                    icon = QIcon(ico_path)
+                    dpr = self.devicePixelRatioF() if hasattr(self, 'devicePixelRatioF') else 1.0
+                    target_px = max(96, 96)  # logical px
+                    target_dev_px = int(target_px * dpr)
+                    # Request a pixmap at device pixels to keep sharpness
+                    pm = icon.pixmap(QSize(target_dev_px, target_dev_px))
+                    if pm.isNull():
+                        # Fallback: load and scale manually with SmoothTransformation
+                        raw = QPixmap(ico_path)
+                        img = raw.toImage().scaled(target_dev_px, target_dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                        pm = QPixmap.fromImage(img)
+                    # Ensure correct device pixel ratio so it renders crisp on HiDPI
+                    try:
+                        pm.setDevicePixelRatio(dpr)
+                    except Exception:
+                        pass
+                    icon_lbl = QLabel()
+                    icon_lbl.setPixmap(pm)
+                    icon_lbl.setAlignment(Qt.AlignCenter)
+                    lay.addWidget(icon_lbl)
+            except Exception:
+                pass
+            lbl = QLabel("Preparing retranslation view…")
+            # Slightly increase font size while handling point/pixel configs
+            try:
+                f = lbl.font()
+                if f.pointSize() > 0:
+                    f.setPointSize(f.pointSize() + 1)
+                else:
+                    px = f.pixelSize()
+                    f.setPixelSize((px + 2) if px > 0 else 14)
+                lbl.setFont(f)
+            except Exception:
+                pass
+            lbl.setAlignment(Qt.AlignCenter)
+            lay.addWidget(lbl)
+            self._pm_loading.show()
+        except Exception:
+            self._pm_loading = None
+        # Use a tiny worker so the event loop repaints before we build the real UI on main thread
+        def _emit():
+            try:
+                time.sleep(0.02)
+            except Exception:
+                pass
+            self.open_progress_manager_signal.emit()
+        threading.Thread(target=_emit, name="PMOpenDefer", daemon=True).start()
+
+    def _open_progress_manager_on_main_thread(self):
+        try:
+            # If user opened something else and dialog now exists, just raise it
+            if self._show_cached_progress_manager_if_any():
+                return
+            # Build using existing mixin method on the main thread
+            self.force_retranslation()
+        finally:
+            # Poll a bit to close loader when the real dialog exists
+            def _finish_when_ready():
+                if self._show_cached_progress_manager_if_any():
+                    if self._pm_loading:
+                        try:
+                            self._pm_loading.close()
+                        except Exception:
+                            pass
+                    self._stop_pm_spin()
+                else:
+                    QTimer.singleShot(100, _finish_when_ready)
+            QTimer.singleShot(50, _finish_when_ready)
+
     def _on_save_config_clicked(self):
         """Provide inline feedback when saving config from the toolbar button."""
         try:
