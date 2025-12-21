@@ -2491,7 +2491,7 @@ Recent translations to summarize:
         <p>Access models through NVIDIA Integrate API (OpenAI-compatible)</p>
         <ul>
             <li><b>nd/meta/llama-4-maverick-17b-128e-instruct</b></li>
-            <li><b>nd/deepseek-ai/deep-r1</b> (example)</li>
+            <li><b>nd/deepseek-ai/deep-r1</b></li>
         </ul>
         
         <p style="margin-top: 15px;"><i>Note: Each provider may have different pricing, rate limits, and model availability.</i></p>
