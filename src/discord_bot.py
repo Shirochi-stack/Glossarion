@@ -1050,6 +1050,9 @@ async def translate(
         os.environ['BATCH_SIZE'] = str(batch_size)
         os.environ['MAX_OUTPUT_TOKENS'] = str(max_output_tokens)
         os.environ['TRANSLATION_TEMPERATURE'] = str(temperature)
+        # Preserve markdown/structure and force BeautifulSoup for traditional APIs (from Other Settings)
+        os.environ['ENHANCED_PRESERVE_STRUCTURE'] = '1' if config.get('enhanced_preserve_structure', True) else '0'
+        os.environ['FORCE_BS_FOR_TRADITIONAL'] = '1' if config.get('force_bs_for_traditional', False) else '0'
         
         # Handle compression factor
         # TransateKRtoEN ultimately uses COMPRESSION_FACTOR; "AUTO_COMPRESSION_FACTOR" is treated
@@ -1977,6 +1980,9 @@ async def extract(
         os.environ['GLOSSARY_TEMPERATURE'] = str(temperature)
         os.environ['TRANSLATION_TEMPERATURE'] = str(temperature)
         os.environ['GLOSSARY_MAX_OUTPUT_TOKENS'] = str(max_output_tokens)
+        # Preserve markdown/structure and force BeautifulSoup for traditional APIs (from Other Settings)
+        os.environ['ENHANCED_PRESERVE_STRUCTURE'] = '1' if config.get('enhanced_preserve_structure', True) else '0'
+        os.environ['FORCE_BS_FOR_TRADITIONAL'] = '1' if config.get('force_bs_for_traditional', False) else '0'
         
         # Set extraction mode
         os.environ['TEXT_EXTRACTION_METHOD'] = extraction_mode
