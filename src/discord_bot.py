@@ -768,6 +768,20 @@ async def model_autocomplete(interaction: discord.Interaction, current: str):
     ]
 
 
+async def profile_autocomplete(interaction: discord.Interaction, current: str):
+    """Autocomplete prompt profiles defined in translator_gui (config prompt_profiles)."""
+    try:
+        cfg = load_config()
+        profiles = list((cfg.get("prompt_profiles") or {}).keys())
+        if "Universal" not in profiles:
+            profiles.insert(0, "Universal")
+        if current:
+            profiles = [p for p in profiles if current.lower() in p.lower()]
+        return [app_commands.Choice(name=p, value=p) for p in profiles[:25]]
+    except Exception:
+        return [app_commands.Choice(name="Universal", value="Universal")]
+
+
 @bot.tree.command(name="translate", description="Translate EPUB, TXT, or PDF file")
 @app_commands.describe(
     api_key="Your API key",
@@ -793,7 +807,8 @@ async def model_autocomplete(interaction: discord.Interaction, current: str):
     gemini_thinking_budget="Gemini thinking budget (-1=auto, 0=disabled) - Default: -1",
     or_thinking_tokens="OpenRouter thinking tokens - Default: 2000",
     gpt_effort="GPT-5/OpenAI thinking effort (none/low/medium/high/xhigh) - Default: medium",
-    target_language="Target language"
+    target_language="Target language",
+    profile="Prompt profile from translator_gui (default: Universal)"
 )
 @app_commands.choices(extraction_mode=[
     app_commands.Choice(name="Enhanced (html2text)", value="enhanced"),
@@ -811,6 +826,7 @@ async def model_autocomplete(interaction: discord.Interaction, current: str):
     app_commands.Choice(name="XHigh", value="xhigh"),
 ])
 @app_commands.autocomplete(model=model_autocomplete)
+@app_commands.autocomplete(profile=profile_autocomplete)
 async def translate(
     interaction: discord.Interaction,
     api_key: str,
@@ -836,7 +852,8 @@ async def translate(
     gemini_thinking_budget: int = -1,
     or_thinking_tokens: int = 2000,
     gpt_effort: str = "medium",
-    target_language: str = "English"
+    target_language: str = "English",
+    profile: str = "Universal"
 ):
     """Translate file using Glossarion"""
     
@@ -901,9 +918,19 @@ async def translate(
     model = (model or '').strip() or (config.get('model') or '').strip() or (os.getenv('MODEL') or '').strip() or 'gpt-4o'
 
     # Initial response (we already deferred; now edit the original response)
+    profile_note = (
+        f"Profile: {profile or 'Universal'}\n"
+        "Note: target_lang replacement is skipped for profile prompts; choose the profile language you need.\n"
+        "Profiles ending with _txt use html2text (default). Others use BeautifulSoup. 'ocr' profiles are for images."
+    )
     embed = discord.Embed(
         title="📚 Translation Started",
-        description=f"**File:** {filename}\n**Model:** {model}\n**Target:** {target_language}",
+        description=(
+            f"**File:** {filename}\n"
+            f"**Model:** {model}\n"
+            f"**Target:** {target_language}\n\n"
+            f"{profile_note}"
+        ),
         color=discord.Color.blue()
     )
     msg_obj = await _safe_edit_original_response(interaction, embed=embed)
@@ -938,6 +965,7 @@ async def translate(
                 "or_thinking_tokens": or_thinking_tokens,
                 "gpt_effort": gpt_effort,
                 "target_language": target_language,
+                "profile": profile,
             }
         })
     except Exception as e:
@@ -1024,10 +1052,15 @@ async def translate(
 
         # Get system prompt from config
         prompt_profiles = config.get('prompt_profiles', {})
-        if 'Universal' in prompt_profiles:
-            system_prompt = prompt_profiles['Universal'].replace('{target_lang}', target_language)
-        else:
-            # Fallback to first available profile or basic prompt
+        chosen_profile = (profile or "Universal").strip()
+        system_prompt = None
+        if prompt_profiles:
+            # When a profile is chosen, use it as-is; do not substitute target_lang (per user note).
+            system_prompt = prompt_profiles.get(chosen_profile)
+            if system_prompt is None and 'Universal' in prompt_profiles:
+                system_prompt = prompt_profiles['Universal']
+        if not system_prompt:
+            # Fallback to basic prompt
             system_prompt = f"Translate to {target_language}. Preserve all formatting."
         
         # Custom OpenAI Endpoint (single source of truth: custom_endpoint_url)
@@ -1043,6 +1076,7 @@ async def translate(
         # Set model and API key
         os.environ['MODEL'] = model
         os.environ['SYSTEM_PROMPT'] = system_prompt
+        os.environ['PROFILE_NAME'] = chosen_profile.lower() if chosen_profile else "universal"
         os.environ['OUTPUT_DIRECTORY'] = temp_dir
         
         # Set translation parameters
