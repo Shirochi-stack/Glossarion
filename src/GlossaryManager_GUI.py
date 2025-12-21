@@ -2130,6 +2130,7 @@ CRITICAL EXTRACTION RULES:
 - The raw_name and translated_name must be SHORT NOUNS ONLY (1-5 words max)
 - REJECT entries that contain verbs or end with punctuation (?, !, .)
 - REJECT entries starting with: "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But". (The description column is excluded from this restriction)
+- Do NOT output any entries that are rejected by the above rules; skip them entirely
 - If unsure whether something is a proper noun/name, skip it
 - The description column must contain detailed context/explanation
 
@@ -3596,10 +3597,10 @@ Prioritize names that appear with honorifics or in important contexts."""
         advanced_toggle_layout = QHBoxLayout(advanced_toggle_widget)
         advanced_toggle_layout.setContentsMargins(0, 4, 0, 4)
         advanced_toggle_layout.addStretch()
-        advanced_checkbox = QCheckBox("Advanced editing")
+        advanced_checkbox = self._create_styled_checkbox("Advanced editing")
         advanced_checkbox.setChecked(False)
         advanced_toggle_layout.addWidget(advanced_checkbox)
-        content_frame_layout.insertWidget(1, advanced_toggle_widget)
+        content_frame_layout.insertWidget(0, advanced_toggle_widget)
 
         advanced_tools_widget = QWidget()
         advanced_tools_layout = QGridLayout(advanced_tools_widget)

@@ -30,6 +30,7 @@ CRITICAL EXTRACTION RULES:
 - The raw_name and translated_name must be SHORT NOUNS ONLY (1-5 words max)
 - REJECT entries that contain verbs or end with punctuation (?, !, .)
 - REJECT entries starting with: "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But". (The description column is excluded from this restriction)
+- Do NOT output any entries that are rejected by the above rules; skip them entirely
 - If unsure whether something is a proper noun/name, skip it
 - The description column must contain detailed context/explanation
 
