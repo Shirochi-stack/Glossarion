@@ -1631,6 +1631,15 @@ class ProgressManager:
         
         Returns the key that should be used for this chapter in the progress dict.
         """
+        def _normalize_fname(fname):
+            """Normalize filename for comparison regardless of response_ prefix or extension."""
+            if not fname:
+                return None
+            base = os.path.basename(fname)
+            if base.startswith('response_'):
+                base = base[len('response_'):]
+            # Strip extension only for comparison so .html vs .xhtml don't diverge
+            return os.path.splitext(base)[0]
         # CHUNK FIX: For decimal chapter numbers (e.g., 1.0, 1.1), use the full decimal in the key
         # This prevents collisions when multiple chunks share the same integer part
         if isinstance(actual_num, float) and actual_num != int(actual_num):
@@ -1668,6 +1677,12 @@ class ProgressManager:
             
             # If the existing entry is for the same file, use simple key
             if existing_file == filename:
+                return chapter_key
+
+            # NEW: tolerate retain-source toggle changes (response_ prefix / extension)
+            existing_norm = _normalize_fname(existing_file)
+            new_norm = _normalize_fname(filename)
+            if existing_norm and new_norm and existing_norm == new_norm:
                 return chapter_key
             
             # MERGED STATUS FIX: If existing entry is merged, always use simple key
