@@ -50,11 +50,12 @@ PROJECT_ROOT = os.path.dirname(src_dir)
 HOSTED_FILES_DIR = os.path.join(PROJECT_ROOT, "hosted_files")
 HOSTED_TTL_SECONDS = 24 * 60 * 60  # 24 hours
 HOSTED_MAX_BYTES = 5 * 1024 * 1024 * 1024  # 5 GB
-MAX_DISCORD_UPLOAD = 25 * 1024 * 1024  # 25 MB
+MAX_DISCORD_UPLOAD = 10 * 1024 * 1024  # 10 MB
 FILE_HOST_PORT = int(os.getenv("FILE_HOST_PORT", "8080"))
 FILE_HOST_BASE_URL = (os.getenv("FILE_HOST_BASE_URL") or f"http://localhost:{FILE_HOST_PORT}").rstrip("/")
 GOFILE_TOKEN = os.getenv("GOFILE_TOKEN")
 ORACLE_PAR_BASE = os.getenv("ORACLE_PAR_BASE", "")  # PAR base ending with /o/
+USER_CONFIG_DIR = os.path.join(PROJECT_ROOT, "bot_user_configs")
 
 _file_host_runner: Optional[web.AppRunner] = None
 _file_host_site: Optional[web.TCPSite] = None
@@ -505,6 +506,31 @@ logging.getLogger("discord.app_commands.tree").addFilter(_SuppressExpectedAutoco
 # Global storage for translation state
 translation_states = {}
 
+# ---- Per-user config helpers ----
+def _user_config_path(user_id: int) -> str:
+    return os.path.join(USER_CONFIG_DIR, f"{user_id}.json")
+
+
+def load_user_config(user_id: int) -> dict:
+    try:
+        path = _user_config_path(user_id)
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_user_config(user_id: int, payload: dict) -> None:
+    try:
+        os.makedirs(USER_CONFIG_DIR, exist_ok=True)
+        cfg = load_user_config(user_id)
+        cfg.update(payload)
+        with open(_user_config_path(user_id), "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        sys.stderr.write(f"[CONFIG] Failed to save user config for {user_id}: {e}\n")
+        sys.stderr.flush()
+
 
 def _ephemeral(interaction: discord.Interaction) -> bool:
     """Use ephemeral responses in guilds; in DMs, send normal messages."""
@@ -865,6 +891,9 @@ async def translate(
             await _safe_edit_original_response(interaction, content="❌ custom_endpoint_url must start with http:// or https://")
             return
 
+    user_id = interaction.user.id
+    user_config = load_user_config(user_id)
+
     # Load config early so we can default the model without relying on autocomplete.
     config = load_config()
 
@@ -886,6 +915,34 @@ async def translate(
         message = None
     if message is None:
         return
+    # Persist user preferences for next runs
+    try:
+        save_user_config(user_id, {
+            "translate": {
+                "model": model,
+                "custom_endpoint_url": custom_endpoint_url,
+                "extraction_mode": extraction_mode,
+                "temperature": temperature,
+                "batch_size": batch_size,
+                "max_output_tokens": max_output_tokens,
+                "disable_smart_filter": disable_smart_filter,
+                "duplicate_algorithm": duplicate_algorithm,
+                "enable_auto_glossary": enable_auto_glossary,
+                "request_merge_count": request_merge_count,
+                "split_the_merge": split_the_merge,
+                "send_zip": send_zip,
+                "compression_factor": compression_factor,
+                "thinking": thinking,
+                "gemini_thinking_level": gemini_thinking_level,
+                "gemini_thinking_budget": gemini_thinking_budget,
+                "or_thinking_tokens": or_thinking_tokens,
+                "gpt_effort": gpt_effort,
+                "target_language": target_language,
+            }
+        })
+    except Exception as e:
+        sys.stderr.write(f"[CONFIG] Failed to persist /translate prefs: {e}\n")
+        sys.stderr.flush()
     
     # Create temp directory
     temp_dir = tempfile.mkdtemp(
@@ -1094,7 +1151,7 @@ async def translate(
         # Cap retries for the Discord bot to keep runs predictable.
         os.environ['MAX_RETRIES'] = '3'
         # Set all glossary variables from GUI
-        os.environ['GLOSSARY_COMPRESSION_FACTOR'] = str(config.get('glossary_compression_factor', 1.0))
+        os.environ['GLOSSARY_COMPRESSION_FACTOR'] = str(config.get('glossary_compression_factor', 1.2))
         # Enable glossary prompt compression (filtering unused entries) by default
         os.environ['COMPRESS_GLOSSARY_PROMPT'] = '1' if config.get('compress_glossary_prompt', True) else '0'
         os.environ['GLOSSARY_FILTER_MODE'] = config.get('glossary_filter_mode', 'all')
@@ -1512,26 +1569,19 @@ async def translate(
             sys.stderr.write(f"[SUCCESS] Ready to send: {output_file_path} ({file_size / 1024 / 1024:.2f}MB)\\n")
 
             if _should_offload(file_size, send_zip):
-                try:
-                    loop = asyncio.get_event_loop()
-                    download_url = await loop.run_in_executor(
-                        None,
-                        functools.partial(_upload_to_oracle_par, output_file_path, output_display_name),
-                    )
-                except Exception as e:
-                    sys.stderr.write(f"[HOST ERROR] Oracle upload failed: {e}\\n")
-                    download_url = None
-                if not download_url:
-                    for uploader, name in (( _upload_to_tmpfiles, "tmpfiles"), (_upload_to_tempsh, "temp.sh"), (_upload_to_gofile, "gofile")):
-                        try:
-                            download_url = await loop.run_in_executor(
-                                None,
-                                functools.partial(uploader, output_file_path, output_display_name),
-                            )
-                            break
-                        except Exception as e2:
-                            sys.stderr.write(f"[HOST ERROR] {name}: {e2}\\n")
-                            continue
+                loop = asyncio.get_event_loop()
+                download_url = None
+                # 1) tmpfiles
+                for uploader, name in (( _upload_to_tmpfiles, "tmpfiles"), (_upload_to_tempsh, "temp.sh"), (_upload_to_oracle_par, "oracle"), (_upload_to_gofile, "gofile")):
+                    try:
+                        download_url = await loop.run_in_executor(
+                            None,
+                            functools.partial(uploader, output_file_path, output_display_name),
+                        )
+                        break
+                    except Exception as e2:
+                        sys.stderr.write(f"[HOST ERROR] {name}: {e2}\n")
+                        continue
                 if download_url:
                     embed = discord.Embed(
                         title="✅ Translation Complete!",
@@ -1627,6 +1677,42 @@ async def translate(
         except Exception:
             pass
 
+@bot.tree.command(name="settings", description="Show your saved Glossarion bot preferences")
+async def settings(interaction: discord.Interaction):
+    """Display the caller's saved /translate and /extract defaults."""
+
+    if not await _safe_defer(interaction, ephemeral=True):
+        return
+
+    user_id = interaction.user.id
+    cfg = load_user_config(user_id) or {}
+    translate_cfg = cfg.get("translate") or {}
+    extract_cfg = cfg.get("extract") or {}
+
+    if not translate_cfg and not extract_cfg:
+        await _safe_edit_original_response(
+            interaction,
+            content="ℹ️ No saved settings yet. Run /translate or /extract once to store them."
+        )
+        return
+
+    def _fmt(section: dict) -> str:
+        if not section:
+            return "_none_"
+        import json
+        text = json.dumps(section, indent=2, ensure_ascii=False)
+        if len(text) > 1500:
+            text = text[:1500] + "... (truncated)"
+        return f"```json\n{text}\n```"
+
+    embed = discord.Embed(
+        title="Your Saved Settings",
+        color=discord.Color.blue()
+    )
+    embed.add_field(name="Translate", value=_fmt(translate_cfg), inline=False)
+    embed.add_field(name="Extract", value=_fmt(extract_cfg), inline=False)
+
+    await _safe_edit_original_response(interaction, embed=embed)
 
 @bot.tree.command(name="extract", description="Extract glossary from EPUB, TXT, or PDF file")
 @app_commands.describe(
@@ -1640,7 +1726,7 @@ async def translate(
     temperature="Glossary extraction temperature 0.0-1.0 (default: 0.1)",
     batch_size="Paragraphs per batch (default: 10)",
     max_output_tokens="Max output tokens (default: 65536)",
-    glossary_compression_factor="Glossary compression factor (default: 1.0)",
+    glossary_compression_factor="Glossary compression factor (default: 1.2)",
     merge_count="Chapters per request (set >=2 to enable request merging; <=1 disables; omit to disable)",
     duplicate_algorithm="Duplicate handling: auto/strict/balanced/aggressive/basic (default: balanced)",
     send_zip="Return output as a ZIP archive instead of individual file (default: False)",
@@ -1679,7 +1765,7 @@ async def extract(
     temperature: float = 0.1,
     batch_size: int = 10,
     max_output_tokens: int = 65536,
-    glossary_compression_factor: float = 1.0,
+    glossary_compression_factor: float = 1.2,
     merge_count: Optional[int] = None,
     duplicate_algorithm: str = "balanced",
     send_zip: bool = False,
@@ -1741,6 +1827,8 @@ async def extract(
         if custom_endpoint_url and not (custom_endpoint_url.startswith('http://') or custom_endpoint_url.startswith('https://')):
             await _safe_edit_original_response(interaction, content="❌ custom_endpoint_url must start with http:// or https://")
             return
+    user_id = interaction.user.id
+    user_config = load_user_config(user_id)
 
     # Load config early so we can default the model without relying on autocomplete.
     config = load_config()
@@ -1763,6 +1851,31 @@ async def extract(
         message = None
     if message is None:
         return
+    # Persist user preferences for next runs
+    try:
+        save_user_config(user_id, {
+            "extract": {
+                "model": model,
+                "custom_endpoint_url": custom_endpoint_url,
+                "extraction_mode": extraction_mode,
+                "temperature": temperature,
+                "batch_size": batch_size,
+                "max_output_tokens": max_output_tokens,
+                "glossary_compression_factor": glossary_compression_factor,
+                "merge_count": merge_count,
+                "duplicate_algorithm": duplicate_algorithm,
+                "send_zip": send_zip,
+                "thinking": thinking,
+                "gemini_thinking_level": gemini_thinking_level,
+                "gemini_thinking_budget": gemini_thinking_budget,
+                "or_thinking_tokens": or_thinking_tokens,
+                "gpt_effort": gpt_effort,
+                "target_language": target_language,
+            }
+        })
+    except Exception as e:
+        sys.stderr.write(f"[CONFIG] Failed to persist /extract prefs: {e}\n")
+        sys.stderr.flush()
     
     # Create temp directory
     temp_dir = tempfile.mkdtemp(
@@ -2211,26 +2324,18 @@ async def extract(
             file_size = os.path.getsize(output_file_path)
 
             if _should_offload(file_size, send_zip):
-                try:
-                    loop = asyncio.get_event_loop()
-                    download_url = await loop.run_in_executor(
-                        None,
-                        functools.partial(_upload_to_oracle_par, output_file_path, output_display_name),
-                    )
-                except Exception as e:
-                    sys.stderr.write(f"[HOST ERROR] Oracle upload failed: {e}\\n")
-                    download_url = None
-                if not download_url:
-                    for uploader, name in (( _upload_to_tmpfiles, "tmpfiles"), (_upload_to_tempsh, "temp.sh"), (_upload_to_gofile, "gofile")):
-                        try:
-                            download_url = await loop.run_in_executor(
-                                None,
-                                functools.partial(uploader, output_file_path, output_display_name),
-                            )
-                            break
-                        except Exception as e2:
-                            sys.stderr.write(f"[HOST ERROR] {name}: {e2}\\n")
-                            continue
+                loop = asyncio.get_event_loop()
+                download_url = None
+                for uploader, name in (( _upload_to_tmpfiles, "tmpfiles"), (_upload_to_tempsh, "temp.sh"), (_upload_to_oracle_par, "oracle"), (_upload_to_gofile, "gofile")):
+                    try:
+                        download_url = await loop.run_in_executor(
+                            None,
+                            functools.partial(uploader, output_file_path, output_display_name),
+                        )
+                        break
+                    except Exception as e2:
+                        sys.stderr.write(f"[HOST ERROR] {name}: {e2}\n")
+                        continue
                 if download_url:
                     embed = discord.Embed(
                         title="✅ Glossary Extraction Complete!",
