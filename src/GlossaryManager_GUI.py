@@ -2445,7 +2445,11 @@ Prioritize names that appear with honorifics or in important contexts."""
                # Set up columns based on new format
                if self.current_glossary_format in ['list', 'token_csv'] and entries and 'type' in entries[0]:
                    # New simple format
-                   column_fields = ['type', 'raw_name', 'translated_name', 'gender']
+                   column_fields = []
+                   # Show section if present
+                   if any('_section' in e for e in entries):
+                       column_fields.append('_section')
+                   column_fields.extend(['type', 'raw_name', 'translated_name', 'gender'])
 
                    # Include description/custom fields
                    for entry in entries:
@@ -2482,7 +2486,7 @@ Prioritize names that appear with honorifics or in important contexts."""
                headers = ['#'] + [field.replace('_', ' ').title() for field in column_fields]
                self.glossary_tree.setHeaderLabels(headers)
                
-               self.glossary_tree.setColumnWidth(0, 40)
+               self.glossary_tree.setColumnWidth(0, 80)
                
                for idx, field in enumerate(column_fields, start=1):
                    if field in ['raw_name', 'translated_name', 'original_name', 'name', 'original', 'translated']:

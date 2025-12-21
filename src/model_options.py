@@ -154,6 +154,14 @@ def get_model_options() -> List[str]:
         "eh/grok-code-fast-1","eh/llama-2-70b-chat", "eh/yi-34b-chat-200k", "eh/mistral-large", "eh/deepseek-v3-0324:free",
         "eh/deepseek-v3.1:free", "eh/deepseek-v3.1", "eh/deepseek-v3.2-exp:free", "eh/deepseek-v3.2-exp" , "eh/deepseek-v3.2-exp-thinking" ,
         "eh/gemini-pro", "eh/deepseek-coder-33b", "eh/gemma-3-27b-it",
+
+        # NVIDIA Integrate (OpenAI-compatible) — models from UI dropdown
+        "nd/meta/llama-4-maverick-17b-128e-instruct",
+        "nd/meta/llama-4-scout-17b-16e-instruct",
+        "nd/deepseek-ai/deepseek-r1",
+        "nd/meta/llama-3.3-70b-instruct",
+        "nd/qwen/qwen2.5-coder-32b-instruct",
+        "nd/deepseek-ai/deep-r1",
         
         # Last Resort
         "deepl",  # Will use DeepL API

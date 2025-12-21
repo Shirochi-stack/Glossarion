@@ -2486,6 +2486,13 @@ Recent translations to summarize:
         <p style="color: #856404; padding: 8px; font-size: 11px;">
             <b>⚠️ Note:</b> POE integration may not work properly due to API limitations or changes.
         </p>
+
+        <h4>NVIDIA (nd/)</h4>
+        <p>Access models through NVIDIA Integrate API (OpenAI-compatible)</p>
+        <ul>
+            <li><b>nd/meta/llama-4-maverick-17b-128e-instruct</b></li>
+            <li><b>nd/deepseek-ai/deep-r1</b> (example)</li>
+        </ul>
         
         <p style="margin-top: 15px;"><i>Note: Each provider may have different pricing, rate limits, and model availability.</i></p>
         """
