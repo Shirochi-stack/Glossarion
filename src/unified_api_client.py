@@ -7977,15 +7977,7 @@ class UnifiedClient:
             else:
                 api_key_clean = str(api_key)
             if api_key_clean != api_key_clean.strip():
-                # Log once per session to help users self-diagnose without leaking secrets
-                try:
-                    self.__class__._log_once(
-                        "⚠️ API key had leading/trailing whitespace; stripping for Authorization header safety.",
-                        is_debug=True
-                    )
-                except Exception:
-                    pass
-            api_key_clean = api_key_clean.strip()
+                api_key_clean = api_key_clean.strip()
         except Exception:
             api_key_clean = api_key
 
