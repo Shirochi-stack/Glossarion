@@ -1024,6 +1024,7 @@ class UnifiedClient:
         'openrouter': 'openrouter',
         'fireworks': 'fireworks',
         'groq/': 'groq',  # Prefix for explicit Groq routing
+        'nd/': 'nvidia',
         'eh/': 'electronhub',
         'electronhub/': 'electronhub',
         'electron/': 'electronhub',
@@ -3435,6 +3436,13 @@ class UnifiedClient:
             else:
                 base_url = os.getenv("XAI_API_URL", "https://api.x.ai/v1")
                 logger.info(f"xAI will use endpoint: {base_url}")
+        elif self.client_type == 'nvidia':
+            # NVIDIA NIM uses OpenAI-compatible endpoint
+            if openai is None:
+                logger.info("NVIDIA endpoint will use HTTP API")
+            else:
+                base_url = os.getenv("NVIDIA_API_URL", "https://integrate.api.nvidia.com/v1")
+                logger.info(f"NVIDIA endpoint will use: {base_url}")
         
         # =====================================================
         # MICROSECOND LOCK: Create ALL clients with thread safety
@@ -3561,6 +3569,17 @@ class UnifiedClient:
                         base_url=base_url
                     )
                 logger.info(f"xAI client configured with endpoint: {base_url}")
+        elif self.client_type == 'nvidia':
+            if openai is not None:
+                if base_url is None:
+                    base_url = os.getenv("NVIDIA_API_URL", "https://integrate.api.nvidia.com/v1")
+
+                with self._model_lock:
+                    self.openai_client = openai.OpenAI(
+                        api_key=self.api_key,
+                        base_url=base_url
+                    )
+                logger.info(f"NVIDIA client configured with endpoint: {base_url}")
  
         elif self.client_type == 'deepl' or self.model.startswith('deepl'):
             self.client_type = 'deepl'
@@ -8106,6 +8125,7 @@ class UnifiedClient:
             'electronhub': self._send_electronhub,  # ElectronHub aggregator (restored)
             'fireworks': self._send_openai_provider_router,
             'xai': self._send_openai_provider_router,  # xAI Grok models
+            'nvidia': self._send_openai_provider_router,  # NVIDIA NIM
             'salesforce': self._send_openai_provider_router,  # Consolidated
             'vertex_model_garden': self._send_vertex_model_garden,
             'deepl': self._send_deepl,  # DeepL translation service
@@ -10241,6 +10261,9 @@ class UnifiedClient:
             # Strip the 'chutes/' prefix from the model name if present
             if effective_model.startswith('chutes/'):
                 effective_model = effective_model[7:]  # Remove 'chutes/' prefix
+        elif provider == 'nvidia':
+            if effective_model.startswith('nd/'):
+                effective_model = effective_model[3:]
         
         # CUSTOM ENDPOINT OVERRIDE - Check if enabled and override base_url
         use_custom_endpoint = os.getenv('USE_CUSTOM_OPENAI_ENDPOINT', '0') == '1'
@@ -10432,7 +10455,7 @@ class UnifiedClient:
         
         # Use OpenAI SDK for providers known to work well with it
         sdk_compatible = ['deepseek', 'together', 'mistral', 'yi', 'qwen', 'moonshot', 'groq', 
-                         'electronhub', 'openrouter', 'fireworks', 'xai', 'gemini-openai', 'chutes']
+                         'electronhub', 'openrouter', 'fireworks', 'xai', 'gemini-openai', 'chutes', 'nvidia']
         
         # Allow forcing HTTP-only for OpenRouter via toggle (default: disabled)
         openrouter_http_only = os.getenv('OPENROUTER_USE_HTTP_ONLY', '0') == '1'
@@ -11436,6 +11459,7 @@ class UnifiedClient:
             'deepseek': lambda: os.getenv("DEEPSEEK_API_URL", "https://api.deepseek.com/v1"),
             'perplexity': "https://api.perplexity.ai",
             'chutes': lambda: os.getenv("CHUTES_API_URL", "https://llm.chutes.ai/v1"),
+            'nvidia': lambda: os.getenv("NVIDIA_API_URL", "https://integrate.api.nvidia.com/v1"),
             'salesforce': lambda: os.getenv("SALESFORCE_API_URL", "https://api.salesforce.com/v1"),
             'bigscience': "https://api.together.xyz/v1",  # Together AI fallback
             'meta': "https://api.together.xyz/v1"  # Together AI fallback

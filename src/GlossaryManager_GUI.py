@@ -2268,31 +2268,156 @@ Prioritize names that appear with honorifics or in important contexts."""
                return
            
            try:
+               # Helpers for token-efficient format (sectioned, bullet-style CSV text)
+               def parse_token_efficient_glossary(lines):
+                   entries = []
+                   sections = []
+                   current_section = None
+                   gender_keywords = {'male', 'female', 'unknown'}
+                   header_columns = ['translated_name', 'raw_name', 'gender', 'description']
+                   # Default extra columns: pattern manager + custom fields (used if header omits them)
+                   default_extra_columns = []
+                   try:
+                       import PatternManager as _pm
+                       pf = getattr(_pm, 'PATTERN_ADDITIONAL_FIELDS', [])
+                       if isinstance(pf, (list, tuple)):
+                           default_extra_columns.extend(pf)
+                   except Exception:
+                       pass
+                   default_extra_columns.extend(self.config.get('custom_glossary_fields', []))
+                   extra_columns = list(default_extra_columns)
+                   # Map section -> type (from custom entry types only, plus simple plurals)
+                   custom_types = getattr(self, 'custom_entry_types', {}) or {
+                       'character': {'enabled': True, 'has_gender': True},
+                       'term': {'enabled': True, 'has_gender': False},
+                   }
+
+                   type_map = {}
+                   for t in custom_types.keys():
+                       type_map[t.lower()] = t
+                       # naive plural
+                       if not t.lower().endswith('s'):
+                           type_map[f"{t.lower()}s"] = t
+
+                   for raw_line in lines:
+                       line = raw_line.strip()
+                       if not line:
+                           continue
+                       if line.lower().startswith('glossary columns:'):
+                           # Parse header columns
+                           cols_text = line.split(':', 1)[1]
+                           header_columns = [c.strip() for c in cols_text.split(',') if c.strip()]
+                           if len(header_columns) < 4:
+                               header_columns = ['translated_name', 'raw_name', 'gender', 'description']
+                           extra_columns = header_columns[4:] or list(default_extra_columns)
+                           continue
+                       if line.startswith('===') and line.endswith('==='):
+                           section_name = line.strip('=').strip()
+                           current_section = section_name
+                           sections.append(section_name)
+                           continue
+                       if not line.startswith('* '):
+                           continue
+
+                       # Pattern: * translated (raw) [gender]: description
+                       import re
+                       m = re.match(r'^\*\s+(.*?)\s*(?:\((.*?)\))?\s*(?:\[(.*?)\])?\s*(?::\s*(.*))?$', line)
+                       if not m:
+                           continue
+                       translated = (m.group(1) or '').strip()
+                       raw_name = (m.group(2) or '').strip()
+                       bracket = (m.group(3) or '').strip()
+                       desc = (m.group(4) or '').strip()
+
+                       # Split out extra column values encoded as " | key: val"
+                       extra_values = {}
+                       if desc and ' | ' in desc:
+                           parts = desc.split(' | ')
+                           desc = parts[0].strip()
+                           for part in parts[1:]:
+                               if ':' in part:
+                                   k, v = part.split(':', 1)
+                                   extra_values[k.strip()] = v.strip()
+
+                       gender = ''
+                       if bracket:
+                           if bracket.lower() in gender_keywords:
+                               gender = bracket
+                           else:
+                               # treat bracket content as description fragment
+                               desc = f"{bracket}: {desc}".strip(': ').strip() if desc else bracket
+
+                       entry = {
+                           'type': type_map.get((current_section or 'term').lower(), 'term'),
+                           'raw_name': raw_name,
+                           'translated_name': translated,
+                           'gender': gender,
+                       }
+                       if desc:
+                           entry['description'] = desc
+                       if current_section:
+                           entry['_section'] = current_section
+                       # Apply any extra columns from header
+                       for col in extra_columns:
+                           if col in extra_values:
+                               entry[col] = extra_values[col]
+                       entries.append(entry)
+
+                   return entries, sections
+
+               # Prepare accumulator for field discovery
+               all_fields = set()
+
                # Try CSV first
                if path.endswith('.csv'):
-                   import csv
-                   entries = []
+                   # Peek to detect token-efficient format
                    with open(path, 'r', encoding='utf-8') as f:
-                       reader = csv.reader(f)
-                       for row in reader:
-                           if len(row) >= 3:
-                               entry = {
-                                   'type': row[0],
-                                   'raw_name': row[1],
-                                   'translated_name': row[2]
-                               }
-                               if row[0] == 'character' and len(row) > 3:
-                                   entry['gender'] = row[3]
-                               entries.append(entry)
-                   self.current_glossary_data = entries
-                   self.current_glossary_format = 'list'
+                       lines = f.readlines()
+
+                   token_style = False
+                   for l in lines:
+                       lstrip = l.lstrip()
+                       if lstrip.startswith('===') or lstrip.startswith('* '):
+                           token_style = True
+                           break
+                   if not token_style and lines and lines[0].lower().startswith('glossary columns:'):
+                       token_style = True
+
+                   if token_style:
+                       entries, sections = parse_token_efficient_glossary(lines)
+                       self.current_glossary_data = entries
+                       self.current_glossary_format = 'token_csv'
+                       self.current_glossary_sections = sections
+                       for e in entries:
+                           all_fields.update(e.keys())
+                   else:
+                       import csv
+                       entries = []
+                       with open(path, 'r', encoding='utf-8') as f:
+                           reader = csv.reader(f)
+                           for row in reader:
+                               if len(row) >= 3:
+                                   entry = {
+                                       'type': row[0],
+                                       'raw_name': row[1],
+                                       'translated_name': row[2]
+                                   }
+                                   if row[0] == 'character' and len(row) > 3:
+                                       entry['gender'] = row[3]
+                                   # include any extra columns
+                                   if len(row) > 4:
+                                       entry['description'] = row[4]
+                                   entries.append(entry)
+                       self.current_glossary_data = entries
+                       self.current_glossary_format = 'list'
+                       for e in entries:
+                           all_fields.update(e.keys())
                else:
                    # JSON format
                    with open(path, 'r', encoding='utf-8') as f:
                        data = json.load(f)
                    
                    entries = []
-                   all_fields = set()
                    
                    if isinstance(data, dict):
                        if 'entries' in data:
@@ -2318,13 +2443,23 @@ Prioritize names that appear with honorifics or in important contexts."""
                            entries.append(item)
                
                # Set up columns based on new format
-               if self.current_glossary_format == 'list' and entries and 'type' in entries[0]:
+               if self.current_glossary_format in ['list', 'token_csv'] and entries and 'type' in entries[0]:
                    # New simple format
                    column_fields = ['type', 'raw_name', 'translated_name', 'gender']
+
+                   # Include description/custom fields
+                   for entry in entries:
+                       for field in entry.keys():
+                           if field.startswith('_'):
+                               continue
+                           if field not in column_fields:
+                               column_fields.append(field)
                    
                    # Check for any custom fields
                    for entry in entries:
                        for field in entry.keys():
+                           if field.startswith('_'):
+                               continue
                            if field not in column_fields:
                                column_fields.append(field)
                else:
@@ -2378,7 +2513,7 @@ Prioritize names that appear with honorifics or in important contexts."""
                stats = []
                stats.append(f"Total entries: {len(entries)}")
                
-               if self.current_glossary_format == 'list' and entries and 'type' in entries[0]:
+               if self.current_glossary_format in ['list', 'token_csv'] and entries and 'type' in entries[0]:
                    # New format stats
                    characters = sum(1 for e in entries if e.get('type') == 'character')
                    terms = sum(1 for e in entries if e.get('type') == 'term')
@@ -2406,7 +2541,7 @@ Prioritize names that appear with honorifics or in important contexts."""
            if path:
                self.editor_file_entry.setText(path)
                load_glossary_for_editing()
-       
+
         # Common save helper
         def save_current_glossary():
            path = self.editor_file_entry.text()
@@ -2414,26 +2549,109 @@ Prioritize names that appear with honorifics or in important contexts."""
                return False
            try:
                if path.endswith('.csv'):
-                   # Save as CSV
-                   import csv
-                   with open(path, 'w', encoding='utf-8', newline='') as f:
-                       writer = csv.writer(f)
+                   if getattr(self, 'current_glossary_format', '') == 'token_csv':
+                       def save_token_csv(entries, path_out):
+                           sections = getattr(self, 'current_glossary_sections', []) or []
+                           if not sections:
+                               sections = ['CHARACTERS', 'TITLES', 'ORGANIZATIONS', 'LOCATIONS', 'ITEMS', 'ABILITYS']
+
+                           grouped = {sec: [] for sec in sections}
+                           default_map = {'character': 'CHARACTERS', 'term': 'TITLES'}
+                           for entry in entries:
+                               sec = entry.get('_section')
+                               if not sec:
+                                   sec = default_map.get(entry.get('type', 'term'), 'TITLES')
+                               if sec not in grouped:
+                                   grouped[sec] = []
+                                   sections.append(sec)
+                               grouped[sec].append(entry)
+
+                           # Build header columns: standard + pattern-manager fields + custom/additional fields
+                           standard_cols = ['translated_name', 'raw_name', 'gender', 'description']
+                           pattern_fields = []
+                           try:
+                               import PatternManager as _pm
+                               pf = getattr(_pm, 'PATTERN_ADDITIONAL_FIELDS', [])
+                               if isinstance(pf, (list, tuple)):
+                                   pattern_fields = list(pf)
+                           except Exception:
+                               pattern_fields = []
+
+                           custom_fields = self.config.get('custom_glossary_fields', [])
+                           # include any fields present in data that are not internal/standard
+                           data_fields = []
+                           for e in entries:
+                               for k in e.keys():
+                                   if k.startswith('_') or k in ['type'] + standard_cols:
+                                       continue
+                                   if k not in custom_fields and k not in pattern_fields and k not in data_fields:
+                                       data_fields.append(k)
+                           header_cols = standard_cols + pattern_fields + custom_fields + data_fields
+
+                           lines = [f"Glossary Columns: {', '.join(header_cols)}", ""]
+                           for sec in sections:
+                               sec_entries = grouped.get(sec, [])
+                               if not sec_entries:
+                                   continue
+                               lines.append(f"=== {sec} ===")
+                               for e in sec_entries:
+                                   translated = e.get('translated_name', '')
+                                   raw_name = e.get('raw_name', '')
+                                   gender = e.get('gender', '')
+                                   desc = e.get('description', '')
+
+                                   line = f"* {translated}"
+                                   if raw_name:
+                                       line += f" ({raw_name})"
+                                   if gender:
+                                       line += f" [{gender}]"
+                                   extra_tail = []
+                                   for col in header_cols[4:]:
+                                       val = e.get(col, '')
+                                       if val:
+                                           extra_tail.append(f"{col}: {val}")
+                                   if desc:
+                                       line += f": {desc}"
+                                   if extra_tail:
+                                       tail_str = " | ".join(extra_tail)
+                                       line += f" | {tail_str}" if desc else f": {tail_str}"
+                                   lines.append(line)
+                               lines.append("")
+
+                           with open(path_out, 'w', encoding='utf-8', newline='') as f:
+                               f.write("\n".join(lines).rstrip() + "\n")
+
+                       save_token_csv(self.current_glossary_data, path)
+                   else:
+                       import csv
+                       standard_fields = ['type', 'raw_name', 'translated_name', 'gender']
+                       extra_fields = []
                        for entry in self.current_glossary_data:
-                           if entry.get('type') == 'character':
-                               writer.writerow([entry.get('type', ''), entry.get('raw_name', ''), 
-                                              entry.get('translated_name', ''), entry.get('gender', '')])
-                           else:
-                               writer.writerow([entry.get('type', ''), entry.get('raw_name', ''), 
-                                              entry.get('translated_name', ''), ''])
+                           for k in entry.keys():
+                               if k.startswith('_') or k in standard_fields:
+                                   continue
+                               if k not in extra_fields:
+                                   extra_fields.append(k)
+                       with open(path, 'w', encoding='utf-8', newline='') as f:
+                           writer = csv.writer(f)
+                           for entry in self.current_glossary_data:
+                               row = [
+                                   entry.get('type', ''),
+                                   entry.get('raw_name', ''),
+                                   entry.get('translated_name', ''),
+                                   entry.get('gender', '')
+                               ]
+                               for field in extra_fields:
+                                   row.append(entry.get(field, ''))
+                               writer.writerow(row)
                else:
-                   # Save as JSON
                    with open(path, 'w', encoding='utf-8') as f:
                        json.dump(self.current_glossary_data, f, ensure_ascii=False, indent=2)
                return True
            except Exception as e:
                QMessageBox.critical(parent, "Error", f"Failed to save: {e}")
                return False
-       
+
         def clean_empty_fields():
             if not self.current_glossary_data:
                 QMessageBox.critical(parent, "Error", "No glossary loaded")
