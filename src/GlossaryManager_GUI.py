@@ -12,9 +12,9 @@ from PySide6.QtWidgets import (QDialog, QWidget, QLabel, QLineEdit, QPushButton,
                                 QVBoxLayout, QHBoxLayout, QGridLayout, QFrame,
                                 QGroupBox, QSpinBox, QSlider, QMessageBox, QFileDialog,
                                 QSizePolicy, QAbstractItemView, QButtonGroup, QApplication,
-                                QComboBox)
+                                QComboBox, QMenu, QInputDialog)
 from PySide6.QtCore import Qt, Signal, Slot, QTimer
-from PySide6.QtGui import QFont, QColor, QIcon
+from PySide6.QtGui import QFont, QColor, QIcon, QKeySequence, QShortcut
 
 # WindowManager and UIHelper removed - not needed in PySide6
 # Qt handles window management and UI utilities automatically
@@ -93,6 +93,7 @@ class GlossaryManagerMixin:
         # Note: self.master is a Tkinter window, so we use None as parent for PySide6
         dialog = QDialog(None)
         dialog.setWindowTitle("Glossary Manager")
+        dialog.setFont(QFont("Segoe UI", 10))
         
         # Use screen ratios instead of fixed pixels
         self._screen = QApplication.primaryScreen().geometry()
@@ -2253,12 +2254,15 @@ Prioritize names that appear with honorifics or in important contexts."""
         self.glossary_tree.setColumnCount(1)
         self.glossary_tree.setHeaderLabels(["#"])
         self.glossary_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.glossary_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         content_frame_layout.addWidget(self.glossary_tree)
 
         self.glossary_tree.itemDoubleClicked.connect(lambda item, col: self._on_tree_double_click(item, col))
+        self.glossary_tree.customContextMenuRequested.connect(lambda pos: None)  # will be rebound after helpers are defined
 
         self.current_glossary_data = None
         self.current_glossary_format = None
+        self.glossary_column_fields = []
 
         # Editor functions
         def load_glossary_for_editing():
@@ -2481,6 +2485,7 @@ Prioritize names that appear with honorifics or in important contexts."""
                    column_fields.extend(custom_fields)
                
                self.glossary_tree.clear()
+               self.glossary_column_fields = list(column_fields)
                self.glossary_tree.setColumnCount(len(column_fields) + 1)  # +1 for index column
                
                headers = ['#'] + [field.replace('_', ' ').title() for field in column_fields]
@@ -2511,6 +2516,10 @@ Prioritize names that appear with honorifics or in important contexts."""
                        values.append(str(value))
                    
                    item = QTreeWidgetItem(values)
+                   if self.current_glossary_format == 'dict':
+                       item.setData(0, Qt.UserRole, entry.get('original', ''))
+                   else:
+                       item.setData(0, Qt.UserRole, idx)
                    self.glossary_tree.addTopLevelItem(item)
                
                # Update stats
@@ -2530,6 +2539,8 @@ Prioritize names that appear with honorifics or in important contexts."""
                
                self.stats_label.setText(" | ".join(stats))
                self.append_log(f"✅ Loaded {len(entries)} entries from glossary")
+               self._last_find_text = ""
+               self._last_find_pos = -1
                
            except Exception as e:
                QMessageBox.critical(parent, "Error", f"Failed to load glossary: {e}")
@@ -2661,7 +2672,7 @@ Prioritize names that appear with honorifics or in important contexts."""
                 QMessageBox.critical(parent, "Error", "No glossary loaded")
                 return
             
-            if self.current_glossary_format == 'list':
+            if self.current_glossary_format in ['list', 'token_csv']:
                 # Check if there are any empty fields
                 empty_fields_found = False
                 fields_cleaned = {}
@@ -2724,7 +2735,7 @@ Prioritize names that appear with honorifics or in important contexts."""
 
                 indices_to_delete.sort(reverse=True)
 
-                if self.current_glossary_format == 'list':
+                if self.current_glossary_format in ['list', 'token_csv']:
                    for idx in indices_to_delete:
                        if 0 <= idx < len(self.current_glossary_data):
                            del self.current_glossary_data[idx]
@@ -2745,7 +2756,7 @@ Prioritize names that appear with honorifics or in important contexts."""
                 QMessageBox.critical(parent, "Error", "No glossary loaded")
                 return
             
-            if self.current_glossary_format == 'list':
+            if self.current_glossary_format in ['list', 'token_csv']:
                 # Import the skip function from the updated script
                 try:
                     from extract_glossary_from_epub import skip_duplicate_entries, remove_honorifics
@@ -3011,11 +3022,11 @@ Prioritize names that appear with honorifics or in important contexts."""
             stats_layout = QVBoxLayout(stats_group)
             main_layout.addWidget(stats_group)
             
-            entry_count = len(self.current_glossary_data) if self.current_glossary_format == 'list' else len(self.current_glossary_data.get('entries', {}))
+            entry_count = len(self.current_glossary_data) if self.current_glossary_format in ['list', 'token_csv'] else len(self.current_glossary_data.get('entries', {}))
             stats_layout.addWidget(QLabel(f"Total entries: {entry_count}"))
             
             # For new format, show type breakdown
-            if self.current_glossary_format == 'list' and self.current_glossary_data and 'type' in self.current_glossary_data[0]:
+            if self.current_glossary_format in ['list', 'token_csv'] and self.current_glossary_data and 'type' in self.current_glossary_data[0]:
                 characters = sum(1 for e in self.current_glossary_data if e.get('type') == 'character')
                 terms = sum(1 for e in self.current_glossary_data if e.get('type') == 'term')
                 stats_layout.addWidget(QLabel(f"Characters: {characters}, Terms: {terms}"))
@@ -3092,7 +3103,7 @@ Prioritize names that appear with honorifics or in important contexts."""
                         if not self.create_glossary_backup(f"before_trim_{entries_to_remove}"):
                             return
                     
-                    if self.current_glossary_format == 'list':
+                    if self.current_glossary_format in ['list', 'token_csv']:
                         # Keep only top N entries
                         if top_n < len(self.current_glossary_data):
                             self.current_glossary_data = self.current_glossary_data[:top_n]
@@ -3175,7 +3186,7 @@ Prioritize names that appear with honorifics or in important contexts."""
             content_layout.addSpacing(15)
             
             # Current stats
-            entry_count = len(self.current_glossary_data) if self.current_glossary_format == 'list' else len(self.current_glossary_data.get('entries', {}))
+            entry_count = len(self.current_glossary_data) if self.current_glossary_format in ['list', 'token_csv'] else len(self.current_glossary_data.get('entries', {}))
             
             stats_group = QGroupBox("Current Status")
             stats_layout = QVBoxLayout(stats_group)
@@ -3186,7 +3197,7 @@ Prioritize names that appear with honorifics or in important contexts."""
             content_layout.addSpacing(15)
             
             # Check if new format
-            is_new_format = (self.current_glossary_format == 'list' and 
+            is_new_format = (self.current_glossary_format in ['list', 'token_csv'] and 
                            self.current_glossary_data and 
                            'type' in self.current_glossary_data[0])
             
@@ -3313,7 +3324,7 @@ Prioritize names that appear with honorifics or in important contexts."""
                 
                 matching = 0
                 
-                if self.current_glossary_format == 'list':
+                if self.current_glossary_format in ['list', 'token_csv']:
                     for entry in self.current_glossary_data:
                         if check_entry_matches(entry):
                             matching += 1
@@ -3345,7 +3356,7 @@ Prioritize names that appear with honorifics or in important contexts."""
                         gender_value = val
                         break
                 
-                if self.current_glossary_format == 'list':
+                if self.current_glossary_format in ['list', 'token_csv']:
                     filtered = []
                     for entry in self.current_glossary_data:
                         if check_entry_matches(entry):
@@ -3517,6 +3528,62 @@ Prioritize names that appear with honorifics or in important contexts."""
 
         auto_select_current_glossary()
        
+        # Quick toolbar above the entry list
+        toolbar_widget = QWidget()
+        toolbar_layout = QHBoxLayout(toolbar_widget)
+        toolbar_layout.setContentsMargins(0, 0, 0, 4)
+        for text, handler, color in [
+            ("Save", save_edited_glossary, "#15803d"),
+            ("Save As...", save_as_glossary, "#0f766e"),
+            ("Delete Selected", delete_selected_entries, "#991b1b")
+        ]:
+            btn = QPushButton(text)
+            btn.setFixedWidth(115)
+            btn.clicked.connect(handler)
+            btn.setStyleSheet(f"background-color: {color}; color: white; padding: 6px; font-weight: bold;")
+            toolbar_layout.addWidget(btn)
+        toolbar_layout.addStretch()
+        content_frame_layout.insertWidget(0, toolbar_widget)
+
+        def show_tree_context_menu(pos):
+            menu = QMenu(self.glossary_tree)
+            menu.addAction("Save Changes", save_edited_glossary)
+            menu.addAction("Save As...", save_as_glossary)
+            menu.addSeparator()
+            menu.addAction("Delete Selected", delete_selected_entries)
+            menu.addAction("Reload", load_glossary_for_editing)
+            menu.exec(self.glossary_tree.viewport().mapToGlobal(pos))
+
+        try:
+            self.glossary_tree.customContextMenuRequested.disconnect()
+        except Exception:
+            pass
+        self.glossary_tree.customContextMenuRequested.connect(show_tree_context_menu)
+       
+        def find_in_tree():
+            text, ok = QInputDialog.getText(self.dialog, "Find in entries", "Text to find:",
+                                            QLineEdit.Normal, getattr(self, "_last_find_text", ""))
+            if not ok or not text:
+                return
+            total = self.glossary_tree.topLevelItemCount()
+            if total == 0:
+                return
+            if text != getattr(self, "_last_find_text", ""):
+                self._last_find_pos = -1
+            text_lower = text.lower()
+            start = (getattr(self, "_last_find_pos", -1) + 1) % total
+            for offset in range(total):
+                idx = (start + offset) % total
+                item = self.glossary_tree.topLevelItem(idx)
+                cols = [item.text(c) for c in range(item.columnCount())]
+                if any(text_lower in c.lower() for c in cols):
+                    self.glossary_tree.setCurrentItem(item)
+                    self.glossary_tree.scrollToItem(item)
+                    self._last_find_text = text
+                    self._last_find_pos = idx
+                    return
+            QMessageBox.information(self.dialog, "Find", "No matches found.")
+       
         # Buttons
         browse_btn = QPushButton("Browse")
         browse_btn.setFixedWidth(135)
@@ -3584,32 +3651,33 @@ Prioritize names that appear with honorifics or in important contexts."""
         save_as_btn.setStyleSheet("background-color: #15803d; color: white; padding: 8px; font-weight: bold; border: 1px solid #15803d;")
         row3_layout.addWidget(save_as_btn)
 
+        # Keyboard shortcuts
+        QShortcut(QKeySequence.Save, self.dialog, activated=save_edited_glossary)
+        QShortcut(QKeySequence.Delete, self.dialog, activated=delete_selected_entries)
+        QShortcut(QKeySequence.Find, self.dialog, activated=find_in_tree)
+
     def _on_tree_double_click(self, item, column_idx):
        """Handle double-click on treeview item for inline editing"""
-       if not item or column_idx < 0:
+       if not item or column_idx <= 0:
            return
        
-       # Get column count
-       column_count = self.glossary_tree.columnCount()
-       if column_idx >= column_count:
+       if not self.glossary_column_fields or column_idx - 1 >= len(self.glossary_column_fields):
            return
        
-       # Get column name from header
-       col_name = self.glossary_tree.headerItem().text(column_idx)
+       col_key = self.glossary_column_fields[column_idx - 1]
        current_value = item.text(column_idx)
        
        edit_dialog = QDialog(self.dialog)
-       edit_dialog.setWindowTitle(f"Edit {col_name.replace('_', ' ').title()}")
+       edit_dialog.setWindowTitle(f"Edit {col_key.replace('_', ' ').title()}")
        edit_dialog.setMinimumWidth(400)
        edit_dialog.setMinimumHeight(150)
        
        dialog_layout = QVBoxLayout(edit_dialog)
        dialog_layout.setContentsMargins(20, 20, 20, 20)
        
-       label = QLabel(f"Edit {col_name.replace('_', ' ').title()}:")
+       label = QLabel(f"Edit {col_key.replace('_', ' ').title()}:")
        dialog_layout.addWidget(label)
        
-       # Simple entry for new format fields
        entry = QLineEdit(current_value)
        dialog_layout.addWidget(entry)
        dialog_layout.addSpacing(5)
@@ -3618,21 +3686,29 @@ Prioritize names that appear with honorifics or in important contexts."""
        
        def save_edit():
            new_value = entry.text()
-           
-           # Update tree item
            item.setText(column_idx, new_value)
            
-           # Update data
            row_idx = int(item.text(0)) - 1
            
-           if self.current_glossary_format == 'list':
+           if self.current_glossary_format in ['list', 'token_csv']:
                if 0 <= row_idx < len(self.current_glossary_data):
                    data_entry = self.current_glossary_data[row_idx]
-                   
                    if new_value:
-                       data_entry[col_name] = new_value
+                       data_entry[col_key] = new_value
                    else:
-                       data_entry.pop(col_name, None)
+                       data_entry.pop(col_key, None)
+           
+           elif self.current_glossary_format == 'dict':
+               key = item.data(0, Qt.UserRole)
+               entries = self.current_glossary_data.get('entries', {})
+               if key in entries:
+                   if col_key == 'original':
+                       value = entries.pop(key)
+                       new_key = new_value or key
+                       entries[new_key] = value
+                       item.setData(0, Qt.UserRole, new_key)
+                   elif col_key == 'translated':
+                       entries[key] = new_value
            
            edit_dialog.accept()
        
@@ -3652,10 +3728,8 @@ Prioritize names that appear with honorifics or in important contexts."""
        cancel_btn.setStyleSheet("background-color: #6c757d; color: white; padding: 8px;")
        button_layout.addWidget(cancel_btn)
        
-       # Connect Enter/Escape shortcuts
        entry.returnPressed.connect(save_edit)
        
-       # Show edit dialog with fade animation
        try:
            from dialog_animations import exec_dialog_with_fade
            exec_dialog_with_fade(edit_dialog, duration=250)
