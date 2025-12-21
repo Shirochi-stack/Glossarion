@@ -27,11 +27,14 @@ import logging
 import time
 import uuid
 import functools
+import base64
+import hashlib
 from urllib.parse import quote as urlquote
 from typing import Optional
 
 import requests
 from aiohttp import web
+from cryptography.fernet import Fernet
 
 # Add src directory to path
 # In this repo layout, `discord_bot.py` typically lives inside the `src/` directory.
@@ -531,6 +534,79 @@ def save_user_config(user_id: int, payload: dict) -> None:
         sys.stderr.write(f"[CONFIG] Failed to save user config for {user_id}: {e}\n")
         sys.stderr.flush()
 
+def _derive_user_cipher(user_id: int, passphrase: Optional[str], salt: str) -> Fernet:
+    """Derive a Fernet cipher for a user from passphrase or USER_CFG_MASTER_KEY."""
+    key_source = (passphrase or os.getenv("USER_CFG_MASTER_KEY") or "").strip()
+    if not key_source:
+        raise ValueError(
+            "No passphrase provided and USER_CFG_MASTER_KEY is not set. "
+            "Set a passphrase or configure USER_CFG_MASTER_KEY to unlock saved credentials."
+        )
+    salt_bytes = (salt or "").encode("utf-8")
+    material = hashlib.sha256(
+        key_source.encode("utf-8") + b":" + str(user_id).encode("utf-8") + b":" + salt_bytes
+    ).digest()
+    return Fernet(base64.urlsafe_b64encode(material))
+
+
+def _encrypt_user_secret(user_id: int, payload: dict, passphrase: Optional[str]) -> dict:
+    """Encrypt a payload for a specific user."""
+    salt = base64.urlsafe_b64encode(os.urandom(16)).decode()
+    cipher = _derive_user_cipher(user_id, passphrase, salt)
+    token = cipher.encrypt(json.dumps(payload).encode("utf-8")).decode()
+    return {
+        "ciphertext": token,
+        "salt": salt,
+        "uses_passphrase": bool(passphrase),
+        "created_at": int(time.time()),
+    }
+
+
+def _decrypt_user_secret(user_id: int, blob: dict, passphrase: Optional[str]) -> dict:
+    """Decrypt a per-user payload."""
+    if not blob or not isinstance(blob, dict):
+        return {}
+    salt = blob.get("salt") or ""
+    token = blob.get("ciphertext")
+    if not token:
+        return {}
+    cipher = _derive_user_cipher(user_id, passphrase, salt)
+    data = cipher.decrypt(token.encode("utf-8"))
+    return json.loads(data.decode("utf-8"))
+
+
+def _parse_multi_key_block(raw: Optional[str], model: Optional[str]) -> list:
+    """Parse up to 50 API keys (one per line) into multi_api_keys entries."""
+    keys = []
+    if not raw:
+        return keys
+    for line in raw.splitlines():
+        key = line.strip()
+        if not key:
+            continue
+        entry = {"api_key": key, "model": (model or "").strip() or "gpt-4o", "enabled": True}
+        keys.append(entry)
+        if len(keys) >= 50:
+            break
+    return keys
+
+
+def load_saved_credentials(user_id: int, passphrase: Optional[str]) -> Optional[dict]:
+    """Return decrypted saved credentials for user, if present."""
+    cfg = load_user_config(user_id)
+    blob = cfg.get("credentials") or None
+    if not blob:
+        return None
+    try:
+        return _decrypt_user_secret(user_id, blob, passphrase)
+    except ValueError:
+        # Bubble up missing passphrase/master key errors
+        raise
+    except Exception as e:
+        sys.stderr.write(f"[CONFIG] Failed to decrypt credentials for {user_id}: {e}\n")
+        sys.stderr.flush()
+        return None
+
 
 def _ephemeral(interaction: discord.Interaction) -> bool:
     """Use ephemeral responses in guilds; in DMs, send normal messages."""
@@ -737,7 +813,9 @@ async def on_ready():
         synced = await bot.tree.sync()
         print(f"✅ Synced {len(synced)} command(s)")
     except Exception as e:
+        import traceback
         print(f"❌ Failed to sync commands: {e}")
+        traceback.print_exc()
 
 
 async def model_autocomplete(interaction: discord.Interaction, current: str):
@@ -781,11 +859,72 @@ async def profile_autocomplete(interaction: discord.Interaction, current: str):
     except Exception:
         return [app_commands.Choice(name="Universal", value="Universal")]
 
+@bot.tree.command(name="save", description="Save your API settings (encrypted per user)")
+@app_commands.describe(
+    api_key="Primary API key to use by default",
+    model="Default model to use",
+    passphrase="Optional passphrase for encryption (else USER_CFG_MASTER_KEY is used)",
+    multi_key_mode="Enable multi-key rotation pool",
+    fallback_key="Enable fallback key list (uses the same multi keys)",
+    multi_keys="Up to 50 API keys, one per line (Multi key 1..50)"
+)
+async def save_cmd(
+    interaction: discord.Interaction,
+    api_key: str,
+    model: str,
+    passphrase: Optional[str] = None,
+    multi_key_mode: bool = False,
+    fallback_key: bool = False,
+    multi_keys: Optional[str] = None,
+):
+    """Persist encrypted API credentials for later /translate and /extract runs."""
+
+    if not await _safe_defer(interaction, ephemeral=True):
+        return
+
+    user_id = interaction.user.id
+    parsed_multi = _parse_multi_key_block(multi_keys, model)
+
+    payload = {
+        "api_key": api_key.strip(),
+        "model": (model or "").strip(),
+        "use_multi_api_keys": bool(multi_key_mode and parsed_multi),
+        "multi_api_keys": parsed_multi,
+        "use_fallback_keys": bool(fallback_key and parsed_multi),
+        "fallback_keys": parsed_multi if fallback_key and parsed_multi else [],
+    }
+
+    try:
+        encrypted = _encrypt_user_secret(user_id, payload, passphrase)
+    except ValueError as e:
+        await _safe_edit_original_response(interaction, content=f"❌ {e}")
+        return
+    except Exception as e:
+        await _safe_edit_original_response(interaction, content=f"❌ Failed to save: {e}")
+        return
+
+    save_user_config(user_id, {"credentials": encrypted})
+
+    note = "Encrypted with passphrase" if passphrase else "Encrypted with USER_CFG_MASTER_KEY"
+    detail = "Multi-key rotation enabled" if payload["use_multi_api_keys"] else "Single key mode"
+    embed = discord.Embed(
+        title="✅ Saved credentials",
+        description=(
+            f"Model: `{payload['model'] or 'gpt-4o'}`\n"
+            f"Primary key stored.\n"
+            f"{detail}" + (f" ({len(parsed_multi)} keys)" if payload["use_multi_api_keys"] else "") + ".\n"
+            f"{note}."
+        ),
+        color=discord.Color.green(),
+    )
+    if payload["use_fallback_keys"]:
+        embed.add_field(name="Fallback keys", value=f"{len(parsed_multi)} configured", inline=False)
+
+    await _safe_edit_original_response(interaction, embed=embed)
+
 
 @bot.tree.command(name="translate", description="Translate EPUB, TXT, or PDF file")
 @app_commands.describe(
-    api_key="Your API key",
-    model="AI model to use (optional; defaults to config.json if omitted)",
     file="EPUB, TXT, or PDF file to translate (optional if using url)",
     url="Google Drive or Dropbox link to file (optional if using file attachment)",
     custom_endpoint_url="Custom OpenAI-compatible base URL (auto-enables when set; omit to disable)",
@@ -805,7 +944,6 @@ async def profile_autocomplete(interaction: discord.Interaction, current: str):
     thinking="Enable/disable AI thinking capabilities (GPT/Gemini/DeepSeek) - Default: True",
     gemini_thinking_level="Gemini 3 thinking level (low/high) - Default: high",
     gemini_thinking_budget="Gemini thinking budget (-1=auto, 0=disabled) - Default: -1",
-    or_thinking_tokens="OpenRouter thinking tokens - Default: 2000",
     gpt_effort="GPT-5/OpenAI thinking effort (none/low/medium/high/xhigh) - Default: medium",
     target_language="Target language",
     profile="Prompt profile from translator_gui (default: Universal)"
@@ -829,10 +967,11 @@ async def profile_autocomplete(interaction: discord.Interaction, current: str):
 @app_commands.autocomplete(profile=profile_autocomplete)
 async def translate(
     interaction: discord.Interaction,
-    api_key: str,
-    model: Optional[str] = None,
     file: discord.Attachment = None,
     url: str = None,
+    api_key: Optional[str] = None,
+    passphrase: Optional[str] = None,
+    model: Optional[str] = None,
     custom_endpoint_url: Optional[str] = None,
     google_credentials_file: discord.Attachment = None,
     extraction_mode: str = "enhanced",
@@ -850,7 +989,6 @@ async def translate(
     thinking: bool = True,
     gemini_thinking_level: str = "high",
     gemini_thinking_budget: int = -1,
-    or_thinking_tokens: int = 2000,
     gpt_effort: str = "medium",
     target_language: str = "English",
     profile: str = "Universal"
@@ -911,11 +1049,45 @@ async def translate(
     user_id = interaction.user.id
     user_config = load_user_config(user_id)
 
+    try:
+        saved_creds = load_saved_credentials(user_id, passphrase)
+    except ValueError as e:
+        await _safe_edit_original_response(interaction, content=f"❌ {e}")
+        return
+    except Exception:
+        saved_creds = None
+
     # Load config early so we can default the model without relying on autocomplete.
     config = load_config()
 
     # Default model: prefer explicit user input, otherwise config.json, then env var, then a safe fallback.
+    if saved_creds and not model:
+        model = (saved_creds.get('model') or '').strip()
     model = (model or '').strip() or (config.get('model') or '').strip() or (os.getenv('MODEL') or '').strip() or 'gpt-4o'
+
+
+    if saved_creds and not api_key:
+        api_key = saved_creds.get('api_key')
+    api_key = (api_key or '').strip()
+    if not api_key:
+        await _safe_edit_original_response(interaction, content="❌ No API key available. Provide api_key or run /save first (with passphrase if set).")
+        return
+
+    use_multi_keys = bool(saved_creds and saved_creds.get("use_multi_api_keys") and saved_creds.get("multi_api_keys"))
+    if use_multi_keys:
+        os.environ['USE_MULTI_API_KEYS'] = '1'
+        os.environ['MULTI_API_KEYS'] = json.dumps(saved_creds.get("multi_api_keys", []))
+    else:
+        os.environ['USE_MULTI_API_KEYS'] = '0'
+        os.environ.pop('MULTI_API_KEYS', None)
+
+    use_fallback_keys = bool(saved_creds and saved_creds.get("use_fallback_keys") and saved_creds.get("fallback_keys"))
+    if use_fallback_keys:
+        os.environ['USE_FALLBACK_KEYS'] = '1'
+        os.environ['FALLBACK_KEYS'] = json.dumps(saved_creds.get("fallback_keys", []))
+    else:
+        os.environ['USE_FALLBACK_KEYS'] = '0'
+        os.environ.pop('FALLBACK_KEYS', None)
 
     # Initial response (we already deferred; now edit the original response)
     profile_note = (
@@ -962,7 +1134,6 @@ async def translate(
                 "thinking": thinking,
                 "gemini_thinking_level": gemini_thinking_level,
                 "gemini_thinking_budget": gemini_thinking_budget,
-                "or_thinking_tokens": or_thinking_tokens,
                 "gpt_effort": gpt_effort,
                 "target_language": target_language,
                 "profile": profile,
@@ -1611,7 +1782,7 @@ async def translate(
                 loop = asyncio.get_event_loop()
                 download_url = None
                 # 1) tmpfiles
-                for uploader, name in (( _upload_to_tmpfiles, "tmpfiles"), (_upload_to_tempsh, "temp.sh"), (_upload_to_oracle_par, "oracle"), (_upload_to_gofile, "gofile")):
+                for uploader, name in (( _upload_to_tempsh, "temp.sh"), (_upload_to_tmpfiles, "tmpfiles"), (_upload_to_oracle_par, "oracle"), (_upload_to_gofile, "gofile")):
                     try:
                         download_url = await loop.run_in_executor(
                             None,
@@ -1755,10 +1926,11 @@ async def settings(interaction: discord.Interaction):
 
 @bot.tree.command(name="extract", description="Extract glossary from EPUB, TXT, or PDF file")
 @app_commands.describe(
-    api_key="Your API key",
-    model="AI model to use (optional; defaults to config.json if omitted)",
     file="EPUB, TXT, or PDF file to extract glossary from (optional if using url)",
     url="Google Drive or Dropbox link to file (optional if using file attachment)",
+    api_key="Your API key (optional after /save)",
+    passphrase="Passphrase to decrypt saved credentials (if set in /save)",
+    model="AI model to use (optional; defaults to config.json if omitted)",
     custom_endpoint_url="Custom OpenAI-compatible base URL (auto-enables when set; omit to disable)",
     google_credentials_file="Google Cloud credentials JSON file upload (for Vertex AI models)",
     extraction_mode="Text extraction method (default: Enhanced/html2text)",
@@ -1772,7 +1944,6 @@ async def settings(interaction: discord.Interaction):
     thinking="Enable/disable AI thinking capabilities (GPT/Gemini/DeepSeek) - Default: True",
     gemini_thinking_level="Gemini 3 thinking level (low/high) - Default: high",
     gemini_thinking_budget="Gemini thinking budget (-1=auto, 0=disabled) - Default: -1",
-    or_thinking_tokens="OpenRouter thinking tokens - Default: 2000",
     gpt_effort="GPT-5/OpenAI thinking effort (none/low/medium/high/xhigh) - Default: medium",
     target_language="Target language for translations"
 )
@@ -1794,10 +1965,11 @@ async def settings(interaction: discord.Interaction):
 @app_commands.autocomplete(model=model_autocomplete)
 async def extract(
     interaction: discord.Interaction,
-    api_key: str,
-    model: Optional[str] = None,
     file: discord.Attachment = None,
     url: str = None,
+    api_key: Optional[str] = None,
+    passphrase: Optional[str] = None,
+    model: Optional[str] = None,
     custom_endpoint_url: Optional[str] = None,
     google_credentials_file: discord.Attachment = None,
     extraction_mode: str = "enhanced",
@@ -1811,7 +1983,6 @@ async def extract(
     thinking: bool = True,
     gemini_thinking_level: str = "high",
     gemini_thinking_budget: int = -1,
-    or_thinking_tokens: int = 2000,
     gpt_effort: str = "medium",
     target_language: str = "English"
 ):
@@ -1869,11 +2040,44 @@ async def extract(
     user_id = interaction.user.id
     user_config = load_user_config(user_id)
 
+    try:
+        saved_creds = load_saved_credentials(user_id, passphrase)
+    except ValueError as e:
+        await _safe_edit_original_response(interaction, content=f"❌ {e}")
+        return
+    except Exception:
+        saved_creds = None
+
     # Load config early so we can default the model without relying on autocomplete.
     config = load_config()
 
     # Default model: prefer explicit user input, otherwise config.json, then env var, then a safe fallback.
+    if saved_creds and not model:
+        model = (saved_creds.get('model') or '').strip()
     model = (model or '').strip() or (config.get('model') or '').strip() or (os.getenv('MODEL') or '').strip() or 'gpt-4o'
+
+    if saved_creds and not api_key:
+        api_key = saved_creds.get('api_key')
+    api_key = (api_key or '').strip()
+    if not api_key:
+        await _safe_edit_original_response(interaction, content="❌ No API key available. Provide api_key or run /save first (with passphrase if set).")
+        return
+
+    use_multi_keys = bool(saved_creds and saved_creds.get("use_multi_api_keys") and saved_creds.get("multi_api_keys"))
+    if use_multi_keys:
+        os.environ['USE_MULTI_API_KEYS'] = '1'
+        os.environ['MULTI_API_KEYS'] = json.dumps(saved_creds.get("multi_api_keys", []))
+    else:
+        os.environ['USE_MULTI_API_KEYS'] = '0'
+        os.environ.pop('MULTI_API_KEYS', None)
+
+    use_fallback_keys = bool(saved_creds and saved_creds.get("use_fallback_keys") and saved_creds.get("fallback_keys"))
+    if use_fallback_keys:
+        os.environ['USE_FALLBACK_KEYS'] = '1'
+        os.environ['FALLBACK_KEYS'] = json.dumps(saved_creds.get("fallback_keys", []))
+    else:
+        os.environ['USE_FALLBACK_KEYS'] = '0'
+        os.environ.pop('FALLBACK_KEYS', None)
 
     # Initial response (we already deferred; now edit the original response)
     embed = discord.Embed(
@@ -1907,7 +2111,6 @@ async def extract(
                 "thinking": thinking,
                 "gemini_thinking_level": gemini_thinking_level,
                 "gemini_thinking_budget": gemini_thinking_budget,
-                "or_thinking_tokens": or_thinking_tokens,
                 "gpt_effort": gpt_effort,
                 "target_language": target_language,
             }
@@ -2110,12 +2313,12 @@ async def extract(
             os.environ['ENABLE_GPT_THINKING'] = '0'
             os.environ['ENABLE_GEMINI_THINKING'] = '0'
             os.environ['ENABLE_DEEPSEEK_THINKING'] = '0'
+            os.environ.pop('GPT_REASONING_TOKENS', None)
             sys.stderr.write(f"[CONFIG] Thinking capabilities disabled via command\n")
         else:
             # Set specific thinking variables if thinking is enabled
             os.environ['GEMINI_THINKING_LEVEL'] = gemini_thinking_level
             os.environ['THINKING_BUDGET'] = str(gemini_thinking_budget)
-            os.environ['GPT_REASONING_TOKENS'] = str(or_thinking_tokens)
             os.environ['GPT_EFFORT'] = gpt_effort
         
         # Handle Vertex AI / Google Cloud credentials
@@ -2368,7 +2571,7 @@ async def extract(
             if _should_offload(file_size, send_zip):
                 loop = asyncio.get_event_loop()
                 download_url = None
-                for uploader, name in (( _upload_to_tmpfiles, "tmpfiles"), (_upload_to_tempsh, "temp.sh"), (_upload_to_oracle_par, "oracle"), (_upload_to_gofile, "gofile")):
+                for uploader, name in (( _upload_to_tempsh, "temp.sh"), (_upload_to_tmpfiles, "tmpfiles"), (_upload_to_oracle_par, "oracle"), (_upload_to_gofile, "gofile")):
                     try:
                         download_url = await loop.run_in_executor(
                             None,
@@ -2515,7 +2718,7 @@ async def help_command(interaction: discord.Interaction):
     
     embed.add_field(
         name="Commands",
-        value="`/translate` - Translate file\\n`/extract` - Extract glossary\\n`/models` - List models\\n`/help` - This message\\n\\nUse `send_zip: True` to force ZIP output.",
+        value="`/save` - Store encrypted API key/model\n`/translate` - Translate file\n`/extract` - Extract glossary\n`/models` - List models\n`/help` - This message\n\nUse `send_zip: True` to force ZIP output.",
         inline=False
     )
     
