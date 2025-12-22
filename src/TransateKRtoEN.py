@@ -7078,7 +7078,42 @@ def main(log_callback=None, stop_callback=None):
         print(f"📑 DEBUG: Existing glossary.csv? {os.path.exists(existing_glossary_csv)}")
         print(f"📑 DEBUG: Existing glossary.json? {os.path.exists(existing_glossary_json)}")
 
-        if config.MANUAL_GLOSSARY and os.path.isfile(config.MANUAL_GLOSSARY):
+        def _nonempty(path):
+            try:
+                return os.path.getsize(path) > 0
+            except Exception:
+                return False
+
+        def _has_glossary_data(path):
+            """Return True only if the glossary file contains at least one entry."""
+            try:
+                ext = os.path.splitext(path)[1].lower()
+                if ext in [".csv", ".txt", ".md"]:
+                    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                        lines = [line for line in f.readlines() if line.strip()]
+                    # Require at least one non-header data line
+                    return len(lines) > 1
+                if ext == ".json":
+                    with open(path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    if isinstance(data, dict):
+                        if "entries" in data and isinstance(data["entries"], dict):
+                            return len(data["entries"]) > 0
+                        return len(data) > 0
+                    if isinstance(data, list):
+                        return len(data) > 0
+                # Unknown extension: fallback to non-empty size check
+                return _nonempty(path)
+            except Exception:
+                return False
+
+        # If manual glossary is present but empty/header-only, clear it so auto-gen can run
+        if config.MANUAL_GLOSSARY and os.path.isfile(config.MANUAL_GLOSSARY) and not _has_glossary_data(config.MANUAL_GLOSSARY):
+            print("📑 Manual glossary is empty; ignoring to allow automatic generation.")
+            config.MANUAL_GLOSSARY = ""
+            os.environ.pop("MANUAL_GLOSSARY", None)
+
+        if config.MANUAL_GLOSSARY and os.path.isfile(config.MANUAL_GLOSSARY) and _has_glossary_data(config.MANUAL_GLOSSARY):
             ext = os.path.splitext(config.MANUAL_GLOSSARY)[1].lower()
             # Treat .txt and .md files as CSV format (keep original extension)
             if ext in [".csv", ".txt"]:
@@ -7115,11 +7150,26 @@ def main(log_callback=None, stop_callback=None):
                             print(f"⚠️ Failed to copy glossary extension: {e}")
                     else:
                         print(f"📑 Using existing glossary extension in output folder")
-        elif os.path.exists(existing_glossary_csv) or os.path.exists(existing_glossary_json):
+        # If existing glossaries in output are empty, delete them so they don't block auto-gen
+        if os.path.exists(existing_glossary_csv) and not _has_glossary_data(existing_glossary_csv):
+            try:
+                os.remove(existing_glossary_csv)
+                print("📑 Removed empty glossary.csv to allow automatic generation.")
+            except Exception as e:
+                print(f"⚠️ Could not remove empty glossary.csv: {e}")
+        if os.path.exists(existing_glossary_json) and not _has_glossary_data(existing_glossary_json):
+            try:
+                os.remove(existing_glossary_json)
+                print("📑 Removed empty glossary.json to allow automatic generation.")
+            except Exception as e:
+                print(f"⚠️ Could not remove empty glossary.json: {e}")
+
+        elif (os.path.exists(existing_glossary_csv) and _has_glossary_data(existing_glossary_csv)) or \
+             (os.path.exists(existing_glossary_json) and _has_glossary_data(existing_glossary_json)):
             print("📑 Existing glossary file detected in source folder - skipping automatic generation")
-            if os.path.exists(existing_glossary_csv):
+            if os.path.exists(existing_glossary_csv) and _has_glossary_data(existing_glossary_csv):
                 print(f"📑 Using existing glossary.csv: {existing_glossary_csv}")
-            elif os.path.exists(existing_glossary_json):
+            elif os.path.exists(existing_glossary_json) and _has_glossary_data(existing_glossary_json):
                 print(f"📑 Using existing glossary.json: {existing_glossary_json}")
             
             # Copy glossary extension if configured
