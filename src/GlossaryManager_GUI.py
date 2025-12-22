@@ -591,7 +591,6 @@ class GlossaryManagerMixin:
                 
                 self.append_log("✅ Glossary settings saved successfully")
                 self.append_log("✅ Environment variables reinitialized")
-                QMessageBox.information(dialog, "Success", "Glossary settings saved!")
                 dialog.accept()
                 
             except Exception as e:
@@ -2240,9 +2239,17 @@ Prioritize names that appear with honorifics or in important contexts."""
         html_toggle_layout = QHBoxLayout(html_toggle_widget)
         html_toggle_layout.setContentsMargins(0, 0, 0, 4)
         self.update_html_on_save_checkbox = self._create_styled_checkbox("Update all HTML files on save")
+        self.update_html_on_save_checkbox.setChecked(self.config.get('update_html_on_save', True))
         self.update_html_on_save_checkbox.setToolTip(
             "When enabled, saving will also replace updated translated names across all .html files."
         )
+        def _persist_update_html(state):
+            self.config['update_html_on_save'] = bool(state)
+            try:
+                self.save_config(show_message=False)
+            except Exception:
+                pass
+        self.update_html_on_save_checkbox.stateChanged.connect(_persist_update_html)
         html_toggle_layout.addWidget(self.update_html_on_save_checkbox)
         html_toggle_layout.addStretch()
         # We'll place this above the save buttons inside the toolbar later
@@ -3556,7 +3563,8 @@ Prioritize names that appear with honorifics or in important contexts."""
             for base_dir in candidate_dirs:
                 for root, _, files in os.walk(base_dir):
                     for name in files:
-                        if not name.lower().endswith('.html'):
+                        lower_name = name.lower()
+                        if not (lower_name.endswith('.html') or lower_name.endswith('.txt')):
                             continue
                         path = os.path.join(root, name)
                         try:
@@ -3574,7 +3582,7 @@ Prioritize names that appear with honorifics or in important contexts."""
                                 for old, new in changes:
                                     replaced_here += content.count(old)
                                 total_replacements += replaced_here
-                                self.append_log(f"Updated HTML: {path} ({replaced_here} replacements)")
+                                self.append_log(f"Updated file: {path} ({replaced_here} replacements)")
                         except Exception as e:
                             self.append_log(f"⚠️ Failed to update {path}: {e}")
             return files_updated, total_replacements
@@ -3597,7 +3605,7 @@ Prioritize names that appear with honorifics or in important contexts."""
                files_updated = 0
                if self.update_html_on_save_checkbox.isChecked() and changes:
                    files_updated, total_repl = update_html_files(changes)
-                   self.append_log(f"Updated {files_updated} HTML files with translated-name changes ({total_repl} replacements).")
+                   self.append_log(f"Updated {files_updated} files with translated-name changes ({total_repl} replacements).")
                # Reset baseline and highlights
                if self.current_glossary_format in ['list', 'token_csv']:
                    self._original_translated_map = {
