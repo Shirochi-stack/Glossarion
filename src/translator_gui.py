@@ -5632,6 +5632,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 manual_glossary_path = os.getenv('MANUAL_GLOSSARY')
                 if not manual_glossary_path and hasattr(self, 'manual_glossary_path'):
                     manual_glossary_path = self.manual_glossary_path
+                # If the file exists but is empty, treat it as missing so auto generation can run
+                if manual_glossary_path and os.path.exists(manual_glossary_path):
+                    try:
+                        if os.path.getsize(manual_glossary_path) == 0:
+                            self.append_log("ℹ️ Glossary file is empty; treating as missing so automatic glossary generation can run.")
+                            manual_glossary_path = None
+                    except Exception:
+                        pass
                 
                 # If automatic glossary is enabled and no manual glossary exists, defer appending
                 if enable_auto_glossary and (not manual_glossary_path or not os.path.exists(manual_glossary_path)):
