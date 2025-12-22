@@ -2132,7 +2132,7 @@ def _create_response_handling_section(self, parent):
     indefinite_desc.setContentsMargins(40, 2, 0, 5)
     section_v.addWidget(indefinite_desc)
     
-    # Add Halgakos icon at bottom (HiDPI-aware 36x36 badge, keep overall footprint small)
+    # Add Halgakos icon under the description (HiDPI-aware 90x90, centered)
     import os
     icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
     if os.path.exists(icon_path):
@@ -2144,7 +2144,7 @@ def _create_response_handling_section(self, parent):
             dpr = self.devicePixelRatioF()
         except Exception:
             dpr = 1.0
-        logical_px = 16
+        logical_px = 90
         dev_px = int(logical_px * max(1.0, dpr))
         icon = QIcon(icon_path)
         pm = icon.pixmap(QSize(dev_px, dev_px))
@@ -2156,10 +2156,17 @@ def _create_response_handling_section(self, parent):
             pm.setDevicePixelRatio(dpr)
         except Exception:
             pass
-        icon_label.setPixmap(pm)
-        icon_label.setFixedSize(36, 36)
+        # Fit into logical size while preserving DPR
+        pm_fitted = pm.scaled(int(logical_px * dpr), int(logical_px * dpr),
+                              Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        try:
+            pm_fitted.setDevicePixelRatio(dpr)
+        except Exception:
+            pass
+        icon_label.setPixmap(pm_fitted)
+        icon_label.setFixedSize(logical_px, logical_px)
         icon_label.setAlignment(Qt.AlignCenter)
-        section_v.addWidget(icon_label)
+        section_v.addWidget(icon_label, alignment=Qt.AlignCenter)
     
     # Place the section at row 1, column 0 to match the original grid
     try:
