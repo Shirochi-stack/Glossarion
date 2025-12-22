@@ -3571,28 +3571,138 @@ Prioritize names that appear with honorifics or in important contexts."""
         self.glossary_tree.customContextMenuRequested.connect(show_tree_context_menu)
        
         def find_in_tree():
-            text, ok = QInputDialog.getText(self.dialog, "Find in entries", "Text to find:",
-                                            QLineEdit.Normal, getattr(self, "_last_find_text", ""))
-            if not ok or not text:
-                return
-            total = self.glossary_tree.topLevelItemCount()
-            if total == 0:
-                return
-            if text != getattr(self, "_last_find_text", ""):
-                self._last_find_pos = -1
-            text_lower = text.lower()
-            start = (getattr(self, "_last_find_pos", -1) + 1) % total
-            for offset in range(total):
-                idx = (start + offset) % total
-                item = self.glossary_tree.topLevelItem(idx)
-                cols = [item.text(c) for c in range(item.columnCount())]
-                if any(text_lower in c.lower() for c in cols):
-                    self.glossary_tree.setCurrentItem(item)
-                    self.glossary_tree.scrollToItem(item)
-                    self._last_find_text = text
-                    self._last_find_pos = idx
+            import re
+
+            dialog = QDialog(self.dialog)
+            dialog.setWindowTitle("Find / Replace")
+            dialog_layout = QVBoxLayout(dialog)
+
+            grid = QGridLayout()
+            dialog_layout.addLayout(grid)
+
+            find_edit = QLineEdit(getattr(self, "_last_find_text", ""))
+            replace_edit = QLineEdit(getattr(self, "_last_replace_text", ""))
+
+            grid.addWidget(QLabel("Find:"), 0, 0)
+            grid.addWidget(find_edit, 0, 1)
+            grid.addWidget(QLabel("Replace with:"), 1, 0)
+            grid.addWidget(replace_edit, 1, 1)
+
+            status_label = QLabel("")
+            status_label.setStyleSheet("color: #9ca3af;")
+            dialog_layout.addWidget(status_label)
+
+            def find_next():
+                text = find_edit.text()
+                if not text:
                     return
-            QMessageBox.information(self.dialog, "Find", "No matches found.")
+                total = self.glossary_tree.topLevelItemCount()
+                if total == 0:
+                    return
+                if text != getattr(self, "_last_find_text", ""):
+                    self._last_find_pos = -1
+                text_lower = text.lower()
+                start = (getattr(self, "_last_find_pos", -1) + 1) % total
+                for offset in range(total):
+                    idx = (start + offset) % total
+                    item = self.glossary_tree.topLevelItem(idx)
+                    cols = [item.text(c) for c in range(item.columnCount())]
+                    if any(text_lower in c.lower() for c in cols):
+                        self.glossary_tree.setCurrentItem(item)
+                        self.glossary_tree.scrollToItem(item)
+                        self._last_find_text = text
+                        self._last_find_pos = idx
+                        status_label.setText(f"Found at row {idx + 1}")
+                        return
+                status_label.setText("No matches found.")
+
+            def replace_in_item(item):
+                """Replace occurrences in a single tree item and keep data in sync."""
+                text = find_edit.text()
+                repl = replace_edit.text()
+                if not text or item is None:
+                    return 0
+
+                pattern = re.compile(re.escape(text), re.IGNORECASE)
+                replacements = 0
+
+                for col_idx in range(1, item.columnCount()):
+                    before = item.text(col_idx)
+                    after, count = pattern.subn(repl, before)
+                    if count == 0:
+                        continue
+
+                    item.setText(col_idx, after)
+                    col_key = self.glossary_column_fields[col_idx - 1] if self.glossary_column_fields else None
+
+                    if self.current_glossary_format in ['list', 'token_csv']:
+                        try:
+                            row_idx = int(item.text(0)) - 1
+                        except Exception:
+                            row_idx = -1
+                        if 0 <= row_idx < len(self.current_glossary_data) and col_key:
+                            entry = self.current_glossary_data[row_idx]
+                            if col_key == '_section':
+                                entry['_section'] = after
+                            elif after:
+                                entry[col_key] = after
+                            else:
+                                entry.pop(col_key, None)
+
+                    elif self.current_glossary_format == 'dict':
+                        key = item.data(0, Qt.UserRole)
+                        entries = self.current_glossary_data.get('entries', {})
+                        if col_key == 'original':
+                            value = entries.pop(key, None)
+                            new_key = after if after else key
+                            entries[new_key] = value
+                            item.setData(0, Qt.UserRole, new_key)
+                        elif col_key == 'translated' and key in entries:
+                            entries[key] = after
+
+                    replacements += count
+
+                return replacements
+
+            def replace_current():
+                count = replace_in_item(self.glossary_tree.currentItem())
+                status_label.setText(f"Replaced {count} occurrence(s) in current row" if count else "No matches in current row.")
+
+            def replace_all():
+                total_items = self.glossary_tree.topLevelItemCount()
+                if total_items == 0 or not find_edit.text():
+                    return
+                total_repl = 0
+                for idx in range(total_items):
+                    item = self.glossary_tree.topLevelItem(idx)
+                    total_repl += replace_in_item(item)
+                self._last_find_text = find_edit.text()
+                self._last_replace_text = replace_edit.text()
+                status_label.setText(f"Replaced {total_repl} occurrence(s) across all entries.")
+
+            buttons = QHBoxLayout()
+            dialog_layout.addLayout(buttons)
+
+            find_btn = QPushButton("Find Next")
+            find_btn.clicked.connect(find_next)
+            buttons.addWidget(find_btn)
+
+            replace_btn = QPushButton("Replace")
+            replace_btn.clicked.connect(replace_current)
+            buttons.addWidget(replace_btn)
+
+            replace_all_btn = QPushButton("Replace All")
+            replace_all_btn.clicked.connect(replace_all)
+            buttons.addWidget(replace_all_btn)
+
+            buttons.addStretch()
+
+            close_btn = QPushButton("Close")
+            close_btn.clicked.connect(dialog.accept)
+            buttons.addWidget(close_btn)
+
+            find_edit.returnPressed.connect(find_next)
+            dialog.exec()
        
         # Buttons
         browse_btn = QPushButton("Browse")
