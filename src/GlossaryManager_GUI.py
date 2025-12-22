@@ -3590,12 +3590,13 @@ Prioritize names that appear with honorifics or in important contexts."""
         def save_edited_glossary():
            changes = collect_translated_changes()
            if self.update_html_on_save_checkbox.isChecked() and changes:
-               example_lines = "\\n".join(f"{old or '<empty>'} -> {new or '<empty>'}" for old, new in changes[:5])
+               example_lines = "<br>".join(f"{old or '&lt;empty&gt;'} -> {new or '&lt;empty&gt;'}" for old, new in changes[:5])
                msg = QMessageBox(self.dialog)
                msg.setIcon(QMessageBox.Warning)
                msg.setWindowTitle("Update HTML files")
                msg.setText(f"{len(changes)} entries have had their translated name field updated.\nNow all HTML files will be updated to reflect the change.")
                msg.setInformativeText(example_lines)
+               msg.setTextFormat(Qt.RichText)
                msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
                msg.setDefaultButton(QMessageBox.Yes)
                if msg.exec() != QMessageBox.Yes:
