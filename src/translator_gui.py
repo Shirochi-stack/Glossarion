@@ -4258,6 +4258,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # Animations
                 self.pm_icon_spin_animation = QPropertyAnimation(self.pm_button_icon, b"rotation")
                 self.pm_icon_spin_animation.setDuration(900)
+                self._pm_spin_cycle_ms = 900
                 self.pm_icon_spin_animation.setStartValue(0)
                 self.pm_icon_spin_animation.setEndValue(360)
                 self.pm_icon_spin_animation.setLoopCount(-1)
@@ -4351,86 +4352,45 @@ If you see multiple p-b cookies, use the one with the longest value."""
 
     def _stop_pm_spin(self):
         if hasattr(self, 'pm_icon_spin_animation') and hasattr(self, 'pm_button_icon') and hasattr(self, 'pm_icon_stop_animation'):
+            # Stop infinite spin if running
             if self.pm_icon_spin_animation.state() == QPropertyAnimation.Running:
                 self.pm_icon_spin_animation.stop()
-                try:
-                    current = self.pm_button_icon.get_rotation() % 360
-                except Exception:
-                    current = 0
-                target = 360 if current > 180 else 0
-                self.pm_icon_stop_animation.setStartValue(current)
-                self.pm_icon_stop_animation.setEndValue(target)
-                self.pm_icon_stop_animation.start()
+            # Always finish a full forward cycle to 360° before stopping
+            try:
+                current = self.pm_button_icon.get_rotation() % 360
+            except Exception:
+                current = 0
+            remaining = 360 - (current if current > 0 else 360)
+            # Compute duration proportional to remaining angle, based on one cycle duration
+            cycle = getattr(self, '_pm_spin_cycle_ms', 900)
+            duration = max(150, int(cycle * (remaining / 360.0)))
+            self.pm_icon_stop_animation.stop()
+            self.pm_icon_stop_animation.setEasingCurve(QEasingCurve.Linear)
+            self.pm_icon_stop_animation.setDuration(duration)
+            self.pm_icon_stop_animation.setStartValue(current if current > 0 else 0)
+            self.pm_icon_stop_animation.setEndValue(360)
+            self.pm_icon_stop_animation.start()
+            # After finishing, snap back to 0 so the next spin starts cleanly
+            try:
+                QTimer.singleShot(duration, lambda: self.pm_button_icon.set_rotation(0))
+            except Exception:
+                pass
 
     def open_progress_manager(self):
         """User clicked Progress Manager. Show instantly if cached; otherwise show a tiny loader and open lazily."""
         # Start spin now
         if hasattr(self, 'pm_icon_spin_animation') and self.pm_icon_spin_animation.state() != QPropertyAnimation.Running:
             self.pm_icon_spin_animation.start()
+            try:
+                import time as _t
+                self._pm_spin_started_at = _t.monotonic()
+            except Exception:
+                self._pm_spin_started_at = None
         # If cached, just show
         if self._show_cached_progress_manager_if_any():
             self._stop_pm_spin()
             return
-        # Show lightweight loading dialog immediately
-        try:
-            from PySide6.QtWidgets import QDialog, QVBoxLayout
-            self._pm_loading = QDialog(self)
-            self._pm_loading.setWindowTitle("Progress Manager — Loading…")
-            try:
-                base_dir = getattr(self, 'base_dir', os.path.dirname(os.path.abspath(__file__)))
-                ico_path = os.path.join(base_dir, 'Halgakos.ico')
-                if os.path.exists(ico_path):
-                    self._pm_loading.setWindowIcon(QIcon(ico_path))
-            except Exception:
-                pass
-            self._pm_loading.setModal(False)
-            self._pm_loading.resize(320, 140)
-            lay = QVBoxLayout(self._pm_loading)
-            # Add icon inside dialog content
-            try:
-                from PySide6.QtGui import QIcon, QPixmap
-                from PySide6.QtCore import QSize
-                if os.path.exists(ico_path):
-                    icon = QIcon(ico_path)
-                    dpr = self.devicePixelRatioF() if hasattr(self, 'devicePixelRatioF') else 1.0
-                    target_px = max(96, 96)  # logical px
-                    target_dev_px = int(target_px * dpr)
-                    # Request a pixmap at device pixels to keep sharpness
-                    pm = icon.pixmap(QSize(target_dev_px, target_dev_px))
-                    if pm.isNull():
-                        # Fallback: load and scale manually with SmoothTransformation
-                        raw = QPixmap(ico_path)
-                        img = raw.toImage().scaled(target_dev_px, target_dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                        pm = QPixmap.fromImage(img)
-                    # Ensure correct device pixel ratio so it renders crisp on HiDPI
-                    try:
-                        pm.setDevicePixelRatio(dpr)
-                    except Exception:
-                        pass
-                    icon_lbl = QLabel()
-                    icon_lbl.setPixmap(pm)
-                    icon_lbl.setAlignment(Qt.AlignCenter)
-                    lay.addWidget(icon_lbl)
-            except Exception:
-                pass
-            lbl = QLabel("Preparing retranslation view…")
-            # Slightly increase font size while handling point/pixel configs
-            try:
-                f = lbl.font()
-                if f.pointSize() > 0:
-                    f.setPointSize(f.pointSize() + 1)
-                else:
-                    px = f.pixelSize()
-                    f.setPixelSize((px + 2) if px > 0 else 14)
-                lbl.setFont(f)
-            except Exception:
-                pass
-            lbl.setAlignment(Qt.AlignCenter)
-            lay.addWidget(lbl)
-            self._pm_loading.show()
-        except Exception:
-            self._pm_loading = None
-        # Use a tiny worker so the event loop repaints before we build the real UI on main thread
+        # No loading dialog — keep the toolbar icon spinning until the dialog is ready
         def _emit():
             try:
                 time.sleep(0.02)
@@ -4443,21 +4403,19 @@ If you see multiple p-b cookies, use the one with the longest value."""
         try:
             # If user opened something else and dialog now exists, just raise it
             if self._show_cached_progress_manager_if_any():
+                self._stop_pm_spin()
                 return
             # Build using existing mixin method on the main thread
             self.force_retranslation()
         finally:
-            # Poll a bit to close loader when the real dialog exists
-            def _finish_when_ready():
+            # Poll until the actual dialog exists, then stop spinning
+            def _finish_when_ready(attempts=0):
                 if self._show_cached_progress_manager_if_any():
-                    if self._pm_loading:
-                        try:
-                            self._pm_loading.close()
-                        except Exception:
-                            pass
+                    self._stop_pm_spin()
+                elif attempts >= 60:  # ~6s max
                     self._stop_pm_spin()
                 else:
-                    QTimer.singleShot(100, _finish_when_ready)
+                    QTimer.singleShot(100, lambda: _finish_when_ready(attempts + 1))
             QTimer.singleShot(50, _finish_when_ready)
 
     def _on_save_config_clicked(self):
