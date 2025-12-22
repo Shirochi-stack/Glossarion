@@ -178,7 +178,8 @@ class SplashManager:
         """Load the Halgakos.ico icon"""
         try:
             import os
-            from PySide6.QtGui import QIcon
+            from PySide6.QtGui import QIcon, QPixmap
+            from PySide6.QtCore import QSize
             
             if getattr(sys, 'frozen', False):
                 # Running as .exe
@@ -190,33 +191,30 @@ class SplashManager:
             ico_path = os.path.join(base_dir, 'Halgakos.ico')
             
             if os.path.isfile(ico_path):
-                # Load icon with Qt and get the highest resolution available
+                # HiDPI-aware, high-quality scaling (same technique as Progress Manager)
                 icon = QIcon(ico_path)
-                available_sizes = icon.availableSizes()
+                try:
+                    dpr = self.splash_window.devicePixelRatioF()
+                except Exception:
+                    dpr = 1.0
+                target_logical = 110  # keep same visual size as before
+                target_dev_px = int(target_logical * max(1.0, dpr))
+                pm = icon.pixmap(QSize(target_dev_px, target_dev_px))
+                if pm.isNull():
+                    # Fallback: manual scale with SmoothTransformation
+                    raw = QPixmap(ico_path)
+                    img = raw.toImage().scaled(target_dev_px, target_dev_px, Qt.AspectRatioMode.KeepAspectRatio,
+                                               Qt.TransformationMode.SmoothTransformation)
+                    pm = QPixmap.fromImage(img)
+                # Ensure crisp rendering on HiDPI
+                try:
+                    pm.setDevicePixelRatio(dpr)
+                except Exception:
+                    pass
                 
-                if available_sizes:
-                    # Get the largest available size from the ICO file
-                    largest_size = max(available_sizes, key=lambda s: s.width() * s.height())
-                    print(f"📐 Loading icon at native size: {largest_size.width()}x{largest_size.height()}")
-                    
-                    # Get pixmap at the largest native size
-                    pixmap = icon.pixmap(largest_size)
-                    
-                    # Only scale if the native size is larger than 110x110
-                    # This preserves quality by using native resolution when possible
-                    if largest_size.width() > 110 or largest_size.height() > 110:
-                        pixmap = pixmap.scaled(110, 110, Qt.AspectRatioMode.KeepAspectRatio, 
-                                              Qt.TransformationMode.SmoothTransformation)
-                else:
-                    # Fallback to direct load
-                    pixmap = QPixmap(ico_path)
-                    if pixmap.width() > 110 or pixmap.height() > 110:
-                        pixmap = pixmap.scaled(110, 110, Qt.AspectRatioMode.KeepAspectRatio, 
-                                              Qt.TransformationMode.SmoothTransformation)
-                
-                if not pixmap.isNull():
+                if not pm.isNull():
                     icon_label = QLabel()
-                    icon_label.setPixmap(pixmap)
+                    icon_label.setPixmap(pm)
                     icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
                     icon_label.setStyleSheet("background: transparent;")
                     layout.addWidget(icon_label)

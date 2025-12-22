@@ -3109,7 +3109,7 @@ Recent translations to summarize:
         
         # Create icon container to isolate rotation effect
         icon_container = QWidget()
-        icon_container.setFixedSize(90, 90)  # Fixed size to prevent layout shift during rotation
+        icon_container.setFixedSize(90, 90)  # Original container size to match pre-change look
         icon_container.setStyleSheet("background-color: transparent;")  # Transparent background
         icon_layout = QVBoxLayout(icon_container)
         icon_layout.setContentsMargins(0, 0, 0, 0)
@@ -3118,18 +3118,15 @@ Recent translations to summarize:
         self.run_button_icon = RotatableLabel(icon_container)
         self.run_button_icon.setStyleSheet("background-color: transparent;")  # Transparent background for icon label
         if os.path.exists(icon_path):
-            # Load the icon at the highest available resolution
+            # Restore original sizing technique for exact legacy look
             from PySide6.QtGui import QImage
             icon = QIcon(icon_path)
-            # Get the largest available size from the icon
             available_sizes = icon.availableSizes()
             if available_sizes:
                 largest_size = max(available_sizes, key=lambda s: s.width() * s.height())
                 pixmap = icon.pixmap(largest_size)
             else:
                 pixmap = QPixmap(icon_path)
-            
-            # Scale with high-quality transformation
             scaled_pixmap = pixmap.scaled(80, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self.run_button_icon.set_original_pixmap(scaled_pixmap)
         self.run_button_icon.setAlignment(Qt.AlignCenter)
@@ -3989,15 +3986,24 @@ If you see multiple p-b cookies, use the one with the longest value."""
         self.qa_button_icon = RotatableLabel()
         self.qa_button_icon.setStyleSheet("background-color: transparent;")
         if os.path.exists(icon_path):
+            from PySide6.QtCore import QSize
             icon = QIcon(icon_path)
-            available_sizes = icon.availableSizes()
-            if available_sizes:
-                largest_size = max(available_sizes, key=lambda s: s.width() * s.height())
-                pixmap = icon.pixmap(largest_size)
-            else:
-                pixmap = QPixmap(icon_path)
-            scaled_pixmap = pixmap.scaled(24, 24, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            self.qa_button_icon.set_original_pixmap(scaled_pixmap)
+            try:
+                dpr = self.devicePixelRatioF()
+            except Exception:
+                dpr = 1.0
+            logical_px = 16
+            dev_px = int(logical_px * max(1.0, dpr))
+            pm = icon.pixmap(QSize(dev_px, dev_px))
+            if pm.isNull():
+                raw = QPixmap(icon_path)
+                img = raw.toImage().scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                pm = QPixmap.fromImage(img)
+            try:
+                pm.setDevicePixelRatio(dpr)
+            except Exception:
+                pass
+            self.qa_button_icon.set_original_pixmap(pm)
         self.qa_button_icon.setFixedSize(36, 36)  # Larger container to prevent clipping during rotation
         self.qa_button_icon.setAlignment(Qt.AlignCenter)
         
@@ -4133,15 +4139,24 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self.glossary_button_icon.setStyleSheet("background-color: transparent;")
                 if os.path.exists(icon_path):
                     from PySide6.QtGui import QIcon, QPixmap
+                    from PySide6.QtCore import QSize
                     icon = QIcon(icon_path)
-                    available_sizes = icon.availableSizes()
-                    if available_sizes:
-                        largest_size = max(available_sizes, key=lambda s: s.width() * s.height())
-                        pixmap = icon.pixmap(largest_size)
-                    else:
-                        pixmap = QPixmap(icon_path)
-                    scaled_pixmap = pixmap.scaled(24, 24, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                    self.glossary_button_icon.set_original_pixmap(scaled_pixmap)
+                    try:
+                        dpr = self.devicePixelRatioF()
+                    except Exception:
+                        dpr = 1.0
+                    logical_px = 16
+                    dev_px = int(logical_px * max(1.0, dpr))
+                    pm = icon.pixmap(QSize(dev_px, dev_px))
+                    if pm.isNull():
+                        raw = QPixmap(icon_path)
+                        img = raw.toImage().scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                        pm = QPixmap.fromImage(img)
+                    try:
+                        pm.setDevicePixelRatio(dpr)
+                    except Exception:
+                        pass
+                    self.glossary_button_icon.set_original_pixmap(pm)
                 self.glossary_button_icon.setFixedSize(36, 36)  # Larger container to prevent clipping during rotation
                 self.glossary_button_icon.setAlignment(Qt.AlignCenter)
                 
@@ -4219,11 +4234,25 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self.pm_button_icon = RotatableLabel()
                 self.pm_button_icon.setStyleSheet("background-color: transparent;")
                 if os.path.exists(icon_path):
+                    from PySide6.QtCore import QSize
                     icon = QIcon(icon_path)
-                    sizes = icon.availableSizes()
-                    pixmap = icon.pixmap(max(sizes, key=lambda s: s.width()*s.height())) if sizes else QPixmap(icon_path)
-                    self.pm_button_icon.set_original_pixmap(pixmap.scaled(24, 24, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-                self.pm_button_icon.setFixedSize(32, 32)
+                    try:
+                        dpr = self.devicePixelRatioF()
+                    except Exception:
+                        dpr = 1.0
+                    logical_px = 16
+                    dev_px = int(logical_px * max(1.0, dpr))
+                    pm = icon.pixmap(QSize(dev_px, dev_px))
+                    if pm.isNull():
+                        raw = QPixmap(icon_path)
+                        img = raw.toImage().scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                        pm = QPixmap.fromImage(img)
+                    try:
+                        pm.setDevicePixelRatio(dpr)
+                    except Exception:
+                        pass
+                    self.pm_button_icon.set_original_pixmap(pm)
+                self.pm_button_icon.setFixedSize(28, 28)
                 self.pm_button_icon.setAlignment(Qt.AlignCenter)
 
                 # Animations
