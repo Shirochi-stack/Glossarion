@@ -3150,6 +3150,7 @@ Recent translations to summarize:
             dev_px = int(target_logical * max(1.0, dpr))
             avail = icon.availableSizes()
             if avail:
+                # pick largest available size to minimize upscaling
                 best = max(avail, key=lambda s: s.width() * s.height())
                 pm = icon.pixmap(best * int(max(1.0, dpr)))
             else:
@@ -3157,18 +3158,22 @@ Recent translations to summarize:
             if pm.isNull():
                 pm = QPixmap(icon_path)
             if not pm.isNull():
+                # normalize DPR on source pixmap
                 try:
                     pm.setDevicePixelRatio(dpr)
                 except Exception:
                     pass
-                fitted = pm.scaled(int(target_logical * dpr), int(target_logical * dpr),
-                                   Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                # scale to device pixels then set DPR so Qt draws sharply at 90 logical px
+                fitted = pm.scaled(int(target_logical * dpr),
+                                   int(target_logical * dpr),
+                                   Qt.KeepAspectRatio,
+                                   Qt.SmoothTransformation)
                 try:
                     fitted.setDevicePixelRatio(dpr)
                 except Exception:
                     pass
                 self.run_button_icon.set_original_pixmap(fitted)
-        self.run_button_icon.setFixedSize(target_logical, target_logical)
+                self.run_button_icon.setFixedSize(target_logical, target_logical)
         self.run_button_icon.setAlignment(Qt.AlignCenter)
         icon_layout.addWidget(self.run_button_icon)
         

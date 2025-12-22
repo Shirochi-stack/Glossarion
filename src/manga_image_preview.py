@@ -1495,9 +1495,43 @@ class MangaImagePreviewWidget(QWidget):
         script_dir = os.path.dirname(os.path.abspath(__file__))
         self.halgakos_icon = create_spinning_checkbox_with_icon(
             self.manual_editing_toggle,
-            icon_size=20,
+            icon_size=36,
             base_dir=script_dir
         )
+        # Re-apply icon with devicePixelRatio for crisp HiDPI rendering
+        try:
+            icon_path = os.path.join(script_dir, "Halgakos.ico")
+            if os.path.exists(icon_path):
+                icon = QIcon(icon_path)
+                try:
+                    dpr = self.devicePixelRatioF()
+                except Exception:
+                    dpr = 1.0
+                target_logical = 36
+                dev_px = int(target_logical * max(1.0, dpr))
+                pm = icon.pixmap(QSize(dev_px, dev_px))
+                if pm.isNull():
+                    pm = QPixmap(icon_path)
+                if not pm.isNull():
+                    try:
+                        pm.setDevicePixelRatio(dpr)
+                    except Exception:
+                        pass
+                    fitted = pm.scaled(
+                        int(target_logical * dpr),
+                        int(target_logical * dpr),
+                        Qt.KeepAspectRatio,
+                        Qt.SmoothTransformation
+                    )
+                    try:
+                        fitted.setDevicePixelRatio(dpr)
+                    except Exception:
+                        pass
+                    self.halgakos_icon.setPixmap(fitted)
+                    self.halgakos_icon.setFixedSize(target_logical, target_logical)
+                    self.halgakos_icon.setAlignment(Qt.AlignCenter)
+        except Exception:
+            pass
         title_layout.addWidget(self.halgakos_icon)
         
         title_layout.addStretch()

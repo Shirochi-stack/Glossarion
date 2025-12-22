@@ -4120,9 +4120,19 @@ class MangaTranslationTab(QObject):
         if os.path.exists(icon_path):
             icon_label = QLabel()
             icon_pixmap = QPixmap(icon_path)
-            # Scale to a reasonable size
-            scaled_pixmap = icon_pixmap.scaled(150, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            icon_label.setPixmap(scaled_pixmap)
+            try:
+                dpr = self.dialog.devicePixelRatio() if hasattr(self, 'dialog') and self.dialog else 1.0
+            except Exception:
+                dpr = 1.0
+            target_logical = 90
+            fitted = icon_pixmap.scaled(int(target_logical * dpr), int(target_logical * dpr),
+                                        Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            try:
+                fitted.setDevicePixelRatio(dpr)
+            except Exception:
+                pass
+            icon_label.setPixmap(fitted)
+            icon_label.setFixedSize(target_logical, target_logical)
             icon_label.setAlignment(Qt.AlignCenter)
             icon_layout.addWidget(icon_label)
             
@@ -4920,9 +4930,20 @@ class MangaTranslationTab(QObject):
         if os.path.exists(icon_path_font):
             font_icon_label = QLabel()
             font_icon_pixmap = QPixmap(icon_path_font)
-            # Scale to a smaller, more subtle size
-            font_scaled_pixmap = font_icon_pixmap.scaled(40, 40, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            font_icon_label.setPixmap(font_scaled_pixmap)
+            try:
+                from PySide6.QtGui import QScreen
+                dpr = self.dialog.devicePixelRatio() if hasattr(self, 'dialog') and self.dialog else 1.0
+            except Exception:
+                dpr = 1.0
+            target_logical = 36
+            fitted = font_icon_pixmap.scaled(int(target_logical * dpr), int(target_logical * dpr),
+                                             Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            try:
+                fitted.setDevicePixelRatio(dpr)
+            except Exception:
+                pass
+            font_icon_label.setPixmap(fitted)
+            font_icon_label.setFixedSize(target_logical, target_logical)
             font_icon_label.setAlignment(Qt.AlignCenter)
             font_icon_layout.addWidget(font_icon_label)
             
@@ -5012,9 +5033,9 @@ class MangaTranslationTab(QObject):
                 self._original_pixmap = pixmap
                 self.setPixmap(pixmap)
         
-        # Icon container
+        # Icon container (HiDPI-aware 90x90)
         icon_container = QWidget()
-        icon_container.setFixedSize(100, 100)  # Increased size
+        icon_container.setFixedSize(100, 100)
         icon_container.setStyleSheet("background-color: transparent;")
         icon_layout = QVBoxLayout(icon_container)
         icon_layout.setContentsMargins(0, 0, 0, 0)
@@ -5024,14 +5045,33 @@ class MangaTranslationTab(QObject):
         self.start_button_icon.setStyleSheet("background-color: transparent;")
         if os.path.exists(icon_path):
             icon = QIcon(icon_path)
-            available_sizes = icon.availableSizes()
-            if available_sizes:
-                largest_size = max(available_sizes, key=lambda s: s.width() * s.height())
-                pixmap = icon.pixmap(largest_size)
+            try:
+                dpr = self.devicePixelRatioF()
+            except Exception:
+                dpr = 1.0
+            target_logical = 90
+            dev_px = int(target_logical * max(1.0, dpr))
+            avail = icon.availableSizes()
+            if avail:
+                best = max(avail, key=lambda s: s.width() * s.height())
+                pm = icon.pixmap(best * int(max(1.0, dpr)))
             else:
-                pixmap = QPixmap(icon_path)
-            scaled_pixmap = pixmap.scaled(90, 90, Qt.KeepAspectRatio, Qt.SmoothTransformation)  # Increased size
-            self.start_button_icon.set_original_pixmap(scaled_pixmap)
+                pm = icon.pixmap(QSize(dev_px, dev_px))
+            if pm.isNull():
+                pm = QPixmap(icon_path)
+            if not pm.isNull():
+                try:
+                    pm.setDevicePixelRatio(dpr)
+                except Exception:
+                    pass
+                fitted = pm.scaled(int(target_logical * dpr), int(target_logical * dpr),
+                                   Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                try:
+                    fitted.setDevicePixelRatio(dpr)
+                except Exception:
+                    pass
+                self.start_button_icon.set_original_pixmap(fitted)
+                self.start_button_icon.setFixedSize(target_logical, target_logical)
         self.start_button_icon.setAlignment(Qt.AlignCenter)
         icon_layout.addWidget(self.start_button_icon)
         
