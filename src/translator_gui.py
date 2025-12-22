@@ -556,18 +556,20 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         def stop(self):
             if self.timer.isActive():
                 self.timer.stop()
-            if self.base_pixmap:
-                try:
-                    w, h = self.target_size
-                    restored = self.base_pixmap.scaled(int(w*self.dpr), int(h*self.dpr),
-                                                       Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            try:
+                # Prefer the label's original pixmap (already HiDPI aware)
+                restored = getattr(self.label, "_original_pixmap", None)
+                if restored is None or restored.isNull():
+                    restored = self.base_pixmap
+                if restored and self.dpr > 1.0:
                     try:
                         restored.setDevicePixelRatio(self.dpr)
                     except Exception:
                         pass
+                if restored:
                     self.label.setPixmap(restored)
-                except Exception:
-                    pass
+            except Exception:
+                pass
 
         def is_running(self):
             return self.timer.isActive()
