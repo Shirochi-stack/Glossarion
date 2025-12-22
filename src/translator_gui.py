@@ -34,7 +34,7 @@ try:
                                     QMenuBar, QMenu, QMessageBox, QFileDialog, QDialog,
                                     QScrollArea, QTabWidget, QCheckBox, QComboBox, QSpinBox,
                                     QSizePolicy, QSplitter, QProgressBar, QStyle, QToolButton, QGraphicsOpacityEffect)
-    from PySide6.QtCore import Qt, Signal, Slot, QTimer, QThread, QSize, QEvent, QPropertyAnimation, QEasingCurve, Property
+    from PySide6.QtCore import Qt, Signal, Slot, QTimer, QThread, QSize, QEvent, QPropertyAnimation, QEasingCurve, Property, QObject
     from PySide6.QtGui import QFont, QColor, QIcon, QTextCursor, QKeySequence, QAction, QTextCharFormat, QTransform
 except ImportError as e:
     print(f"\n{'='*60}")
@@ -492,6 +492,74 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
     refresh_preview_signal = Signal()
     # Qt Signal to request Progress Manager open on main thread
     open_progress_manager_signal = Signal()
+
+    class _CachedSpinner(QObject):
+        """Tiny helper to spin an icon smoothly using cached frames (no QPainter)."""
+        def __init__(self, label: QLabel, base_pixmap, interval_ms=16, steps=48, parent=None):
+            super().__init__(parent or label)
+            self.label = label
+            self.base_pixmap = base_pixmap
+            self.interval_ms = interval_ms
+            self.frames = []
+            self._frame_idx = 0
+            # Precompute rotated frames once to avoid runtime stutter
+            try:
+                size = label.size()
+                for i in range(steps):
+                    angle = (i * 360) / steps
+                    rotated = base_pixmap.transformed(QTransform().rotate(angle), Qt.SmoothTransformation)
+                    if size.width() and size.height():
+                        # Force-fill the label square so the icon doesn't visually shrink
+                        rotated = rotated.scaled(size.width(), size.height(),
+                                                 Qt.IgnoreAspectRatio,
+                                                 Qt.SmoothTransformation)
+                    self.frames.append(rotated)
+            except Exception:
+                self.frames = []
+            self.timer = QTimer(self)
+            self.timer.timeout.connect(self._advance)
+
+        def _advance(self):
+            if not self.frames:
+                return
+            self.label.setPixmap(self.frames[self._frame_idx])
+            self._frame_idx = (self._frame_idx + 1) % len(self.frames)
+
+        def start(self):
+            if self.timer.isActive() or not self.frames:
+                return
+            self._frame_idx = 0
+            self.timer.start(self.interval_ms)
+
+        def stop(self):
+            if self.timer.isActive():
+                self.timer.stop()
+            if self.base_pixmap:
+                try:
+                    self.label.setPixmap(self.base_pixmap)
+                except Exception:
+                    pass
+
+        def is_running(self):
+            return self.timer.isActive()
+
+    def _create_spinner(self, label: QLabel, steps=48, interval_ms=14):
+        """Build a cached spinner for a label's current pixmap."""
+        try:
+            base_pm = getattr(label, "_original_pixmap", None) or label.pixmap()
+            if base_pm is None or base_pm.isNull():
+                return None
+            # Ensure we use the label's intended size (fallback to pixmap size)
+            size = label.size()
+            if size.width() == 0 or size.height() == 0:
+                size = base_pm.size()
+            # Pre-scale to label size to avoid shrink when rotating
+            base_pm = base_pm.scaled(size.width(), size.height(),
+                                     Qt.KeepAspectRatio,
+                                     Qt.SmoothTransformation)
+            return TranslatorGUI._CachedSpinner(label, base_pm, interval_ms=interval_ms, steps=steps, parent=self)
+        except Exception:
+            return None
     
     def __init__(self, parent=None):
         # Initialize QMainWindow
@@ -4052,17 +4120,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
         self.qa_button_icon.setFixedSize(36, 36)  # Larger container to prevent clipping during rotation
         self.qa_button_icon.setAlignment(Qt.AlignCenter)
         
-        # Create animations for QA button icon
-        self.qa_icon_spin_animation = QPropertyAnimation(self.qa_button_icon, b"rotation")
-        self.qa_icon_spin_animation.setDuration(900)
-        self.qa_icon_spin_animation.setStartValue(0)
-        self.qa_icon_spin_animation.setEndValue(360)
-        self.qa_icon_spin_animation.setLoopCount(-1)
-        self.qa_icon_spin_animation.setEasingCurve(QEasingCurve.Linear)
-        
-        self.qa_icon_stop_animation = QPropertyAnimation(self.qa_button_icon, b"rotation")
-        self.qa_icon_stop_animation.setDuration(800)
-        self.qa_icon_stop_animation.setEasingCurve(QEasingCurve.OutCubic)
+        # Smooth spinner (cached frames, no QPainter)
+        self.qa_spinner = self._create_spinner(self.qa_button_icon)
         
         # Button text label
         self.qa_text_label = QLabel("QA Scan")  # Store as instance variable
@@ -4205,17 +4264,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self.glossary_button_icon.setFixedSize(36, 36)  # Larger container to prevent clipping during rotation
                 self.glossary_button_icon.setAlignment(Qt.AlignCenter)
                 
-                # Create animations for Glossary button icon
-                self.glossary_icon_spin_animation = QPropertyAnimation(self.glossary_button_icon, b"rotation")
-                self.glossary_icon_spin_animation.setDuration(900)
-                self.glossary_icon_spin_animation.setStartValue(0)
-                self.glossary_icon_spin_animation.setEndValue(360)
-                self.glossary_icon_spin_animation.setLoopCount(-1)
-                self.glossary_icon_spin_animation.setEasingCurve(QEasingCurve.Linear)
-                
-                self.glossary_icon_stop_animation = QPropertyAnimation(self.glossary_button_icon, b"rotation")
-                self.glossary_icon_stop_animation.setDuration(800)
-                self.glossary_icon_stop_animation.setEasingCurve(QEasingCurve.OutCubic)
+                # Smooth spinner (cached frames)
+                self.glossary_spinner = self._create_spinner(self.glossary_button_icon)
                 
                 # Button text label
                 self.glossary_text_label = QLabel("Extract Glossary")  # Store as instance variable
@@ -4297,21 +4347,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     except Exception:
                         pass
                     self.pm_button_icon.set_original_pixmap(pm)
-                self.pm_button_icon.setFixedSize(28, 28)
+                self.pm_button_icon.setFixedSize(36, 36)
                 self.pm_button_icon.setAlignment(Qt.AlignCenter)
 
-                # Animations
-                self.pm_icon_spin_animation = QPropertyAnimation(self.pm_button_icon, b"rotation")
-                self.pm_icon_spin_animation.setDuration(900)
+                # Smooth spinner (cached frames)
+                self.pm_spinner = self._create_spinner(self.pm_button_icon, steps=40, interval_ms=16)
                 self._pm_spin_cycle_ms = 900
-                self.pm_icon_spin_animation.setStartValue(0)
-                self.pm_icon_spin_animation.setEndValue(360)
-                self.pm_icon_spin_animation.setLoopCount(-1)
-                self.pm_icon_spin_animation.setEasingCurve(QEasingCurve.Linear)
-
-                self.pm_icon_stop_animation = QPropertyAnimation(self.pm_button_icon, b"rotation")
-                self.pm_icon_stop_animation.setDuration(800)
-                self.pm_icon_stop_animation.setEasingCurve(QEasingCurve.OutCubic)
 
                 self.pm_text_label = QLabel("Progress Manager")
                 self.pm_text_label.setStyleSheet("color: white; font-weight: bold; background-color: transparent;")
@@ -4396,36 +4437,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
         return False
 
     def _stop_pm_spin(self):
-        if hasattr(self, 'pm_icon_spin_animation') and hasattr(self, 'pm_button_icon') and hasattr(self, 'pm_icon_stop_animation'):
-            # Stop infinite spin if running
-            if self.pm_icon_spin_animation.state() == QPropertyAnimation.Running:
-                self.pm_icon_spin_animation.stop()
-            # Always finish a full forward cycle to 360° before stopping
-            try:
-                current = self.pm_button_icon.get_rotation() % 360
-            except Exception:
-                current = 0
-            remaining = 360 - (current if current > 0 else 360)
-            # Compute duration proportional to remaining angle, based on one cycle duration
-            cycle = getattr(self, '_pm_spin_cycle_ms', 900)
-            duration = max(150, int(cycle * (remaining / 360.0)))
-            self.pm_icon_stop_animation.stop()
-            self.pm_icon_stop_animation.setEasingCurve(QEasingCurve.Linear)
-            self.pm_icon_stop_animation.setDuration(duration)
-            self.pm_icon_stop_animation.setStartValue(current if current > 0 else 0)
-            self.pm_icon_stop_animation.setEndValue(360)
-            self.pm_icon_stop_animation.start()
-            # After finishing, snap back to 0 so the next spin starts cleanly
-            try:
-                QTimer.singleShot(duration, lambda: self.pm_button_icon.set_rotation(0))
-            except Exception:
-                pass
+        if hasattr(self, 'pm_spinner') and self.pm_spinner:
+            self.pm_spinner.stop()
 
     def open_progress_manager(self):
         """User clicked Progress Manager. Show instantly if cached; otherwise show a tiny loader and open lazily."""
         # Start spin now
-        if hasattr(self, 'pm_icon_spin_animation') and self.pm_icon_spin_animation.state() != QPropertyAnimation.Running:
-            self.pm_icon_spin_animation.start()
+        if hasattr(self, 'pm_spinner') and self.pm_spinner and not self.pm_spinner.is_running():
+            self.pm_spinner.start()
             try:
                 import time as _t
                 self._pm_spin_started_at = _t.monotonic()
@@ -7890,10 +7909,9 @@ Important rules:
                """)
                self.glossary_button.clicked.connect(self.stop_glossary_extraction)
                self.glossary_button.setEnabled(True)
-               # Start spinning animation for glossary icon
-               if hasattr(self, 'glossary_icon_spin_animation') and hasattr(self, 'glossary_button_icon'):
-                   if self.glossary_icon_spin_animation.state() != QPropertyAnimation.Running:
-                       self.glossary_icon_spin_animation.start()
+               # Start spinner for glossary icon
+               if getattr(self, 'glossary_spinner', None):
+                   self.glossary_spinner.start()
            else:
                # Update text label instead of button text
                if hasattr(self, 'glossary_text_label'):
@@ -7912,21 +7930,9 @@ Important rules:
                """)
                self.glossary_button.clicked.connect(self.run_glossary_extraction_thread)
                self.glossary_button.setEnabled(bool(glossary_main and not any_process_running))
-               # Stop spinning animation gracefully for glossary icon
-               if hasattr(self, 'glossary_icon_spin_animation') and hasattr(self, 'glossary_button_icon') and hasattr(self, 'glossary_icon_stop_animation'):
-                   if self.glossary_icon_spin_animation.state() == QPropertyAnimation.Running:
-                       self.glossary_icon_spin_animation.stop()
-                       current_rotation = self.glossary_button_icon.get_rotation()
-                       current_rotation = current_rotation % 360
-                       if current_rotation > 180:
-                           target_rotation = 360
-                       else:
-                           target_rotation = 0
-                       self.glossary_icon_stop_animation.setStartValue(current_rotation)
-                       self.glossary_icon_stop_animation.setEndValue(target_rotation)
-                       self.glossary_icon_stop_animation.start()
-                   elif self.glossary_icon_stop_animation.state() != QPropertyAnimation.Running:
-                       self.glossary_button_icon.set_rotation(0)
+               # Stop spinner
+               if getattr(self, 'glossary_spinner', None):
+                   self.glossary_spinner.stop()
     
        # EPUB button
        if hasattr(self, 'epub_button'):
@@ -7966,10 +7972,9 @@ Important rules:
                """)
                self.qa_button.clicked.connect(self.stop_qa_scan)
                self.qa_button.setEnabled(True)
-               # Start spinning animation for QA icon
-               if hasattr(self, 'qa_icon_spin_animation') and hasattr(self, 'qa_button_icon'):
-                   if self.qa_icon_spin_animation.state() != QPropertyAnimation.Running:
-                       self.qa_icon_spin_animation.start()
+               # Start spinner for QA icon
+               if getattr(self, 'qa_spinner', None):
+                   self.qa_spinner.start()
            else:
                # Update text label instead of button text
                if hasattr(self, 'qa_text_label'):
@@ -7988,21 +7993,9 @@ Important rules:
                """)
                self.qa_button.clicked.connect(self.run_qa_scan)
                self.qa_button.setEnabled(bool(scan_html_folder and not any_process_running))
-               # Stop spinning animation gracefully for QA icon
-               if hasattr(self, 'qa_icon_spin_animation') and hasattr(self, 'qa_button_icon') and hasattr(self, 'qa_icon_stop_animation'):
-                   if self.qa_icon_spin_animation.state() == QPropertyAnimation.Running:
-                       self.qa_icon_spin_animation.stop()
-                       current_rotation = self.qa_button_icon.get_rotation()
-                       current_rotation = current_rotation % 360
-                       if current_rotation > 180:
-                           target_rotation = 360
-                       else:
-                           target_rotation = 0
-                       self.qa_icon_stop_animation.setStartValue(current_rotation)
-                       self.qa_icon_stop_animation.setEndValue(target_rotation)
-                       self.qa_icon_stop_animation.start()
-                   elif self.qa_icon_stop_animation.state() != QPropertyAnimation.Running:
-                       self.qa_button_icon.set_rotation(0)
+               # Stop spinner
+               if getattr(self, 'qa_spinner', None):
+                   self.qa_spinner.stop()
 
     def stop_translation(self):
         """Stop translation while preserving loaded file"""
