@@ -3574,8 +3574,7 @@ Prioritize names that appear with honorifics or in important contexts."""
                                 for old, new in changes:
                                     replaced_here += content.count(old)
                                 total_replacements += replaced_here
-                                # Keep emoji but add plain prefix to avoid clipping in some consoles
-                                self.append_log(f"[HTML] 📝 Updated HTML: {path} ({replaced_here} replacements)")
+                                self.append_log(f"Updated HTML: {path} ({replaced_here} replacements)")
                         except Exception as e:
                             self.append_log(f"⚠️ Failed to update {path}: {e}")
             return files_updated, total_replacements
@@ -3598,8 +3597,7 @@ Prioritize names that appear with honorifics or in important contexts."""
                files_updated = 0
                if self.update_html_on_save_checkbox.isChecked() and changes:
                    files_updated, total_repl = update_html_files(changes)
-                   # Keep emoji but add plain prefix to avoid clipping in some consoles
-                   self.append_log(f"[HTML] 📝 Updated {files_updated} HTML files with translated-name changes ({total_repl} replacements).")
+                   self.append_log(f"Updated {files_updated} HTML files with translated-name changes ({total_repl} replacements).")
                # Reset baseline and highlights
                if self.current_glossary_format in ['list', 'token_csv']:
                    self._original_translated_map = {
