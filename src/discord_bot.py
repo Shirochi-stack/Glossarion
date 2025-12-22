@@ -460,6 +460,30 @@ except ImportError as e:
 # Config file
 CONFIG_FILE = os.path.join(src_dir, "config.json")
 
+# Default prompt profiles used as a fallback when config.json cannot be read
+# or does not contain prompt_profiles. Keep Universal first for clarity.
+DEFAULT_PROMPT_PROFILES = [
+    "Universal",
+    "korean_TXT",
+    "japanese_TXT",
+    "chinese_TXT",
+    "korean_OCR",
+    "japanese_OCR",
+    "chinese_OCR",
+    "Manga_KR",
+    "Manga_JP",
+    "Manga_CN",
+    "korean",
+    "japanese",
+    "chinese",
+    "Original",
+    "korean2",
+    "Manga_JP_1",
+    "nano banna",
+    "test",
+    "refinement",
+]
+
 # Bot setup
 intents = discord.Intents.default()
 intents.message_content = True
@@ -798,12 +822,29 @@ class LogView(discord.ui.View):
 
 def load_config():
     """Load Glossarion config (decrypted)"""
-    try:
-        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-            config = json.load(f)
-            return decrypt_config(config)
-    except:
-        return {}
+    search_paths = [
+        CONFIG_FILE,
+        os.path.join(PROJECT_ROOT, "config.json"),
+        os.path.join(os.getcwd(), "config.json"),
+    ]
+
+    for path in search_paths:
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+                config = decrypt_config(config)
+                # Remember which config file we actually used (debugging aid)
+                config["_source_config"] = path
+                return config
+        except FileNotFoundError:
+            continue
+        except Exception as e:
+            sys.stderr.write(f"[CONFIG] Failed to load {path}: {e}\n")
+            sys.stderr.flush()
+
+    sys.stderr.write("[CONFIG] No config.json found in expected locations; using empty config\n")
+    sys.stderr.flush()
+    return {}
 
 
 @bot.event
@@ -850,13 +891,28 @@ async def profile_autocomplete(interaction: discord.Interaction, current: str):
     """Autocomplete prompt profiles defined in translator_gui (config prompt_profiles)."""
     try:
         cfg = load_config()
-        profiles = list((cfg.get("prompt_profiles") or {}).keys())
+        profiles_dict = cfg.get("prompt_profiles") or {}
+        profiles = list(profiles_dict.keys())
+
+        # Fallback to hardcoded defaults if config has no profiles
+        if not profiles:
+            profiles = DEFAULT_PROMPT_PROFILES.copy()
+            sys.stderr.write("[CONFIG] prompt_profiles missing; using built-in defaults for autocomplete\n")
+            sys.stderr.flush()
+        else:
+            # Ensure default Universal is always present
+            for default in DEFAULT_PROMPT_PROFILES:
+                if default not in profiles:
+                    profiles.append(default)
+
         if "Universal" not in profiles:
             profiles.insert(0, "Universal")
         if current:
             profiles = [p for p in profiles if current.lower() in p.lower()]
         return [app_commands.Choice(name=p, value=p) for p in profiles[:25]]
-    except Exception:
+    except Exception as e:
+        sys.stderr.write(f"[AUTO] profile_autocomplete fallback due to error: {e}\n")
+        sys.stderr.flush()
         return [app_commands.Choice(name="Universal", value="Universal")]
 
 @bot.tree.command(name="save", description="Save your API settings (encrypted per user)")
