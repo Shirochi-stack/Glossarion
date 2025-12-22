@@ -2132,16 +2132,32 @@ def _create_response_handling_section(self, parent):
     indefinite_desc.setContentsMargins(40, 2, 0, 5)
     section_v.addWidget(indefinite_desc)
     
-    # Add Halgakos icon at bottom
+    # Add Halgakos icon at bottom (HiDPI-aware 36x36 badge, keep overall footprint small)
     import os
     icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
     if os.path.exists(icon_path):
-        from PySide6.QtGui import QIcon
+        from PySide6.QtGui import QIcon, QPixmap
+        from PySide6.QtCore import QSize
         icon_label = QLabel()
-        icon_label.setMinimumSize(180, 180)
+        icon_label.setStyleSheet("background-color: transparent;")
+        try:
+            dpr = self.devicePixelRatioF()
+        except Exception:
+            dpr = 1.0
+        logical_px = 16
+        dev_px = int(logical_px * max(1.0, dpr))
         icon = QIcon(icon_path)
-        pixmap = icon.pixmap(140, 140)
-        icon_label.setPixmap(pixmap)
+        pm = icon.pixmap(QSize(dev_px, dev_px))
+        if pm.isNull():
+            raw = QPixmap(icon_path)
+            img = raw.toImage().scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            pm = QPixmap.fromImage(img)
+        try:
+            pm.setDevicePixelRatio(dpr)
+        except Exception:
+            pass
+        icon_label.setPixmap(pm)
+        icon_label.setFixedSize(36, 36)
         icon_label.setAlignment(Qt.AlignCenter)
         section_v.addWidget(icon_label)
     

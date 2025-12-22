@@ -884,28 +884,37 @@ class GlossaryManagerMixin:
         algo_layout.setContentsMargins(0, 0, 0, 5)
         duplicate_frame_layout.addWidget(algo_widget)
         
-        # Add icon before dropdown
+        # Add icon before dropdown (HiDPI-aware 36x36 like Extract Glossary)
         algo_icon_label = QLabel()
+        algo_icon_label.setStyleSheet("background-color: transparent;")
         try:
-            # Try to load Halgakos.ico as icon
             icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
             if os.path.exists(icon_path):
-                from PySide6.QtGui import QPixmap
-                pixmap = QPixmap(icon_path)
-                if not pixmap.isNull():
-                    # Scale to 24x24 for nice display
-                    scaled_pixmap = pixmap.scaled(24, 24, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                    algo_icon_label.setPixmap(scaled_pixmap)
-                else:
-                    # Fallback to emoji if icon doesn't load
-                    algo_icon_label.setText("🎯")
-                    algo_icon_label.setStyleSheet("font-size: 18pt;")
+                from PySide6.QtGui import QIcon, QPixmap
+                from PySide6.QtCore import QSize
+                icon = QIcon(icon_path)
+                try:
+                    dpr = self.devicePixelRatioF()
+                except Exception:
+                    dpr = 1.0
+                logical_px = 16
+                dev_px = int(logical_px * max(1.0, dpr))
+                pm = icon.pixmap(QSize(dev_px, dev_px))
+                if pm.isNull():
+                    raw = QPixmap(icon_path)
+                    img = raw.toImage().scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    pm = QPixmap.fromImage(img)
+                try:
+                    pm.setDevicePixelRatio(dpr)
+                except Exception:
+                    pass
+                algo_icon_label.setPixmap(pm)
+                algo_icon_label.setFixedSize(36, 36)
+                algo_icon_label.setAlignment(Qt.AlignCenter)
             else:
-                # Icon file not found, use emoji
                 algo_icon_label.setText("🎯")
                 algo_icon_label.setStyleSheet("font-size: 18pt;")
-        except Exception as e:
-            # Any error, fallback to emoji
+        except Exception:
             algo_icon_label.setText("🎯")
             algo_icon_label.setStyleSheet("font-size: 18pt;")
         

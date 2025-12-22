@@ -1352,9 +1352,32 @@ class MultiAPIKeyDialog(QDialog):
         self.enabled_checkbox.setChecked(self.enabled_var)
         self.enabled_checkbox.toggled.connect(self._toggle_multi_key_mode)
         
-        # Add spinning icon next to multi-key mode checkbox
-        base_dir = getattr(self.translator_gui, 'base_dir', None)
-        self.multikey_icon = create_icon_label(size=24, base_dir=base_dir)
+        # Add spinning icon next to multi-key mode checkbox (HiDPI-aware like Extract Glossary)
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+        self.multikey_icon = QLabel()
+        self.multikey_icon.setStyleSheet("background-color: transparent;")
+        if os.path.exists(icon_path):
+            from PySide6.QtGui import QIcon, QPixmap
+            from PySide6.QtCore import QSize
+            icon = QIcon(icon_path)
+            try:
+                dpr = self.devicePixelRatioF()
+            except Exception:
+                dpr = 1.0
+            logical_px = 16
+            dev_px = int(logical_px * max(1.0, dpr))
+            pm = icon.pixmap(QSize(dev_px, dev_px))
+            if pm.isNull():
+                raw = QPixmap(icon_path)
+                img = raw.toImage().scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                pm = QPixmap.fromImage(img)
+            try:
+                pm.setDevicePixelRatio(dpr)
+            except Exception:
+                pass
+            self.multikey_icon.setPixmap(pm)
+        self.multikey_icon.setFixedSize(36, 36)
+        self.multikey_icon.setAlignment(Qt.AlignCenter)
         self.enabled_checkbox.toggled.connect(lambda: animate_icon(self.multikey_icon))
         
         title_layout.addStretch()
@@ -1488,9 +1511,32 @@ class MultiAPIKeyDialog(QDialog):
         self.use_fallback_checkbox.setChecked(self.use_fallback_var)
         self.use_fallback_checkbox.toggled.connect(self._toggle_fallback_section)
         
-        # Add spinning icon next to fallback keys checkbox
-        base_dir = getattr(self.translator_gui, 'base_dir', None)
-        self.fallback_icon = create_icon_label(size=20, base_dir=base_dir)
+        # Add spinning icon next to fallback keys checkbox (HiDPI-aware like Extract Glossary)
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+        self.fallback_icon = QLabel()
+        self.fallback_icon.setStyleSheet("background-color: transparent;")
+        if os.path.exists(icon_path):
+            from PySide6.QtGui import QIcon, QPixmap
+            from PySide6.QtCore import QSize
+            icon = QIcon(icon_path)
+            try:
+                dpr = self.devicePixelRatioF()
+            except Exception:
+                dpr = 1.0
+            logical_px = 16
+            dev_px = int(logical_px * max(1.0, dpr))
+            pm = icon.pixmap(QSize(dev_px, dev_px))
+            if pm.isNull():
+                raw = QPixmap(icon_path)
+                img = raw.toImage().scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                pm = QPixmap.fromImage(img)
+            try:
+                pm.setDevicePixelRatio(dpr)
+            except Exception:
+                pass
+            self.fallback_icon.setPixmap(pm)
+        self.fallback_icon.setFixedSize(36, 36)
+        self.fallback_icon.setAlignment(Qt.AlignCenter)
         self.use_fallback_checkbox.toggled.connect(lambda: animate_icon(self.fallback_icon))
         
         fallback_checkbox_layout.addWidget(self.fallback_icon)
