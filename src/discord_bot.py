@@ -1612,19 +1612,43 @@ async def translate(
         # TransateKRtoEN writes into: OUTPUT_DIRECTORY/<file_base>/...
         output_base = os.path.splitext(os.path.basename(filename))[0]
         safe_base = output_base.replace('/', '_').replace('\\', '_').replace(':', '_').replace('*', '_').replace('?', '_').replace('"', '_').replace('<', '_').replace('>', '_').replace('|', '_')
+        preferred_output_dir = os.path.join(temp_dir, filename)
 
         # The translator historically used the raw base name; keep both candidates for compatibility.
-        output_dir_candidates = [
+        candidate_dirs = [
+            preferred_output_dir,
             os.path.join(temp_dir, output_base),
             os.path.join(temp_dir, safe_base),
         ]
-        output_subdir = None
-        for d in output_dir_candidates:
-            if os.path.exists(d) and os.path.isdir(d):
-                output_subdir = d
-                break
-        if output_subdir is None:
-            output_subdir = os.path.join(temp_dir, safe_base)
+        existing_dir = None
+        seen = set()
+        for d in candidate_dirs:
+            if d in seen:
+                continue
+            seen.add(d)
+            try:
+                if os.path.exists(d) and os.path.isdir(d):
+                    existing_dir = d
+                    break
+            except Exception:
+                continue
+
+        output_subdir = preferred_output_dir
+        if existing_dir:
+            if existing_dir != preferred_output_dir and not os.path.exists(preferred_output_dir):
+                try:
+                    os.replace(existing_dir, preferred_output_dir)
+                    output_subdir = preferred_output_dir
+                except Exception:
+                    output_subdir = existing_dir
+            else:
+                output_subdir = preferred_output_dir if existing_dir == preferred_output_dir else existing_dir
+        else:
+            try:
+                os.makedirs(preferred_output_dir, exist_ok=True)
+            except OSError:
+                output_subdir = os.path.join(temp_dir, safe_base)
+                os.makedirs(output_subdir, exist_ok=True)
 
         def _pick_newest(d: str, exts: list[str], must_contain: Optional[str] = None) -> Optional[str]:
             try:
@@ -1715,7 +1739,8 @@ async def translate(
                 sys.stderr.write(f"[ZIP] Using temp dir as source (no output dir found)\\n")
             sys.stderr.flush()
             
-            zip_filename = f"{safe_base}_translated.zip"
+            preferred_zip_name = f"{filename}.zip"
+            zip_filename = preferred_zip_name
             zip_path = os.path.join(temp_dir, zip_filename)
             
             # Update status to show zipping
@@ -1731,12 +1756,11 @@ async def translate(
             
             try:
                 # Create zip archive in background thread
-                def create_zip():
-                    sys.stderr.write(f"[ZIP] Starting compression...\\n")
-                    # ... (zip logic) ...
+                def create_zip(target_path: str):
+                    sys.stderr.write(f"[ZIP] Starting compression to {os.path.basename(target_path)}...\\n")
                     import zipfile
                     files_added = 0
-                    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                    with zipfile.ZipFile(target_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
                         for root, dirs, files in os.walk(zip_source_dir):
                             for file_item in files:
                                 file_path = os.path.join(root, file_item)
@@ -1747,10 +1771,20 @@ async def translate(
                                 arcname = os.path.relpath(file_path, zip_source_dir)
                                 zipf.write(file_path, arcname)
                                 files_added += 1
-                    return zip_path
+                    return target_path
                 
                 loop = asyncio.get_event_loop()
-                await loop.run_in_executor(None, create_zip)
+                try:
+                    await loop.run_in_executor(None, functools.partial(create_zip, zip_path))
+                except (OSError, ValueError) as zip_err:
+                    fallback_zip_name = f"{safe_base}.zip"
+                    if zip_filename != fallback_zip_name:
+                        sys.stderr.write(f"[ZIP] Preferred zip name '{zip_filename}' failed ({zip_err}); falling back to safe name.\\n")
+                        zip_filename = fallback_zip_name
+                        zip_path = os.path.join(temp_dir, zip_filename)
+                        await loop.run_in_executor(None, functools.partial(create_zip, zip_path))
+                    else:
+                        raise
                 
                 output_file_path = zip_path
                 output_display_name = zip_filename
