@@ -3560,6 +3560,17 @@ Prioritize names that appear with honorifics or in important contexts."""
             menu.addAction("Save Changes", save_edited_glossary)
             menu.addAction("Save As...", save_as_glossary)
             menu.addSeparator()
+            # Edit selected entry using existing inline editor
+            current_item = self.glossary_tree.itemAt(pos)
+            current_col = self.glossary_tree.columnAt(pos.x())
+            if current_item and current_col > 0:
+                menu.addAction("Edit", lambda: self._on_tree_double_click(current_item, current_col))
+            else:
+                # fallback to current selection
+                item = self.glossary_tree.currentItem()
+                col = self.glossary_tree.currentColumn()
+                if item and col > 0:
+                    menu.addAction("Edit", lambda: self._on_tree_double_click(item, col))
             menu.addAction("Delete Selected", delete_selected_entries)
             menu.addAction("Reload", load_glossary_for_editing)
             menu.exec(self.glossary_tree.viewport().mapToGlobal(pos))
