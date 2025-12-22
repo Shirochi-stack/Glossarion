@@ -3130,28 +3130,45 @@ Recent translations to summarize:
                 self._original_pixmap = pixmap
                 self.setPixmap(pixmap)
         
-        # Create icon container to isolate rotation effect
+        # Create icon container to isolate rotation effect (HiDPI-aware 90x90)
         icon_container = QWidget()
-        icon_container.setFixedSize(90, 90)  # Original container size to match pre-change look
-        icon_container.setStyleSheet("background-color: transparent;")  # Transparent background
+        icon_container.setFixedSize(90, 90)
+        icon_container.setStyleSheet("background-color: transparent;")
         icon_layout = QVBoxLayout(icon_container)
         icon_layout.setContentsMargins(0, 0, 0, 0)
         icon_layout.setAlignment(Qt.AlignCenter)
         
         self.run_button_icon = RotatableLabel(icon_container)
-        self.run_button_icon.setStyleSheet("background-color: transparent;")  # Transparent background for icon label
+        self.run_button_icon.setStyleSheet("background-color: transparent;")
         if os.path.exists(icon_path):
-            # Restore original sizing technique for exact legacy look
-            from PySide6.QtGui import QImage
             icon = QIcon(icon_path)
-            available_sizes = icon.availableSizes()
-            if available_sizes:
-                largest_size = max(available_sizes, key=lambda s: s.width() * s.height())
-                pixmap = icon.pixmap(largest_size)
+            try:
+                dpr = self.devicePixelRatioF()
+            except Exception:
+                dpr = 1.0
+            target_logical = 90
+            dev_px = int(target_logical * max(1.0, dpr))
+            avail = icon.availableSizes()
+            if avail:
+                best = max(avail, key=lambda s: s.width() * s.height())
+                pm = icon.pixmap(best * int(max(1.0, dpr)))
             else:
-                pixmap = QPixmap(icon_path)
-            scaled_pixmap = pixmap.scaled(80, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            self.run_button_icon.set_original_pixmap(scaled_pixmap)
+                pm = icon.pixmap(QSize(dev_px, dev_px))
+            if pm.isNull():
+                pm = QPixmap(icon_path)
+            if not pm.isNull():
+                try:
+                    pm.setDevicePixelRatio(dpr)
+                except Exception:
+                    pass
+                fitted = pm.scaled(int(target_logical * dpr), int(target_logical * dpr),
+                                   Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                try:
+                    fitted.setDevicePixelRatio(dpr)
+                except Exception:
+                    pass
+                self.run_button_icon.set_original_pixmap(fitted)
+        self.run_button_icon.setFixedSize(target_logical, target_logical)
         self.run_button_icon.setAlignment(Qt.AlignCenter)
         icon_layout.addWidget(self.run_button_icon)
         
