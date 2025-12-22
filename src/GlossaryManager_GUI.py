@@ -3841,6 +3841,22 @@ Prioritize names that appear with honorifics or in important contexts."""
                 self._last_replace_text = replace_edit.text()
                 status_label.setText(f"Replaced {total_repl} occurrence(s) across all entries.")
 
+                # Fallback: if nothing replaced in glossary, offer to update files directly
+                if total_repl == 0:
+                    old = find_edit.text()
+                    new = replace_edit.text()
+                    prompt = QMessageBox(self.dialog)
+                    prompt.setIcon(QMessageBox.Question)
+                    prompt.setWindowTitle("No glossary match")
+                    prompt.setText("No entry found in the glossary. Update HTML/TXT files directly?")
+                    prompt.setInformativeText(f"{old} -> {new}")
+                    prompt.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+                    prompt.setDefaultButton(QMessageBox.Yes)
+                    if prompt.exec() == QMessageBox.Yes:
+                        files_updated, total_file_repl = update_html_files([(old, new)])
+                        self.append_log(f"Updated {files_updated} files directly from Find/Replace fallback ({total_file_repl} replacements).")
+                        status_label.setText(f"Updated {files_updated} files directly ({total_file_repl} replacements).")
+
             buttons = QHBoxLayout()
             dialog_layout.addLayout(buttons)
 
