@@ -2982,9 +2982,9 @@ class QAScannerMixin:
                 for rb, value in format_radio_buttons:
                     rb.setChecked(value == 'detailed')
                 auto_save_checkbox.setChecked(True)
-                check_word_count_checkbox.setChecked(False)
+                check_word_count_checkbox.setChecked(True)
                 check_multiple_headers_checkbox.setChecked(True)
-                warn_mismatch_checkbox.setChecked(False)
+                warn_mismatch_checkbox.setChecked(True)
                 check_missing_html_tag_checkbox.setChecked(True)
                 check_missing_header_tags_checkbox.setChecked(True)
                 check_paragraph_structure_checkbox.setChecked(True)
