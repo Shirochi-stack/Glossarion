@@ -5022,6 +5022,10 @@ class MangaTranslationTab(QObject):
                     transform = QTransform()
                     transform.rotate(angle)
                     rotated = self._original_pixmap.transformed(transform, Qt.SmoothTransformation)
+                    try:
+                        rotated.setDevicePixelRatio(self._original_pixmap.devicePixelRatio())
+                    except Exception:
+                        pass
                     self.setPixmap(rotated)
             
             def get_rotation(self):
@@ -5044,28 +5048,24 @@ class MangaTranslationTab(QObject):
         self.start_button_icon = RotatableLabel(icon_container)
         self.start_button_icon.setStyleSheet("background-color: transparent;")
         if os.path.exists(icon_path):
-            icon = QIcon(icon_path)
-            try:
-                dpr = self.devicePixelRatioF()
-            except Exception:
-                dpr = 1.0
-            target_logical = 90
-            dev_px = int(target_logical * max(1.0, dpr))
-            avail = icon.availableSizes()
-            if avail:
-                best = max(avail, key=lambda s: s.width() * s.height())
-                pm = icon.pixmap(best * int(max(1.0, dpr)))
+            # Prefer high-res PNG if available
+            png_path = os.path.join(os.path.dirname(icon_path), "Halgakos.png")
+            if os.path.exists(png_path):
+                pm = QPixmap(png_path)
             else:
-                pm = icon.pixmap(QSize(dev_px, dev_px))
-            if pm.isNull():
-                pm = QPixmap(icon_path)
+                icon = QIcon(icon_path)
+                avail = icon.availableSizes()
+                pm = icon.pixmap(max(avail, key=lambda s: s.width() * s.height())) if avail else QPixmap(icon_path)
             if not pm.isNull():
                 try:
-                    pm.setDevicePixelRatio(dpr)
+                    dpr = self.devicePixelRatioF()
                 except Exception:
-                    pass
-                fitted = pm.scaled(int(target_logical * dpr), int(target_logical * dpr),
-                                   Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    dpr = 1.0
+                target_logical = 90
+                fitted = pm.scaled(int(target_logical * dpr),
+                                   int(target_logical * dpr),
+                                   Qt.KeepAspectRatio,
+                                   Qt.SmoothTransformation)
                 try:
                     fitted.setDevicePixelRatio(dpr)
                 except Exception:
