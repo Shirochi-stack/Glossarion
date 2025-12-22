@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (QDialog, QWidget, QLabel, QLineEdit, QPushButton,
                                 QSizePolicy, QAbstractItemView, QButtonGroup, QApplication,
                                 QComboBox, QMenu, QInputDialog)
 from PySide6.QtCore import Qt, Signal, Slot, QTimer
-from PySide6.QtGui import QFont, QColor, QIcon, QKeySequence, QShortcut
+from PySide6.QtGui import QFont, QColor, QIcon, QKeySequence, QShortcut, QBrush
 
 # WindowManager and UIHelper removed - not needed in PySide6
 # Qt handles window management and UI utilities automatically
@@ -2235,6 +2235,18 @@ Prioritize names that appear with honorifics or in important contexts."""
         editor_layout = QVBoxLayout(parent)
         editor_layout.setContentsMargins(10, 10, 10, 10)
 
+        # Toggle: update HTML files when translated names change
+        html_toggle_widget = QWidget()
+        html_toggle_layout = QHBoxLayout(html_toggle_widget)
+        html_toggle_layout.setContentsMargins(0, 0, 0, 4)
+        self.update_html_on_save_checkbox = self._create_styled_checkbox("Update all HTML files on save")
+        self.update_html_on_save_checkbox.setToolTip(
+            "When enabled, saving will also replace updated translated names across all .html files."
+        )
+        html_toggle_layout.addWidget(self.update_html_on_save_checkbox)
+        html_toggle_layout.addStretch()
+        # We'll place this above the save buttons inside the toolbar later
+
         file_widget = QWidget()
         file_layout = QHBoxLayout(file_widget)
         file_layout.setContentsMargins(0, 0, 0, 10)
@@ -2273,6 +2285,35 @@ Prioritize names that appear with honorifics or in important contexts."""
         self.current_glossary_data = None
         self.current_glossary_format = None
         self.glossary_column_fields = []
+        self._original_translated_map = {}
+
+        # Row highlight helpers
+        orange_brush = QBrush(QColor("#f97316"))
+        default_brush = QBrush()
+
+        def mark_row_updated(item, updated):
+            for c in range(item.columnCount()):
+                item.setBackground(c, orange_brush if updated else default_brush)
+
+        def get_baseline_translated(item, col_key):
+            if col_key not in ['translated_name', 'translated']:
+                return None
+            if self.current_glossary_format in ['list', 'token_csv']:
+                try:
+                    idx = int(item.text(0)) - 1
+                except Exception:
+                    return None
+                return self._original_translated_map.get(idx, '')
+            elif self.current_glossary_format == 'dict':
+                key = item.data(0, Qt.UserRole)
+                return self._original_translated_map.get(key, '')
+            return None
+
+        def update_row_highlight(item, col_key, new_val):
+            baseline = get_baseline_translated(item, col_key)
+            if baseline is None:
+                return
+            mark_row_updated(item, new_val != baseline)
 
         # Editor functions
         def load_glossary_for_editing():
@@ -2551,6 +2592,18 @@ Prioritize names that appear with honorifics or in important contexts."""
                self.append_log(f"✅ Loaded {len(entries)} entries from glossary")
                self._last_find_text = ""
                self._last_find_pos = -1
+               # Capture baseline translated values for change tracking
+               if self.current_glossary_format in ['list', 'token_csv']:
+                   self._original_translated_map = {
+                       idx: entry.get('translated_name', '') for idx, entry in enumerate(self.current_glossary_data)
+                   }
+               elif self.current_glossary_format == 'dict':
+                   self._original_translated_map = dict(self.current_glossary_data.get('entries', {}))
+               else:
+                   self._original_translated_map = {}
+               # Clear any existing highlights
+               for i in range(self.glossary_tree.topLevelItemCount()):
+                   mark_row_updated(self.glossary_tree.topLevelItem(i), False)
                
            except Exception as e:
                QMessageBox.critical(parent, "Error", f"Failed to load glossary: {e}")
@@ -3467,8 +3520,95 @@ Prioritize names that appear with honorifics or in important contexts."""
            except Exception as e:
                QMessageBox.critical(self.dialog, "Error", f"Failed to export: {e}")
        
+        def collect_translated_changes():
+            """Return list of (old, new) translated-name changes since last baseline."""
+            changes = []
+            if self.current_glossary_format in ['list', 'token_csv']:
+                for idx, entry in enumerate(self.current_glossary_data or []):
+                    old = self._original_translated_map.get(idx, entry.get('translated_name', ''))
+                    new = entry.get('translated_name', '')
+                    if old != new:
+                        changes.append((old, new))
+            elif self.current_glossary_format == 'dict':
+                entries = (self.current_glossary_data or {}).get('entries', {})
+                for key, new in entries.items():
+                    old = self._original_translated_map.get(key, new)
+                    if old != new:
+                        changes.append((old, new))
+            return changes
+
+        def update_html_files(changes):
+            """Replace old translated names with new ones across .html files."""
+            if not changes:
+                return 0, 0
+            candidate_dirs = []
+            for key in ['html_output_dir', 'html_output_folder', 'output_html_dir', 'html_export_dir']:
+                val = self.config.get(key)
+                if val and os.path.isdir(val):
+                    candidate_dirs.append(val)
+            # Fallback to current working directory if nothing configured
+            if not candidate_dirs:
+                candidate_dirs.append(os.getcwd())
+
+            files_updated = 0
+            total_replacements = 0
+
+            for base_dir in candidate_dirs:
+                for root, _, files in os.walk(base_dir):
+                    for name in files:
+                        if not name.lower().endswith('.html'):
+                            continue
+                        path = os.path.join(root, name)
+                        try:
+                            with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                                content = f.read()
+                            new_content = content
+                            for old, new in changes:
+                                if old and new and old in new_content:
+                                    new_content = new_content.replace(old, new)
+                            if new_content != content:
+                                with open(path, 'w', encoding='utf-8') as f:
+                                    f.write(new_content)
+                                files_updated += 1
+                                replaced_here = 0
+                                for old, new in changes:
+                                    replaced_here += content.count(old)
+                                total_replacements += replaced_here
+                                # Keep emoji but add plain prefix to avoid clipping in some consoles
+                                self.append_log(f"[HTML] 📝 Updated HTML: {path} ({replaced_here} replacements)")
+                        except Exception as e:
+                            self.append_log(f"⚠️ Failed to update {path}: {e}")
+            return files_updated, total_replacements
+        
         def save_edited_glossary():
+           changes = collect_translated_changes()
+           if self.update_html_on_save_checkbox.isChecked() and changes:
+               example_lines = "\\n".join(f"{old or '<empty>'} -> {new or '<empty>'}" for old, new in changes[:5])
+               msg = QMessageBox(self.dialog)
+               msg.setIcon(QMessageBox.Warning)
+               msg.setWindowTitle("Update HTML files")
+               msg.setText(f"{len(changes)} entries have had their translated name field updated.\nNow all HTML files will be updated to reflect the change.")
+               msg.setInformativeText(example_lines)
+               msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+               msg.setDefaultButton(QMessageBox.Yes)
+               if msg.exec() != QMessageBox.Yes:
+                   return
+
            if save_current_glossary():
+               files_updated = 0
+               if self.update_html_on_save_checkbox.isChecked() and changes:
+                   files_updated, total_repl = update_html_files(changes)
+                   # Keep emoji but add plain prefix to avoid clipping in some consoles
+                   self.append_log(f"[HTML] 📝 Updated {files_updated} HTML files with translated-name changes ({total_repl} replacements).")
+               # Reset baseline and highlights
+               if self.current_glossary_format in ['list', 'token_csv']:
+                   self._original_translated_map = {
+                       idx: entry.get('translated_name', '') for idx, entry in enumerate(self.current_glossary_data)
+                   }
+               elif self.current_glossary_format == 'dict':
+                   self._original_translated_map = dict((self.current_glossary_data or {}).get('entries', {}))
+               for i in range(self.glossary_tree.topLevelItemCount()):
+                   mark_row_updated(self.glossary_tree.topLevelItem(i), False)
                QMessageBox.information(self.dialog, "Success", "Glossary saved successfully")
                self.append_log(f"✅ Saved glossary to: {self.editor_file_entry.text()}")
        
@@ -3542,6 +3682,9 @@ Prioritize names that appear with honorifics or in important contexts."""
         toolbar_widget = QWidget()
         toolbar_layout = QHBoxLayout(toolbar_widget)
         toolbar_layout.setContentsMargins(0, 0, 0, 4)
+        # Place the HTML update toggle above the save controls
+        toolbar_layout.addWidget(html_toggle_widget)
+
         for text, handler, color in [
             ("Save", save_edited_glossary, "#15803d"),
             ("Save As...", save_as_glossary, "#0f766e"),
@@ -3672,6 +3815,7 @@ Prioritize names that appear with honorifics or in important contexts."""
                             entries[key] = after
 
                     replacements += count
+                    update_row_highlight(item, col_key, after)
 
                 return replacements
 
@@ -3821,7 +3965,28 @@ Prioritize names that appear with honorifics or in important contexts."""
                        item.setData(0, Qt.UserRole, new_key)
                    elif col_key == 'translated':
                        entries[key] = new_value
-           
+           # Local highlight update to mark changed translated fields
+           if col_key in ['translated_name', 'translated']:
+               try:
+                   orange = getattr(self, "_highlight_brush_orange", None)
+                   default = getattr(self, "_highlight_brush_default", None)
+                   if orange is None:
+                       orange = QBrush(QColor("#f97316"))
+                       default = QBrush()
+                       self._highlight_brush_orange = orange
+                       self._highlight_brush_default = default
+                   baseline = None
+                   if self.current_glossary_format in ['list', 'token_csv']:
+                       baseline = self._original_translated_map.get(row_idx, '')
+                   elif self.current_glossary_format == 'dict':
+                       baseline = self._original_translated_map.get(item.data(0, Qt.UserRole), '')
+                   if baseline is not None:
+                       brush = orange if new_value != baseline else default
+                       for c in range(item.columnCount()):
+                           item.setBackground(c, brush)
+               except Exception:
+                   pass
+
            edit_dialog.accept()
        
        dialog_layout.addSpacing(10)
