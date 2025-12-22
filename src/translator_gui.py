@@ -4434,6 +4434,33 @@ If you see multiple p-b cookies, use the one with the longest value."""
     def _show_cached_progress_manager_if_any(self) -> bool:
         """Bring any cached Progress Manager dialog to front instantly. Returns True if shown."""
         try:
+            def _refresh_dialog(dlg):
+                try:
+                    # Prefer explicit refresh function on dialog
+                    if hasattr(dlg, '_refresh_func') and callable(dlg._refresh_func):
+                        dlg._refresh_func()
+                        return
+                    # Multi-file dialog: per-tab refresh handlers
+                    if hasattr(self, '_refresh_all_tabs') and hasattr(dlg, '_tab_data'):
+                        # If tabs have explicit refresh_func, call them; otherwise use bulk refresh
+                        used_handler = False
+                        for tab_data in getattr(dlg, '_tab_data', []):
+                            func = tab_data.get('refresh_func')
+                            if callable(func):
+                                func()
+                                used_handler = True
+                        if used_handler:
+                            return
+                        self._refresh_all_tabs(dlg._tab_data)
+                        return
+                    # Single-file dialog stores its data as _data
+                    if hasattr(self, '_refresh_retranslation_data') and hasattr(dlg, '_data'):
+                        if callable(getattr(dlg, '_refresh_func', None)):
+                            dlg._refresh_func()
+                        else:
+                            self._refresh_retranslation_data(dlg._data)
+                except Exception:
+                    pass
             # Single-file cache
             if hasattr(self, 'entry_epub') and hasattr(self.entry_epub, 'text'):
                 p = self.entry_epub.text().strip()
@@ -4445,6 +4472,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         try:
                             dlg.setWindowState((dlg.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
                             dlg.show(); dlg.raise_(); dlg.activateWindow()
+                            _refresh_dialog(dlg)
                             return True
                         except Exception:
                             pass
@@ -4454,6 +4482,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 try:
                     dlg.setWindowState((dlg.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
                     dlg.show(); dlg.raise_(); dlg.activateWindow()
+                    _refresh_dialog(dlg)
                     return True
                 except Exception:
                     pass
@@ -4467,6 +4496,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     try:
                         dlg.setWindowState((dlg.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
                         dlg.show(); dlg.raise_(); dlg.activateWindow()
+                        _refresh_dialog(dlg)
                         return True
                     except Exception:
                         pass

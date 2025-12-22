@@ -1836,12 +1836,20 @@ class RetranslationMixin:
         
         btn_refresh.clicked.connect(animated_refresh)
         button_layout.addWidget(btn_refresh, 1, 3, 1, 1)
+
+        # Expose refresh handler for external triggers (e.g., Progress Manager reopen)
+        data['refresh_func'] = animated_refresh
+        if data.get('dialog'):
+            setattr(data['dialog'], '_refresh_func', animated_refresh)
         
         btn_cancel = QPushButton("Cancel")
         btn_cancel.setMinimumHeight(32)
         btn_cancel.setStyleSheet("QPushButton { background-color: #6c757d; color: white; padding: 6px 16px; font-weight: bold; font-size: 10pt; }")
         btn_cancel.clicked.connect(lambda: data['dialog'].close() if data.get('dialog') else None)
         button_layout.addWidget(btn_cancel, 1, 4, 1, 1)
+
+        # Automatically refresh once when dialog is opened
+        animated_refresh()
 
     def _refresh_all_tabs(self, tab_data_list):
         """Refresh all tabs in a multi-file retranslation dialog"""
