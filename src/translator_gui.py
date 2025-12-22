@@ -502,17 +502,39 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
             self.interval_ms = interval_ms
             self.frames = []
             self._frame_idx = 0
+            # Determine a stable logical target size even before layout is applied
+            size_hint = label.size()
+            target_w = size_hint.width()
+            target_h = size_hint.height()
+            if target_w <= 0 or target_h <= 0:
+                hint = label.sizeHint()
+                target_w = max(target_w, hint.width())
+                target_h = max(target_h, hint.height())
+            if target_w <= 0 or target_h <= 0:
+                target_w = target_h = max(label.minimumWidth(), label.minimumHeight(), label.maximumWidth(), label.maximumHeight(), 36)
+            if target_w <= 0 or target_h <= 0:
+                target_w = target_h = 36
+            self.target_size = (target_w, target_h)
+            try:
+                self.dpr = label.devicePixelRatioF()
+            except Exception:
+                self.dpr = 1.0
             # Precompute rotated frames once to avoid runtime stutter
             try:
-                size = label.size()
+                size = QSize(self.target_size[0], self.target_size[1])
                 for i in range(steps):
                     angle = (i * 360) / steps
                     rotated = base_pixmap.transformed(QTransform().rotate(angle), Qt.SmoothTransformation)
                     if size.width() and size.height():
-                        # Force-fill the label square so the icon doesn't visually shrink
-                        rotated = rotated.scaled(size.width(), size.height(),
-                                                 Qt.IgnoreAspectRatio,
+                        # Keep aspect ratio and respect HiDPI scaling
+                        rotated = rotated.scaled(int(size.width()*self.dpr),
+                                                 int(size.height()*self.dpr),
+                                                 Qt.KeepAspectRatio,
                                                  Qt.SmoothTransformation)
+                        try:
+                            rotated.setDevicePixelRatio(self.dpr)
+                        except Exception:
+                            pass
                     self.frames.append(rotated)
             except Exception:
                 self.frames = []
@@ -536,7 +558,14 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                 self.timer.stop()
             if self.base_pixmap:
                 try:
-                    self.label.setPixmap(self.base_pixmap)
+                    w, h = self.target_size
+                    restored = self.base_pixmap.scaled(int(w*self.dpr), int(h*self.dpr),
+                                                       Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    try:
+                        restored.setDevicePixelRatio(self.dpr)
+                    except Exception:
+                        pass
+                    self.label.setPixmap(restored)
                 except Exception:
                     pass
 
@@ -549,12 +578,19 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
             base_pm = getattr(label, "_original_pixmap", None) or label.pixmap()
             if base_pm is None or base_pm.isNull():
                 return None
-            # Ensure we use the label's intended size (fallback to pixmap size)
-            size = label.size()
-            if size.width() == 0 or size.height() == 0:
-                size = base_pm.size()
-            # Pre-scale to label size to avoid shrink when rotating
-            base_pm = base_pm.scaled(size.width(), size.height(),
+            # Ensure we use a stable target size even before layout; prefer fixed/sizeHint or default 36
+            size_hint = label.size()
+            target_w = size_hint.width()
+            target_h = size_hint.height()
+            if target_w <= 0 or target_h <= 0:
+                hint = label.sizeHint()
+                target_w = max(target_w, hint.width())
+                target_h = max(target_h, hint.height())
+            if target_w <= 0 or target_h <= 0:
+                target_w = target_h = max(label.minimumWidth(), label.minimumHeight(), label.maximumWidth(), label.maximumHeight(), 36)
+            if target_w <= 0 or target_h <= 0:
+                target_w = target_h = 36
+            base_pm = base_pm.scaled(target_w, target_h,
                                      Qt.KeepAspectRatio,
                                      Qt.SmoothTransformation)
             return TranslatorGUI._CachedSpinner(label, base_pm, interval_ms=interval_ms, steps=steps, parent=self)
