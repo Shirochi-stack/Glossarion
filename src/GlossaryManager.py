@@ -1956,33 +1956,14 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                         valid_term_found = True
             
             # Keep sentence if it has valid terms OR contains a gender pronoun (for context)
-            if valid_term_found or (has_pronoun and valid_term_found): # Only keep pronoun sentence if it ALSO has a valid term, or if we want to expand context logic
-                # Actually, standard logic is: keep if relevant to glossary
-                # If it has a pronoun, it's good context for the names in it.
-                # If it has NO names but HAS pronoun, it might be useless unless adjacent to a name sentence.
-                # For now, let's keep it if it has valid terms.
-                # If user wants expanded context, we should probably keep sentences with pronouns even if no *new* term is found, 
-                # but only if it matches *existing* frequent terms? 
-                # Simplest approach for "include_gender_context": 
-                # Prioritize sentences with BOTH names AND pronouns.
-                
-                # Revised logic: Keep if it has valid terms. 
-                # If include_gender_context is True, we treat sentences with pronouns as "valuable" 
-                # and perhaps boost them? 
-                # Actually, the user's prompt implies "adding to filtering logic... to expand the context window".
-                # The current code filters down to `important_sentences`.
-                # If we drop a sentence because it has no "new" terms, we lose gender context.
-                # So: If a sentence has a gender pronoun AND at least one potential name (even if common), keep it.
-                
-                # Let's stick to: Keep if `valid_term_found`.
-                # AND: If `include_gender_context` is ON, we might want to be more lenient?
-                # No, just ensure we don't accidentally filter it out.
-                
-                if valid_term_found:
-                    sentence_key = sentence[:50] # Use prefix as key to avoid duplicates
-                    if sentence_key not in local_seen:
-                        local_important.append(sentence)
-                        local_seen.add(sentence_key)
+            # If include_gender_context is True, we include sentences with pronouns even if they don't have new terms,
+            # but ONLY if the pronouns match known characters. However, we don't know the characters yet.
+            # So, we include pronoun sentences to provide context for the LLM to infer gender.
+            if valid_term_found or (include_gender_context and has_pronoun):
+                sentence_key = sentence[:50] # Use prefix as key to avoid duplicates
+                if sentence_key not in local_seen:
+                    local_important.append(sentence)
+                    local_seen.add(sentence_key)
         
         return local_word_freq, local_important, local_seen, batch_idx
     
