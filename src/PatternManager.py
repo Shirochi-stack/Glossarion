@@ -241,6 +241,10 @@ CJK_HONORIFICS = {
         '-guniang', '-xiaojie', '-daren', '-qianbei', '-daoyou', '-zhanglao', 
         '-shibo', '-shishu', '-shifu', '-laoshi', '-xiansheng', '-daxia', 
         '-shaoxia', '-nvxia', '-jushi', '-shanren', '-dazhang', '-zhenren',
+        'benzuo', 'bengong', 'benwang', 'benshao', 'zhen', 'gu', 'laozi', 'zaixia',
+        'pindao', 'xiaodao', 'nucai', 'chen', 'qie', 'wanbei',
+        'bixia', 'dianxia', 'niangniang', 'laoda', 'laoban', 'zhanggui', 'xiaoer',
+        'shizhu',
         
             # Ancient Chinese romanizations
         '-zi', '-gong', '-hou', '-bo', '-jun', '-qing', '-weng', '-fu', 
@@ -324,7 +328,7 @@ TITLE_PATTERNS = {
         r'\b(King|Queen|Prince|Princess|Emperor|Empress|Duke|Duchess|Marquis|Marquess|Earl|Count|Countess|Viscount|Viscountess|Baron|Baroness|Knight|Lord|Lady|Sir|Dame|General|Admiral|Captain|Major|Colonel|Commander|Lieutenant|Sergeant|Minister|Chancellor|President|Mayor|Governor|Judge|Doctor|Professor|Father|Reverend|Master|Mistress)\b',
         r'\b(His|Her|Your|Their)\s+(Majesty|Highness|Grace|Excellency|Honor|Worship|Lordship|Ladyship)\b',
             # Romanized historical titles
-        r'\b(Tianzi|Huangdi|Huanghou|Taizi|Qinwang|Junwang|Beile|Beizi|Gongzhu|Gege)\b',
+        r'\b(Tianzi|Huangdi|Huanghou|Taizi|Qinwang|Junwang|Beile|Beizi|Gongzhu|Gege|Bixia|Dianxia|Niangniang|Fuma|Wangye)\b',
         r'\b(Chengxiang|Zaixiang|Taishi|Taifu|Taibao|Taiwei|Situ|Sikong|Dasima)\b',
         r'\b(Shogun|Daimyo|Samurai|Ronin|Ninja|Tenno|Mikado|Kampaku|Sessho)\b',
         r'\b(Taewang|Wangbi|Wanghu|Seja|Daegun|Gun|Ongju|Gongju|Buma)\b'
@@ -401,6 +405,56 @@ CHINESE_WUXIA_TERMS = {
     'ranks': [
         '武林盟主', '一流高手', '二流高手', '三流高手', '绝顶高手',
         '宗师', '大宗师', '先天宗师', '大侠', '少侠', '女侠'
+    ]
+}
+
+# Common Chinese terms found in web novels (Wuxia/Xianxia/Xuanhuan)
+CHINESE_NOVEL_TERMS = {
+    'cultivation': [
+        '气', '丹田', '经脉', '真气', '元气', '灵气', '仙气', '玄气', '斗气', '魔气', '鬼气', '妖气', '煞气', '罡气', '剑气', '刀气',
+        '金丹', '元婴', '筑基', '练气', '心魔', '识海', '神识', '元神', '灵魂', '肉身', '法身',
+        '道', '阴阳', '五行', '武', '功', '法', '术', '神通', '道法', '仙术', '禁制', '阵法', '符箓',
+        '劫', '天劫', '雷劫', '心魔劫', '飞升', '渡劫', '顿悟', '闭关', '出关', '夺舍', '转世', '轮回',
+        '炼丹', '炼器', '炼阵', '炼符', '双修', '炉鼎', '采补', '辟谷'
+    ],
+    'beings': [
+        '仙', '魔', '妖', '鬼', '神', '人', '龙', '凤', '麒麟', '玄武', '白虎', '朱雀',
+        '尊者', '圣人', '大帝', '天尊', '道祖', '真人', '上仙', '散仙', '地仙', '天仙', '金仙',
+        '散修', '邪修', '魔修', '鬼修', '妖修', '剑修', '体修', '法修', '器灵', '傀儡'
+    ],
+    'world': [
+        '江湖', '武林', '天下', '宗门', '帮', '派', '家', '世家', '皇朝', '帝国', '圣地',
+        '仙界', '神界', '魔界', '妖界', '鬼界', '凡间', '俗世', '修真界',
+        '秘境', '遗迹', '洞府', '福地', '洞天', '禁地', '绝地', '坊市', '拍卖会'
+    ],
+    'address_self': [
+        '本座', '本宫', '本王', '本少', '本皇', '本帝', '本尊', '本圣',
+        '朕', '孤', '寡人', '老子', '老夫', '老身', '老朽', '老衲',
+        '在下', '鄙人', '小道', '贫道', '贫僧', '小僧', '不才',
+        '奴才', '臣', '妾', '妾身', '晚辈', '小弟', '小妹', '学生', '弟子', '徒儿'
+    ],
+    'address_others': [
+        '陛下', '殿下', '娘娘', '王爷', '侯爷',
+        '老大', '老板', '掌柜', '小二',
+        '道友', '施主', '大师', '师太', '真人', '仙子', '仙长',
+        '前辈', '后辈', '小友',
+        '师尊', '师父', '师傅', '师兄', '师弟', '师姐', '师妹', '师叔', '师伯', '师祖',
+        '兄台', '仁兄', '贤弟',
+        '公子', '少爷', '小姐', '姑娘', '夫人', '老爷', '太太'
+    ],
+    'measurements': [
+        '里', '丈', '尺', '寸',
+        '斤', '两',
+        '时辰', '刻', '分', '息', '炷香', '盏茶',
+        '元', '文', '两', '贯'
+    ],
+    'items': [
+        '法宝', '灵宝', '仙宝', '古宝', '灵器', '法器', '仙器', '神器',
+        '丹药', '灵丹', '仙丹', '毒丹', '废丹',
+        '灵石', '仙石', '灵晶', '玄石',
+        '纳戒', '储物袋', '储物戒指', '乾坤袋',
+        '玉简', '功法', '秘籍', '图谱',
+        '灵草', '灵药', '仙草', '天材地宝'
     ]
 }
 

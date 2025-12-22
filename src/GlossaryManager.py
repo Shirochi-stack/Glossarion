@@ -1240,7 +1240,25 @@ def _looks_like_name(text):
     
     # Chinese names (EXPANDED: 2-6 Chinese characters for cultivation novels)
     if all(0x4E00 <= ord(char) <= 0x9FFF for char in text) and 2 <= len(text) <= 6:
-        # Check if it starts with a known surname (1 or 2 chars)
+        # 1. Check if it matches specific Chinese name patterns (Courtesy Name, Generation Name)
+        if hasattr(PM, 'CHINESE_NAME_PATTERNS'):
+            # Courtesy names (e.g. "Lu Bozi")
+            if 'courtesy_names' in PM.CHINESE_NAME_PATTERNS:
+                for pattern in PM.CHINESE_NAME_PATTERNS['courtesy_names']:
+                    if re.match(pattern, text):
+                        return True
+            
+            # Generation names (middle character matches generation list)
+            if len(text) == 3 and 'generation_names' in PM.CHINESE_NAME_PATTERNS:
+                if text[1] in PM.CHINESE_NAME_PATTERNS['generation_names']:
+                    return True
+
+            # Title prefixes (e.g. "Old Li", "Little Wang")
+            if 'title_prefixes' in PM.CHINESE_NAME_PATTERNS:
+                if text[0] in PM.CHINESE_NAME_PATTERNS['title_prefixes']:
+                    return True
+
+        # 2. Check if it starts with a known surname (1 or 2 chars)
         if len(text) >= 2:
             # Check single-char surname
             if text[0] in PM.CHINESE_SINGLE_SURNAMES:
@@ -1248,7 +1266,8 @@ def _looks_like_name(text):
             # Check two-char compound surname
             if len(text) >= 3 and text[:2] in PM.CHINESE_COMPOUND_SURNAMES:
                 return True
-        # Even without surname match, if it's 2-6 chars it could be a valid term
+        
+        # 3. Even without surname match, if it's 2-6 chars it could be a valid term
         return True
     
     # English names (starts with capital, mostly letters)
@@ -1708,6 +1727,24 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         japanese_kana = sum(1 for char in sample if (0x3040 <= ord(char) <= 0x309F) or (0x30A0 <= ord(char) <= 0x30FF))
         chinese_chars = sum(1 for char in sample if 0x4E00 <= ord(char) <= 0x9FFF)
         
+        # Check gender pronouns as secondary indicator if character counts are ambiguous
+        if korean_chars == 0 and japanese_kana == 0 and chinese_chars > 0:
+            # Distinguish Chinese vs Kanji-heavy Japanese using pronouns
+            if hasattr(PM, 'GENDER_PRONOUNS'):
+                # Check Chinese pronouns
+                chinese_pronouns = PM.GENDER_PRONOUNS.get('chinese', {}).get('male', []) + \
+                                 PM.GENDER_PRONOUNS.get('chinese', {}).get('female', [])
+                for p in chinese_pronouns:
+                    if p in sample:
+                        return 'chinese'
+                        
+                # Check Japanese pronouns
+                japanese_pronouns = PM.GENDER_PRONOUNS.get('japanese', {}).get('male', []) + \
+                                  PM.GENDER_PRONOUNS.get('japanese', {}).get('female', [])
+                for p in japanese_pronouns:
+                    if p in sample:
+                        return 'japanese'
+
         if korean_chars > 50:
             return 'korean'
         elif japanese_kana > 20:
@@ -1840,6 +1877,12 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             for category in PM.CHINESE_BATTLE_TERMS.values():
                 if term in category:
                     return False  # Keep battle terms!
+
+            # Check novel terms (common raw Chinese terms)
+            if hasattr(PM, 'CHINESE_NOVEL_TERMS'):
+                for category in PM.CHINESE_NOVEL_TERMS.values():
+                    if term in category:
+                        return False
         
         return False
     
@@ -1867,6 +1910,21 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     total_sentences = len(sentences)
     last_progress_time = time.time()
     
+    # Prepare gender context check
+    include_gender_context = os.getenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
+    gender_pronouns = []
+    if include_gender_context and hasattr(PM, 'GENDER_PRONOUNS'):
+        # Get pronouns for the detected language
+        lang_key = 'english'
+        if primary_lang == 'korean': lang_key = 'korean'
+        elif primary_lang == 'chinese': lang_key = 'chinese'
+        elif primary_lang == 'japanese': lang_key = 'japanese'
+        
+        gender_pronouns.extend(PM.GENDER_PRONOUNS.get(lang_key, {}).get('male', []))
+        gender_pronouns.extend(PM.GENDER_PRONOUNS.get(lang_key, {}).get('female', []))
+        if gender_pronouns:
+            print(f"📑 Gender context enabled: scanning for pronouns in {lang_key}")
+
     def process_sentence_batch(batch_sentences, batch_idx):
         """Process a batch of sentences"""
         local_word_freq = Counter()
@@ -1877,21 +1935,51 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             sentence = sentence.strip()
             if len(sentence) < 10 or len(sentence) > 500:
                 continue
-                
+            
+            # Check for gender pronouns if enabled - include sentence if pronoun found
+            has_pronoun = False
+            if include_gender_context and gender_pronouns:
+                for pronoun in gender_pronouns:
+                    if pronoun in sentence:
+                        has_pronoun = True
+                        break
+            
             # Find all potential terms in this sentence
             matches = re.findall(combined_pattern, sentence)
             
+            valid_term_found = False
             if matches:
                 # Filter out excluded terms
-                filtered_matches = []
                 for match in matches:
                     if not should_exclude_term(match):
                         local_word_freq[match] += 1
-                        filtered_matches.append(match)
+                        valid_term_found = True
+            
+            # Keep sentence if it has valid terms OR contains a gender pronoun (for context)
+            if valid_term_found or (has_pronoun and valid_term_found): # Only keep pronoun sentence if it ALSO has a valid term, or if we want to expand context logic
+                # Actually, standard logic is: keep if relevant to glossary
+                # If it has a pronoun, it's good context for the names in it.
+                # If it has NO names but HAS pronoun, it might be useless unless adjacent to a name sentence.
+                # For now, let's keep it if it has valid terms.
+                # If user wants expanded context, we should probably keep sentences with pronouns even if no *new* term is found, 
+                # but only if it matches *existing* frequent terms? 
+                # Simplest approach for "include_gender_context": 
+                # Prioritize sentences with BOTH names AND pronouns.
                 
-                # Keep sentences with valid potential terms
-                if filtered_matches:
-                    sentence_key = ' '.join(sorted(filtered_matches))
+                # Revised logic: Keep if it has valid terms. 
+                # If include_gender_context is True, we treat sentences with pronouns as "valuable" 
+                # and perhaps boost them? 
+                # Actually, the user's prompt implies "adding to filtering logic... to expand the context window".
+                # The current code filters down to `important_sentences`.
+                # If we drop a sentence because it has no "new" terms, we lose gender context.
+                # So: If a sentence has a gender pronoun AND at least one potential name (even if common), keep it.
+                
+                # Let's stick to: Keep if `valid_term_found`.
+                # AND: If `include_gender_context` is ON, we might want to be more lenient?
+                # No, just ensure we don't accidentally filter it out.
+                
+                if valid_term_found:
+                    sentence_key = sentence[:50] # Use prefix as key to avoid duplicates
                     if sentence_key not in local_seen:
                         local_important.append(sentence)
                         local_seen.add(sentence_key)
