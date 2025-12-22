@@ -636,7 +636,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 65536
         self.proc = self.glossary_proc = None
-        __version__ = "6.7.0"
+        __version__ = "6.7.1"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -2119,7 +2119,7 @@ Recent translations to summarize:
             # Set the initial active profile for autosave
             self._active_profile_for_autosave = self.profile_var
         
-        self.append_log("🚀 Glossarion v6.7.0 - Ready to use!")
+        self.append_log("🚀 Glossarion v6.7.1 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -2767,10 +2767,33 @@ Recent translations to summarize:
         self.batch_checkbox.setChecked(self.batch_translation_var)
         self.batch_checkbox.stateChanged.connect(self._on_batch_toggle)
         
-        # Add spinning icon next to batch checkbox using spinning helper
-        from spinning import create_icon_label, animate_icon
-        base_dir = getattr(self, 'base_dir', None)
-        self.batch_icon = create_icon_label(size=20, base_dir=base_dir)
+        # Add spinning icon next to batch checkbox using the same HiDPI logic as the Extract Glossary button
+        from spinning import animate_icon
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+        self.batch_icon = QLabel()
+        self.batch_icon.setStyleSheet("background-color: transparent;")
+        if os.path.exists(icon_path):
+            from PySide6.QtGui import QIcon, QPixmap
+            from PySide6.QtCore import QSize
+            icon = QIcon(icon_path)
+            try:
+                dpr = self.devicePixelRatioF()
+            except Exception:
+                dpr = 1.0
+            logical_px = 16
+            dev_px = int(logical_px * max(1.0, dpr))
+            pm = icon.pixmap(QSize(dev_px, dev_px))
+            if pm.isNull():
+                raw = QPixmap(icon_path)
+                img = raw.toImage().scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                pm = QPixmap.fromImage(img)
+            try:
+                pm.setDevicePixelRatio(dpr)
+            except Exception:
+                pass
+            self.batch_icon.setPixmap(pm)
+        self.batch_icon.setFixedSize(36, 36)  # Match Extract Glossary button container
+        self.batch_icon.setAlignment(Qt.AlignCenter)
         self.batch_checkbox.toggled.connect(lambda: animate_icon(self.batch_icon))
         
         batch_layout.addWidget(self.batch_icon)
@@ -10716,7 +10739,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v6.7.0...")
+    print("🚀 Starting Glossarion v6.7.1...")
     
     # Initialize splash screen
     splash_manager = None
