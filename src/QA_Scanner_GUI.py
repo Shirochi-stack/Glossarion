@@ -484,47 +484,64 @@ class QAScannerMixin:
                 icon_container_layout.setContentsMargins(0, 0, 0, 0)
                 icon_container_layout.setAlignment(Qt.AlignCenter)
                 
-                # Icon/Emoji - use Halgakos.ico for AI Hunter, emoji for others (original logic)
+                # Icon/Emoji - use Halgakos.ico for AI Hunter, emoji for others (HiDPI, multi-path, sharp)
                 if mi["value"] == "ai-hunter":
+                    icon_label = None
                     try:
-                        ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
-                        if os.path.isfile(ico_path):
-                            icon_label = QLabel()
-                            # Load icon from QIcon to get best size, then convert to pixmap
+                        import sys
+                        candidates = [
+                            os.path.join(getattr(self, "base_dir", os.getcwd()), "Halgakos.ico"),
+                            os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico"),
+                            os.path.join(os.getcwd(), "Halgakos.ico"),
+                            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Halgakos.ico"),
+                            os.path.join(getattr(sys, "_MEIPASS", os.getcwd()), "Halgakos.ico"),
+                        ]
+                        ico_path = next((p for p in candidates if os.path.isfile(p)), None)
+                        if ico_path:
                             icon = QIcon(ico_path)
-                            # Get the available sizes and pick closest to desired size
-                            available_sizes = icon.availableSizes()
-                            if available_sizes:
-                                # Find size closest to 56x56
-                                target_size = 56
-                                best_size = min(available_sizes, 
-                                              key=lambda s: abs(s.width() - target_size) + abs(s.height() - target_size))
-                                # Get pixmap at native resolution
-                                original_pixmap = icon.pixmap(best_size)
+                            icon_label = QLabel()
+                            icon_label.setStyleSheet("background-color: transparent; border: none;")
+                            # Use device pixel ratio to avoid blur
+                            try:
+                                dpr = self.devicePixelRatioF()
+                            except Exception:
+                                dpr = 1.0
+                            target_logical = 56  # requested logical size of label
+                            dev_px = int(target_logical * max(1.0, dpr))
+                            # Prefer largest available size to reduce scaling blur
+                            avail = icon.availableSizes()
+                            if avail:
+                                best = max(avail, key=lambda s: s.width() * s.height())
+                                pm = icon.pixmap(best * int(max(1.0, dpr)))
                             else:
-                                # Fallback if no sizes available
-                                original_pixmap = QPixmap(ico_path)
-                            
-                            if not original_pixmap.isNull():
-                                # Scale from best native size with high quality
-                                scaled_pixmap = original_pixmap.scaled(
-                                    56, 56,
+                                pm = icon.pixmap(QSize(dev_px, dev_px))
+                            if pm.isNull():
+                                pm = QPixmap(ico_path)
+                            if not pm.isNull():
+                                try:
+                                    pm.setDevicePixelRatio(dpr)
+                                except Exception:
+                                    pass
+                                # Fit into logical target size
+                                fitted = pm.scaled(
+                                    int(target_logical * dpr),
+                                    int(target_logical * dpr),
                                     Qt.KeepAspectRatio,
-                                    Qt.SmoothTransformation
+                                    Qt.SmoothTransformation,
                                 )
-                                icon_label.setPixmap(scaled_pixmap)
+                                try:
+                                    fitted.setDevicePixelRatio(dpr)
+                                except Exception:
+                                    pass
+                                icon_label.setPixmap(fitted)
+                                icon_label.setFixedSize(target_logical, target_logical)
                                 icon_label.setAlignment(Qt.AlignCenter)
-                                icon_label.setStyleSheet("background-color: transparent; border: none;")
                                 icon_container_layout.addWidget(icon_label)
-                        else:
-                            # Fallback to emoji if icon not found
-                            emoji_label = QLabel(mi["emoji"])
-                            emoji_label.setFont(QFont("Arial", 38))
-                            emoji_label.setAlignment(Qt.AlignCenter)
-                            emoji_label.setStyleSheet("background-color: transparent; color: white; border: none;")
-                            icon_container_layout.addWidget(emoji_label)
+                            else:
+                                icon_label = None
                     except Exception:
-                        # Fallback to emoji if error
+                        icon_label = None
+                    if icon_label is None:
                         emoji_label = QLabel(mi["emoji"])
                         emoji_label.setFont(QFont("Arial", 38))
                         emoji_label.setAlignment(Qt.AlignCenter)
