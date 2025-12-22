@@ -3487,13 +3487,34 @@ def _create_prompt_management_section(self, parent):
             self._original_pixmap = pixmap
             self.setPixmap(pixmap)
     
-    # Create icon with rotation support
+    # Create icon with rotation support (HiDPI-aware, smaller than 36x36)
     icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
     translate_icon_label = RotatableLabel()
     if os.path.exists(icon_path):
-        pixmap = QPixmap(icon_path)
-        scaled_pixmap = pixmap.scaled(16, 16, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        translate_icon_label.set_original_pixmap(scaled_pixmap)
+        try:
+            from PySide6.QtGui import QIcon, QPixmap
+            from PySide6.QtCore import QSize
+            try:
+                dpr = self.devicePixelRatioF()
+            except Exception:
+                dpr = 1.0
+            logical_px = 12  # smaller than toolbar icons
+            dev_px = int(logical_px * max(1.0, dpr))
+            icon = QIcon(icon_path)
+            pm = icon.pixmap(QSize(dev_px, dev_px))
+            if pm.isNull():
+                raw = QPixmap(icon_path)
+                img = raw.toImage().scaled(dev_px, dev_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                pm = QPixmap.fromImage(img)
+            try:
+                pm.setDevicePixelRatio(dpr)
+            except Exception:
+                pass
+            translate_icon_label.set_original_pixmap(pm)
+        except Exception:
+            pixmap = QPixmap(icon_path)
+            scaled_pixmap = pixmap.scaled(16, 16, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            translate_icon_label.set_original_pixmap(scaled_pixmap)
     
     self.translate_headers_icon = translate_icon_label
     

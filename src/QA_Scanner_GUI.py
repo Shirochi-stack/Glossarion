@@ -484,9 +484,8 @@ class QAScannerMixin:
                 icon_container_layout.setContentsMargins(0, 0, 0, 0)
                 icon_container_layout.setAlignment(Qt.AlignCenter)
                 
-                # Icon/Emoji - use Halgakos.ico for AI Hunter, emoji for others
+                # Icon/Emoji - use Halgakos.ico for AI Hunter, emoji for others (original logic)
                 if mi["value"] == "ai-hunter":
-                    # Use Halgakos icon for AI Hunter
                     try:
                         ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
                         if os.path.isfile(ico_path):
