@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (QWidget, QLabel, QFrame, QPushButton, QVBoxLayout
                                QRadioButton, QSlider, QSpinBox, QDoubleSpinBox, QTextEdit,
                                QProgressBar, QFileDialog, QMessageBox, QColorDialog, QScrollArea,
                                QDialog, QButtonGroup, QApplication, QSizePolicy, QToolButton)
-from PySide6.QtCore import Qt, QTimer, Signal, QObject, Slot, QEvent, QPropertyAnimation, QEasingCurve, Property, QThread, QSize
+from PySide6.QtCore import Qt, QTimer, Signal, QObject, Slot, QEvent, QPropertyAnimation, QEasingCurve, Property, QThread
 from PySide6.QtGui import QFont, QColor, QTextCharFormat, QIcon, QKeyEvent, QPixmap, QTransform
 from typing import List, Dict, Optional, Any
 from queue import Queue, Empty
@@ -5037,43 +5037,48 @@ class MangaTranslationTab(QObject):
                 self._original_pixmap = pixmap
                 self.setPixmap(pixmap)
         
-        # Icon container (HiDPI-aware 90x90, match translator_gui crisp handling)
+        # Icon container (HiDPI-aware 100x100)
         icon_container = QWidget()
-        icon_container.setFixedSize(90, 90)
+        icon_container.setFixedSize(100, 100)
         icon_container.setStyleSheet("background-color: transparent;")
         icon_layout = QVBoxLayout(icon_container)
         icon_layout.setContentsMargins(0, 0, 0, 0)
         icon_layout.setAlignment(Qt.AlignCenter)
-        
+
         self.start_button_icon = RotatableLabel(icon_container)
         self.start_button_icon.setStyleSheet("background-color: transparent;")
         if os.path.exists(icon_path):
+            from PySide6.QtCore import QSize
             icon = QIcon(icon_path)
             try:
                 dpr = self.devicePixelRatioF()
             except Exception:
                 dpr = 1.0
-            target_logical = 90
-            dev_px = int(target_logical * max(1.0, dpr))
+            target_logical = 100
+            target_dpr = max(1.0, dpr)
+            dev_px = int(target_logical * target_dpr)
+
             avail = icon.availableSizes()
             if avail:
                 best = max(avail, key=lambda s: s.width() * s.height())
-                pm = icon.pixmap(best * int(max(1.0, dpr)))
+                pm = icon.pixmap(best * int(target_dpr))
             else:
                 pm = icon.pixmap(QSize(dev_px, dev_px))
+
             if pm.isNull():
                 pm = QPixmap(icon_path)
+
             if not pm.isNull():
                 try:
-                    pm.setDevicePixelRatio(dpr)
+                    pm.setDevicePixelRatio(target_dpr)
                 except Exception:
                     pass
-                fitted = pm.scaled(int(target_logical * dpr),
-                                   int(target_logical * dpr),
+                fitted = pm.scaled(int(target_logical * target_dpr),
+                                   int(target_logical * target_dpr),
                                    Qt.KeepAspectRatio,
                                    Qt.SmoothTransformation)
                 try:
-                    fitted.setDevicePixelRatio(dpr)
+                    fitted.setDevicePixelRatio(target_dpr)
                 except Exception:
                     pass
                 self.start_button_icon.set_original_pixmap(fitted)
