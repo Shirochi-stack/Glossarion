@@ -2382,9 +2382,112 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     # Handle max_sentences = 0 as "include all sentences"
     if max_sentences > 0 and len(filtered_sentences) > max_sentences:
         print(f"📁 Limiting to {max_sentences} representative sentences (from {len(filtered_sentences):,})")
-        # Take a representative sample
-        step = len(filtered_sentences) // max_sentences
-        filtered_sentences = filtered_sentences[::step][:max_sentences]
+        
+        # SMART SELECTION: Prioritize sentences with unique terms and gender context
+        # instead of blind slicing.
+        
+        # 1. Identify which terms appear in which sentences
+        # We need to re-scan briefly or pass this info along. Re-scanning is safer/easier here.
+        print(f"📑 analyzing sentences for term coverage and gender nuance...")
+        term_to_sentences = {} # term -> list of (score, sentence_index)
+        sentence_scores = {}   # index -> score
+        
+        # Pre-compile regexes
+        honorific_pattern = None
+        if primary_lang in PM.CJK_HONORIFICS:
+            h_list = PM.CJK_HONORIFICS[primary_lang] + PM.CJK_HONORIFICS.get('english', [])
+            # Sort by length desc
+            h_list.sort(key=len, reverse=True)
+            # Create regex for any honorific
+            if h_list:
+                h_pattern_str = '|'.join(map(re.escape, h_list))
+                honorific_pattern = re.compile(h_pattern_str)
+
+        # Get pronouns for scoring
+        gender_pronouns = []
+        if include_gender_context and hasattr(PM, 'GENDER_PRONOUNS'):
+            lang_key = 'english'
+            if primary_lang == 'korean': lang_key = 'korean'
+            elif primary_lang == 'chinese': lang_key = 'chinese'
+            elif primary_lang == 'japanese': lang_key = 'japanese'
+            gender_pronouns = PM.GENDER_PRONOUNS.get(lang_key, {}).get('male', []) + \
+                              PM.GENDER_PRONOUNS.get(lang_key, {}).get('female', [])
+
+        # Score sentences
+        for idx, sent in enumerate(filtered_sentences):
+            score = 1.0
+            
+            # Boost for gender pronouns (Gender Nuance)
+            if include_gender_context and gender_pronouns:
+                for p in gender_pronouns:
+                    if p in sent:
+                        score += 5.0 # High priority for gender context
+                        break
+            
+            # Boost for honorifics
+            if honorific_pattern and honorific_pattern.search(sent):
+                score += 2.0
+                
+            sentence_scores[idx] = score
+            
+            # Map terms to this sentence
+            # We only care about the frequent terms we identified earlier
+            # Use simple substring check for speed since we already filtered
+            for term in frequent_terms:
+                if term in sent:
+                    if term not in term_to_sentences:
+                        term_to_sentences[term] = []
+                    term_to_sentences[term].append(idx)
+        
+        # 2. Select sentences via Round-Robin to ensure coverage of ALL unique terms
+        selected_indices = set()
+        
+        # Sort each term's sentences by score descending
+        for term in term_to_sentences:
+            term_to_sentences[term].sort(key=lambda idx: sentence_scores[idx], reverse=True)
+            
+        # Round-robin selection
+        # We want to pick the best sentence for Term 1, then best for Term 2, etc.
+        # Then 2nd best for Term 1... until we fill max_sentences
+        
+        # Convert to list of iterators
+        term_iterators = [iter(term_to_sentences[term]) for term in sorted(term_to_sentences.keys())]
+        
+        while len(selected_indices) < max_sentences and term_iterators:
+            active_iterators = []
+            for it in term_iterators:
+                if len(selected_indices) >= max_sentences:
+                    break
+                
+                try:
+                    # Find next unselected sentence for this term
+                    while True:
+                        idx = next(it)
+                        if idx not in selected_indices:
+                            selected_indices.add(idx)
+                            # Keep this iterator active if it might have more
+                            active_iterators.append(it)
+                            break
+                        # If already selected (by another term), try next one for this term
+                except StopIteration:
+                    pass # This term has no more sentences
+            
+            term_iterators = active_iterators
+            
+        # If we still have room (rare), fill with highest scored remaining sentences
+        if len(selected_indices) < max_sentences:
+            remaining = sorted(
+                [i for i in range(len(filtered_sentences)) if i not in selected_indices],
+                key=lambda i: sentence_scores[i],
+                reverse=True
+            )
+            selected_indices.update(remaining[:max_sentences - len(selected_indices)])
+            
+        # Sort indices to maintain narrative flow
+        final_indices = sorted(list(selected_indices))
+        filtered_sentences = [filtered_sentences[i] for i in final_indices]
+        print(f"📁 Smart selection complete: Kept {len(filtered_sentences)} sentences covering {len(term_to_sentences)} unique terms")
+
     elif max_sentences == 0:
         print(f"📁 Including ALL {len(filtered_sentences):,} sentences (max_sentences=0)")
     
