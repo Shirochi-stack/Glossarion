@@ -2504,13 +2504,44 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                         # Strict filtering applied to 'before' token to reduce noise.
                         for m in honor_pat.finditer(sent):
                             # 1. Check BEFORE the honorific
-                            prefix = sent[:m.start()].strip()
-                            if prefix:
-                                # Clean the token of punctuation
-                                token = prefix.split()[-1]
-                                token = token.strip(".,;:!?\"'()[]{}<>~`@#$%^&*-=_+|\\/")
+                            if primary_lang == 'chinese':
+                                # Chinese logic: Get previous 2-4 characters without relying on space
+                                start_idx = m.start()
+                                # Try taking 2, 3, 4 characters backwards
+                                # Chinese names are typically 2-3 characters (Surname + Given Name)
+                                # We check if they form a valid name
+                                prefix_str = sent[max(0, start_idx-4):start_idx]
                                 
-                                if token and not any(ch.isdigit() for ch in token):
+                                # Iterate through possible name lengths (2 to 4) ending at honorific
+                                # We prioritize shorter names (2-3) if they look valid? No, prioritize longest valid?
+                                # Let's try to extract valid chunks.
+                                token = ""
+                                # Scan backwards for valid Chinese chars
+                                current_token = ""
+                                for i in range(1, 5): # Look back up to 4 chars
+                                    if start_idx - i < 0: break
+                                    char = sent[start_idx - i]
+                                    # Check if char is valid Chinese character
+                                    if '\u4e00' <= char <= '\u9fff':
+                                        current_token = char + current_token
+                                    else:
+                                        break # Stop at non-Chinese char (punctuation, space, etc)
+                                
+                                if len(current_token) >= 2:
+                                    token = current_token
+                            else:
+                                # Original logic for space-separated languages (Korean, English, Japanese)
+                                prefix = sent[:m.start()].strip()
+                                if prefix:
+                                    token = prefix.split()[-1]
+                                    token = token.strip(".,;:!?\"'()[]{}<>~`@#$%^&*-=_+|\\/")
+                                else:
+                                    token = ""
+
+                            if token:
+                                # Apply all validation logic (common words, fullmatch regex, etc.)
+                                if not any(ch.isdigit() for ch in token):
+                                    # ... (Rest of existing validation logic) ...
                                     # FILTERING: Skip tokens with common noisy start characters
                                     if not any(token.startswith(c) for c in ['[', '(', '{', '<', '-', 'ㄴ', 'ㅇ', 'ㄹ', 'ㅁ', 'ㅂ', 'ㅋ', 'ㅎ']):
                                         # FILTERING: Skip tokens that look like file extensions or paths
@@ -2521,26 +2552,14 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                                                 if not (len(token) > 2 and any(token.endswith(e) for e in ['겠네', '리라', '니까', '는데', '러나', '다가', '면서', '지만', '도록', '으로', '에서', '에게', '한테', '라고', '이란'])):
                                                     
                                                     # STRICTER ATTACHMENT CHECK FOR KOREAN SUFFIXES
-                                                    # If the honorific is a suffix type (starts with empty string or implicit attachment like '님', '씨'),
-                                                    # we should prefer cases where it was attached or very close.
-                                                    # The regex `honor_pat` matches the honorific. `m.start()` is where it starts.
-                                                    # `prefix` is `sent[:m.start()]`. If `prefix` ends with space, `token` was detached.
-                                                    # For Korean '님', '씨', detachment is allowed but rare for names in formal writing, 
-                                                    # but frequent in chat/informal (e.g. "철수 님"). 
-                                                    # However, detached tokens are HUGE source of false positives (e.g. "저기요 님").
-                                                    # We will strictly require attachment if the token is short (2 chars) to avoid "저 님", "그 님".
-                                                    # Unless it's a known title pattern.
+                                                    # (For Chinese, we already extracted attached characters, so this check is implicitly passed or N/A)
+                                                    is_attached = True 
+                                                    if primary_lang != 'chinese':
+                                                        is_attached = not sent[:m.start()].endswith(' ')
                                                     
-                                                    is_attached = not sent[:m.start()].endswith(' ')
-                                                    
-                                                    # If it's a common suffix honorific and token is short/ambiguous, require attachment?
-                                                    # Let's rely on Valid Token Shape first.
-
                                                     # Valid token structure check
                                                     valid_shape = False
                                                     # STRICTER: Use regex to ensure the ENTIRE token matches the valid pattern
-                                                    # This rejects mixed garbage like "레빗tv의" (Hangul + Latin + Hangul) or "먹겠네;;" (Hangul + Punctuation)
-                                                    # Previously re.search allowed "tv" or ";;" to exist outside the match
                                                     if re.fullmatch(r'[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af·]{2,4}', token):
                                                         valid_shape = True
                                                     elif re.fullmatch(r'^[A-Z][a-z]{1,15}(\s+[A-Z][a-z]{1,15})?$', token):
