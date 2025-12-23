@@ -6319,6 +6319,20 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 )
                 
                 if not self.stop_requested:
+                    # If auto glossary was generated, load it into the editor context
+                    try:
+                        auto_enabled = False
+                        if hasattr(self, 'enable_auto_glossary_var'):
+                            auto_enabled = bool(self.enable_auto_glossary_var)
+                        else:
+                            auto_enabled = bool(self.config.get('enable_auto_glossary', True))
+                        if auto_enabled:
+                            self.auto_load_glossary_for_file(file_path)
+                            if getattr(self, 'auto_loaded_glossary_path', None):
+                                self.append_log(f"📑 Auto-loaded glossary for editor: {os.path.basename(self.auto_loaded_glossary_path)}")
+                    except Exception as e:
+                        self.append_log(f"⚠️ Failed to auto-load glossary into editor: {e}")
+
                     self.append_log("✅ Translation completed successfully!")
                     return True
                 else:
@@ -7679,16 +7693,37 @@ Important rules:
                     return False
                 
                 # Check if output file exists
+                final_glossary_path = None
                 if not self.stop_requested and os.path.exists(output_path):
-                    self.append_log(f"✅ Glossary saved to: {output_path}")
-                    return True
+                    final_glossary_path = output_path
                 else:
                     # Check if it was saved in Glossary folder by the script
                     glossary_path = os.path.join("Glossary", output_path)
                     if os.path.exists(glossary_path):
-                        self.append_log(f"✅ Glossary saved to: {glossary_path}")
-                        return True
-                    return False
+                        final_glossary_path = glossary_path
+
+                if final_glossary_path:
+                    self.append_log(f"✅ Glossary saved to: {final_glossary_path}")
+                    try:
+                        # Persist auto-loaded glossary so the editor tab picks it up immediately
+                        self.manual_glossary_path = final_glossary_path
+                        self.auto_loaded_glossary_path = final_glossary_path
+                        self.auto_loaded_glossary_for_file = file_path
+                        self.manual_glossary_manually_loaded = False
+                        if hasattr(self, 'editor_file_entry'):
+                            self.editor_file_entry.setText(final_glossary_path)
+                        # Refresh editor view on UI thread if helper is available
+                        try:
+                            from PySide6.QtCore import QTimer
+                            if hasattr(self, '_auto_select_current_glossary'):
+                                QTimer.singleShot(0, self._auto_select_current_glossary)
+                        except Exception as qt_err:
+                            self.append_log(f"⚠️ UI refresh skipped: {qt_err}")
+                        self.append_log("📑 Loaded glossary into editor context (auto-loaded)")
+                    except Exception as e:
+                        self.append_log(f"⚠️ Failed to bind glossary to editor: {e}")
+                    return True
+                return False
                 
             finally:
                 sys.argv = old_argv
@@ -8486,7 +8521,21 @@ Important rules:
                            QTimer.singleShot(100, lambda sb=scrollbar: sb.setValue(sb.maximum()) if _time.time() >= getattr(self, '_autoscroll_delay_until', 0) and not getattr(self, '_user_scrolled_up', False) else None)
                    # Force immediate update of the widget
                    self.log_text.update()
-                   self.log_text.repaint()
+               except Exception:
+                   pass
+
+               # Auto-load glossary into editor right after auto-generation finishes (log-driven hook)
+               try:
+                   if isinstance(message, str) and "Automatic glossary generation COMPLETED" in message:
+                       if hasattr(self, 'file_path') and self.file_path:
+                           self.auto_load_glossary_for_file(self.file_path)
+                       if hasattr(self, '_auto_select_current_glossary'):
+                           from PySide6.QtCore import QTimer
+                           QTimer.singleShot(0, self._auto_select_current_glossary)
+                       # Emit a one-time log without re-triggering this hook
+                       if not getattr(self, '_auto_glossary_log_shown', False):
+                           self._auto_glossary_log_shown = True
+                           self.append_log_direct("📑 Loaded auto glossary into editor")
                except Exception:
                    pass
            except Exception as e:

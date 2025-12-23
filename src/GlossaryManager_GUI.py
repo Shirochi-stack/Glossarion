@@ -3826,6 +3826,8 @@ Critical Requirement: You must include absolutely all characters found in the pr
                     pass
 
         auto_select_current_glossary()
+        # Expose so other workflows (auto-generation/translation) can trigger a refresh without reopening the tab
+        self._auto_select_current_glossary = auto_select_current_glossary
        
         # Quick toolbar above the entry list
         toolbar_widget = QWidget()
