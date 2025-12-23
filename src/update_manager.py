@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTimer, QObject, QThread, Signal, Slot, QUrl
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
-from PySide6.QtGui import QFont, QIcon, QTextCursor
+from PySide6.QtGui import QFont, QIcon, QPixmap, QTextCursor
 from datetime import datetime
 
 class UpdateCheckWorker(QThread):
@@ -377,6 +377,24 @@ class UpdateManager(QObject):
                 self.CURRENT_VERSION = title.split('v')[-1].strip()
             else:
                 self.CURRENT_VERSION = "0.0.0"
+    
+    def _load_halgakos_pixmap(self, logical_size: int = 72):
+        """Load Halgakos icon with HiDPI scaling."""
+        try:
+            ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
+            if not os.path.isfile(ico_path):
+                return None
+            pm = QPixmap(ico_path)
+            if pm.isNull():
+                return None
+            screen = QApplication.primaryScreen()
+            dpr = screen.devicePixelRatio() if screen else 1.0
+            target = int(logical_size * dpr)
+            scaled = pm.scaled(target, target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            scaled.setDevicePixelRatio(dpr)
+            return scaled
+        except Exception:
+            return None
     
     def fetch_multiple_releases(self, count=10) -> List[Dict]:
         """Fetch multiple releases from GitHub
@@ -775,16 +793,16 @@ class UpdateManager(QObject):
         main_layout.setContentsMargins(20, 20, 20, 20)
         main_layout.setSpacing(10)
         
-        # Try to load and resize the icon
+        # Try to load and resize the icon (HiDPI-aware 72x72 logical)
         try:
-            ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
-            if os.path.isfile(ico_path):
-                # Load and resize image
-                icon_pixmap = QPixmap(ico_path).scaled(48, 48, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            icon_pixmap = self._load_halgakos_pixmap(72)
+            if icon_pixmap:
                 icon_label = QLabel()
                 icon_label.setPixmap(icon_pixmap)
                 icon_label.setAlignment(Qt.AlignCenter)
-                main_layout.addWidget(icon_label)
+                icon_label.setFixedSize(72, 72)
+                main_layout.addWidget(icon_label, 0, Qt.AlignHCenter)
+                main_layout.addSpacing(12)
         except Exception as e:
             print(f"Could not load loading icon: {e}")
         
@@ -986,6 +1004,38 @@ class UpdateManager(QObject):
         main_layout.setContentsMargins(20, 20, 20, 20)
         main_layout.setSpacing(10)
         
+        # Title row with Halgakos icons (72x72 logical)
+        title_container = QWidget()
+        title_layout = QHBoxLayout(title_container)
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        title_layout.setSpacing(14)
+        title_layout.setAlignment(Qt.AlignCenter)
+
+        left_pm = self._load_halgakos_pixmap(72)
+        left_icon = QLabel()
+        if left_pm:
+            left_icon.setPixmap(left_pm)
+            left_icon.setFixedSize(72, 72)
+        left_icon.setAlignment(Qt.AlignCenter)
+        title_layout.addWidget(left_icon, 0, Qt.AlignVCenter)
+
+        title_label = QLabel(dialog.windowTitle())
+        title_font = QFont()
+        title_font.setPointSize(14)
+        title_font.setBold(True)
+        title_label.setFont(title_font)
+        title_label.setAlignment(Qt.AlignCenter)
+        title_layout.addWidget(title_label, 0, Qt.AlignVCenter)
+
+        right_pm = self._load_halgakos_pixmap(72)
+        right_icon = QLabel()
+        if right_pm:
+            right_icon.setPixmap(right_pm)
+            right_icon.setFixedSize(72, 72)
+        right_icon.setAlignment(Qt.AlignCenter)
+        title_layout.addWidget(right_icon, 0, Qt.AlignVCenter)
+
+        main_layout.addWidget(title_container)
         # Initialize selected_asset to None
         self.selected_asset = None
         

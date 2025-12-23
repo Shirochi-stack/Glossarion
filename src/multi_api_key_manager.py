@@ -541,6 +541,30 @@ class RefusalPatternsDialog(QDialog):
             "i can't translate this content",
         ]
     
+    def _load_halgakos_pixmap(self, logical_size: int = 36):
+        """Load the Halgakos icon as a HiDPI-aware pixmap scaled to logical_size."""
+        try:
+            base_dir = getattr(self.translator_gui, 'base_dir', os.getcwd())
+            ico_path = os.path.join(base_dir, 'Halgakos.ico')
+            if not os.path.isfile(ico_path):
+                return None
+            pixmap = QPixmap(ico_path)
+            if pixmap.isNull():
+                return None
+            screen = QApplication.primaryScreen()
+            dpr = screen.devicePixelRatio() if screen else 1.0
+            target = int(logical_size * dpr)
+            scaled = pixmap.scaled(
+                target,
+                target,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
+            )
+            scaled.setDevicePixelRatio(dpr)
+            return scaled
+        except Exception:
+            return None
+    
     def _create_dialog(self):
         """Create the dialog UI"""
         # Apply stylesheet matching other dialogs
@@ -604,25 +628,11 @@ class RefusalPatternsDialog(QDialog):
         
         # Left Icon
         icon_label_left = QLabel()
-        try:
-            base_dir = getattr(self.translator_gui, 'base_dir', os.getcwd())
-            ico_path = os.path.join(base_dir, 'Halgakos.ico')
-            if os.path.isfile(ico_path):
-                # Load icon as pixmap with high quality
-                pixmap = QPixmap(ico_path)
-                if not pixmap.isNull():
-                    # Scale to appropriate size while preserving quality
-                    # Use smooth transformation for better quality
-                    scaled_pixmap = pixmap.scaled(
-                        48, 48,
-                        Qt.KeepAspectRatio,
-                        Qt.SmoothTransformation
-                    )
-                    icon_label_left.setPixmap(scaled_pixmap)
-                    icon_label_left.setFixedSize(48, 48)
-                    icon_label_left.setAlignment(Qt.AlignCenter)
-        except Exception:
-            pass
+        left_pixmap = self._load_halgakos_pixmap(36)
+        if left_pixmap:
+            icon_label_left.setPixmap(left_pixmap)
+            icon_label_left.setFixedSize(36, 36)
+        icon_label_left.setAlignment(Qt.AlignCenter)
         
         title_layout.addWidget(icon_label_left, 0, Qt.AlignVCenter)
         
@@ -637,25 +647,11 @@ class RefusalPatternsDialog(QDialog):
         
         # Right Icon (mirror of left)
         icon_label_right = QLabel()
-        try:
-            base_dir = getattr(self.translator_gui, 'base_dir', os.getcwd())
-            ico_path = os.path.join(base_dir, 'Halgakos.ico')
-            if os.path.isfile(ico_path):
-                # Load icon as pixmap with high quality
-                pixmap = QPixmap(ico_path)
-                if not pixmap.isNull():
-                    # Scale to appropriate size while preserving quality
-                    # Use smooth transformation for better quality
-                    scaled_pixmap = pixmap.scaled(
-                        48, 48,
-                        Qt.KeepAspectRatio,
-                        Qt.SmoothTransformation
-                    )
-                    icon_label_right.setPixmap(scaled_pixmap)
-                    icon_label_right.setFixedSize(48, 48)
-                    icon_label_right.setAlignment(Qt.AlignCenter)
-        except Exception:
-            pass
+        right_pixmap = self._load_halgakos_pixmap(36)
+        if right_pixmap:
+            icon_label_right.setPixmap(right_pixmap)
+            icon_label_right.setFixedSize(36, 36)
+        icon_label_right.setAlignment(Qt.AlignCenter)
         
         title_layout.addWidget(icon_label_right, 0, Qt.AlignVCenter)
         

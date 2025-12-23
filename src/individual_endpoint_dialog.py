@@ -95,15 +95,62 @@ class IndividualEndpointDialog(QDialog):
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(20, 16, 20, 16)
         main_layout.setSpacing(10)
-        
-        # Header
-        header_layout = QHBoxLayout()
+
+        # Title row with Halgakos icons
+        title_container = QWidget()
+        title_layout = QHBoxLayout(title_container)
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        title_layout.setSpacing(12)
+        title_layout.setAlignment(Qt.AlignCenter)
+
+        def _load_halgakos_pixmap(logical_size: int = 36):
+            try:
+                base_dir = getattr(self.translator_gui, 'base_dir', os.getcwd())
+                ico_path = os.path.join(base_dir, 'Halgakos.ico')
+                if not os.path.isfile(ico_path):
+                    return None
+                pm = QPixmap(ico_path)
+                if pm.isNull():
+                    return None
+                from PySide6.QtWidgets import QApplication
+                screen = QApplication.primaryScreen()
+                dpr = screen.devicePixelRatio() if screen else 1.0
+                target = int(logical_size * dpr)
+                scaled = pm.scaled(target, target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                scaled.setDevicePixelRatio(dpr)
+                return scaled
+            except Exception:
+                return None
+
+        icon_left = QLabel()
+        left_pm = _load_halgakos_pixmap(36)
+        if left_pm:
+            icon_left.setPixmap(left_pm)
+            icon_left.setFixedSize(36, 36)
+        icon_left.setAlignment(Qt.AlignCenter)
+        title_layout.addWidget(icon_left, 0, Qt.AlignVCenter)
+
         header_label = QLabel("Per-Key Custom Endpoint")
         header_font = QFont()
         header_font.setPointSize(14)
         header_font.setBold(True)
         header_label.setFont(header_font)
-        header_layout.addWidget(header_label)
+        header_label.setAlignment(Qt.AlignCenter)
+        title_layout.addWidget(header_label, 0, Qt.AlignVCenter)
+
+        icon_right = QLabel()
+        right_pm = _load_halgakos_pixmap(36)
+        if right_pm:
+            icon_right.setPixmap(right_pm)
+            icon_right.setFixedSize(36, 36)
+        icon_right.setAlignment(Qt.AlignCenter)
+        title_layout.addWidget(icon_right, 0, Qt.AlignVCenter)
+
+        main_layout.addWidget(title_container)
+        
+        # Header (enable toggle + spinner)
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 0)
         
         # Enable toggle using styled checkbox with icon
         self.enable_checkbox = self._create_styled_checkbox("Enable")
@@ -133,13 +180,17 @@ class IndividualEndpointDialog(QDialog):
         """)
         header_layout.addStretch()
         
-        # Add Halgakos.ico next to the enable checkbox using spinning helper
-        base_dir = getattr(self.translator_gui, 'base_dir', None)
-        icon_label = create_icon_label(size=24, base_dir=base_dir)
-        
-        # Connect checkbox toggle to spinning animation
+        # Add Halgakos.ico next to the enable checkbox using HiDPI pixmap
+        icon_label = QLabel()
+        toggle_pm = _load_halgakos_pixmap(24)
+        if toggle_pm:
+            icon_label.setPixmap(toggle_pm)
+            icon_label.setFixedSize(24, 24)
+        icon_label.setAlignment(Qt.AlignCenter)
+
+        # Connect checkbox toggle to spinning animation (uses same label)
         self.enable_checkbox.toggled.connect(lambda: animate_icon(icon_label))
-        
+
         header_layout.addWidget(icon_label)
         header_layout.addWidget(self.enable_checkbox)
         
