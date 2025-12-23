@@ -45,7 +45,7 @@ Focus on identifying:
 1. Character names with their honorifics
 2. Important terms, titles and ranks
 
-Generate a glossary with all character names, terms, titles, and other important elements found.
+Generate a glossary with all character names, terms, titles, and other important elements found."""
 
 
 # Class-level shared lock for API submission timing
