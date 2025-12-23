@@ -2769,9 +2769,6 @@ Critical Requirement: You must include absolutely all characters found in the pr
                self.editor_file_entry.setText(path)
                load_glossary_for_editing()
 
-        # Expose callback so external code can trigger a load after setting the path
-        self.load_glossary_for_editor_callback = load_glossary_for_editing
-
         # Common save helper
         def save_current_glossary():
            path = self.editor_file_entry.text()
@@ -3811,14 +3808,19 @@ Critical Requirement: You must include absolutely all characters found in the pr
                 auto_path = getattr(self, 'auto_loaded_glossary_path', None)
                 manual_path = getattr(self, 'manual_glossary_path', None)
 
-                # Prefer the auto-loaded glossary if it exists and is a CSV/JSON
-                for cand in [auto_path, manual_path]:
-                    if cand and os.path.exists(cand):
-                        self.editor_file_entry.setText(cand)
-                        load_glossary_for_editing()
-                        return
+                # Prefer the auto-loaded glossary if it exists and is a CSV
+                if auto_path and os.path.exists(auto_path):
+                    self.editor_file_entry.setText(auto_path)
+                    load_glossary_for_editing()
+                    return
 
-                # Fallback: derive from current input file path (output folder shares base name)
+                # Fallback to any currently loaded manual glossary
+                if manual_path and os.path.exists(manual_path):
+                    self.editor_file_entry.setText(manual_path)
+                    load_glossary_for_editing()
+                    return
+
+                # SIMPLE FALLBACK: derive from current input file's output folder
                 try:
                     epub_path = None
                     if hasattr(self, 'get_current_epub_path'):
@@ -3845,12 +3847,8 @@ Critical Requirement: You must include absolutely all characters found in the pr
                                 return
                 except Exception:
                     pass
-            except Exception as e:
-                # Fail silently but log for debugging
-                try:
-                    self.append_log(f"⚠️ Failed to auto-select glossary for editor: {e}")
-                except Exception:
-                    pass
+            except Exception:
+                pass
 
         auto_select_current_glossary()
        
