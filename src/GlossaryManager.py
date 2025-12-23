@@ -1835,6 +1835,11 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     
     primary_lang = detect_primary_language(clean_text)
     print(f"📑 Detected primary language: {primary_lang}")
+    # Safety guard: ensure flag exists even if subprocess reload missed earlier assignment
+    try:
+        include_gender_context_flag
+    except NameError:
+        include_gender_context_flag = os.getenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
 
     # Gender pronouns for optional gender-context filtering in early captures
     gender_pronouns = []
@@ -2423,9 +2428,6 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                     honor_pat = re.compile(hon_regex)
                     ordered_names = []
                     for idx, sent in enumerate(filtered_sentences):
-                        # If gender context is required, skip sentences without pronouns
-                        if not _sentence_has_gender_pronoun(sent):
-                            continue
                         for m in combined_pat.finditer(sent):
                             name = m.group("name").strip()
                             if not name or any(ch.isdigit() for ch in name):
@@ -2443,8 +2445,6 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                                 ordered_names.append(name)
                         # Fallback: token immediately before any honorific
                         for m in honor_pat.finditer(sent):
-                            if not _sentence_has_gender_pronoun(sent):
-                                continue
                             prefix = sent[:m.start()].strip()
                             token = prefix.split()[-1] if prefix.split() else ""
                             if token and not any(ch.isdigit() for ch in token):
@@ -2468,7 +2468,18 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                                     ordered_names.append(token)
                 else:
                     print("📑 Dynamic expansion (honorific-first): no honorifics found in PatternManager for this language")
-                print(f"📑 Dynamic expansion (honorific-first): captured {len(honorific_first_indices)} unique characters before scoring")
+                base_count = len(honorific_first_indices)
+                if include_gender_context_flag and base_count > 0:
+                    try:
+                        gender_subset = sum(
+                            1 for idx in honorific_first_indices.values()
+                            if 0 <= idx < len(filtered_sentences) and _sentence_has_gender_pronoun(filtered_sentences[idx])
+                        )
+                        print(f"📑 Dynamic expansion (honorific-first): captured {base_count} unique characters before scoring (gender-context subset: {gender_subset})")
+                    except Exception:
+                        print(f"📑 Dynamic expansion (honorific-first): captured {base_count} unique characters before scoring")
+                else:
+                    print(f"📑 Dynamic expansion (honorific-first): captured {base_count} unique characters before scoring")
             except Exception:
                 print("📑 Dynamic expansion (honorific-first): error parsing honorific names; continuing without early captures")
         else:
