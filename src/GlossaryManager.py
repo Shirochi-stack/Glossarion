@@ -573,12 +573,12 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
                             all_glossary_entries.append(line)
                             chunk_lines.append(line)
                     
-                    # Incremental update
+                    # Incremental update (per chunk file inside incremental_glossary folder)
                     try:
-                        _incremental_update_glossary(output_dir, chunk_lines, strip_honorifics, language, filter_mode)
-                        print(f"📑 Incremental write: +{len(chunk_lines)} entries")
+                        _incremental_update_glossary(output_dir, chunk_idx, chunk_lines, strip_honorifics, language, filter_mode)
+                        print(f"📑 Incremental write: chunk {chunk_idx} (+{len(chunk_lines)} entries)")
                     except Exception as e2:
-                        print(f"⚠️ Incremental write failed: {e2}")
+                        print(f"⚠️ Incremental write failed for chunk {chunk_idx}: {e2}")
             finally:
                 if _prev_defer is None:
                     if "GLOSSARY_DEFER_SAVE" in os.environ:
@@ -599,7 +599,8 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         
         # START WITH INCREMENTAL GLOSSARY AS BASE IF IT EXISTS AND IS LARGER
         # This ensures that if memory was lost (e.g. during a long sequential run), we rely on the disk backup
-        incremental_path = os.path.join(output_dir, "glossary.incremental.csv")
+        incremental_dir = os.path.join(output_dir, "incremental_glossary")
+        incremental_path = os.path.join(incremental_dir, "glossary.incremental.all.csv")
         base_entries = list(all_glossary_entries)
         using_incremental_as_base = False
         
@@ -1123,28 +1124,69 @@ def _process_chunks_batch_api(chunks_to_process, custom_prompt, language,
     
     return all_csv_lines
 
-def _incremental_update_glossary(output_dir, chunk_lines, strip_honorifics, language, filter_mode):
-    """Incrementally update glossary.csv (token-efficient) using an on-disk CSV aggregator.
-    This keeps glossary.csv present and growing after each chunk while preserving
-    token-efficient format for the visible file.
+def _incremental_update_glossary(output_dir, chunk_idx, chunk_lines, strip_honorifics, language, filter_mode):
+    """Incrementally update glossary output.
+
+    Creates per-chunk CSV snapshots in an "incremental_glossary" subfolder:
+    glossary.incremental1.csv, glossary.incremental2.csv, ...
+
+    Also maintains a combined aggregator file (glossary.incremental.all.csv)
+    that save_glossary() can use as a crash-safe backup.
     """
     if not chunk_lines:
         return
-    # Paths
-    agg_path = os.path.join(output_dir, "glossary.incremental.csv")
+    
+    # Incremental output directory
+    incremental_dir = os.path.join(output_dir, "incremental_glossary")
+    os.makedirs(incremental_dir, exist_ok=True)
+    
+    # Per-chunk snapshot path (no merging, just this chunk)
+    chunk_filename = f"glossary.incremental{chunk_idx}.csv"
+    chunk_path = os.path.join(incremental_dir, chunk_filename)
+    
+    # Combined aggregator path (append-only) and visible glossary path (merged)
+    agg_path = os.path.join(incremental_dir, "glossary.incremental.all.csv")
     vis_path = os.path.join(output_dir, "glossary.csv")
-    # Ensure output dir
+    
+    # Ensure main output dir exists
     os.makedirs(output_dir, exist_ok=True)
-    # Compose CSV with header for merging
+    
+    # Compose CSV lines for this chunk
     include_gender_context = os.getenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
     include_description = os.getenv("GLOSSARY_INCLUDE_DESCRIPTION", "0") == "1"
+    
+    header = "type,raw_name,translated_name"
     if include_description:
-        new_csv_lines = ["type,raw_name,translated_name,gender,description"] + chunk_lines
+        header += ",gender,description"
     elif include_gender_context:
-        new_csv_lines = ["type,raw_name,translated_name,gender"] + chunk_lines
-    else:
-        new_csv_lines = ["type,raw_name,translated_name"] + chunk_lines
-    # Load existing aggregator content, if any
+        header += ",gender"
+    
+    new_csv_lines = [header] + chunk_lines
+
+    # Save per-chunk snapshot (no merging)
+    _atomic_write_file(chunk_path, "\n".join(new_csv_lines))
+
+    # Append to aggregator (raw append, no merging/deduping to preserve full history)
+    # Use lock to prevent concurrent appends
+    with _file_write_lock:
+        try:
+            file_exists = os.path.exists(agg_path)
+            with open(agg_path, 'a', encoding='utf-8') as f:
+                # If new file, write header + chunks
+                if not file_exists:
+                    f.write("\n".join(new_csv_lines))
+                    # Ensure newline at end if needed (not strictly required by join but good practice)
+                    f.write("\n")
+                else:
+                    # If existing file, skip header and append chunks
+                    if chunk_lines:
+                        f.write("\n".join(chunk_lines))
+                        f.write("\n")
+        except Exception as e:
+            print(f"⚠️ Failed to append to incremental aggregator: {e}")
+
+    # Update visible glossary.csv (merged and deduped)
+    # We read the aggregator (now raw history), merge/dedupe it, and save as visible file
     existing_csv = None
     if os.path.exists(agg_path):
         try:
@@ -1152,19 +1194,22 @@ def _incremental_update_glossary(output_dir, chunk_lines, strip_honorifics, lang
                 existing_csv = f.read()
         except Exception as e:
             print(f"⚠️ Incremental: cannot read aggregator: {e}")
+            
     # Merge (exact merge, no fuzzy to keep this fast)
-    merged_csv_lines = _merge_csv_entries(new_csv_lines, existing_csv or "", strip_honorifics, language)
+    # Note: _merge_csv_entries handles deduplication
+    # We pass empty string as 'new' content because existing_csv already contains everything (from append above)
+    # Actually, _merge_csv_entries merges two CSV strings. existing_csv is the full raw history.
+    # If we pass it as 'base', it will clean it up.
+    merged_csv_lines = _merge_csv_entries([], existing_csv or "", strip_honorifics, language)
+    
     # Optional filter mode
     merged_csv_lines = _filter_csv_by_mode(merged_csv_lines, filter_mode)
-    # Save aggregator (CSV)
-    _atomic_write_file(agg_path, "\n".join(merged_csv_lines))
+    
     # Convert to token-efficient format for visible glossary.csv
     token_lines = _convert_to_token_efficient_format(merged_csv_lines)
     token_lines = _sanitize_final_glossary_lines(token_lines, use_legacy_format=False)
+    
     _atomic_write_file(vis_path, "\n".join(token_lines))
-    if not os.path.exists(vis_path):
-        with open(vis_path, 'w', encoding='utf-8') as f:
-            f.write("\n".join(token_lines))
 
 def _process_single_chunk(chunk_idx, chunk_text, custom_prompt, language,
                          min_frequency, max_names, max_titles, batch_size,
