@@ -2791,11 +2791,11 @@ Recent translations to summarize:
         self.frame.addWidget(help_label, 3, 2, Qt.AlignLeft)
         
         # Chapter Range
-        chapter_range_label = QLabel("Chapter range (e.g., 5-10):")
+        chapter_range_label = QLabel("Chapter range:")
         self.frame.addWidget(chapter_range_label, 5, 0, Qt.AlignLeft)
         
         self.chapter_range_entry = QLineEdit()
-        self.chapter_range_entry.setPlaceholderText("e.g. 1-10, 15, 20-25")
+        self.chapter_range_entry.setPlaceholderText("e.g. 5-10, 15")
         self.chapter_range_entry.setText(self.config.get('chapter_range', ''))
         self.chapter_range_entry.setMaximumWidth(120)
         self.frame.addWidget(self.chapter_range_entry, 5, 1, Qt.AlignLeft)
