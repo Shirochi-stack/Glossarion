@@ -3278,6 +3278,7 @@ def _normalize_filtered_text(text: str) -> str:
     normalized_text = re.sub(r"\n{3,}", "\n\n", normalized_text)
     normalized_text = re.sub(r"\n{2,}([”」』])", r"\n\1", normalized_text)
     normalized_text = re.sub(r"([“「『])\n{2,}", r"\1\n", normalized_text)
+    normalized_text = re.sub(r"\n{2,}", "\n", normalized_text)
 
     return normalized_text
 
