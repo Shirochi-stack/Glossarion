@@ -2580,40 +2580,58 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                         term_to_sentences[term].append(idx)
         
         # 2. Select sentences via Round-Robin to ensure coverage of ALL unique terms
+        #    with PRIORITY for character-like terms (those with honorifics)
         selected_indices = set()
         
-        # Sort each term's sentences by score descending
+        # Sort each term's sentences by score descending (higher score first)
         for term in term_to_sentences:
             term_to_sentences[term].sort(key=lambda idx: sentence_scores[idx], reverse=True)
-            
-        # Round-robin selection
-        # We want to pick the best sentence for Term 1, then best for Term 2, etc.
-        # Then 2nd best for Term 1... until we fill max_sentences
         
-        # Convert to list of iterators
-        term_iterators = [iter(term_to_sentences[term]) for term in sorted(term_to_sentences.keys())]
+        # Split terms into character-like (with honorifics) and others
+        character_terms = []
+        non_character_terms = []
+        for term in sorted(term_to_sentences.keys()):
+            try:
+                if _has_honorific(term):
+                    character_terms.append(term)
+                else:
+                    non_character_terms.append(term)
+            except Exception:
+                # Fallback: if anything goes wrong, treat as non-character
+                non_character_terms.append(term)
         
-        while len(selected_indices) < max_sentences and term_iterators:
-            active_iterators = []
-            for it in term_iterators:
-                if len(selected_indices) >= max_sentences:
-                    break
-                
-                try:
-                    # Find next unselected sentence for this term
-                    while True:
-                        idx = next(it)
-                        if idx not in selected_indices:
-                            selected_indices.add(idx)
-                            # Keep this iterator active if it might have more
-                            active_iterators.append(it)
-                            break
-                        # If already selected (by another term), try next one for this term
-                except StopIteration:
-                    pass # This term has no more sentences
+        def round_robin_terms(term_list, selected_indices, max_sentences):
+            """Round-robin over provided term list, updating selected_indices in-place."""
+            # Convert to list of iterators over sentence indices
+            term_iterators = [iter(term_to_sentences[t]) for t in term_list]
             
-            term_iterators = active_iterators
-            
+            while len(selected_indices) < max_sentences and term_iterators:
+                active_iterators = []
+                for it in term_iterators:
+                    if len(selected_indices) >= max_sentences:
+                        break
+                    try:
+                        # Find next unselected sentence for this term
+                        while True:
+                            idx = next(it)
+                            if idx not in selected_indices:
+                                selected_indices.add(idx)
+                                # Keep this iterator active if it might have more
+                                active_iterators.append(it)
+                                break
+                            # If already selected (by another term), try next one for this term
+                    except StopIteration:
+                        pass  # This term has no more sentences
+                term_iterators = active_iterators
+        
+        # First, prioritize character-like terms (honorific-based)
+        if character_terms:
+            round_robin_terms(character_terms, selected_indices, max_sentences)
+        
+        # Then, if we still have room, cover remaining non-character terms
+        if len(selected_indices) < max_sentences and non_character_terms:
+            round_robin_terms(non_character_terms, selected_indices, max_sentences)
+        
         # If we still have room (rare), fill with highest scored remaining sentences
         if len(selected_indices) < max_sentences:
             remaining = sorted(
