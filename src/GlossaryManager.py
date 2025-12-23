@@ -2480,7 +2480,14 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                                           gender_pronouns, include_gender_context)) 
                           for batch_data in batches]
                 
-                # Collect results
+                # Collect results with progress logging
+                completed_batches = 0
+                processed_count = 0
+                scoring_start_time = time.time()
+                last_log_time = scoring_start_time
+                total_batches = len(batches)
+                total_to_score = len(filtered_sentences)
+                
                 for future in as_completed(futures):
                     try:
                         batch_scores, batch_term_map = future.result()
@@ -2490,8 +2497,32 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                             if term not in term_to_sentences:
                                 term_to_sentences[term] = []
                             term_to_sentences[term].extend(indices)
+                            
+                        # Update progress stats
+                        completed_batches += 1
+                        # Estimate sentences processed in this batch (approximate if batches vary)
+                        processed_count += len(batch_scores) 
+                        
+                        current_time = time.time()
+                        elapsed = current_time - scoring_start_time
+                        
+                        # Log periodically (every ~5 seconds or if it's the last batch)
+                        if (current_time - last_log_time >= 5.0) or (completed_batches == total_batches):
+                            rate = processed_count / elapsed if elapsed > 0 else 0
+                            progress_pct = (processed_count / total_to_score) * 100
+                            
+                            if completed_batches < total_batches:
+                                print(f"📑 Scoring... {processed_count:,}/{total_to_score:,} sentences ({progress_pct:.1f}%) | Batch {completed_batches}/{total_batches} | {rate:.0f} sent/sec | {elapsed:.0f}s elapsed")
+                            else:
+                                print(f"📑 Scoring... finalizing last batches | {elapsed:.0f}s elapsed")
+                                
+                            last_log_time = current_time
+                            
                     except Exception as e:
                         print(f"⚠️ Scoring batch failed: {e}")
+                
+                total_elapsed = time.time() - scoring_start_time
+                print(f"📁 All scoring batches completed in {total_elapsed:.1f}s!")
         else:
             # Sequential fallback
             honorific_pattern = re.compile(honorific_pattern_str) if honorific_pattern_str else None
