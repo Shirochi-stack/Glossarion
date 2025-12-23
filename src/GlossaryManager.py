@@ -2376,22 +2376,79 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 honorific_pattern_str = '|'.join(map(re.escape, h_list))
         if honorific_pattern_str:
             try:
-                cjk_name = r"[\\u4e00-\\u9fff\\u3040-\\u30ff\\uac00-\\ud7af·]{2,6}"
-                latin_name = r"[A-Z][a-z]{1,15}(?:\\s+[A-Z][a-z]{1,15}){0,2}"
-                honor_pat = re.compile(rf"(?P<name>{cjk_name}|{latin_name})\\s*(?P<hon>{honorific_pattern_str})")
-                ordered_names = []
-                for idx, sent in enumerate(filtered_sentences):
-                    for m in honor_pat.finditer(sent):
-                        name = m.group("name").strip()
-                        if not name or any(ch.isdigit() for ch in name):
-                            continue
-                        if name not in honorific_first_indices:
-                            honorific_first_indices[name] = idx
-                            ordered_names.append(name)
-                if honorific_first_indices:
-                    print(f"📑 Dynamic expansion (honorific-first): captured {len(honorific_first_indices)} unique characters before scoring")
+                honorifics = PM.CJK_HONORIFICS.get(primary_lang, []) + PM.CJK_HONORIFICS.get('english', [])
+                honorifics = [h for h in honorifics if h]  # drop empties
+                # Keep only clear suffix/title honorifics; drop verb endings/keigo/politeness particles
+                if primary_lang == 'korean':
+                    suffix_allow = {'님','씨','군','양','공','옹','군','양','낭','랑','생','자','부','모','시','제','족하',
+                                    '마마','대감','영감','나리','도령','낭자','아씨','규수','각하','전하','폐하','저하','합하',
+                                    '대비','대왕','왕자','공주','도련님','아가씨'}
+                    honorifics = [h for h in honorifics if h in suffix_allow]
+                elif primary_lang == 'japanese':
+                    suffix_allow = {'さん','ちゃん','君','くん','様','さま','殿','先輩','先生','氏','殿下','閣下','卿'}
+                    honorifics = [h for h in honorifics if h in suffix_allow]
+                elif primary_lang == 'chinese':
+                    # short person titles only
+                    honorifics = [h for h in honorifics if len(h) <= 3 and h in {'先生','小姐','夫人','公子','姑娘','大人','阁下','将军','公主','少爷','老爷','相公','郎君','小姐','少侠','侠士'}]
+                else:
+                    # romanized suffixes only
+                    honorifics = [h for h in honorifics if h.startswith('-') and len(h) <= 8]
+                if honorifics:
+                    hon_regex = "|".join(map(re.escape, honorifics))
+                    cjk_name_pat = r"[\\u4e00-\\u9fff\\u3040-\\u30ff\\uac00-\\ud7af·]{2,4}"
+                    latin_name_pat = r"[A-Z][a-z]{1,15}(?:\\s+[A-Z][a-z]{1,15}){0,1}"
+                    punct_opt = r"[，、,.:;!?…\\)\\] \\}】』」]?"
+                    combined_pat = re.compile(
+                        rf"(?P<name>{cjk_name_pat}|{latin_name_pat})\\s*(?P<hon>{hon_regex}){punct_opt}"
+                    )
+                    honor_pat = re.compile(hon_regex)
+                    ordered_names = []
+                    for idx, sent in enumerate(filtered_sentences):
+                        for m in combined_pat.finditer(sent):
+                            name = m.group("name").strip()
+                            if not name or any(ch.isdigit() for ch in name):
+                                continue
+                            # Skip if name looks like a title term (PatternManager title patterns)
+                            skip_title = False
+                            for pat in PM.TITLE_PATTERNS.get(primary_lang, []):
+                                if re.search(pat, name):
+                                    skip_title = True
+                                    break
+                            if skip_title:
+                                continue
+                            if name not in honorific_first_indices:
+                                honorific_first_indices[name] = idx
+                                ordered_names.append(name)
+                        # Fallback: token immediately before any honorific
+                        for m in honor_pat.finditer(sent):
+                            prefix = sent[:m.start()].strip()
+                            token = prefix.split()[-1] if prefix.split() else ""
+                            if token and not any(ch.isdigit() for ch in token):
+                                # Require reasonable token shape
+                                if re.search(r'[\\u4e00-\\u9fff\\u3040-\\u30ff\\uac00-\\ud7af·]{2,4}', token):
+                                    pass
+                                elif re.match(r'^[A-Z][a-z]{1,15}(\\s+[A-Z][a-z]{1,15})?$', token):
+                                    pass
+                                else:
+                                    continue
+                                # Skip if token looks like a title term
+                                skip_title = False
+                                for pat in PM.TITLE_PATTERNS.get(primary_lang, []):
+                                    if re.search(pat, token):
+                                        skip_title = True
+                                        break
+                                if skip_title:
+                                    continue
+                                if token not in honorific_first_indices:
+                                    honorific_first_indices[token] = idx
+                                    ordered_names.append(token)
+                else:
+                    print("📑 Dynamic expansion (honorific-first): no honorifics found in PatternManager for this language")
+                print(f"📑 Dynamic expansion (honorific-first): captured {len(honorific_first_indices)} unique characters before scoring")
             except Exception:
-                pass
+                print("📑 Dynamic expansion (honorific-first): error parsing honorific names; continuing without early captures")
+        else:
+            print("📑 Dynamic expansion (honorific-first): no honorific pattern available for this language")
     
     # For extremely large datasets, we can optionally do additional filtering
     # Skip this reduction when include_all_characters is enabled to avoid losing rare characters
