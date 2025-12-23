@@ -526,6 +526,7 @@ class GlossaryManagerMixin:
                     ('glossary_context_window_entry', 'glossary_context_window', 'glossary_context_window_var'),
                     ('glossary_max_text_size_entry', 'glossary_max_text_size', 'glossary_max_text_size_var'),
                     ('glossary_max_sentences_entry', 'glossary_max_sentences', 'glossary_max_sentences_var'),
+                    ('include_all_characters_checkbox', 'glossary_include_all_characters', 'glossary_include_all_characters_var'),
                     ('glossary_chapter_split_threshold_entry', 'glossary_chapter_split_threshold', 'glossary_chapter_split_threshold_var'),
                     ('glossary_request_merge_count_entry', 'glossary_request_merge_count', 'glossary_request_merge_count_var'),
                 ]
@@ -1704,21 +1705,23 @@ Rules:
         compress_layout.addWidget(label3)
         compress_layout.addStretch()
         
+        
         # Include all characters toggle (Dynamic Max Limit)
-        include_chars_widget = QWidget()
-        include_chars_layout = QHBoxLayout(include_chars_widget)
-        include_chars_layout.setContentsMargins(0, 0, 0, 15)
-        auto_layout.addWidget(include_chars_widget)
+        # MOVED to row 3 next to max sentences entry for better context
+        # include_chars_widget = QWidget()
+        # include_chars_layout = QHBoxLayout(include_chars_widget)
+        # include_chars_layout.setContentsMargins(0, 0, 0, 15)
+        # auto_layout.addWidget(include_chars_widget)
         
-        if not hasattr(self, 'include_all_characters_checkbox'):
-            self.include_all_characters_checkbox = self._create_styled_checkbox("Dynamic Limit: Include All Characters")
-            self.include_all_characters_checkbox.setChecked(self.config.get('glossary_include_all_characters', False))
-            self.include_all_characters_checkbox.setToolTip("Dynamically increases the Max Sentences limit to ensure every detected character name is included in the context, even if it exceeds the fixed limit.")
-        include_chars_layout.addWidget(self.include_all_characters_checkbox)
+        # if not hasattr(self, 'include_all_characters_checkbox'):
+        #     self.include_all_characters_checkbox = self._create_styled_checkbox("Dynamic Limit: Include All Characters")
+        #     self.include_all_characters_checkbox.setChecked(self.config.get('glossary_include_all_characters', False))
+        #     self.include_all_characters_checkbox.setToolTip("Dynamically increases the Max Sentences limit to ensure every detected character name is included in the context, even if it exceeds the fixed limit.")
+        # include_chars_layout.addWidget(self.include_all_characters_checkbox)
         
-        label_chars = QLabel("(Dynamically increases sentence limit to cover ALL character names)")
-        include_chars_layout.addWidget(label_chars)
-        include_chars_layout.addStretch()
+        # label_chars = QLabel("(Dynamically increases sentence limit to cover ALL character names)")
+        # include_chars_layout.addWidget(label_chars)
+        # include_chars_layout.addStretch()
         
         # Include gender context toggle (below compress glossary)
         gender_context_widget = QWidget()
@@ -2019,6 +2022,14 @@ Rules:
         ms_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         ms_layout.addWidget(ms_label)
         ms_layout.addWidget(self.glossary_max_sentences_entry)
+        
+        # Include All Characters toggle (dynamic limit)
+        if not hasattr(self, 'include_all_characters_checkbox'):
+            self.include_all_characters_checkbox = self._create_styled_checkbox("Dynamic Limit Expansion")
+            self.include_all_characters_checkbox.setToolTip("Dynamic Limit Expansion: Ensures all detected characters are included FIRST, then adds the 'Max sentences' limit on top for general context.")
+            self.include_all_characters_checkbox.setChecked(self.config.get('glossary_include_all_characters', False))
+        ms_layout.addWidget(self.include_all_characters_checkbox)
+        
         hint = QLabel("(Limit for AI processing)")
         hint.setStyleSheet("color: gray;")
         ms_layout.addWidget(hint)
