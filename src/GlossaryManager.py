@@ -405,7 +405,15 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
             splitter = ChapterSplitter(model_name=model, target_tokens=safe_input_limit)
             
             # Get the text to split (filtered or raw)
-            text_to_split = filtered_text_cache if (use_smart_filter and custom_prompt and filtered_text_cache) else all_text
+            # FORCE RAW TEXT for initial chunking if filtering was skipped
+            text_to_split = all_text # Always start with full text for chunking to ensure coverage
+            
+            if use_smart_filter and custom_prompt and filtered_text_cache:
+                # If smart filter was successfully run and produced a reduced text, use that
+                text_to_split = filtered_text_cache
+                print("📑 Using smart-filtered text for token-based chunking")
+            else:
+                print("📑 Using full raw text for token-based chunking")
             
             # Use ChapterSplitter to intelligently split based on tokens
             split_results = splitter.split_chapter(text_to_split, max_tokens=safe_input_limit)
