@@ -2393,15 +2393,12 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         sentence_scores = {}   # index -> score
         
         # Pre-compile regexes
-        honorific_pattern = None
+        honorific_pattern_str = None
         if primary_lang in PM.CJK_HONORIFICS:
             h_list = PM.CJK_HONORIFICS[primary_lang] + PM.CJK_HONORIFICS.get('english', [])
-            # Sort by length desc
             h_list.sort(key=len, reverse=True)
-            # Create regex for any honorific
             if h_list:
-                h_pattern_str = '|'.join(map(re.escape, h_list))
-                honorific_pattern = re.compile(h_pattern_str)
+                honorific_pattern_str = '|'.join(map(re.escape, h_list))
 
         # Get pronouns for scoring
         gender_pronouns = []
@@ -2413,31 +2410,64 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             gender_pronouns = PM.GENDER_PRONOUNS.get(lang_key, {}).get('male', []) + \
                               PM.GENDER_PRONOUNS.get(lang_key, {}).get('female', [])
 
-        # Score sentences
-        for idx, sent in enumerate(filtered_sentences):
-            score = 1.0
+        # Parallelize scoring if dataset is large enough
+        if use_parallel and len(filtered_sentences) > 2000:
+            print(f"📑 Parallelizing sentence scoring with {extraction_workers} workers...")
             
-            # Boost for gender pronouns (Gender Nuance)
-            if include_gender_context and gender_pronouns:
-                for p in gender_pronouns:
-                    if p in sent:
-                        score += 5.0 # High priority for gender context
-                        break
-            
-            # Boost for honorifics
-            if honorific_pattern and honorific_pattern.search(sent):
-                score += 2.0
+            # Prepare batches
+            batch_size = max(500, len(filtered_sentences) // extraction_workers)
+            batches = []
+            for i in range(0, len(filtered_sentences), batch_size):
+                end_idx = min(i + batch_size, len(filtered_sentences))
+                # Pass (start_index, list_of_sentences)
+                batches.append((i, filtered_sentences[i:end_idx]))
                 
-            sentence_scores[idx] = score
+            term_list = list(frequent_terms.keys())
             
-            # Map terms to this sentence
-            # We only care about the frequent terms we identified earlier
-            # Use simple substring check for speed since we already filtered
-            for term in frequent_terms:
-                if term in sent:
-                    if term not in term_to_sentences:
-                        term_to_sentences[term] = []
-                    term_to_sentences[term].append(idx)
+            # Use ProcessPoolExecutor for heavy CPU work
+            if use_process_pool:
+                executor_cls = ProcessPoolExecutor
+            else:
+                executor_cls = ThreadPoolExecutor
+                
+            with executor_cls(max_workers=extraction_workers) as executor:
+                # Submit all batches
+                futures = [executor.submit(_score_sentence_batch, 
+                                         (batch_data, term_list, honorific_pattern_str, 
+                                          gender_pronouns, include_gender_context)) 
+                          for batch_data in batches]
+                
+                # Collect results
+                for future in as_completed(futures):
+                    try:
+                        batch_scores, batch_term_map = future.result()
+                        sentence_scores.update(batch_scores)
+                        # Merge term mappings
+                        for term, indices in batch_term_map.items():
+                            if term not in term_to_sentences:
+                                term_to_sentences[term] = []
+                            term_to_sentences[term].extend(indices)
+                    except Exception as e:
+                        print(f"⚠️ Scoring batch failed: {e}")
+        else:
+            # Sequential fallback
+            honorific_pattern = re.compile(honorific_pattern_str) if honorific_pattern_str else None
+            for idx, sent in enumerate(filtered_sentences):
+                score = 1.0
+                if include_gender_context and gender_pronouns:
+                    for p in gender_pronouns:
+                        if p in sent:
+                            score += 5.0
+                            break
+                if honorific_pattern and honorific_pattern.search(sent):
+                    score += 2.0
+                sentence_scores[idx] = score
+                
+                for term in frequent_terms:
+                    if term in sent:
+                        if term not in term_to_sentences:
+                            term_to_sentences[term] = []
+                        term_to_sentences[term].append(idx)
         
         # 2. Select sentences via Round-Robin to ensure coverage of ALL unique terms
         selected_indices = set()
@@ -4318,6 +4348,44 @@ def _check_sentence_batch_for_terms(args):
             filtered.append(sentence)
     
     return filtered
+
+def _score_sentence_batch(args):
+    """Worker function to score a batch of sentences"""
+    (start_idx, sentences), term_list, honorific_pattern_str, gender_pronouns, include_gender_context = args
+    import re
+    
+    local_scores = {}
+    local_term_map = {}
+    
+    honorific_pattern = re.compile(honorific_pattern_str) if honorific_pattern_str else None
+    
+    for i, sent in enumerate(sentences):
+        global_idx = start_idx + i
+        score = 1.0
+        
+        # Gender boost
+        if include_gender_context and gender_pronouns:
+            for p in gender_pronouns:
+                if p in sent:
+                    score += 5.0
+                    break
+        
+        # Honorific boost
+        if honorific_pattern and honorific_pattern.search(sent):
+            score += 2.0
+            
+        local_scores[global_idx] = score
+        
+        # Term mapping
+        # Optimization: Check terms only if sentence is long enough to contain them
+        if len(sent) > 1:
+            for term in term_list:
+                if term in sent:
+                    if term not in local_term_map:
+                        local_term_map[term] = []
+                    local_term_map[term].append(global_idx)
+                    
+    return local_scores, local_term_map
 
 def _process_sentence_batch_for_extraction(args):
     """Process sentences to extract terms - used by ProcessPoolExecutor"""
