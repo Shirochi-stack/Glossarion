@@ -6319,20 +6319,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 )
                 
                 if not self.stop_requested:
-                    # If auto glossary was generated, load it into the editor context
-                    try:
-                        auto_enabled = False
-                        if hasattr(self, 'enable_auto_glossary_var'):
-                            auto_enabled = bool(self.enable_auto_glossary_var)
-                        else:
-                            auto_enabled = bool(self.config.get('enable_auto_glossary', True))
-                        if auto_enabled:
-                            self.auto_load_glossary_for_file(file_path)
-                            if getattr(self, 'auto_loaded_glossary_path', None):
-                                self.append_log(f"📑 Auto-loaded glossary for editor: {os.path.basename(self.auto_loaded_glossary_path)}")
-                    except Exception as e:
-                        self.append_log(f"⚠️ Failed to auto-load glossary into editor: {e}")
-
                     self.append_log("✅ Translation completed successfully!")
                     return True
                 else:
@@ -7693,37 +7679,16 @@ Important rules:
                     return False
                 
                 # Check if output file exists
-                final_glossary_path = None
                 if not self.stop_requested and os.path.exists(output_path):
-                    final_glossary_path = output_path
+                    self.append_log(f"✅ Glossary saved to: {output_path}")
+                    return True
                 else:
                     # Check if it was saved in Glossary folder by the script
                     glossary_path = os.path.join("Glossary", output_path)
                     if os.path.exists(glossary_path):
-                        final_glossary_path = glossary_path
-
-                if final_glossary_path:
-                    self.append_log(f"✅ Glossary saved to: {final_glossary_path}")
-                    try:
-                        # Persist auto-loaded glossary so the editor tab picks it up immediately
-                        self.manual_glossary_path = final_glossary_path
-                        self.auto_loaded_glossary_path = final_glossary_path
-                        self.auto_loaded_glossary_for_file = file_path
-                        self.manual_glossary_manually_loaded = False
-                        if hasattr(self, 'editor_file_entry'):
-                            self.editor_file_entry.setText(final_glossary_path)
-                        # Refresh editor view on UI thread if helper is available
-                        try:
-                            from PySide6.QtCore import QTimer
-                            if hasattr(self, '_auto_select_current_glossary'):
-                                QTimer.singleShot(0, self._auto_select_current_glossary)
-                        except Exception as qt_err:
-                            self.append_log(f"⚠️ UI refresh skipped: {qt_err}")
-                        self.append_log("📑 Loaded glossary into editor context (auto-loaded)")
-                    except Exception as e:
-                        self.append_log(f"⚠️ Failed to bind glossary to editor: {e}")
-                    return True
-                return False
+                        self.append_log(f"✅ Glossary saved to: {glossary_path}")
+                        return True
+                    return False
                 
             finally:
                 sys.argv = old_argv
@@ -8458,6 +8423,12 @@ Important rules:
                                self._stop_notice_shown = True
                except Exception:
                    pass
+
+               # Fast-path: react to definitive glossary log lines
+               try:
+                   self._handle_definitive_glossary_log(message)
+               except Exception:
+                   pass
                # Bail out if the widget no longer exists
                if not hasattr(self, 'log_text'):
                    print(message)
@@ -8521,21 +8492,7 @@ Important rules:
                            QTimer.singleShot(100, lambda sb=scrollbar: sb.setValue(sb.maximum()) if _time.time() >= getattr(self, '_autoscroll_delay_until', 0) and not getattr(self, '_user_scrolled_up', False) else None)
                    # Force immediate update of the widget
                    self.log_text.update()
-               except Exception:
-                   pass
-
-               # Auto-load glossary into editor right after auto-generation finishes (log-driven hook)
-               try:
-                   if isinstance(message, str) and "Automatic glossary generation COMPLETED" in message:
-                       if hasattr(self, 'file_path') and self.file_path:
-                           self.auto_load_glossary_for_file(self.file_path)
-                       if hasattr(self, '_auto_select_current_glossary'):
-                           from PySide6.QtCore import QTimer
-                           QTimer.singleShot(0, self._auto_select_current_glossary)
-                       # Emit a one-time log without re-triggering this hook
-                       if not getattr(self, '_auto_glossary_log_shown', False):
-                           self._auto_glossary_log_shown = True
-                           self.append_log_direct("📑 Loaded auto glossary into editor")
+                   self.log_text.repaint()
                except Exception:
                    pass
            except Exception as e:
@@ -8553,6 +8510,110 @@ Important rules:
                self.log_signal.emit(message)
            except Exception:
                pass  # Silent failure
+
+    def _resolve_glossary_path(self, raw_path):
+        """Return first existing path candidate for a glossary file."""
+        try:
+            if not raw_path:
+                return None
+            candidates = []
+            # raw and absolute
+            candidates.append(raw_path)
+            candidates.append(os.path.abspath(raw_path))
+            # cwd relative
+            candidates.append(os.path.join(os.getcwd(), raw_path))
+            # Glossary subfolder shorthand
+            if str(raw_path).lower().startswith(("glossary\\", "glossary/")):
+                candidates.append(os.path.join(os.getcwd(), raw_path))
+            # If a source file is selected, try its output folder
+            try:
+                if getattr(self, 'file_path', None):
+                    base = os.path.splitext(os.path.basename(self.file_path))[0]
+                    candidates.append(os.path.join(os.getcwd(), base, raw_path))
+                    candidates.append(os.path.join(os.getcwd(), base, "Glossary", raw_path))
+            except Exception:
+                pass
+            # Deduplicate preserving order
+            seen = set()
+            uniq = []
+            for c in candidates:
+                if c and c not in seen:
+                    uniq.append(c); seen.add(c)
+            for cand in uniq:
+                if os.path.exists(cand):
+                    return os.path.normpath(cand)
+            return None
+        except Exception:
+            return None
+
+    def _sync_glossary_editor_field(self, glossary_path):
+        """Keep the Glossary Editor file entry in sync when we know the glossary path."""
+        try:
+            resolved = self._resolve_glossary_path(glossary_path)
+            if not resolved:
+                return
+            if hasattr(self, 'editor_file_entry') and getattr(self, 'editor_file_entry', None):
+                self.editor_file_entry.setText(resolved)
+                # If the editor is already constructed, auto-load into the tree
+                cb = getattr(self, 'load_glossary_for_editor_callback', None)
+                if callable(cb):
+                    cb()
+        except Exception:
+            pass
+
+    def _handle_definitive_glossary_log(self, message):
+        """
+        Fast-path hook: when log lines state that a glossary was loaded/auto-loaded, sync editor and state.
+        Examples:
+          📑 Auto-loaded glossary (CSV) for <name>: <path>
+          📑 Loaded manual glossary: <path>
+        """
+        try:
+            msg = str(message).strip()
+            glossary_path = None
+            manual = None
+
+            if msg.startswith("📑 Auto-loaded glossary (CSV)") and ':' in msg:
+                glossary_path = msg.split(':', 1)[1].strip()
+                manual = False
+            elif msg.startswith("📑 Loaded manual glossary:") and ':' in msg:
+                glossary_path = msg.split(':', 1)[1].strip()
+                manual = True
+
+            if not glossary_path:
+                return
+
+            glossary_path = self._resolve_glossary_path(glossary_path)
+            if not glossary_path:
+                return
+
+            self.manual_glossary_path = glossary_path
+            self.manual_glossary_manually_loaded = bool(manual)
+            if manual is False:
+                self.auto_loaded_glossary_path = glossary_path
+            try:
+                if getattr(self, 'file_path', None) and os.path.isfile(self.file_path) and self.file_path.lower().endswith('.epub'):
+                    self.auto_loaded_glossary_for_file = self.file_path
+            except Exception:
+                pass
+
+            # Update glossary editor field if present
+            try:
+                if hasattr(self, 'editor_file_entry') and self.editor_file_entry:
+                    self.editor_file_entry.setText(glossary_path)
+            except Exception:
+                pass
+
+            # Notify without recursion
+            try:
+                self.append_log_direct(f"📑 Glossary ready in editor: {os.path.basename(glossary_path)}")
+            except Exception:
+                try:
+                    print(f"📑 Glossary ready in editor: {glossary_path}")
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def update_status_line(self, message, progress_percent=None):
        """Update a status line in the log safely (fallback to print)."""
@@ -8789,6 +8850,7 @@ Important rules:
                         self.auto_loaded_glossary_for_file = file_path
                         self.manual_glossary_manually_loaded = False  # This is auto-loaded
                         self.append_log(f"📑 Auto-loaded glossary (CSV) for {file_base}: {os.path.basename(glossary_path)}")
+                        self._sync_glossary_editor_field(glossary_path)
                         break
                     else:
                         with open(glossary_path, 'r', encoding='utf-8') as f:
@@ -8798,6 +8860,7 @@ Important rules:
                         self.auto_loaded_glossary_for_file = file_path
                         self.manual_glossary_manually_loaded = False  # This is auto-loaded
                         self.append_log(f"📑 Auto-loaded glossary (JSON) for {file_base}: {os.path.basename(glossary_path)}")
+                        self._sync_glossary_editor_field(glossary_path)
                         break
                 except Exception:
                     # If JSON parsing fails, try next candidate
@@ -9533,6 +9596,8 @@ Important rules:
         
         self.append_glossary_var = True
         self.append_log("✅ Automatically enabled 'Append Glossary to System Prompt'")
+        # Sync glossary editor entry if it exists
+        self._sync_glossary_editor_field(path)
 
     def _comprehensive_json_fix(self, content):
         """Apply comprehensive JSON fixes."""

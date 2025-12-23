@@ -2769,6 +2769,9 @@ Critical Requirement: You must include absolutely all characters found in the pr
                self.editor_file_entry.setText(path)
                load_glossary_for_editing()
 
+        # Expose callback so external code can trigger a load after setting the path
+        self.load_glossary_for_editor_callback = load_glossary_for_editing
+
         # Common save helper
         def save_current_glossary():
            path = self.editor_file_entry.text()
@@ -3808,16 +3811,40 @@ Critical Requirement: You must include absolutely all characters found in the pr
                 auto_path = getattr(self, 'auto_loaded_glossary_path', None)
                 manual_path = getattr(self, 'manual_glossary_path', None)
 
-                # Prefer the auto-loaded glossary if it exists and is a CSV
-                if auto_path and os.path.exists(auto_path):
-                    self.editor_file_entry.setText(auto_path)
-                    load_glossary_for_editing()
-                    return
+                # Prefer the auto-loaded glossary if it exists and is a CSV/JSON
+                for cand in [auto_path, manual_path]:
+                    if cand and os.path.exists(cand):
+                        self.editor_file_entry.setText(cand)
+                        load_glossary_for_editing()
+                        return
 
-                # Fallback to any currently loaded manual glossary
-                if manual_path and os.path.exists(manual_path):
-                    self.editor_file_entry.setText(manual_path)
-                    load_glossary_for_editing()
+                # Fallback: derive from current input file path (output folder shares base name)
+                try:
+                    epub_path = None
+                    if hasattr(self, 'get_current_epub_path'):
+                        epub_path = self.get_current_epub_path()
+                    if not epub_path and hasattr(self, 'file_path'):
+                        epub_path = getattr(self, 'file_path', None)
+                    if epub_path and os.path.exists(epub_path):
+                        base = os.path.splitext(os.path.basename(epub_path))[0]
+                        out_dir = os.path.join(os.getcwd(), base)
+                        candidates = [
+                            os.path.join(out_dir, "glossary.csv"),
+                            os.path.join(out_dir, f"{base}_glossary.csv"),
+                            os.path.join(out_dir, "Glossary", "glossary.csv"),
+                            os.path.join(out_dir, "Glossary", f"{base}_glossary.csv"),
+                            os.path.join(out_dir, "glossary.json"),
+                            os.path.join(out_dir, f"{base}_glossary.json"),
+                            os.path.join(out_dir, "Glossary", "glossary.json"),
+                            os.path.join(out_dir, "Glossary", f"{base}_glossary.json"),
+                        ]
+                        for cand in candidates:
+                            if os.path.exists(cand):
+                                self.editor_file_entry.setText(cand)
+                                load_glossary_for_editing()
+                                return
+                except Exception:
+                    pass
             except Exception as e:
                 # Fail silently but log for debugging
                 try:
@@ -3826,8 +3853,6 @@ Critical Requirement: You must include absolutely all characters found in the pr
                     pass
 
         auto_select_current_glossary()
-        # Expose so other workflows (auto-generation/translation) can trigger a refresh without reopening the tab
-        self._auto_select_current_glossary = auto_select_current_glossary
        
         # Quick toolbar above the entry list
         toolbar_widget = QWidget()
