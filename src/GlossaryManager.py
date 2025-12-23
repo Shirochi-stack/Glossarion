@@ -183,6 +183,29 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     if is_stop_requested():
         print("📁 ❌ Glossary generation stopped by user")
         return {}
+        
+    # CLEAR incremental history UNCONDITIONALLY at the start of any run
+    # This prevents stale chunks from polluting the aggregation, regardless of whether chunking is used
+    incremental_dir = os.path.join(output_dir, "incremental_glossary")
+    if os.path.exists(incremental_dir):
+        print(f"📑 Cleaning incremental glossary folder: {incremental_dir}")
+        try:
+            import shutil
+            # Safely clear the entire incremental folder
+            for filename in os.listdir(incremental_dir):
+                file_path = os.path.join(incremental_dir, filename)
+                try:
+                    if os.path.isfile(file_path) or os.path.islink(file_path):
+                        os.unlink(file_path)
+                    elif os.path.isdir(file_path):
+                        shutil.rmtree(file_path)
+                except Exception as e:
+                    print(f"⚠️ Failed to delete {file_path}: {e}")
+        except Exception as e:
+            print(f"⚠️ Failed to clear incremental history: {e}")
+            
+    # Ensure directory exists for potential use
+    os.makedirs(incremental_dir, exist_ok=True)
     
     # Check if glossary already exists; if so, we'll MERGE it later (do not return early)
     glossary_path = os.path.join(output_dir, "glossary.csv")
@@ -377,23 +400,27 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         incremental_dir = os.path.join(output_dir, "incremental_glossary")
         agg_path = os.path.join(incremental_dir, "glossary.incremental.all.csv")
         
-        # CLEAR incremental history if it exists to ensure 'all' file only contains current run data
+    # CLEAR incremental history if it exists to ensure 'all' file only contains current run data
         # This prevents it from growing indefinitely across multiple runs
-        if os.path.exists(agg_path):
+        if os.path.exists(incremental_dir):
             try:
-                os.remove(agg_path)
-                print(f"📑 Cleared previous incremental history: {agg_path}")
+                import shutil
+                # Safely clear the entire incremental folder
+                for filename in os.listdir(incremental_dir):
+                    file_path = os.path.join(incremental_dir, filename)
+                    try:
+                        if os.path.isfile(file_path) or os.path.islink(file_path):
+                            os.unlink(file_path)
+                        elif os.path.isdir(file_path):
+                            shutil.rmtree(file_path)
+                    except Exception as e:
+                        print(f"⚠️ Failed to delete {file_path}: {e}")
+                print(f"📑 Cleared incremental glossary folder: {incremental_dir}")
             except Exception as e:
                 print(f"⚠️ Failed to clear incremental history: {e}")
         
-        # Clean up individual chunk files too for consistency
-        if os.path.exists(incremental_dir):
-            for f in os.listdir(incremental_dir):
-                if f.startswith("glossary.incremental") and f.endswith(".csv"):
-                    try:
-                        os.remove(os.path.join(incremental_dir, f))
-                    except:
-                        pass
+        # Ensure directory exists (if it was fully removed or didn't exist)
+        os.makedirs(incremental_dir, exist_ok=True)
 
         if chapter_split_threshold == 0:
             # Use ChapterSplitter for token-based intelligent chunking
@@ -2497,9 +2524,12 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
 
                                                     # Valid token structure check
                                                     valid_shape = False
-                                                    if re.search(r'[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af·]{2,4}', token):
+                                                    # STRICTER: Use regex to ensure the ENTIRE token matches the valid pattern
+                                                    # This rejects mixed garbage like "레빗tv의" (Hangul + Latin + Hangul) or "먹겠네;;" (Hangul + Punctuation)
+                                                    # Previously re.search allowed "tv" or ";;" to exist outside the match
+                                                    if re.fullmatch(r'[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af·]{2,4}', token):
                                                         valid_shape = True
-                                                    elif re.match(r'^[A-Z][a-z]{1,15}(\s+[A-Z][a-z]{1,15})?$', token):
+                                                    elif re.fullmatch(r'^[A-Z][a-z]{1,15}(\s+[A-Z][a-z]{1,15})?$', token):
                                                         valid_shape = True
                                                     
                                                     if valid_shape:
