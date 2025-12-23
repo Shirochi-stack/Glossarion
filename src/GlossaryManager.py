@@ -1788,6 +1788,8 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     include_all_characters_env = os.getenv("GLOSSARY_INCLUDE_ALL_CHARACTERS", "0")
     include_all_characters = include_all_characters_env == "1"
     
+    force_skip_smart_selection = False
+    honorific_first_indices = {}
     # Clean HTML if present
     print(f"📑 Step 1/7: Cleaning HTML tags...")
     from bs4 import BeautifulSoup
@@ -2363,6 +2365,35 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     
     filtered_sentences = important_sentences  # Already filtered!
     print(f"📑 Using {len(filtered_sentences):,} pre-filtered sentences (already contain glossary terms)")
+
+    # EARLY DYNAMIC EXPANSION: collect one sentence index per unique honorific-attached name (first appearance), before scoring/nuance
+    if include_all_characters:
+        honorific_pattern_str = None
+        if primary_lang in PM.CJK_HONORIFICS:
+            h_list = PM.CJK_HONORIFICS[primary_lang] + PM.CJK_HONORIFICS.get('english', [])
+            h_list.sort(key=len, reverse=True)
+            if h_list:
+                honorific_pattern_str = '|'.join(map(re.escape, h_list))
+        if honorific_pattern_str:
+            try:
+                honor_pat = re.compile(honorific_pattern_str)
+                name_regex = re.compile(r'([\w\-\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]{1,20})\s*$')
+                ordered_names = []
+                for idx, sent in enumerate(filtered_sentences):
+                    m = honor_pat.search(sent)
+                    if not m:
+                        continue
+                    prefix = sent[:m.start()].strip()
+                    nm = name_regex.search(prefix)
+                    if nm:
+                        name = nm.group(1)
+                        if name not in honorific_first_indices:
+                            honorific_first_indices[name] = idx
+                            ordered_names.append(name)
+                if honorific_first_indices:
+                    print(f"📑 Dynamic expansion (honorific-first): captured {len(honorific_first_indices)} unique characters before scoring")
+            except Exception:
+                pass
     
     # For extremely large datasets, we can optionally do additional filtering
     # Skip this reduction when include_all_characters is enabled to avoid losing rare characters
@@ -2458,7 +2489,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     print(f"🔍 [DEBUG] Final GLOSSARY_MAX_SENTENCES value being used: {max_sentences}")
 
     # Force smart selection path when dynamic expansion is enabled, even if filtered_sentences <= max_sentences
-    run_smart_selection = include_all_characters or (max_sentences > 0 and len(filtered_sentences) > max_sentences)
+    run_smart_selection = (not force_skip_smart_selection) and (include_all_characters or (max_sentences > 0 and len(filtered_sentences) > max_sentences))
     if run_smart_selection and max_sentences > 0:
         print(f"📁 Limiting to {max_sentences} representative sentences (from {len(filtered_sentences):,})")
         
@@ -2687,34 +2718,22 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                         pass
                 term_iterators = active_iterators
 
-        if include_all_characters and character_terms:
-            print(f"📑 'Include All Characters' enabled: Ensuring coverage for {len(character_terms)} characters...")
-            
-            # Strategy: one best sentence per UNIQUE character term, no duplicates
-            for term in character_terms:
-                sentences = term_to_sentences[term]
-                if sentences:
-                    selected_indices.add(sentences[0])  # exactly one per character term
-            
-            initial_count = len(selected_indices)
-            print(f"📑   - Mandatory character sentences: {initial_count}")
-            
-            # No added budget: just keep the mandatory set; fill remaining only if max_sentences provides room
-            effective_limit = max(initial_count, max_sentences)
-            print(f"📑   - Dynamic limit set to: {effective_limit}")
-            
-            # Phase 2: Use remaining budget for non-character terms only (if any budget remains)
-            if non_character_terms and len(selected_indices) < effective_limit:
-                round_robin_terms(non_character_terms, selected_indices, effective_limit)
-        else:
-            # Standard Fixed Limit Logic
-            # First, prioritize character-like terms (honorific-based)
-            if character_terms:
-                round_robin_terms(character_terms, selected_indices, max_sentences)
-            
-            # Then, if we still have room, cover remaining non-character terms
-            if len(selected_indices) < max_sentences and non_character_terms:
-                round_robin_terms(non_character_terms, selected_indices, max_sentences)
+        effective_limit = max_sentences
+        # If we collected honorific-first sentences, seed the selection with them
+        if include_all_characters and honorific_first_indices:
+            for idx in honorific_first_indices.values():
+                if 0 <= idx < len(filtered_sentences):
+                    selected_indices.add(idx)
+            # Ensure limit accounts for mandatory picks
+            effective_limit = max(max_sentences, len(selected_indices))
+        # Standard Fixed Limit Logic
+        # First, prioritize character-like terms (honorific-based)
+        if character_terms:
+            round_robin_terms(character_terms, selected_indices, max_sentences)
+        
+        # Then, if we still have room, cover remaining non-character terms
+        if len(selected_indices) < max_sentences and non_character_terms:
+            round_robin_terms(non_character_terms, selected_indices, max_sentences)
         
         
         # If we still have room (rare), fill with highest scored remaining sentences
@@ -2737,10 +2756,6 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     
     # Check if gender context expansion is enabled
     include_gender_context = os.getenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
-    
-    # To avoid blowing up output, disable context expansion when dynamic expansion is active
-    if include_all_characters:
-        include_gender_context = False
     
     if include_gender_context:
         context_window = int(os.getenv("GLOSSARY_CONTEXT_WINDOW", "2"))
