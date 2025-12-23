@@ -1431,7 +1431,7 @@ Rules:
         if not hasattr(self, 'glossary_enable_chapter_split_checkbox'):
             self.glossary_enable_chapter_split_checkbox = self._create_styled_checkbox("Enable chapter splitting")
             self.glossary_enable_chapter_split_checkbox.setToolTip("When enabled, large glossary chapters are auto-split using the output token limit and compression factor to avoid oversized requests.")
-        self.glossary_enable_chapter_split_checkbox.setChecked(self.config.get('glossary_enable_chapter_split', True))
+        self.glossary_enable_chapter_split_checkbox.setChecked(self.config.get('glossary_enable_chapter_split', False))
         settings_grid.addWidget(self.glossary_enable_chapter_split_checkbox, 3, 0)
 
         # Logic for Auto Compression Factor
@@ -2186,7 +2186,7 @@ Rules:
                 self.glossary_max_sentences_entry.setText("200")
                 self.glossary_target_language_combo.setCurrentText("English")
                 if hasattr(self, 'glossary_enable_chapter_split_checkbox'):
-                    self.glossary_enable_chapter_split_checkbox.setChecked(True)
+                    self.glossary_enable_chapter_split_checkbox.setChecked(False)
                 
                 # Reset filter mode to 'all'
                 if 'all' in self.glossary_filter_mode_buttons:
