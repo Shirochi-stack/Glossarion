@@ -369,6 +369,28 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
                      (chapter_split_threshold > 0 and effective_text_size > chapter_split_threshold)
     
     if needs_chunking:
+        # Prepare chunk processing
+        incremental_dir = os.path.join(output_dir, "incremental_glossary")
+        agg_path = os.path.join(incremental_dir, "glossary.incremental.all.csv")
+        
+        # CLEAR incremental history if it exists to ensure 'all' file only contains current run data
+        # This prevents it from growing indefinitely across multiple runs
+        if os.path.exists(agg_path):
+            try:
+                os.remove(agg_path)
+                print(f"📑 Cleared previous incremental history: {agg_path}")
+            except Exception as e:
+                print(f"⚠️ Failed to clear incremental history: {e}")
+        
+        # Clean up individual chunk files too for consistency
+        if os.path.exists(incremental_dir):
+            for f in os.listdir(incremental_dir):
+                if f.startswith("glossary.incremental") and f.endswith(".csv"):
+                    try:
+                        os.remove(os.path.join(incremental_dir, f))
+                    except:
+                        pass
+
         if chapter_split_threshold == 0:
             # Use ChapterSplitter for token-based intelligent chunking
             print(f"📑 Text exceeds safe token limit, using ChapterSplitter for token-based chunking...")
