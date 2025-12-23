@@ -8723,11 +8723,14 @@ Important rules:
         # Prefer CSV over JSON when both exist
         glossary_candidates = [
             os.path.join(output_dir, "glossary.csv"),
-            os.path.join(output_dir, f"{file_base}_glossary.csv"),
-            os.path.join(output_dir, "Glossary", f"{file_base}_glossary.csv"),
+            os.path.join(output_dir, "Glossary", "glossary.csv"),
             os.path.join(output_dir, "glossary.json"),
-            os.path.join(output_dir, f"{file_base}_glossary.json"),
-            os.path.join(output_dir, "Glossary", f"{file_base}_glossary.json")
+            os.path.join(output_dir, "Glossary", "glossary.json"),
+            # TXT / MD support (lowest priority)
+            os.path.join(output_dir, "glossary.txt"),
+            os.path.join(output_dir, "Glossary", "glossary.txt"),
+            os.path.join(output_dir, "glossary.md"),
+            os.path.join(output_dir, "Glossary", "glossary.md"),
         ]
         for glossary_path in glossary_candidates:
             if os.path.exists(glossary_path):

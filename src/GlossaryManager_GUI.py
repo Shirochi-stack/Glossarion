@@ -3831,14 +3831,17 @@ Critical Requirement: You must include absolutely all characters found in the pr
                         base = os.path.splitext(os.path.basename(epub_path))[0]
                         out_dir = os.path.join(os.getcwd(), base)
                         candidates = [
+                            # CSV (highest priority)
                             os.path.join(out_dir, "glossary.csv"),
-                            os.path.join(out_dir, f"{base}_glossary.csv"),
                             os.path.join(out_dir, "Glossary", "glossary.csv"),
-                            os.path.join(out_dir, "Glossary", f"{base}_glossary.csv"),
+                            # JSON
                             os.path.join(out_dir, "glossary.json"),
-                            os.path.join(out_dir, f"{base}_glossary.json"),
                             os.path.join(out_dir, "Glossary", "glossary.json"),
-                            os.path.join(out_dir, "Glossary", f"{base}_glossary.json"),
+                            # TXT / MD (lowest priority after CSV/JSON)
+                            os.path.join(out_dir, "glossary.txt"),
+                            os.path.join(out_dir, "Glossary", "glossary.txt"),
+                            os.path.join(out_dir, "glossary.md"),
+                            os.path.join(out_dir, "Glossary", "glossary.md"),
                         ]
                         for cand in candidates:
                             if os.path.exists(cand):
