@@ -2376,17 +2376,15 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 honorific_pattern_str = '|'.join(map(re.escape, h_list))
         if honorific_pattern_str:
             try:
-                honor_pat = re.compile(honorific_pattern_str)
-                name_regex = re.compile(r'([\w\-\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]{1,20})\s*$')
+                cjk_name = r"[\\u4e00-\\u9fff\\u3040-\\u30ff\\uac00-\\ud7af·]{2,6}"
+                latin_name = r"[A-Z][a-z]{1,15}(?:\\s+[A-Z][a-z]{1,15}){0,2}"
+                honor_pat = re.compile(rf"(?P<name>{cjk_name}|{latin_name})\\s*(?P<hon>{honorific_pattern_str})")
                 ordered_names = []
                 for idx, sent in enumerate(filtered_sentences):
-                    m = honor_pat.search(sent)
-                    if not m:
-                        continue
-                    prefix = sent[:m.start()].strip()
-                    nm = name_regex.search(prefix)
-                    if nm:
-                        name = nm.group(1)
+                    for m in honor_pat.finditer(sent):
+                        name = m.group("name").strip()
+                        if not name or any(ch.isdigit() for ch in name):
+                            continue
                         if name not in honorific_first_indices:
                             honorific_first_indices[name] = idx
                             ordered_names.append(name)
