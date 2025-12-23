@@ -2874,7 +2874,7 @@ Recent translations to summarize:
         batch_layout.setSpacing(8)
         
         self.batch_checkbox = self._create_styled_checkbox("Batch Translation")
-        self.batch_checkbox.setToolTip("Groups multiple small chapters into a single API request to speed up translation")
+        self.batch_checkbox.setToolTip("Sends multiple chapters in parallel API requests")
         self.batch_checkbox.setChecked(self.batch_translation_var)
         self.batch_checkbox.stateChanged.connect(self._on_batch_toggle)
         
