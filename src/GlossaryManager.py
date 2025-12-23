@@ -2529,8 +2529,32 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                                 
                                 if len(current_token) >= 2:
                                     token = current_token
+                            elif primary_lang == 'japanese':
+                                # Japanese logic: Get previous 2-6 characters
+                                start_idx = m.start()
+                                # Scan backwards for valid Japanese chars (Kanji, Hiragana, Katakana)
+                                token = ""
+                                current_token = ""
+                                for i in range(1, 7): # Look back up to 6 chars
+                                    if start_idx - i < 0: break
+                                    char = sent[start_idx - i]
+                                    # Check if char is valid Japanese character
+                                    # Kanji: 4E00-9FFF, Hiragana: 3040-309F, Katakana: 30A0-30FF
+                                    # Also include long vowel mark (ー): 30FC
+                                    is_valid_jp = ('\u4e00' <= char <= '\u9fff') or \
+                                                  ('\u3040' <= char <= '\u309f') or \
+                                                  ('\u30a0' <= char <= '\u30ff') or \
+                                                  (char == '\u30fc')
+                                    
+                                    if is_valid_jp:
+                                        current_token = char + current_token
+                                    else:
+                                        break # Stop at non-Japanese char
+                                
+                                if len(current_token) >= 2:
+                                    token = current_token
                             else:
-                                # Original logic for space-separated languages (Korean, English, Japanese)
+                                # Original logic for space-separated languages (Korean, English)
                                 prefix = sent[:m.start()].strip()
                                 if prefix:
                                     token = prefix.split()[-1]
