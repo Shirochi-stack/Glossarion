@@ -1854,6 +1854,48 @@ def _load_likely_character_gazetteer(primary_lang: str):
 
     return cleaned, dataset_info.get("label", "Default"), source_path, used_seed
 
+def _build_dynamic_likely_from_patterns(frequent_terms: dict, primary_lang: str):
+    """
+    Build a fallback likely-character set from in-text frequent terms using PatternManager rules.
+    Only used when no external gazetteer/seed entries are available.
+    """
+    candidates = []
+    honorifics = PM.CJK_HONORIFICS.get(primary_lang, []) + PM.CJK_HONORIFICS.get('english', [])
+    title_patterns = PM.TITLE_PATTERNS.get(primary_lang, [])
+
+    for term, freq in frequent_terms.items():
+        t = _normalize_likely_name(term)
+        if not (2 <= len(t) <= 8):
+            continue
+        # Language-specific shape checks
+        if primary_lang == 'korean':
+            if re.fullmatch(r'[가-힣]{2,4}', t):
+                candidates.append((t, freq))
+        elif primary_lang == 'japanese':
+            if re.fullmatch(r'[\u4e00-\u9fff\u3040-\u30ff]{2,6}', t):
+                candidates.append((t, freq))
+        elif primary_lang == 'chinese':
+            if re.fullmatch(r'[\u4e00-\u9fff]{2,4}', t):
+                candidates.append((t, freq))
+
+    filtered = []
+    for name, freq in candidates:
+        if any(h in name for h in honorifics):
+            continue
+        skip = False
+        for pat in title_patterns:
+            if re.search(pat, name):
+                skip = True
+                break
+        if skip:
+            continue
+        filtered.append((name, freq))
+
+    # Sort by frequency desc and cap
+    filtered.sort(key=lambda x: x[1], reverse=True)
+    limit = int(os.getenv("GLOSSARY_LIKELY_CHAR_DYNAMIC_LIMIT", "300"))
+    return {name for name, _ in filtered[:limit]}
+
 def _build_likely_matchers(likely_chars: set):
     """
     Build fast-match structures for likely character detection.
@@ -2489,6 +2531,14 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
 
     # Load likely-character gazetteer (per language) for priority scoring/logging
     likely_chars, likely_dataset_label, likely_source_path, likely_used_seed = _load_likely_character_gazetteer(primary_lang)
+    if not likely_chars:
+        dynamic_likely = _build_dynamic_likely_from_patterns(frequent_terms, primary_lang)
+        if dynamic_likely:
+            likely_chars = dynamic_likely
+            likely_dataset_label = "AutoPattern"
+            likely_source_path = "dynamic_from_text"
+            likely_used_seed = True
+            print(f"📑 Likely character fallback built from text: {len(likely_chars)} candidates (limit {os.getenv('GLOSSARY_LIKELY_CHAR_DYNAMIC_LIMIT','300')})")
     likely_single_tokens, likely_tokenizer_pattern_str = _build_likely_matchers(likely_chars)
     likely_term_to_sentences = {}
     likely_character_term_count = 0
