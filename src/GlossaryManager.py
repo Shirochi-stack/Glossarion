@@ -2570,20 +2570,22 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                             safe_map[safe_name] = name
                             dummy_lines.append(f"character,{safe_name},{safe_name}")
                         
-                        # Use existing deduplication logic which respects user-configured algorithms
-                        # Must detect libraries to pass correctly
+                        # Check library availability to choose best execution mode
+                        use_rf = False
                         try:
                             import rapidfuzz
                             use_rf = True
                         except ImportError:
-                            use_rf = False
-                        
+                            pass
+                            
+                        use_jelly = False
                         try:
                             import jellyfish
                             use_jelly = True
                         except ImportError:
-                            use_jelly = False
-
+                            pass
+                            
+                        # Use existing deduplication logic which respects user-configured algorithms
                         deduped_lines = _deduplicate_pass1_raw_names(
                             dummy_lines, 
                             float(os.getenv("GLOSSARY_FUZZY_THRESHOLD", "0.90")), 
