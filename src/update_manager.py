@@ -773,7 +773,12 @@ class UpdateManager(QObject):
         # Create loading dialog
         self.loading_dialog = QDialog(parent)
         self.loading_dialog.setWindowTitle("Checking for Updates")
-        self.loading_dialog.setFixedSize(300, 150)
+        # Size by screen ratio for HiDPI friendliness
+        screen_rect = QApplication.primaryScreen().geometry()
+        dlg_w = max(300, int(screen_rect.width() * 0.17))
+        dlg_h = max(170, int(screen_rect.height() * 0.17))
+        self.loading_dialog.setMinimumSize(dlg_w, dlg_h)
+        self.loading_dialog.resize(dlg_w, dlg_h)
         self.loading_dialog.setModal(True)
         
         # Set the proper application icon for the dialog
@@ -790,19 +795,19 @@ class UpdateManager(QObject):
         
         # Create main layout
         main_layout = QVBoxLayout(self.loading_dialog)
-        main_layout.setContentsMargins(20, 20, 20, 20)
-        main_layout.setSpacing(10)
+        main_layout.setContentsMargins(20, 24, 20, 24)
+        main_layout.setSpacing(16)
         
         # Try to load and resize the icon (HiDPI-aware 72x72 logical)
         try:
-            icon_pixmap = self._load_halgakos_pixmap(72)
+            icon_pixmap = self._load_halgakos_pixmap(96)
             if icon_pixmap:
                 icon_label = QLabel()
                 icon_label.setPixmap(icon_pixmap)
                 icon_label.setAlignment(Qt.AlignCenter)
-                icon_label.setFixedSize(72, 72)
+                icon_label.setFixedSize(96, 96)
                 main_layout.addWidget(icon_label, 0, Qt.AlignHCenter)
-                main_layout.addSpacing(12)
+                main_layout.addSpacing(24)
         except Exception as e:
             print(f"Could not load loading icon: {e}")
         
