@@ -935,8 +935,8 @@ class GlossaryManagerMixin:
             "Basic Only - Simple Levenshtein distance"
         ])
         
-        # Load saved setting or default to Balanced
-        saved_algo = self.config.get('glossary_duplicate_algorithm', 'balanced')
+        # Load saved setting or default to Auto
+        saved_algo = self.config.get('glossary_duplicate_algorithm', 'auto')
         algo_index_map = {
             'auto': 0,
             'strict': 1,
@@ -944,7 +944,7 @@ class GlossaryManagerMixin:
             'aggressive': 3,
             'basic': 4
         }
-        self.duplicate_algo_combo.setCurrentIndex(algo_index_map.get(saved_algo, 2))
+        self.duplicate_algo_combo.setCurrentIndex(algo_index_map.get(saved_algo, 0))
         
         # Try to set custom dropdown icon using Halgakos.ico
         try:
