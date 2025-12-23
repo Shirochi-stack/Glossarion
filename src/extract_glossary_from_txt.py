@@ -1,6 +1,5 @@
 # extract_glossary_from_txt.py
 import os
-import json
 from typing import List
 from txt_processor import TextFileProcessor
 from chapter_splitter import ChapterSplitter
@@ -15,19 +14,20 @@ def extract_chapters_from_txt(txt_path: str) -> List[str]:
     model_name = os.getenv("MODEL", "gpt-3.5-turbo")
     chapter_splitter = ChapterSplitter(model_name=model_name)
     
-    # Get max tokens from environment
-    max_input_tokens_str = os.getenv("MAX_INPUT_TOKENS", "1000000").strip()
-    if not max_input_tokens_str or max_input_tokens_str == "":
-        # Token limit disabled - use a very large number
-        max_input_tokens = 10000000  # 10M tokens
-    else:
-        max_input_tokens = int(max_input_tokens_str)
-    
-    # Calculate available tokens (leaving room for system prompt and context)
-    system_prompt_size = 2000  # Estimate for glossary system prompt
-    context_size = 5000  # Estimate for context history
-    safety_margin = 1000
-    available_tokens = max_input_tokens - system_prompt_size - context_size - safety_margin
+    # Translation-aligned safe chunk budget
+    compression_factor = float(os.getenv("GLOSSARY_COMPRESSION_FACTOR", os.getenv("COMPRESSION_FACTOR", "1.0")))
+    raw_output_env = os.getenv("GLOSSARY_MAX_OUTPUT_TOKENS", os.getenv("MAX_OUTPUT_TOKENS", "65536"))
+    try:
+        effective_output = int(str(raw_output_env).strip())
+    except Exception:
+        effective_output = 65536
+    if effective_output <= 0:
+        effective_output = 65536
+    safety_margin_output = 500
+    available_tokens = int((effective_output - safety_margin_output) / max(compression_factor, 0.01))
+    available_tokens = max(available_tokens, 1000)
+    chapter_split_enabled = os.getenv("GLOSSARY_ENABLE_CHAPTER_SPLIT", "1") == "1"
+    print(f"📊 Chapter chunk budget: {available_tokens:,} tokens (output limit {effective_output:,}, compression {compression_factor})")
     
     text_chapters = []
     
@@ -35,8 +35,8 @@ def extract_chapters_from_txt(txt_path: str) -> List[str]:
         # Check if chapter needs splitting
         chapter_tokens = chapter_splitter.count_tokens(chapter['body'])
         
-        if chapter_tokens > available_tokens:
-            print(f"Chapter {idx+1} has {chapter_tokens} tokens, splitting into smaller chunks...")
+        if chapter_split_enabled and chapter_tokens > available_tokens:
+            print(f"Chapter {idx+1} has {chapter_tokens} tokens, splitting into smaller chunks (budget {available_tokens})...")
             
             # Use ChapterSplitter to split the HTML content
             # Pass filename for content type detection
@@ -50,7 +50,7 @@ def extract_chapters_from_txt(txt_path: str) -> List[str]:
                     text_chapters.append(text)
                     print(f"  Added chunk {chunk_idx}/{total_chunks} ({chapter_splitter.count_tokens(text)} tokens)")
         else:
-            # Chapter is small enough, extract text as-is
+            # Chapter is small enough or splitting disabled, extract text as-is
             soup = BeautifulSoup(chapter['body'], 'html.parser')
             text = soup.get_text(strip=True)
             if text:

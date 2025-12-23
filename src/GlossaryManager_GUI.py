@@ -519,6 +519,12 @@ class GlossaryManagerMixin:
                     self.config['glossary_request_merging_enabled'] = glossary_request_merging
                     setattr(self, 'glossary_request_merging_enabled_var', glossary_request_merging)
                 
+                # Chapter split toggle (manual glossary)
+                if hasattr(self, 'glossary_enable_chapter_split_checkbox'):
+                    split_enabled = self.glossary_enable_chapter_split_checkbox.isChecked()
+                    self.config['glossary_enable_chapter_split'] = split_enabled
+                    setattr(self, 'glossary_enable_chapter_split_var', split_enabled)
+                
                 # Update text field variables from Targeted Extraction Settings
                 text_field_to_var_mapping = [
                     ('glossary_min_frequency_entry', 'glossary_min_frequency', 'glossary_min_frequency_var'),
@@ -1421,6 +1427,13 @@ Rules:
         self.glossary_request_merging_checkbox.setChecked(self.config.get('glossary_request_merging_enabled', False))
         settings_grid.addWidget(self.glossary_request_merging_checkbox, 2, 1)
 
+        # Row 3: Chapter split toggle (output-limit safe chunking)
+        if not hasattr(self, 'glossary_enable_chapter_split_checkbox'):
+            self.glossary_enable_chapter_split_checkbox = self._create_styled_checkbox("Enable chapter splitting")
+            self.glossary_enable_chapter_split_checkbox.setToolTip("When enabled, large glossary chapters are auto-split using the output token limit and compression factor to avoid oversized requests.")
+        self.glossary_enable_chapter_split_checkbox.setChecked(self.config.get('glossary_enable_chapter_split', True))
+        settings_grid.addWidget(self.glossary_enable_chapter_split_checkbox, 3, 0)
+
         # Logic for Auto Compression Factor
         def _update_glossary_compression():
             try:
@@ -2172,6 +2185,8 @@ Rules:
                 self.glossary_chapter_split_threshold_entry.setText("0")
                 self.glossary_max_sentences_entry.setText("200")
                 self.glossary_target_language_combo.setCurrentText("English")
+                if hasattr(self, 'glossary_enable_chapter_split_checkbox'):
+                    self.glossary_enable_chapter_split_checkbox.setChecked(True)
                 
                 # Reset filter mode to 'all'
                 if 'all' in self.glossary_filter_mode_buttons:

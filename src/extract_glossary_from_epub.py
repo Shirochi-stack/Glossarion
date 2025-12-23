@@ -186,6 +186,25 @@ def parse_glossary_token_limit():
     return 1000000, "1000000 (default)"
 
 MAX_GLOSSARY_TOKENS, GLOSSARY_LIMIT_STR = parse_glossary_token_limit()
+def _compute_safe_input_tokens(max_output_tokens: int, compression_factor: float, *, safety_margin: int = 500, minimum: int = 1000) -> int:
+    """
+    Mirror the chapter split budgeting used in TransateKRtoEN:
+    available_tokens = (effective_output_tokens - safety_margin) / compression_factor, clamped to a minimum.
+    """
+    try:
+        effective = int(max_output_tokens)
+    except Exception:
+        effective = 65536
+    if effective <= 0:
+        effective = 65536
+    try:
+        cf = float(compression_factor)
+        if cf <= 0:
+            cf = 1.0
+    except Exception:
+        cf = 1.0
+    budget = int((effective - safety_margin) / cf)
+    return max(budget, minimum)
 
 # Global stop flag for GUI integration
 _stop_requested = False
@@ -2294,20 +2313,48 @@ def main(log_callback=None, stop_callback=None):
     compression_factor = float(os.getenv("GLOSSARY_COMPRESSION_FACTOR", os.getenv("COMPRESSION_FACTOR", "1.0")))
     print(f"📐 Compression Factor: {compression_factor}")
 
+    # Toggle for chapter splitting (manual glossary tab)
+    chapter_split_enabled = os.getenv("GLOSSARY_ENABLE_CHAPTER_SPLIT", "1") == "1"
+    print(f"✂️  Chapter Split Enabled: {'✅' if chapter_split_enabled else '❌'}")
+
+    # Resolve effective output token limit (honor -1 as inherit)
+    raw_output_env = os.getenv("GLOSSARY_MAX_OUTPUT_TOKENS", os.getenv("MAX_OUTPUT_TOKENS", "0"))
+    effective_output_tokens = None
+    try:
+        raw_val = int(str(raw_output_env).strip())
+        if raw_val > 0:
+            effective_output_tokens = raw_val
+    except Exception:
+        effective_output_tokens = None
+
+    if effective_output_tokens is None or effective_output_tokens <= 0:
+        try:
+            fallback_val = int(os.getenv("MAX_OUTPUT_TOKENS", str(config.get('max_tokens', 65536))))
+            effective_output_tokens = fallback_val if fallback_val > 0 else 65536
+        except Exception:
+            effective_output_tokens = 65536
+
+    # Honor discovered per-model limits from UnifiedClient (if available)
+    try:
+        with UnifiedClient._model_limits_lock:
+            cached_limit = getattr(UnifiedClient, "_model_token_limits", {}).get(model)
+        if cached_limit and cached_limit > 0:
+            effective_output_tokens = min(effective_output_tokens, cached_limit)
+    except Exception:
+        pass
+
+    # Budget for chunking, matching TransateKRtoEN safe limit logic
+    available_tokens = _compute_safe_input_tokens(effective_output_tokens, compression_factor)
+    print(f"📊 Chunk budget: {available_tokens:,} tokens (output limit {effective_output_tokens:,}, margin 500, compression {compression_factor})")
+
     # Initialize chapter splitter with compression factor
     chapter_splitter = ChapterSplitter(model_name=model, compression_factor=compression_factor)
-    
+
     # Get temperature from environment or config
     temp = float(os.getenv("GLOSSARY_TEMPERATURE") or config.get('temperature', 0.1))
-    
-    # Get output token limit (glossary-specific with fallback to global)
-    env_max_output = os.getenv("GLOSSARY_MAX_OUTPUT_TOKENS", os.getenv("MAX_OUTPUT_TOKENS"))
-    if env_max_output and env_max_output.isdigit():
-        mtoks = int(env_max_output)
-        print(f"[DEBUG] Output Token Limit: {mtoks} (from GUI)")
-    else:
-        mtoks = config.get('max_tokens', 4196)
-        print(f"[DEBUG] Output Token Limit: {mtoks} (from config)")
+
+    # Use effective output tokens for API max_tokens
+    mtoks = effective_output_tokens
     
     # Get context limit from environment or config
     ctx_limit = int(os.getenv("GLOSSARY_CONTEXT_LIMIT") or config.get('context_limit_chapters', 3))
@@ -3018,37 +3065,32 @@ def main(log_callback=None, stop_callback=None):
                     token_limit = 1000000
                     limit_str = "1000000 (default)"
                 
-                # Log combined prompt similar to main translator
+                # Log combined prompt similar to main translator (use safe chunk budget)
                 if contextual_enabled and assistant_tokens > 0:
                     print(
                         f"💬 Chapter {idx+1} combined prompt: "
                         f"{total_tokens:,} tokens (system + user: {non_assistant_tokens:,}, "
-                        f"assistant/memory: {assistant_tokens:,}) / {limit_str}"
+                        f"assistant/memory: {assistant_tokens:,}) | chunk budget {available_tokens:,}"
                     )
                 else:
                     print(
                         f"💬 Chapter {idx+1} combined prompt: "
-                        f"{total_tokens:,} tokens (system + user) / {limit_str}"
+                        f"{total_tokens:,} tokens (system + user) | chunk budget {available_tokens:,}"
                     )
-                
-                # Check if we're over the token limit and need to split
-                if token_limit is not None and total_tokens > token_limit:
-                    print(f"⚠️ Chapter {idx+1} exceeds token limit: {total_tokens} > {token_limit}")
-                    print(f"📄 Using ChapterSplitter to split into smaller chunks...")
-                    
-                    # Calculate available tokens for content
-                    system_tokens = chapter_splitter.count_tokens(system_prompt)
-                    context_tokens = sum(chapter_splitter.count_tokens(m["content"]) for m in trim_context_history(history, ctx_limit, rolling_window))
-                    safety_margin = 1000
-                    available_tokens = token_limit - system_tokens - context_tokens - safety_margin
-                    
+
+                # Determine if we need to split based on output-limit budget
+                chapter_tokens = chapter_splitter.count_tokens(chapter_content)
+                if chapter_split_enabled and chapter_tokens > available_tokens:
+                    print(f"⚠️ Chapter {idx+1} exceeds chunk budget: {chapter_tokens:,} > {available_tokens:,}")
+                    print(f"📄 Using ChapterSplitter to split into smaller chunks (output-limit safe)...")
+
                     # Since glossary extraction works with plain text, wrap it in a simple HTML structure
                     chapter_html = f"<html><body><p>{chap.replace(chr(10)+chr(10), '</p><p>')}</p></body></html>"
-                    
+
                     # Use ChapterSplitter to split the chapter
                     # No filename passed as this is EPUB content (not plain text files)
                     chunks = chapter_splitter.split_chapter(chapter_html, available_tokens)
-                    print(f"📄 Chapter split into {len(chunks)} chunks")
+                    print(f"📄 Chapter split into {len(chunks)} chunks (budget {available_tokens:,})")
                     
                     # Process each chunk
                     chapter_glossary_data = []  # Collect data from all chunks

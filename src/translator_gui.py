@@ -7543,8 +7543,8 @@ Important rules:
                     'GLOSSARY_REQUEST_MERGING_ENABLED': '1' if self.config.get('glossary_request_merging_enabled', False) else '0',
                     'GLOSSARY_REQUEST_MERGE_COUNT': str(self.config.get('glossary_request_merge_count', 10)),
                     'GLOSSARY_COMPRESSION_FACTOR': str(self.config.get('glossary_compression_factor', getattr(self, 'compression_factor_var', 1.0))),
-                    'GLOSSARY_MAX_OUTPUT_TOKENS': str(self.max_output_tokens) if str(self.config.get('glossary_max_output_tokens', '-1')) == '-1' else str(self.config.get('glossary_max_output_tokens')),
                     'GLOSSARY_OUTPUT_LEGACY_JSON': '1' if getattr(self, 'glossary_output_legacy_json_var', False) else '0',
+                    'GLOSSARY_ENABLE_CHAPTER_SPLIT': '1' if self.config.get('glossary_enable_chapter_split', True) else '0',
                 }
                 
                 # Add project ID for Vertex AI
