@@ -269,6 +269,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     max_sentences = int(max_sentences_env)
     print(f"🔍 [DEBUG] Converted to integer: {max_sentences}")
     include_all_characters_env = os.getenv("GLOSSARY_INCLUDE_ALL_CHARACTERS", "0")
+    include_all_characters = include_all_characters_env == "1"
     print(f"📑 DEBUG: Include all characters (dynamic limit expansion) = '{include_all_characters_env}'")
     
     print(f"📑 Settings: Min frequency: {min_frequency}, Max names: {max_names}, Max titles: {max_titles}")
@@ -2450,6 +2451,11 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         print(f"🔍 [DEBUG] max_sentences parameter was provided: {max_sentences}")
     
     print(f"🔍 [DEBUG] Final GLOSSARY_MAX_SENTENCES value being used: {max_sentences}")
+    # Dynamic expansion flag
+    include_all_characters_env = os.getenv("GLOSSARY_INCLUDE_ALL_CHARACTERS", "0")
+    include_all_characters = include_all_characters_env == "1"
+    print(f"📑 DEBUG: Include all characters (dynamic limit expansion) = '{include_all_characters_env}'")
+
     # Handle max_sentences = 0 as "include all sentences"
     if max_sentences > 0 and len(filtered_sentences) > max_sentences:
         print(f"📁 Limiting to {max_sentences} representative sentences (from {len(filtered_sentences):,})")
@@ -2600,6 +2606,12 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                     non_character_terms.append(term)
             except Exception:
                 non_character_terms.append(term)
+
+        # If dynamic limit expansion is enabled, treat ALL detected terms as characters to guarantee coverage
+        if include_all_characters:
+            character_terms = list(term_to_sentences.keys())
+            non_character_terms = []
+            print(f"📑 DEBUG: Dynamic limit expansion active — treating {len(character_terms):,} terms as characters")
         
         def round_robin_terms(term_list, selected_indices, target_limit, min_per_term=None):
             """Round-robin over provided term list, updating selected_indices in-place."""
@@ -2628,9 +2640,6 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                         pass
                 term_iterators = active_iterators
 
-        # Check for "Include All Characters" override
-        include_all_characters = os.getenv("GLOSSARY_INCLUDE_ALL_CHARACTERS", "0") == "1"
-        
         if include_all_characters and character_terms:
             print(f"📑 'Include All Characters' enabled: Ensuring coverage for {len(character_terms)} characters...")
             
