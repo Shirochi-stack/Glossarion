@@ -2442,57 +2442,64 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                                 continue
                             if name not in honorific_first_indices:
                                 honorific_first_indices[name] = idx
-                                ordered_names.append(name)
+                            # Append every time to track frequency
+                            ordered_names.append(name)
                         # Fallback: token immediately before any honorific
+                        # NOTE: Bidirectional check ('after') was removed due to excessive false positives.
+                        # Strict filtering applied to 'before' token to reduce noise.
                         for m in honor_pat.finditer(sent):
+                            # 1. Check BEFORE the honorific
                             prefix = sent[:m.start()].strip()
-                            if not prefix: continue
-                            
-                            # Clean the token of punctuation
-                            token = prefix.split()[-1]
-                            token = token.strip(".,;:!?\"'()[]{}<>~`@#$%^&*-=_+|\\/")
-                            
-                            if not token: continue
-                            
-                            if not any(ch.isdigit() for ch in token):
-                                # FILTERING: Skip tokens with common noisy start characters (double check after strip)
-                                if any(token.startswith(c) for c in ['[', '(', '{', '<', '-', 'ㄴ', 'ㅇ', 'ㄹ', 'ㅁ', 'ㅂ', 'ㅋ', 'ㅎ']):
-                                    continue
+                            if prefix:
+                                # Clean the token of punctuation
+                                token = prefix.split()[-1]
+                                token = token.strip(".,;:!?\"'()[]{}<>~`@#$%^&*-=_+|\\/")
                                 
-                                # FILTERING: Skip tokens that look like file extensions or paths
-                                if '.' in token or '/' in token or '\\' in token:
-                                    continue
-                                    
-                                # FILTERING: Skip tokens that are just common words/particles
-                                if token in PM.COMMON_WORDS:
-                                    continue
-                                
-                                # FILTERING: Aggressive Korean Verb/Adjective Ending Check
-                                # (Only apply if token is > 2 chars to avoid filtering 2-char names like '유나', '민지')
-                                # Heuristic: Words > 2 chars ending in these are LIKELY verbs/adjectives/adverbs in this context
-                                if len(token) > 2 and any(token.endswith(e) for e in ['겠네', '리라', '니까', '는데', '러나', '다가', '면서', '지만', '도록', '으로', '에서', '에게', '한테', '라고', '이란']):
-                                    continue
+                                if token and not any(ch.isdigit() for ch in token):
+                                    # FILTERING: Skip tokens with common noisy start characters
+                                    if not any(token.startswith(c) for c in ['[', '(', '{', '<', '-', 'ㄴ', 'ㅇ', 'ㄹ', 'ㅁ', 'ㅂ', 'ㅋ', 'ㅎ']):
+                                        # FILTERING: Skip tokens that look like file extensions or paths
+                                        if not ('.' in token or '/' in token or '\\' in token):
+                                            # FILTERING: Skip tokens that are just common words/particles
+                                            if token not in PM.COMMON_WORDS:
+                                                # FILTERING: Aggressive Korean Verb/Adjective Ending Check
+                                                if not (len(token) > 2 and any(token.endswith(e) for e in ['겠네', '리라', '니까', '는데', '러나', '다가', '면서', '지만', '도록', '으로', '에서', '에게', '한테', '라고', '이란'])):
+                                                    
+                                                    # STRICTER ATTACHMENT CHECK FOR KOREAN SUFFIXES
+                                                    # If the honorific is a suffix type (starts with empty string or implicit attachment like '님', '씨'),
+                                                    # we should prefer cases where it was attached or very close.
+                                                    # The regex `honor_pat` matches the honorific. `m.start()` is where it starts.
+                                                    # `prefix` is `sent[:m.start()]`. If `prefix` ends with space, `token` was detached.
+                                                    # For Korean '님', '씨', detachment is allowed but rare for names in formal writing, 
+                                                    # but frequent in chat/informal (e.g. "철수 님"). 
+                                                    # However, detached tokens are HUGE source of false positives (e.g. "저기요 님").
+                                                    # We will strictly require attachment if the token is short (2 chars) to avoid "저 님", "그 님".
+                                                    # Unless it's a known title pattern.
+                                                    
+                                                    is_attached = not sent[:m.start()].endswith(' ')
+                                                    
+                                                    # If it's a common suffix honorific and token is short/ambiguous, require attachment?
+                                                    # Let's rely on Valid Token Shape first.
 
-                                # Require reasonable token shape
-                                if re.search(r'[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af·]{2,4}', token):
-                                    pass
-                                elif re.match(r'^[A-Z][a-z]{1,15}(\s+[A-Z][a-z]{1,15})?$', token):
-                                    pass
-                                else:
-                                    continue
-                                    
-                                # Skip if token looks like a title term
-                                skip_title = False
-                                for pat in PM.TITLE_PATTERNS.get(primary_lang, []):
-                                    if re.search(pat, token):
-                                        skip_title = True
-                                        break
-                                if skip_title:
-                                    continue
-                                    
-                                if token not in honorific_first_indices:
-                                    honorific_first_indices[token] = idx
-                                    ordered_names.append(token)
+                                                    # Valid token structure check
+                                                    valid_shape = False
+                                                    if re.search(r'[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af·]{2,4}', token):
+                                                        valid_shape = True
+                                                    elif re.match(r'^[A-Z][a-z]{1,15}(\s+[A-Z][a-z]{1,15})?$', token):
+                                                        valid_shape = True
+                                                    
+                                                    if valid_shape:
+                                                        # Skip if token looks like a title term
+                                                        skip_title = False
+                                                        for pat in PM.TITLE_PATTERNS.get(primary_lang, []):
+                                                            if re.search(pat, token):
+                                                                skip_title = True
+                                                                break
+                                                        if not skip_title:
+                                                            if token not in honorific_first_indices:
+                                                                honorific_first_indices[token] = idx
+                                                            # Append every time to track frequency
+                                                            ordered_names.append(token)
 
                     # DEDUPLICATE THE REPRESENTATIVE UNIQUE CHARACTERS HERE
                     if ordered_names:
@@ -2522,6 +2529,30 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                             deduped_names = []
                             kept_indices = {} 
                             skipped_dupes = 0
+                            
+                            # Filter by honorific attachment frequency
+                            # Only keep names that appear with an honorific at least N times
+                            # This filters out one-off noise while keeping legitimate names
+                            name_freq_with_honorific = Counter(ordered_names)
+                            
+                            # Min frequency threshold: Use 3 to further reduce false positives
+                            min_hon_freq = 3
+                            
+                            print(f"📑 Filtering by honorific attachment frequency (min {min_hon_freq} occurrences)...")
+                            
+                            # Get unique candidates that meet frequency threshold
+                            # Use seen set to deduplicate ordered_names while preserving order
+                            filtered_unique = []
+                            seen_candidates = set()
+                            
+                            for name in ordered_names:
+                                if name not in seen_candidates and name_freq_with_honorific[name] >= min_hon_freq:
+                                    filtered_unique.append(name)
+                                    seen_candidates.add(name)
+                                    
+                            print(f"📑 Reduced candidates from {len(ordered_names)} (total) to {len(filtered_unique)} (unique freq-filtered)")
+                            
+                            ordered_names = filtered_unique
                             
                             # Fast lookup structures
                             seen_normalized = set()
