@@ -184,6 +184,28 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         print("📁 ❌ Glossary generation stopped by user")
         return {}
     
+    # Clear incremental history at the start of EVERY run to ensure a clean slate
+    incremental_dir = os.path.join(output_dir, "incremental_glossary")
+    agg_path = os.path.join(incremental_dir, "glossary.incremental.all.csv")
+    
+    if os.path.exists(agg_path):
+        try:
+            os.remove(agg_path)
+            print(f"📑 Cleared previous incremental history: {agg_path}")
+        except Exception as e:
+            print(f"⚠️ Failed to clear incremental history: {e}")
+            
+    if os.path.exists(incremental_dir):
+        try:
+            for f in os.listdir(incremental_dir):
+                if f.startswith("glossary.incremental") and f.endswith(".csv"):
+                    try:
+                        os.remove(os.path.join(incremental_dir, f))
+                    except:
+                        pass
+        except Exception as e:
+            print(f"⚠️ Failed to clear incremental folder: {e}")
+    
     # Check if glossary already exists; if so, we'll MERGE it later (do not return early)
     glossary_path = os.path.join(output_dir, "glossary.csv")
     existing_glossary_content = None
@@ -376,24 +398,6 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         # Prepare chunk processing
         incremental_dir = os.path.join(output_dir, "incremental_glossary")
         agg_path = os.path.join(incremental_dir, "glossary.incremental.all.csv")
-        
-        # CLEAR incremental history if it exists to ensure 'all' file only contains current run data
-        # This prevents it from growing indefinitely across multiple runs
-        if os.path.exists(agg_path):
-            try:
-                os.remove(agg_path)
-                print(f"📑 Cleared previous incremental history: {agg_path}")
-            except Exception as e:
-                print(f"⚠️ Failed to clear incremental history: {e}")
-        
-        # Clean up individual chunk files too for consistency
-        if os.path.exists(incremental_dir):
-            for f in os.listdir(incremental_dir):
-                if f.startswith("glossary.incremental") and f.endswith(".csv"):
-                    try:
-                        os.remove(os.path.join(incremental_dir, f))
-                    except:
-                        pass
 
         if chapter_split_threshold == 0:
             # Use ChapterSplitter for token-based intelligent chunking
@@ -2471,8 +2475,8 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     # We just need to limit the sample size
     
     filtered_sentences = important_sentences  # Already filtered!
-    print(f"📑 Using {len(filtered_sentences):,} pre-filtered sentences (already contain glossary terms)")
-
+    print(f"📑 Candidate sentences from initial scan: {len(filtered_sentences):,} (will be refined based on frequency)")
+    
     # EARLY DYNAMIC EXPANSION: collect one sentence index per unique honorific-attached name (first appearance), before scoring/nuance
     def _sentence_has_gender_pronoun(sent: str) -> bool:
         if not include_gender_context_flag or not gender_pronouns:
@@ -2679,7 +2683,8 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             print(f"📑 Processing {len(check_batches)} batches of ~{check_batch_size} sentences")
             
             # Use ProcessPoolExecutor for true parallelism (if not already in subprocess)
-            use_process_pool_filtering = (not in_subprocess and len(check_batches) > 3)
+            # Switch to ThreadPoolExecutor to prevent potential instability on Windows with large payloads
+            use_process_pool_filtering = False 
             
             if use_process_pool_filtering:
                 print(f"📑 Using ProcessPoolExecutor for true parallel filtering")
