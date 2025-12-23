@@ -2808,26 +2808,28 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                         pass
                 term_iterators = active_iterators
 
-        effective_limit = max_sentences
+        # Base limit from user/config
+        base_limit = max_sentences
         # If we collected honorific-first sentences, seed the selection with them
         if include_all_characters and honorific_first_indices:
             for idx in honorific_first_indices.values():
                 if 0 <= idx < len(filtered_sentences):
                     selected_indices.add(idx)
-            # Ensure limit accounts for mandatory picks
-            effective_limit = max(max_sentences, len(selected_indices))
+        # Dynamic expansion should ADD to the base limit, not replace it
+        honorific_bonus = len(selected_indices) if include_all_characters else 0
+        effective_limit = base_limit + honorific_bonus
         # Standard Fixed Limit Logic
         # First, prioritize character-like terms (honorific-based)
         if character_terms:
-            round_robin_terms(character_terms, selected_indices, max_sentences)
+            round_robin_terms(character_terms, selected_indices, effective_limit)
         
         # Then, if we still have room, cover remaining non-character terms
-        if len(selected_indices) < max_sentences and non_character_terms:
-            round_robin_terms(non_character_terms, selected_indices, max_sentences)
+        if len(selected_indices) < effective_limit and non_character_terms:
+            round_robin_terms(non_character_terms, selected_indices, effective_limit)
         
         
         # If we still have room (rare), fill with highest scored remaining sentences
-        target_limit = effective_limit if include_all_characters else max_sentences
+        target_limit = effective_limit
         if target_limit and len(selected_indices) < target_limit:
             remaining = sorted(
                 [i for i in range(len(filtered_sentences)) if i not in selected_indices],
