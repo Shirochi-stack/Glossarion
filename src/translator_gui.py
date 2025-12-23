@@ -1028,8 +1028,7 @@ character,디히릿 아데,Dihirit Ade,female
 
 Focus on identifying:
 1. Character names with their honorifics
-2. Important titles and ranks
-3. Frequently mentioned terms (min frequency: {min_frequency})
+2. Important terms, titles and ranks
 
 Extract up to {max_names} character names and {max_titles} titles.
 Prioritize names that appear with honorifics or in important contexts.""")
@@ -1064,11 +1063,9 @@ character,디히릿 아데,Dihirit Ade,female
 
 Focus on identifying:
 1. Character names with their honorifics
-2. Important titles and ranks
-3. Frequently mentioned terms (min frequency: {min_frequency})
+2. Important terms, titles and ranks
 
-Extract up to {max_names} character names and {max_titles} titles.
-Prioritize names that appear with honorifics or in important contexts."""
+Generate a glossary with all character names, terms, titles, and other important elements found."""
         else:
             self.unified_auto_glossary_prompt = unified_prompt_from_config
         
