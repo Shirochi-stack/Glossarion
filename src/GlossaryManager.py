@@ -2466,6 +2466,57 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                                 if token not in honorific_first_indices:
                                     honorific_first_indices[token] = idx
                                     ordered_names.append(token)
+
+                    # DEDUPLICATE THE REPRESENTATIVE UNIQUE CHARACTERS HERE
+                    if ordered_names:
+                        print(f"📑 Deduplicating {len(ordered_names)} potential character names (honorific-first)...")
+                        try:
+                            import duplicate_detection_config as DDC
+                            
+                            # Get configured algorithm and threshold
+                            dd_config = DDC.get_duplicate_detection_config()
+                            algo_desc = dd_config.get('description', 'Unknown')
+                            
+                            # Use environment variable directly as fallback
+                            fallback_threshold = float(os.getenv("GLOSSARY_FUZZY_THRESHOLD", "0.90"))
+                            effective_threshold = dd_config.get('threshold', fallback_threshold)
+                            
+                            selected_algo = os.getenv('GLOSSARY_DUPLICATE_ALGORITHM', 'auto').upper()
+                            print(f"📑 Duplicate Detection Algorithm: {selected_algo} ({algo_desc})")
+                            print(f"📑 Deduplicating names with threshold: {effective_threshold:.2f}")
+                            
+                            deduped_names = []
+                            kept_indices = {} # Rebuild this map
+                            skipped_dupes = 0
+                            
+                            # ordered_names preserves first appearance order
+                            for name in ordered_names:
+                                is_dup = False
+                                
+                                # Compare against already kept names
+                                for existing in deduped_names:
+                                    score = DDC.calculate_similarity_with_config(name, existing, dd_config)
+                                    if score >= effective_threshold:
+                                        is_dup = True
+                                        skipped_dupes += 1
+                                        break
+                                
+                                if not is_dup:
+                                    deduped_names.append(name)
+                                    # Keep the original index for this name
+                                    if name in honorific_first_indices:
+                                        kept_indices[name] = honorific_first_indices[name]
+                            
+                            print(f"📑 Advanced deduplication removed {skipped_dupes} duplicate names")
+                            
+                            # Update the lists
+                            ordered_names = deduped_names
+                            honorific_first_indices = kept_indices
+                            
+                        except ImportError:
+                            print("⚠️ duplicate_detection_config module not found, skipping name deduplication")
+                        except Exception as e:
+                            print(f"⚠️ Name deduplication failed: {e}")
                 else:
                     print("📑 Dynamic expansion (honorific-first): no honorifics found in PatternManager for this language")
                 base_count = len(honorific_first_indices)
