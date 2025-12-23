@@ -268,6 +268,8 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     print(f"🔍 [DEBUG] Reading GLOSSARY_MAX_SENTENCES from environment: '{max_sentences_env}'")
     max_sentences = int(max_sentences_env)
     print(f"🔍 [DEBUG] Converted to integer: {max_sentences}")
+    include_all_characters_env = os.getenv("GLOSSARY_INCLUDE_ALL_CHARACTERS", "0")
+    print(f"📑 DEBUG: Include all characters (dynamic limit expansion) = '{include_all_characters_env}'")
     
     print(f"📑 Settings: Min frequency: {min_frequency}, Max names: {max_names}, Max titles: {max_titles}")
     print(f"📑 Strip honorifics: {'✅ Yes' if strip_honorifics else '❌ No'}")
