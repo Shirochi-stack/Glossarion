@@ -2568,6 +2568,9 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     
     print(f"📑 Selected {len(filtered_sentences):,} sentences containing frequent terms")
     
+    # Track character-like term count for final summary
+    character_term_count = 0
+
     # Limit the number of sentences to reduce token usage
     if max_sentences is None:
         max_sentences_fallback = os.getenv("GLOSSARY_MAX_SENTENCES", "200")
@@ -2770,6 +2773,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 character_terms.append(term)
             else:
                 non_character_terms.append(term)
+        character_term_count = len(character_terms)
 
         # If dynamic limit expansion is enabled, prepare to cover every character-like term once
         if include_all_characters and character_terms:
@@ -2940,6 +2944,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     else:
         print(f"📑 Text expansion: {original_length:,} → {filtered_length:,} chars ({abs(size_change_percent):.1f}% expansion)")
     print(f"📑 Terms found: {len(frequent_terms):,} unique terms (min frequency: {min_frequency})")
+    print(f"📑 Characters found (character-like terms): {character_term_count:,}")
     print(f"📑 Final output: {len(filtered_sentences)} sentences, {filtered_length:,} characters")
     print(f"📑 Performance: {(original_length / filter_duration / 1000):.1f}K chars/second")
     print(f"📑 ========================\n")
