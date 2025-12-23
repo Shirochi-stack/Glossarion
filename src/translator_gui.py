@@ -6438,6 +6438,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GLOSSARY_TRANSLATION_PROMPT': self.glossary_translation_prompt if hasattr(self, 'glossary_translation_prompt') else '',
             'GLOSSARY_FORMAT_INSTRUCTIONS': self.glossary_format_instructions if hasattr(self, 'glossary_format_instructions') else '',
             'GLOSSARY_USE_LEGACY_CSV': '1' if self.use_legacy_csv_var else '0',
+            'GLOSSARY_OUTPUT_LEGACY_JSON': '1' if getattr(self, 'glossary_output_legacy_json_var', False) else '0',
             'ENABLE_IMAGE_TRANSLATION': "1" if self.enable_image_translation_var else "0",
             'PROCESS_WEBNOVEL_IMAGES': "1" if self.process_webnovel_images_var else "0",
             'WEBNOVEL_MIN_HEIGHT': str(self.webnovel_min_height_var),
@@ -7536,6 +7537,7 @@ Important rules:
                     'GLOSSARY_REQUEST_MERGE_COUNT': str(self.config.get('glossary_request_merge_count', 10)),
                     'GLOSSARY_COMPRESSION_FACTOR': str(self.config.get('glossary_compression_factor', getattr(self, 'compression_factor_var', 1.0))),
                     'GLOSSARY_MAX_OUTPUT_TOKENS': str(self.max_output_tokens) if str(self.config.get('glossary_max_output_tokens', '-1')) == '-1' else str(self.config.get('glossary_max_output_tokens')),
+                    'GLOSSARY_OUTPUT_LEGACY_JSON': '1' if getattr(self, 'glossary_output_legacy_json_var', False) else '0',
                 }
                 
                 # Add project ID for Vertex AI

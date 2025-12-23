@@ -492,6 +492,7 @@ class GlossaryManagerMixin:
                     ('disable_honorifics_checkbox', 'disable_honorifics_var'),
                     ('use_legacy_csv_checkbox', 'use_legacy_csv_var'),
                     ('glossary_auto_compression_checkbox', 'glossary_auto_compression_var'),
+                    ('glossary_json_output_checkbox', 'glossary_output_legacy_json_var'),
                 ]
                 
                 # Handle inverted logic for disable_smart_filtering_checkbox
@@ -1096,6 +1097,17 @@ class GlossaryManagerMixin:
         label2 = QLabel("When enabled: Uses traditional CSV format with repeated type columns")
         # label2.setStyleSheet("color: gray; font-size: 9pt; margin-left: 20px;")
         format_frame_layout.addWidget(label2)
+
+        # Legacy JSON Output Toggle
+        if not hasattr(self, 'glossary_json_output_checkbox'):
+            self.glossary_json_output_checkbox = self._create_styled_checkbox("Output legacy JSON format")
+            # Default to False as requested
+            self.glossary_json_output_checkbox.setChecked(self.config.get('glossary_output_legacy_json', False))
+        
+        format_frame_layout.addWidget(self.glossary_json_output_checkbox)
+        
+        label3 = QLabel("When enabled: Outputs a .json file containing the glossary structure (useful for backups)")
+        format_frame_layout.addWidget(label3)
         
         # Update label when slider moves
         def update_manual_fuzzy_label(value):

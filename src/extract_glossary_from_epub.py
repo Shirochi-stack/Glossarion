@@ -392,6 +392,10 @@ def get_custom_entry_types():
 
 def save_glossary_json(glossary: List[Dict], output_path: str):
     """Save glossary in the new simple format with automatic sorting by type"""
+    # Check if legacy JSON output is enabled (default disabled)
+    if os.getenv('GLOSSARY_OUTPUT_LEGACY_JSON', '0') != '1':
+        return
+
     global _glossary_json_lock
     
     # Acquire lock to prevent concurrent writes
