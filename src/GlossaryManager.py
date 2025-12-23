@@ -1102,14 +1102,13 @@ def _process_chunks_batch_api(chunks_to_process, custom_prompt, language,
                 # Aggregate for end-of-run
                 all_csv_lines.extend(chunk_lines)
                 
-                # DISABLED: Don't do incremental writes in batch mode
-                # This prevents chunks from merging with each other's results
-                # All merging will happen at the end in save_glossary()
-                # try:
-                #     _incremental_update_glossary(output_dir, chunk_lines, strip_honorifics, language, filter_mode)
-                #     print(f"📑 Incremental write: +{len(chunk_lines)} entries")
-                # except Exception as e2:
-                #     print(f"⚠️ Incremental write failed: {e2}")
+                # RE-ENABLED: Do incremental writes in batch mode
+                # Since we have proper file locking and unique chunk filenames, this is safe
+                try:
+                    _incremental_update_glossary(output_dir, futures[future], chunk_lines, strip_honorifics, language, filter_mode)
+                    print(f"📑 Incremental write: chunk {futures[future]} (+{len(chunk_lines)} entries)")
+                except Exception as e2:
+                    print(f"⚠️ Incremental write failed: {e2}")
                 
                 completed_chunks += 1
                 
