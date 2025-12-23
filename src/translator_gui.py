@@ -2795,6 +2795,7 @@ Recent translations to summarize:
         self.frame.addWidget(chapter_range_label, 5, 0, Qt.AlignLeft)
         
         self.chapter_range_entry = QLineEdit()
+        self.chapter_range_entry.setPlaceholderText("e.g. 1-10, 15, 20-25")
         self.chapter_range_entry.setText(self.config.get('chapter_range', ''))
         self.chapter_range_entry.setMaximumWidth(120)
         self.frame.addWidget(self.chapter_range_entry, 5, 1, Qt.AlignLeft)
@@ -2826,6 +2827,7 @@ Recent translations to summarize:
         contextual_layout.setSpacing(8)
         
         self.contextual_checkbox = self._create_styled_checkbox("Contextual Translation")
+        self.contextual_checkbox.setToolTip("Provides the AI with context from previous chunks/chapters to improve consistency")
         self.contextual_checkbox.setChecked(self.contextual_var)
         self.contextual_checkbox.stateChanged.connect(self._on_contextual_toggle)
         contextual_layout.addWidget(self.contextual_checkbox)
@@ -2857,6 +2859,7 @@ Recent translations to summarize:
         
         # Temperature (row 6)
         temp_label = QLabel("Temperature:")
+        temp_label.setToolTip("Controls AI creativity. Lower (0.1-0.3) = Literal/Stable. Higher (0.7+) = Creative/Random.")
         self.frame.addWidget(temp_label, 6, 2, Qt.AlignLeft)
         
         self.trans_temp = QLineEdit()
@@ -2871,6 +2874,7 @@ Recent translations to summarize:
         batch_layout.setSpacing(8)
         
         self.batch_checkbox = self._create_styled_checkbox("Batch Translation")
+        self.batch_checkbox.setToolTip("Groups multiple small chapters into a single API request to speed up translation")
         self.batch_checkbox.setChecked(self.batch_translation_var)
         self.batch_checkbox.stateChanged.connect(self._on_batch_toggle)
         
@@ -3068,6 +3072,7 @@ Recent translations to summarize:
         
         # Remove AI Artifacts checkbox (row 7, spans all columns)
         self.remove_artifacts_checkbox = self._create_styled_checkbox("Remove AI Artifacts")
+        self.remove_artifacts_checkbox.setToolTip("Automatically cleans AI filler text like 'Here is the translation' or 'I hope this helps'")
         self.remove_artifacts_checkbox.setChecked(self.REMOVE_AI_ARTIFACTS_var)
         self.remove_artifacts_checkbox.stateChanged.connect(self._on_remove_artifacts_toggle)
         self.frame.addWidget(self.remove_artifacts_checkbox, 7, 0, 1, 5, Qt.AlignLeft)
