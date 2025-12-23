@@ -6587,7 +6587,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
            
             # Glossary-specific overrides
             'GLOSSARY_COMPRESSION_FACTOR': str(self.config.get('glossary_compression_factor', self.compression_factor_var)),
-            'GLOSSARY_MAX_OUTPUT_TOKENS': str(self.config.get('glossary_max_output_tokens', current_max_tokens)),
+            'GLOSSARY_MAX_OUTPUT_TOKENS': str(current_max_tokens) if str(self.config.get('glossary_max_output_tokens', '-1')) == '-1' else str(self.config.get('glossary_max_output_tokens')),
             'GLOSSARY_TEMPERATURE': str(self.config.get('manual_glossary_temperature', self.trans_temp.text())),
        }
         print(f"[DEBUG] DISABLE_CHAPTER_MERGING = '{os.getenv('DISABLE_CHAPTER_MERGING', '0')}'")
@@ -7535,7 +7535,7 @@ Important rules:
                     'GLOSSARY_REQUEST_MERGING_ENABLED': '1' if self.config.get('glossary_request_merging_enabled', False) else '0',
                     'GLOSSARY_REQUEST_MERGE_COUNT': str(self.config.get('glossary_request_merge_count', 10)),
                     'GLOSSARY_COMPRESSION_FACTOR': str(self.config.get('glossary_compression_factor', getattr(self, 'compression_factor_var', 1.0))),
-                    'GLOSSARY_MAX_OUTPUT_TOKENS': str(self.config.get('glossary_max_output_tokens', self.max_output_tokens)),
+                    'GLOSSARY_MAX_OUTPUT_TOKENS': str(self.max_output_tokens) if str(self.config.get('glossary_max_output_tokens', '-1')) == '-1' else str(self.config.get('glossary_max_output_tokens')),
                 }
                 
                 # Add project ID for Vertex AI

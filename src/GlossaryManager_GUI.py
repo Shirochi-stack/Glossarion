@@ -491,6 +491,7 @@ class GlossaryManagerMixin:
                     ('strip_honorifics_checkbox', 'strip_honorifics_var'),
                     ('disable_honorifics_checkbox', 'disable_honorifics_var'),
                     ('use_legacy_csv_checkbox', 'use_legacy_csv_var'),
+                    ('glossary_auto_compression_checkbox', 'glossary_auto_compression_var'),
                 ]
                 
                 # Handle inverted logic for disable_smart_filtering_checkbox
@@ -567,6 +568,10 @@ class GlossaryManagerMixin:
                     algo_map = {0: 'auto', 1: 'strict', 2: 'balanced', 3: 'aggressive', 4: 'basic'}
                     self.glossary_duplicate_algorithm_var = algo_map.get(algo_index, 'auto')
                     self.config['glossary_duplicate_algorithm'] = self.glossary_duplicate_algorithm_var
+                
+                # Save auto compression state
+                if hasattr(self, 'glossary_auto_compression_checkbox'):
+                    self.config['glossary_auto_compression'] = self.glossary_auto_compression_checkbox.isChecked()
                 
                 # Call main save_config - it will:
                 # 1. Update custom_entry_types from checkboxes
@@ -1355,8 +1360,22 @@ Rules:
         
         # Row 1: Compression Factor and Rolling window checkbox
         self.glossary_compression_factor_entry = QLineEdit(str(self.config.get('glossary_compression_factor', 1.0)))
-        self.glossary_compression_factor_entry.setFixedWidth(80)
-        settings_grid.addWidget(_m_pair("Compression Factor:", self.glossary_compression_factor_entry), 1, 0)
+        self.glossary_compression_factor_entry.setFixedWidth(60)
+
+        # Auto Compression Factor toggle
+        self.glossary_auto_compression_checkbox = self._create_styled_checkbox("Auto")
+        self.glossary_auto_compression_checkbox.setChecked(self.config.get('glossary_auto_compression', True))
+        
+        # Container for compression factor controls
+        comp_cont = QWidget()
+        comp_layout = QHBoxLayout(comp_cont)
+        comp_layout.setContentsMargins(0, 0, 0, 0)
+        comp_layout.setSpacing(8)
+        comp_layout.addWidget(self.glossary_compression_factor_entry)
+        comp_layout.addWidget(self.glossary_auto_compression_checkbox)
+        comp_layout.addStretch()
+        
+        settings_grid.addWidget(_m_pair("Compression Factor:", comp_cont), 1, 0)
         
         if not hasattr(self, 'glossary_history_rolling_checkbox'):
             self.glossary_history_rolling_checkbox = self._create_styled_checkbox("Keep recent context instead of reset")
@@ -1364,14 +1383,74 @@ Rules:
         settings_grid.addWidget(self.glossary_history_rolling_checkbox, 1, 1)
         
         # Row 2: Output Token Limit and Request Merging checkbox
-        self.glossary_output_token_limit_entry = QLineEdit(str(self.config.get('glossary_max_output_tokens', 65536)))
+        # Default changed to -1 (auto/inherit) instead of 65536
+        self.glossary_output_token_limit_entry = QLineEdit(str(self.config.get('glossary_max_output_tokens', -1)))
         self.glossary_output_token_limit_entry.setFixedWidth(80)
-        settings_grid.addWidget(_m_pair("Output Token Limit:", self.glossary_output_token_limit_entry), 2, 0)
+        self.glossary_output_token_limit_entry.setToolTip("-1 = Use main translation Output Token Limit")
+        
+        # Container for token limit to add "tokens" label
+        token_cont = QWidget()
+        token_layout = QHBoxLayout(token_cont)
+        token_layout.setContentsMargins(0, 0, 0, 0)
+        token_layout.setSpacing(6)
+        token_layout.addWidget(self.glossary_output_token_limit_entry)
+        
+        # Add a small helper label to show actual value if -1
+        self.token_limit_helper = QLabel("")
+        self.token_limit_helper.setStyleSheet("color: gray; font-size: 8pt;")
+        token_layout.addWidget(self.token_limit_helper)
+        token_layout.addStretch()
+        
+        settings_grid.addWidget(_m_pair("Output Token Limit:", token_cont), 2, 0)
         
         if not hasattr(self, 'glossary_request_merging_checkbox'):
             self.glossary_request_merging_checkbox = self._create_styled_checkbox("Glossary Request Merging")
         self.glossary_request_merging_checkbox.setChecked(self.config.get('glossary_request_merging_enabled', False))
         settings_grid.addWidget(self.glossary_request_merging_checkbox, 2, 1)
+
+        # Logic for Auto Compression Factor
+        def _update_glossary_compression():
+            try:
+                # Update helper label for token limit
+                try:
+                    limit_val = int(self.glossary_output_token_limit_entry.text())
+                except ValueError:
+                    limit_val = 65536
+                
+                # Resolve -1 to actual max_output_tokens
+                if limit_val == -1:
+                    actual_limit = getattr(self, 'max_output_tokens', 65536)
+                    self.token_limit_helper.setText(f"(Auto: {actual_limit})")
+                else:
+                    actual_limit = limit_val
+                    self.token_limit_helper.setText("")
+                
+                if not self.glossary_auto_compression_checkbox.isChecked():
+                    self.glossary_compression_factor_entry.setEnabled(True)
+                    return
+
+                self.glossary_compression_factor_entry.setEnabled(False)
+                
+                # Logic: 1.0 | 1.2 | 1.4 | 1.5
+                if actual_limit < 16379:
+                    factor = 1.0
+                elif actual_limit < 32769:
+                    factor = 1.2
+                elif actual_limit < 65536:
+                    factor = 1.4
+                else:
+                    factor = 1.5
+                    
+                self.glossary_compression_factor_entry.setText(str(factor))
+            except Exception as e:
+                print(f"Error updating glossary compression: {e}")
+
+        # Connect signals
+        self.glossary_auto_compression_checkbox.toggled.connect(_update_glossary_compression)
+        self.glossary_output_token_limit_entry.textChanged.connect(lambda: _update_glossary_compression())
+        
+        # Initial update
+        _update_glossary_compression()
         
         # Row 3: Empty and Merge Count
         self.glossary_request_merge_count_entry = QLineEdit(str(self.config.get('glossary_request_merge_count', 10)))
