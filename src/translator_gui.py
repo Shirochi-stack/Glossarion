@@ -6453,7 +6453,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'SAVE_IMAGE_TRANSLATIONS': '1',
             'IMAGE_CHUNK_HEIGHT': str(self.image_chunk_height_var),
             'HIDE_IMAGE_TRANSLATION_LABEL': "1" if self.hide_image_translation_label_var else "0",
-            'RETRY_TIMEOUT': "1" if self.retry_timeout_var else "0",
+            'RETRY_TIMEOUT': "1" if getattr(self, 'retry_timeout_var', self.config.get('retry_timeout', False)) else "0",
             'CHUNK_TIMEOUT': str(self.chunk_timeout_var),
             # New network/HTTP controls
             'ENABLE_HTTP_TUNING': '1' if self.config.get('enable_http_tuning', False) else '0',
@@ -10530,7 +10530,7 @@ Important rules:
                 ('MAX_RETRY_TOKENS', str(getattr(self, 'max_retry_tokens_var', '65536'))),
                 ('RETRY_DUPLICATE_BODIES', '1' if getattr(self, 'retry_duplicate_var', False) else '0'),
                 ('DUPLICATE_LOOKBACK_CHAPTERS', str(getattr(self, 'duplicate_lookback_var', '5'))),
-                ('RETRY_TIMEOUT', '1' if getattr(self, 'retry_timeout_var', True) else '0'),
+                ('RETRY_TIMEOUT', '1' if getattr(self, 'retry_timeout_var', self.config.get('retry_timeout', False)) else '0'),
                 ('CHUNK_TIMEOUT', str(getattr(self, 'chunk_timeout_var', '900'))),
                 ('ENABLE_HTTP_TUNING', '1' if self.config.get('enable_http_tuning', False) else '0'),
                 ('CONNECT_TIMEOUT', str(getattr(self, 'connect_timeout_var', '10'))),

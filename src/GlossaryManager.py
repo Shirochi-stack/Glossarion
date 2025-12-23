@@ -3338,7 +3338,7 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                 # Respect RETRY_TIMEOUT toggle - if disabled, use None for infinite timeout
                 retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "0") == "1"
                 if retry_timeout_enabled:
-                    chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "900"))  # 15 minute default for glossary
+                    chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "900"))
                     print(f"📑 Sending AI extraction request (timeout: {chunk_timeout}s, interruptible)...")
                 else:
                     chunk_timeout = None

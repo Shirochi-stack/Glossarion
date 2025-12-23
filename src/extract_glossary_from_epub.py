@@ -2584,8 +2584,9 @@ def main(log_callback=None, stop_callback=None):
     if len(chapters_to_process) < total_chapters:
         print(f"📊 Processing {len(chapters_to_process)} out of {total_chapters} chapters")
     
-    # Get chunk timeout from environment  
-    chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "900"))  # 15 minutes default
+    # Get chunk timeout (respect RETRY_TIMEOUT toggle)
+    retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "0") == "1"
+    chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "900")) if retry_timeout_enabled else None
     
     # Process chapters based on mode
     # Request merging now works with both batch and sequential modes
