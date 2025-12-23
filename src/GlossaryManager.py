@@ -184,28 +184,6 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         print("📁 ❌ Glossary generation stopped by user")
         return {}
     
-    # Clear incremental history at the start of EVERY run to ensure a clean slate
-    incremental_dir = os.path.join(output_dir, "incremental_glossary")
-    agg_path = os.path.join(incremental_dir, "glossary.incremental.all.csv")
-    
-    if os.path.exists(agg_path):
-        try:
-            os.remove(agg_path)
-            print(f"📑 Cleared previous incremental history: {agg_path}")
-        except Exception as e:
-            print(f"⚠️ Failed to clear incremental history: {e}")
-            
-    if os.path.exists(incremental_dir):
-        try:
-            for f in os.listdir(incremental_dir):
-                if f.startswith("glossary.incremental") and f.endswith(".csv"):
-                    try:
-                        os.remove(os.path.join(incremental_dir, f))
-                    except:
-                        pass
-        except Exception as e:
-            print(f"⚠️ Failed to clear incremental folder: {e}")
-    
     # Check if glossary already exists; if so, we'll MERGE it later (do not return early)
     glossary_path = os.path.join(output_dir, "glossary.csv")
     existing_glossary_content = None
@@ -398,6 +376,24 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         # Prepare chunk processing
         incremental_dir = os.path.join(output_dir, "incremental_glossary")
         agg_path = os.path.join(incremental_dir, "glossary.incremental.all.csv")
+        
+        # CLEAR incremental history if it exists to ensure 'all' file only contains current run data
+        # This prevents it from growing indefinitely across multiple runs
+        if os.path.exists(agg_path):
+            try:
+                os.remove(agg_path)
+                print(f"📑 Cleared previous incremental history: {agg_path}")
+            except Exception as e:
+                print(f"⚠️ Failed to clear incremental history: {e}")
+        
+        # Clean up individual chunk files too for consistency
+        if os.path.exists(incremental_dir):
+            for f in os.listdir(incremental_dir):
+                if f.startswith("glossary.incremental") and f.endswith(".csv"):
+                    try:
+                        os.remove(os.path.join(incremental_dir, f))
+                    except:
+                        pass
 
         if chapter_split_threshold == 0:
             # Use ChapterSplitter for token-based intelligent chunking
@@ -409,15 +405,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
             splitter = ChapterSplitter(model_name=model, target_tokens=safe_input_limit)
             
             # Get the text to split (filtered or raw)
-            # FORCE RAW TEXT for initial chunking if filtering was skipped
-            text_to_split = all_text # Always start with full text for chunking to ensure coverage
-            
-            if use_smart_filter and custom_prompt and filtered_text_cache:
-                # If smart filter was successfully run and produced a reduced text, use that
-                text_to_split = filtered_text_cache
-                print("📑 Using smart-filtered text for token-based chunking")
-            else:
-                print("📑 Using full raw text for token-based chunking")
+            text_to_split = filtered_text_cache if (use_smart_filter and custom_prompt and filtered_text_cache) else all_text
             
             # Use ChapterSplitter to intelligently split based on tokens
             split_results = splitter.split_chapter(text_to_split, max_tokens=safe_input_limit)
@@ -2382,88 +2370,8 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         if term_count % 1000 == 0:
             time.sleep(0.001)
     
-    print(f"📑 Deduplicated to {len(combined_freq):,} unique terms (exact match)")
+    print(f"📑 Deduplicated to {len(combined_freq):,} unique terms")
     
-    # NEW: Global Fuzzy Deduplication of extracted terms
-    # Consolidate similar terms (e.g. "Viper" and "Viper-nim") BEFORE frequency filtering
-    # This maximizes diversity in the final sentence selection
-    if len(combined_freq) > 0:
-        try:
-            fuzzy_thresh = float(os.getenv("GLOSSARY_FUZZY_THRESHOLD", "0.90"))
-            print(f"📑 Applying global fuzzy deduplication to {len(combined_freq)} terms (threshold: {fuzzy_thresh})...")
-            
-            # Convert to dummy CSV for existing deduplicator
-            # Sort by length descending to prioritize longer forms as "raw_name"
-            # Actually, we want to keep the most frequent form? Or the longest?
-            # Deduplicator keeps the first one it sees if they match.
-            # Let's sort by frequency descending so we keep the most common form.
-            sorted_terms = sorted(combined_freq.items(), key=lambda x: x[1], reverse=True)
-            
-            dummy_csv = ["type,raw_name,translated_name"]
-            term_map = {} # safe_name -> original_term
-            
-            for term, count in sorted_terms:
-                # Use name as both raw and translated
-                # Clean name for CSV safety (remove commas/quotes)
-                safe_name = term.replace(',', '').replace('"', '').replace("'", "")
-                if not safe_name.strip():
-                    continue
-                term_map[safe_name] = term
-                
-                # IMPORTANT: Set raw_name AND translated_name to different values if possible
-                # to trick the deduplicator into thinking it's a valid entry.
-                # However, our deduplicator passes raw names first.
-                dummy_csv.append(f"term,{safe_name},{safe_name}_TRANS")
-                
-            # Run deduplication - call the raw names pass directly
-            # This function internally loads 'duplicate_detection_config' to respect user's algorithm choice
-            # We must detect libraries here to pass correct flags
-            try:
-                import rapidfuzz
-                use_rf = True
-            except ImportError:
-                use_rf = False
-                
-            try:
-                import jellyfish
-                use_jelly = True
-            except ImportError:
-                use_jelly = False
-            
-            deduped_csv = _deduplicate_pass1_raw_names(
-                dummy_csv[1:], # Skip header
-                fuzzy_thresh,
-                use_rapidfuzz=use_rf,
-                use_jellyfish=use_jelly
-            )
-            
-            # Rebuild combined_freq with consolidated counts
-            new_combined_freq = Counter()
-            valid_safe_names = set()
-            
-            # 1. Identify survivors
-            for line in deduped_csv[1:]:
-                parts = line.split(',')
-                if len(parts) >= 2:
-                    valid_safe_names.add(parts[1])
-            
-            # 2. Map original terms to survivors (this is hard without the internal map of deduplicator)
-            # Simpler approach: Just keep the survivors and their counts.
-            # We lose the counts of absorbed terms, but we keep the most frequent representative.
-            # Ideally we'd sum them up, but _deduplicate_glossary_with_fuzzy doesn't return mapping.
-            # Given we sorted by frequency, the survivors are the high-frequency ones.
-            
-            for safe_name in valid_safe_names:
-                if safe_name in term_map:
-                    original = term_map[safe_name]
-                    new_combined_freq[original] = combined_freq[original]
-            
-            print(f"📑 Global fuzzy deduplication: {len(combined_freq)} -> {len(new_combined_freq)} unique concepts")
-            combined_freq = new_combined_freq
-            
-        except Exception as e:
-            print(f"⚠️ Global fuzzy deduplication failed: {e}")
-
     # Filter to keep only terms that appear at least min_frequency times
     frequent_terms = {term: count for term, count in combined_freq.items() if count >= min_frequency}
     
@@ -2475,8 +2383,8 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     # We just need to limit the sample size
     
     filtered_sentences = important_sentences  # Already filtered!
-    print(f"📑 Candidate sentences from initial scan: {len(filtered_sentences):,} (will be refined based on frequency)")
-    
+    print(f"📑 Using {len(filtered_sentences):,} pre-filtered sentences (already contain glossary terms)")
+
     # EARLY DYNAMIC EXPANSION: collect one sentence index per unique honorific-attached name (first appearance), before scoring/nuance
     def _sentence_has_gender_pronoun(sent: str) -> bool:
         if not include_gender_context_flag or not gender_pronouns:
@@ -2496,11 +2404,9 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 honorifics = [h for h in honorifics if h]  # drop empties
                 # Keep only clear suffix/title honorifics; drop verb endings/keigo/politeness particles
                 if primary_lang == 'korean':
-                    # STRICTER LIST: Removed ambiguous single-char suffixes (시,자,부,모,제,생,공,옹) to prevent false positives (23k+ terms issue)
-                    # kept '군','양' as they are very common for young people, but '님','씨' are safest
-                    suffix_allow = {'님','씨','군','양','선배','후배','선생님','작가님','기자님', # Modern/common
-                                    '마마','대감','영감','나리','도령','낭자','아씨','규수','각하','전하','폐하','저하','합하', # Historical
-                                    '대비','대왕','왕자','공주','도련님','아가씨','족하'} # Titles
+                    suffix_allow = {'님','씨','군','양','공','옹','군','양','낭','랑','생','자','부','모','시','제','족하',
+                                    '마마','대감','영감','나리','도령','낭자','아씨','규수','각하','전하','폐하','저하','합하',
+                                    '대비','대왕','왕자','공주','도련님','아가씨'}
                     honorifics = [h for h in honorifics if h in suffix_allow]
                 elif primary_lang == 'japanese':
                     suffix_allow = {'さん','ちゃん','君','くん','様','さま','殿','先輩','先生','氏','殿下','閣下','卿'}
@@ -2562,80 +2468,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                                     ordered_names.append(token)
                 else:
                     print("📑 Dynamic expansion (honorific-first): no honorifics found in PatternManager for this language")
-                
-
-                
-                # Deduplicate honorific_first_indices to avoid expanding limit with fuzzy duplicates
-                if len(honorific_first_indices) > 0:
-                    try:
-                        print(f"📑 Dynamic expansion: deduplicating {len(honorific_first_indices)} candidates...")
-                        # Create dummy CSV entries
-                        candidates = sorted(honorific_first_indices.keys(), key=len, reverse=True)
-                        dummy_lines = []
-                        safe_map = {}
-                        
-                        for name in candidates:
-                            # Sanitize for CSV
-                            safe_name = name.replace(',', '').replace('"', '').replace("'", "")
-                            if not safe_name.strip():
-                                continue
-                            safe_map[safe_name] = name
-                            dummy_lines.append(f"character,{safe_name},{safe_name}")
-                        
-                        # Check library availability to choose best execution mode
-                        use_rf = False
-                        try:
-                            import rapidfuzz
-                            use_rf = True
-                        except ImportError:
-                            pass
-                            
-                        use_jelly = False
-                        try:
-                            import jellyfish
-                            use_jelly = True
-                        except ImportError:
-                            pass
-                            
-                        # Use existing deduplication logic which respects user-configured algorithms
-                        deduped_lines = _deduplicate_pass1_raw_names(
-                            dummy_lines, 
-                            float(os.getenv("GLOSSARY_FUZZY_THRESHOLD", "0.90")), 
-                            use_rapidfuzz=use_rf, 
-                            use_jellyfish=use_jelly
-                        )
-                        
-                        # Rebuild indices map
-                        new_indices = {}
-                        for line in deduped_lines:
-                            parts = line.split(',')
-                            if len(parts) >= 2:
-                                safe_name = parts[1]
-                                if safe_name in safe_map:
-                                    original_name = safe_map[safe_name]
-                                    if original_name in honorific_first_indices:
-                                        new_indices[original_name] = honorific_first_indices[original_name]
-                        
-                        print(f"📑 Dynamic expansion: fuzzy deduplicated {len(honorific_first_indices)} -> {len(new_indices)} unique characters")
-                        honorific_first_indices = new_indices
-                        ordered_names = list(new_indices.keys())
-                        
-                    except Exception as e:
-                        print(f"⚠️ Dynamic expansion deduplication failed: {e}")
-
                 base_count = len(honorific_first_indices)
-                
-                # Log the captured characters to a file for debugging as requested
-                try:
-                    debug_path = os.path.join(output_dir if 'output_dir' in locals() else '.', "honorific_debug.txt")
-                    with open(debug_path, "w", encoding="utf-8") as debug_f:
-                        debug_f.write(f"Captured {base_count} unique characters:\n")
-                        for name in ordered_names:
-                            debug_f.write(f"{name}\n")
-                    print(f"📑 Debug log written to {debug_path}")
-                except Exception as e:
-                    print(f"⚠️ Failed to write debug log: {e}")
-
                 if include_gender_context_flag and base_count > 0:
                     try:
                         gender_subset = sum(
@@ -2683,8 +2516,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             print(f"📑 Processing {len(check_batches)} batches of ~{check_batch_size} sentences")
             
             # Use ProcessPoolExecutor for true parallelism (if not already in subprocess)
-            # Switch to ThreadPoolExecutor to prevent potential instability on Windows with large payloads
-            use_process_pool_filtering = False 
+            use_process_pool_filtering = (not in_subprocess and len(check_batches) > 3)
             
             if use_process_pool_filtering:
                 print(f"📑 Using ProcessPoolExecutor for true parallel filtering")
@@ -2772,14 +2604,6 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         honorific_pattern_str = None
         if primary_lang in PM.CJK_HONORIFICS:
             h_list = PM.CJK_HONORIFICS[primary_lang] + PM.CJK_HONORIFICS.get('english', [])
-            
-            # Apply the same strict filtering for scoring to lower priority of weak honorifics
-            if primary_lang == 'korean':
-                suffix_allow = {'님','씨','군','양','선배','후배','선생님','작가님','기자님',
-                                '마마','대감','영감','나리','도령','낭자','아씨','규수','각하','전하','폐하','저하','합하',
-                                '대비','대왕','왕자','공주','도련님','아가씨','족하'}
-                h_list = [h for h in h_list if h in suffix_allow]
-            
             h_list.sort(key=len, reverse=True)
             if h_list:
                 honorific_pattern_str = '|'.join(map(re.escape, h_list))
@@ -2926,11 +2750,6 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         def _is_character_like(term: str) -> bool:
             try:
                 if _has_honorific(term):
-                    # For Korean, be stricter about single-char suffixes to avoid false positives in prioritization
-                    if primary_lang == 'korean':
-                        weak_suffixes = ('시', '자', '부', '모', '제', '생', '공', '옹')
-                        if term.endswith(weak_suffixes):
-                            return False
                     return True
                 # CJK short names
                 if primary_lang in ['korean', 'japanese', 'chinese']:
@@ -3814,267 +3633,118 @@ def _deduplicate_glossary_with_fuzzy(csv_lines, fuzzy_threshold):
     return deduplicated
 
 
-def _check_duplicates_against_reference_worker(args):
-    """
-    Worker function to check a batch of candidates against a reference list.
-    Returns a list of booleans: True if candidate matches ANY term in reference.
-    Optimized for batch processing.
-    """
-    candidates, references, threshold, use_rapidfuzz, use_jellyfish = args
-    
-    if not candidates or not references:
-        return [False] * len(candidates)
-        
-    results = []
-    
-    # Setup matchers
-    rfuzz = None
-    process = None
-    if use_rapidfuzz:
-        try: 
-            from rapidfuzz import fuzz as rfuzz
-            from rapidfuzz import process
-        except ImportError: 
-            use_rapidfuzz = False
-            
-    jellyfish = None
-    if use_jellyfish:
-        try: import jellyfish
-        except ImportError: use_jellyfish = False
-        
+def _deduplicate_pass1_raw_names(entry_lines, fuzzy_threshold, use_rapidfuzz, use_jellyfish):
+    """Pass 1: Remove entries with similar raw names using fuzzy matching"""
     from difflib import SequenceMatcher
     
-    # Optimization: If rapidfuzz is available, use process.cdist or extractOne for massive speedup
     if use_rapidfuzz:
-        # RapidFuzz is highly optimized. We can iterate and check extractOne.
-        # Ideally we'd use cdist for batch-to-batch, but extractOne is simpler to implement logic with.
-        score_cutoff = threshold * 100
-        
-        for cand in candidates:
-            # check against references
-            # processor=None ensures we work on strings directly
-            match = process.extractOne(cand, references, scorer=rfuzz.ratio, score_cutoff=score_cutoff)
-            results.append(bool(match))
-            
-        return results
-
-    # Fallback / Mixed Logic (Jellyfish/Difflib)
-    # This is slower, but runs in parallel process so better than sequential
-    for cand in candidates:
-        is_dup = False
-        cand_len = len(cand)
-        min_len = int(cand_len * 0.7)
-        max_len = int(cand_len * 1.3)
-        
-        for ref in references:
-            # Length filter
-            if not (min_len <= len(ref) <= max_len):
-                continue
-                
-            # Char overlap filter
-            if len(set(cand) & set(ref)) < cand_len * 0.5:
-                continue
-            
-            # Check similarity
-            score = 0.0
-            
-            if use_jellyfish:
-                score = jellyfish.jaro_winkler_similarity(cand, ref)
-            else:
-                score = SequenceMatcher(None, cand, ref).ratio()
-                
-            if score >= threshold:
-                is_dup = True
-                break
-        
-        results.append(is_dup)
-        
-    return results
-
-def _deduplicate_pass1_raw_names(entry_lines, fuzzy_threshold, use_rapidfuzz, use_jellyfish):
-    """Pass 1: Remove entries with similar raw names using Parallel Prefix Blocking Strategy (Fastest O(N))"""
+        from rapidfuzz import fuzz as rfuzz
     
+    if use_jellyfish:
+        import jellyfish
+    
+    deduplicated = []
+    seen_entries = {}  # raw_name -> (entry_type, translated_name)
+    seen_names_lower = set()  # Quick exact match check
+    removed_count = 0
     total_entries = len(entry_lines)
     
-    # Get user-configured deduplication config
-    # This ensures we respect the algorithm selected in the GUI (e.g. 'strict', 'balanced', 'aggressive')
-    try:
-        import duplicate_detection_config
-        dup_config = duplicate_detection_config.get_duplicate_detection_config()
-        active_algorithms = dup_config.get('algorithms', ['basic'])
-        selected_mode = os.getenv('GLOSSARY_DUPLICATE_ALGORITHM', 'auto').upper()
-        print(f"📑 Using user-configured deduplication algorithms ({selected_mode}): {', '.join(active_algorithms)}")
-    except ImportError:
-        print("⚠️ Could not load duplicate_detection_config, falling back to 'basic' + 'partial'")
-        active_algorithms = ['basic', 'partial', 'token_sort']
-    
-    # Pre-parse lines to avoid repeated splitting
-    parsed_entries = []
-    for line in entry_lines:
-        if not line.strip(): continue
-        parts = [p.strip() for p in line.split(',')]
-        if len(parts) < 3: continue
-        parsed_entries.append({
-            'line': line,
-            'raw': parts[1],
-            'lower': parts[1].lower(),
-            'type': parts[0],
-            'trans': parts[2]
-        })
+    for idx, line in enumerate(entry_lines):
+        # Check stop flag every 100 entries
+        if idx > 0 and idx % 100 == 0:
+            if is_stop_requested():
+                print(f"📑 ❌ Pass 1 stopped at entry {idx}/{total_entries}")
+                break
         
-    if total_entries < 500:
-        return _deduplicate_pass1_sequential(parsed_entries, fuzzy_threshold, use_rapidfuzz, use_jellyfish, active_algorithms)
-    
-    print(f"📑 Large dataset ({total_entries} entries): switching to Parallel Prefix Blocking Strategy")
-    
-    # 1. Group by Prefix (First character)
-    # This partitions the problem into ~30-50 independent small problems
-    from collections import defaultdict
-    prefix_groups = defaultdict(list)
-    
-    for entry in parsed_entries:
-        s = entry['lower']
-        # Use first char as key. Empty strings go to '' key.
-        # Normalize non-alphanumeric to a generic bucket to catch symbols together?
-        # Actually, let's just use the first char.
-        prefix = s[0] if s else ''
-        # Group CJK characters? No, CJK space is huge, prefix is fine.
-        prefix_groups[prefix].append(entry)
+        # Show progress for large glossaries
+        if total_entries > 500 and idx % 200 == 0:
+            progress = (idx / total_entries) * 100
+            print(f"📑 Pass 1 progress: {progress:.1f}% ({idx}/{total_entries})")
         
-    print(f"📑 Partitioned into {len(prefix_groups)} prefix groups for parallel processing")
-    
-    # 2. Process groups in parallel
-    max_workers = int(os.getenv("EXTRACTION_WORKERS", "4"))
-    
-    # Use ThreadPoolExecutor for RapidFuzz (GIL released)
-    if use_rapidfuzz:
-        from concurrent.futures import ThreadPoolExecutor
-        ExecutorClass = ThreadPoolExecutor
-    else:
-        from concurrent.futures import ProcessPoolExecutor
-        ExecutorClass = ProcessPoolExecutor
-        
-    final_results = []
-    
-    # Prepare tasks
-    tasks = []
-    for prefix, group in prefix_groups.items():
-        if not group: continue
-        tasks.append((group, fuzzy_threshold, use_rapidfuzz, use_jellyfish, active_algorithms))
-        
-    # Run parallel
-    with ExecutorClass(max_workers=max_workers) as executor:
-        futures = [executor.submit(_deduplicate_group_worker, task) for task in tasks]
-        
-        # Collect results with periodic progress logging
-        completed = 0
-        total_tasks = len(futures)
-        last_logged_percent = 0
-        
-        for future in as_completed(futures):
-            try:
-                group_result = future.result()
-                final_results.extend(group_result)
-            except Exception as e:
-                print(f"⚠️ Prefix group deduplication failed: {e}")
-            
-            completed += 1
-            percent = int((completed / total_tasks) * 100)
-            
-            # Log every 10%
-            if percent >= last_logged_percent + 10:
-                print(f"📑 Deduplication progress: {percent}% ({completed}/{total_tasks} groups)")
-                last_logged_percent = percent
-                
-    print(f"📑 Parallel Prefix Blocking complete: {total_entries} -> {len(final_results)} unique entries")
-    return final_results
-
-def _deduplicate_group_worker(args):
-    """Worker to deduplicate a single prefix group sequentially"""
-    group_entries, threshold, use_rapidfuzz, use_jellyfish, active_algorithms = args
-    # Sort by length descending to prioritize longer names as "base"
-    # This way "Viper-nim" (longer) is seen first, and "Viper" (shorter) is compared against it.
-    group_entries.sort(key=lambda x: len(x['raw']), reverse=True)
-    return _deduplicate_pass1_sequential(group_entries, threshold, use_rapidfuzz, use_jellyfish, active_algorithms)
-
-def _deduplicate_pass1_sequential(parsed_entries, fuzzy_threshold, use_rapidfuzz, use_jellyfish, active_algorithms=None):
-    """Original sequential logic adapted for parsed entries with configurable algorithms"""
-    from difflib import SequenceMatcher
-    import sys
-    
-    if active_algorithms is None:
-        active_algorithms = ['basic']
-    
-    rfuzz = None
-    if use_rapidfuzz:
-        try: 
-            from rapidfuzz import fuzz as rfuzz
-        except Exception as e: 
-            print(f"⚠️ RapidFuzz import failed in worker: {e}")
-            rfuzz = None
-            
-    jellyfish = None
-    if use_jellyfish:
-        try: import jellyfish
-        except: pass
-        
-    deduplicated_lines = []
-    seen_entries = [] # Keep full entry for comparison
-    
-    # DEBUG: Track stats
-    comparisons = 0
-    matches = 0
-    
-    for idx, entry in enumerate(parsed_entries):
-        raw_lower = entry['lower']
-        
-        # Exact check
-        if any(raw_lower == s['lower'] for s in seen_entries):
+        if not line.strip():
             continue
             
-        # Fuzzy check
+        parts = [p.strip() for p in line.split(',')]
+        if len(parts) < 3:
+            continue
+            
+        entry_type = parts[0]
+        raw_name = parts[1]
+        translated_name = parts[2]
+        raw_name_lower = raw_name.lower()
+        
+        # Fast exact duplicate check first
+        if raw_name_lower in seen_names_lower:
+            removed_count += 1
+            if removed_count <= 10:  # Only log first few
+                print(f"📋   Pass 1: Removing exact duplicate: '{raw_name}'")
+            continue
+        
+        # For fuzzy matching, only check if threshold is less than 1.0
         is_duplicate = False
         if fuzzy_threshold < 1.0:
-            for seen in seen_entries:
-                comparisons += 1
+            # Use a more efficient approach: only check similar length strings
+            name_len = len(raw_name)
+            min_len = int(name_len * 0.7)
+            max_len = int(name_len * 1.3)
+            
+            # Only compare with entries of similar length
+            candidates = []
+            for seen_name, (seen_type, seen_trans) in seen_entries.items():
+                if min_len <= len(seen_name) <= max_len:
+                    candidates.append(seen_name)
+            
+            # Check fuzzy similarity with candidates using multiple algorithms
+            for seen_name in candidates:
+                # Quick character overlap check before expensive comparison
+                char_overlap = len(set(raw_name_lower) & set(seen_name.lower()))
+                if char_overlap < len(raw_name_lower) * 0.5:
+                    continue  # Too different, skip
                 
-                best_score = 0.0
+                # Try multiple algorithms and take the best score
+                scores = []
                 
-                if use_rapidfuzz and rfuzz:
-                    # Respect user-configured algorithms
-                    scores = []
-                    
-                    if 'basic' in active_algorithms:
-                        scores.append(rfuzz.ratio(raw_lower, seen['lower']))
-                    
-                    if 'partial' in active_algorithms:
-                        scores.append(rfuzz.partial_ratio(raw_lower, seen['lower']))
-                        
-                    if 'token_sort' in active_algorithms:
-                        scores.append(rfuzz.token_sort_ratio(raw_lower, seen['lower']))
-                        
-                    if not scores: # Fallback
-                        scores.append(rfuzz.ratio(raw_lower, seen['lower']))
-                        
-                    best_score = max(scores) / 100.0
-                    
-                elif use_jellyfish and jellyfish and 'jaro_winkler' in active_algorithms:
-                    best_score = jellyfish.jaro_winkler_similarity(raw_lower, seen['lower'])
+                if use_rapidfuzz:
+                    # RapidFuzz basic ratio
+                    scores.append(rfuzz.ratio(raw_name_lower, seen_name.lower()) / 100.0)
+                    # Token sort (handles word order)
+                    try:
+                        scores.append(rfuzz.token_sort_ratio(raw_name_lower, seen_name.lower()) / 100.0)
+                    except:
+                        pass
+                    # Partial ratio (substring)
+                    try:
+                        scores.append(rfuzz.partial_ratio(raw_name_lower, seen_name.lower()) / 100.0)
+                    except:
+                        pass
                 else:
-                    # Fallback or strict 'basic' without rapidfuzz
-                    best_score = SequenceMatcher(None, raw_lower, seen['lower']).ratio()
-                    
-                if best_score >= fuzzy_threshold:
+                    # Fallback to difflib
+                    scores.append(SequenceMatcher(None, raw_name_lower, seen_name.lower()).ratio())
+                
+                # Try Jaro-Winkler (better for names)
+                if use_jellyfish:
+                    try:
+                        jaro = jellyfish.jaro_winkler_similarity(raw_name, seen_name)
+                        scores.append(jaro)
+                    except:
+                        pass
+                
+                # Take best score
+                best_similarity = max(scores) if scores else 0.0
+                
+                if best_similarity >= fuzzy_threshold:
+                    if removed_count < 10:  # Only log first few
+                        print(f"📋   Pass 1: Removing fuzzy duplicate: '{raw_name}' ~= '{seen_name}' (score: {best_similarity:.2%})")
+                    removed_count += 1
                     is_duplicate = True
-                    matches += 1
-                    # Log removed to reduce spam in parallel execution (1400+ groups)
                     break
         
         if not is_duplicate:
-            seen_entries.append(entry)
-            deduplicated_lines.append(entry['line'])
-            
-    return deduplicated_lines
+            seen_entries[raw_name] = (entry_type, translated_name)
+            seen_names_lower.add(raw_name_lower)
+            deduplicated.append(line)
+    
+    return deduplicated
 
 
 def _deduplicate_pass2_translated_names(entry_lines):
