@@ -2581,7 +2581,12 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     # Force smart selection path when dynamic expansion is enabled, even if filtered_sentences <= max_sentences
     run_smart_selection = (not force_skip_smart_selection) and (include_all_characters or (max_sentences > 0 and len(filtered_sentences) > max_sentences))
     if run_smart_selection and max_sentences > 0:
-        print(f"📁 Limiting to {max_sentences} representative sentences (from {len(filtered_sentences):,})")
+        dynamic_bonus = len(honorific_first_indices) if include_all_characters else 0
+        effective_preview = max_sentences + dynamic_bonus
+        if dynamic_bonus > 0:
+            print(f"📁 Limiting to {max_sentences} + {dynamic_bonus} (dynamic expansion) = {effective_preview} representative sentences (from {len(filtered_sentences):,})")
+        else:
+            print(f"📁 Limiting to {max_sentences} representative sentences (from {len(filtered_sentences):,})")
         
         # SMART SELECTION: Prioritize sentences with unique terms and gender context
         # instead of blind slicing.
