@@ -1783,6 +1783,10 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     filter_start_time = time.time()
     print(f"📑 Starting smart text filtering...")
     print(f"📑 Input text size: {len(text):,} characters")
+
+    # Dynamic character coverage flag (must be defined before any early checks)
+    include_all_characters_env = os.getenv("GLOSSARY_INCLUDE_ALL_CHARACTERS", "0")
+    include_all_characters = include_all_characters_env == "1"
     
     # Clean HTML if present
     print(f"📑 Step 1/7: Cleaning HTML tags...")
@@ -2361,7 +2365,8 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     print(f"📑 Using {len(filtered_sentences):,} pre-filtered sentences (already contain glossary terms)")
     
     # For extremely large datasets, we can optionally do additional filtering
-    if len(filtered_sentences) > 10000 and len(frequent_terms) > 1000:
+    # Skip this reduction when include_all_characters is enabled to avoid losing rare characters
+    if (not include_all_characters) and len(filtered_sentences) > 10000 and len(frequent_terms) > 1000:
         print(f"📑 Large dataset detected - applying frequency-based filtering...")
         print(f"📑 Filtering {len(filtered_sentences):,} sentences for top frequent terms...")
         
@@ -2451,13 +2456,10 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         print(f"🔍 [DEBUG] max_sentences parameter was provided: {max_sentences}")
     
     print(f"🔍 [DEBUG] Final GLOSSARY_MAX_SENTENCES value being used: {max_sentences}")
-    # Dynamic expansion flag
-    include_all_characters_env = os.getenv("GLOSSARY_INCLUDE_ALL_CHARACTERS", "0")
-    include_all_characters = include_all_characters_env == "1"
-    print(f"📑 DEBUG: Include all characters (dynamic limit expansion) = '{include_all_characters_env}'")
 
-    # Handle max_sentences = 0 as "include all sentences"
-    if max_sentences > 0 and len(filtered_sentences) > max_sentences:
+    # Force smart selection path when dynamic expansion is enabled, even if filtered_sentences <= max_sentences
+    run_smart_selection = include_all_characters or (max_sentences > 0 and len(filtered_sentences) > max_sentences)
+    if run_smart_selection and max_sentences > 0:
         print(f"📁 Limiting to {max_sentences} representative sentences (from {len(filtered_sentences):,})")
         
         # SMART SELECTION: Prioritize sentences with unique terms and gender context
@@ -2596,22 +2598,46 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             term_to_sentences[term].sort(key=lambda idx: sentence_scores[idx], reverse=True)
         
         # Split terms into character-like (with honorifics) and others
+        def _is_character_like(term: str) -> bool:
+            try:
+                if _has_honorific(term):
+                    return True
+                # CJK short names
+                if primary_lang in ['korean', 'japanese', 'chinese']:
+                    # Count CJK chars
+                    cjk_len = sum(1 for ch in term if 0x4E00 <= ord(ch) <= 0x9FFF or 0x3040 <= ord(ch) <= 0x30FF or 0xAC00 <= ord(ch) <= 0xD7AF)
+                    if 2 <= cjk_len <= 4:
+                        return True
+                # English-style names: title case with 1-3 words
+                parts = term.split()
+                if 1 <= len(parts) <= 3 and all(p[:1].isupper() for p in parts if p):
+                    return True
+            except Exception:
+                pass
+            return False
+
         character_terms = []
         non_character_terms = []
         for term in sorted(term_to_sentences.keys()):
-            try:
-                if _has_honorific(term):
-                    character_terms.append(term)
-                else:
-                    non_character_terms.append(term)
-            except Exception:
+            if _is_character_like(term):
+                character_terms.append(term)
+            else:
                 non_character_terms.append(term)
 
-        # If dynamic limit expansion is enabled, treat ALL detected terms as characters to guarantee coverage
-        if include_all_characters:
-            character_terms = list(term_to_sentences.keys())
-            non_character_terms = []
-            print(f"📑 DEBUG: Dynamic limit expansion active — treating {len(character_terms):,} terms as characters")
+        # If dynamic limit expansion is enabled, prepare to cover every character-like term once
+        if include_all_characters and character_terms:
+            # Build characters strictly from honorific-bearing terms first; fallback to detection if none
+            honorific_chars = []
+            if honorific_pattern_str:
+                try:
+                    honor_pat = re.compile(honorific_pattern_str)
+                    honorific_chars = [t for t in character_terms if honor_pat.search(t)]
+                except Exception:
+                    honorific_chars = []
+            if honorific_chars:
+                character_terms = honorific_chars
+            # Rank character terms by frequency so most frequent get picked first when sentences are missing
+            character_terms = sorted(character_terms, key=lambda t: frequent_terms.get(t, 0), reverse=True)
         
         def round_robin_terms(term_list, selected_indices, target_limit, min_per_term=None):
             """Round-robin over provided term list, updating selected_indices in-place."""
@@ -2643,38 +2669,22 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         if include_all_characters and character_terms:
             print(f"📑 'Include All Characters' enabled: Ensuring coverage for {len(character_terms)} characters...")
             
-            # Strategy: 
-            # 1. Force include top 1-2 sentences for EVERY character (ignoring limit initially)
-            # 2. Add original max_sentences budget for general coverage
-            
-            # Phase 1: Mandatory Character Coverage
-            # Select at least 1 best sentence for every character
+            # Strategy: one best sentence per UNIQUE character term, no duplicates
             for term in character_terms:
                 sentences = term_to_sentences[term]
                 if sentences:
-                    # Pick best sentence (highest score)
-                    selected_indices.add(sentences[0])
-                    # If detecting gender, maybe pick 2 to be safe?
-                    if include_gender_context and len(sentences) > 1:
-                        selected_indices.add(sentences[1])
+                    selected_indices.add(sentences[0])  # exactly one per character term
             
             initial_count = len(selected_indices)
             print(f"📑   - Mandatory character sentences: {initial_count}")
             
-            # Phase 2: Add general budget on top
-            # We treat the character sentences as "free" or "base"
-            # Now run round robin for non-characters (and deeper character context) up to (current + max_sentences)
-            effective_limit = len(selected_indices) + max_sentences
-            print(f"📑   - Dynamic limit increased: {max_sentences} -> {effective_limit}")
+            # No added budget: just keep the mandatory set; fill remaining only if max_sentences provides room
+            effective_limit = max(initial_count, max_sentences)
+            print(f"📑   - Dynamic limit set to: {effective_limit}")
             
-            # Fill remaining budget with non-characters first to ensure breadth
-            if non_character_terms:
+            # Phase 2: Use remaining budget for non-character terms only (if any budget remains)
+            if non_character_terms and len(selected_indices) < effective_limit:
                 round_robin_terms(non_character_terms, selected_indices, effective_limit)
-                
-            # If still have room, add more character depth
-            if len(selected_indices) < effective_limit:
-                round_robin_terms(character_terms, selected_indices, effective_limit)
-                
         else:
             # Standard Fixed Limit Logic
             # First, prioritize character-like terms (honorific-based)
@@ -2687,13 +2697,14 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         
         
         # If we still have room (rare), fill with highest scored remaining sentences
-        if len(selected_indices) < max_sentences:
+        target_limit = effective_limit if include_all_characters else max_sentences
+        if target_limit and len(selected_indices) < target_limit:
             remaining = sorted(
                 [i for i in range(len(filtered_sentences)) if i not in selected_indices],
                 key=lambda i: sentence_scores[i],
                 reverse=True
             )
-            selected_indices.update(remaining[:max_sentences - len(selected_indices)])
+            selected_indices.update(remaining[:target_limit - len(selected_indices)])
             
         # Sort indices to maintain narrative flow
         final_indices = sorted(list(selected_indices))
@@ -2705,6 +2716,10 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     
     # Check if gender context expansion is enabled
     include_gender_context = os.getenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
+    
+    # To avoid blowing up output, disable context expansion when dynamic expansion is active
+    if include_all_characters:
+        include_gender_context = False
     
     if include_gender_context:
         context_window = int(os.getenv("GLOSSARY_CONTEXT_WINDOW", "2"))
