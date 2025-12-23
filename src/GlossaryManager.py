@@ -2596,6 +2596,26 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         # Sort each term's sentences by score descending (higher score first)
         for term in term_to_sentences:
             term_to_sentences[term].sort(key=lambda idx: sentence_scores[idx], reverse=True)
+        # If dynamic expansion is on, prefer character terms derived from honorific-attached names
+        honorific_char_terms = []
+        if include_all_characters and honorific_pattern_str:
+            try:
+                honor_pat = re.compile(honorific_pattern_str)
+                char_term_map = {}
+                name_regex = re.compile(r'([\w\-\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]+)$')
+                for idx, sent in enumerate(filtered_sentences):
+                    for m in honor_pat.finditer(sent):
+                        prefix = sent[:m.start()].strip()
+                        nm = name_regex.search(prefix)
+                        if nm:
+                            name = nm.group(1)
+                            char_term_map.setdefault(name, []).append(idx)
+                if char_term_map:
+                    term_to_sentences = {k: sorted(v, key=lambda i: sentence_scores.get(i, 0), reverse=True)
+                                         for k, v in char_term_map.items()}
+                    honorific_char_terms = list(term_to_sentences.keys())
+            except Exception:
+                pass
         
         # Split terms into character-like (with honorifics) and others
         def _is_character_like(term: str) -> bool:
@@ -2618,7 +2638,8 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
 
         character_terms = []
         non_character_terms = []
-        for term in sorted(term_to_sentences.keys()):
+        source_terms = honorific_char_terms if (include_all_characters and honorific_char_terms) else sorted(term_to_sentences.keys())
+        for term in source_terms:
             if _is_character_like(term):
                 character_terms.append(term)
             else:
