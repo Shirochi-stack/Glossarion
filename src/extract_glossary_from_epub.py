@@ -2401,7 +2401,8 @@ def main(log_callback=None, stop_callback=None):
 
     # Toggle for chapter splitting (manual glossary tab)
     chapter_split_enabled = os.getenv("GLOSSARY_ENABLE_CHAPTER_SPLIT", "1") == "1"
-    print(f"✂️  Chapter Split Enabled: {'✅' if chapter_split_enabled else '❌'}")
+    if chapter_split_enabled or os.getenv("DEBUG_CHAPTER_SPLIT_LOG", "0") == "1":
+        print(f"✂️  Chapter Split Enabled: {'✅' if chapter_split_enabled else '❌'}")
 
     # Resolve effective output token limit (honor -1 as inherit)
     raw_output_env = os.getenv("GLOSSARY_MAX_OUTPUT_TOKENS", os.getenv("MAX_OUTPUT_TOKENS", "0"))
@@ -2595,14 +2596,39 @@ def main(log_callback=None, stop_callback=None):
         
         # Create merge groups if request merging is enabled
         if use_request_merging:
-            # Group chapters for merging
-            merge_groups = []
-            for i in range(0, len(chapters_to_process), request_merge_count):
-                group = chapters_to_process[i:i + request_merge_count]
-                merge_groups.append(group)
-            print(f"🔗 Created {len(merge_groups)} merge groups from {len(chapters_to_process)} chapters")
-            units_to_process = merge_groups
-            is_merged_mode = True
+            if chapter_split_enabled:
+                # Budget-aware auto-adjust (only when chapter splitting toggle is ON)
+                merge_groups = []
+                run = chapters_to_process  # already ordered
+                i = 0
+                while i < len(run):
+                    group = [run[i]]
+                    i += 1
+
+                    while i < len(run) and len(group) < request_merge_count:
+                        candidate = run[i]
+                        merged_preview = "\n\n".join([c for (_, c) in group + [candidate]])
+                        merged_tokens = chapter_splitter.count_tokens(merged_preview)
+
+                        if merged_tokens <= available_tokens:
+                            group.append(candidate)
+                            i += 1
+                        else:
+                            break
+
+                    merge_groups.append(group)
+
+                print(f"🔗 Created {len(merge_groups)} merge groups from {len(chapters_to_process)} chapters (budget-aware)")
+                units_to_process = merge_groups
+                is_merged_mode = True
+            else:
+                # Original simple grouping by count when split toggle is OFF
+                merge_groups = []
+                for i in range(0, len(chapters_to_process), request_merge_count):
+                    merge_groups.append(chapters_to_process[i:i + request_merge_count])
+                print(f"🔗 Created {len(merge_groups)} merge groups from {len(chapters_to_process)} chapters (count-based)")
+                units_to_process = merge_groups
+                is_merged_mode = True
         else:
             units_to_process = [[ch] for ch in chapters_to_process]  # Each chapter as single-item group
             is_merged_mode = False
@@ -3037,25 +3063,53 @@ def main(log_callback=None, stop_callback=None):
                 
                 chapters_needing_processing.append((idx, chap))
             
-            # Create merge groups from consecutive unprocessed chapters
-            for i in range(0, len(chapters_needing_processing), request_merge_count):
-                group = chapters_needing_processing[i:i + request_merge_count]
-                # Always create groups, even single-chapter ones (they'll just process normally)
-                parent_idx = group[0][0]
-                merge_groups[parent_idx] = group
-                
-                # Only mark children as merged if there's more than one chapter
-                if len(group) > 1:
-                    child_indices = [g[0] for g in group[1:]]
-                    print(f"   📎 Chapters {parent_idx+1} + {[c+1 for c in child_indices]} will be merged")
-                    # Mark child indices as merged so they'll be skipped
-                    for child_idx in child_indices:
-                        if child_idx not in merged_indices:
-                            merged_indices.append(child_idx)
+            if chapter_split_enabled:
+                # Budget-aware grouping (auto-adjust to fit available_tokens)
+                run = chapters_needing_processing
+                i = 0
+                while i < len(run):
+                    group = [run[i]]
+                    i += 1
+                    
+                    while i < len(run) and len(group) < request_merge_count:
+                        candidate = run[i]
+                        merged_preview = "\n\n".join([c for (_, c) in group + [candidate]])
+                        merged_tokens = chapter_splitter.count_tokens(merged_preview)
+                        
+                        if merged_tokens <= available_tokens:
+                            group.append(candidate)
+                            i += 1
+                        else:
+                            break
+                    
+                    parent_idx = group[0][0]
+                    merge_groups[parent_idx] = group
+                    
+                    if len(group) > 1:
+                        child_indices = [g[0] for g in group[1:]]
+                        print(f"   📎 Chapters {parent_idx+1} + {[c+1 for c in child_indices]} will be merged (budget-aware)")
+                        for child_idx in child_indices:
+                            if child_idx not in merged_indices:
+                                merged_indices.append(child_idx)
+            else:
+                # Count-based grouping when chapter splitting toggle is OFF
+                for i in range(0, len(chapters_needing_processing), request_merge_count):
+                    group = chapters_needing_processing[i:i + request_merge_count]
+                    parent_idx = group[0][0]
+                    merge_groups[parent_idx] = group
+                    if len(group) > 1:
+                        child_indices = [g[0] for g in group[1:]]
+                        print(f"   📎 Chapters {parent_idx+1} + {[c+1 for c in child_indices]} will be merged (count-based)")
+                        for child_idx in child_indices:
+                            if child_idx not in merged_indices:
+                                merged_indices.append(child_idx)
             
             if merge_groups:
                 save_progress(completed, glossary, merged_indices)
-                print(f"   📊 Created {len(merge_groups)} merge groups")
+                if chapter_split_enabled:
+                    print(f"   📊 Created {len(merge_groups)} merge groups (budget-aware)")
+                else:
+                    print(f"   📊 Created {len(merge_groups)} merge groups (count-based)")
         
         for idx, chap in enumerate(chapters):
             # Check for stop at the beginning of each chapter
