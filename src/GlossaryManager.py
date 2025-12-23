@@ -2540,12 +2540,16 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                         
                         # Log periodically (every ~5 seconds or if it's the last batch)
                         if (current_time - last_log_time >= 5.0) or (completed_batches == total_batches):
-                            rate = processed_count / elapsed if elapsed > 0 else 0
-                            progress_pct = (processed_count / total_to_score) * 100
+                            # Ensure processed_count doesn't exceed total_to_score for display
+                            display_count = min(processed_count, total_to_score)
+                            progress_pct = min(99.9, (display_count / total_to_score) * 100)
+                            
+                            rate = display_count / elapsed if elapsed > 0 else 0
                             
                             if completed_batches < total_batches:
-                                print(f"📑 Scoring... {processed_count:,}/{total_to_score:,} sentences ({progress_pct:.1f}%) | Batch {completed_batches}/{total_batches} | {rate:.0f} sent/sec | {elapsed:.0f}s elapsed")
+                                print(f"📑 Scoring... {display_count:,}/{total_to_score:,} sentences ({progress_pct:.1f}%) | Batch {completed_batches}/{total_batches} | {rate:.0f} sent/sec | {elapsed:.0f}s elapsed")
                             else:
+                                print(f"📑 Scoring... {total_to_score:,}/{total_to_score:,} sentences (100.0%) | Batch {total_batches}/{total_batches} | {rate:.0f} sent/sec | {elapsed:.0f}s elapsed")
                                 print(f"📑 Scoring... finalizing last batches | {elapsed:.0f}s elapsed")
                                 
                             last_log_time = current_time
