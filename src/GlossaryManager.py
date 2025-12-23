@@ -2432,6 +2432,20 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                             name = m.group("name").strip()
                             if not name or any(ch.isdigit() for ch in name):
                                 continue
+                                
+                            # Apply strict filtering to regex matches too
+                            # FILTERING: Skip tokens with common noisy start characters
+                            if any(name.startswith(c) for c in ['[', '(', '{', '<', '-', 'ㄴ', 'ㅇ', 'ㄹ', 'ㅁ', 'ㅂ', 'ㅋ', 'ㅎ']):
+                                continue
+                            
+                            # FILTERING: Skip tokens that are just common words/particles
+                            if name in PM.COMMON_WORDS:
+                                continue
+                                
+                            # FILTERING: Aggressive Korean Verb/Adjective Ending Check
+                            if len(name) > 2 and any(name.endswith(e) for e in ['겠네', '리라', '니까', '는데', '러나', '다가', '면서', '지만', '도록', '으로', '에서', '에게', '한테', '라고', '이란']):
+                                continue
+                                
                             # Skip if name looks like a title term (PatternManager title patterns)
                             skip_title = False
                             for pat in PM.TITLE_PATTERNS.get(primary_lang, []):
