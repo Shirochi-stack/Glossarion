@@ -321,8 +321,9 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         print("📑 ❌ Glossary generation stopped by user")
         return {}
     
-    # Get chapter split threshold and filter mode
+    # Get chapter split threshold, toggle, and filter mode
     chapter_split_threshold = int(os.getenv("GLOSSARY_CHAPTER_SPLIT_THRESHOLD", "100000"))
+    chapter_split_enabled = os.getenv("GLOSSARY_ENABLE_CHAPTER_SPLIT", "1") == "1"
     filter_mode = os.getenv("GLOSSARY_FILTER_MODE", "all")  # all, only_with_honorifics, only_without_honorifics
     
     # Check if parallel extraction is enabled for automatic glossary
@@ -392,8 +393,12 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
             pass
     
     # Check if we need to split into chunks based on EFFECTIVE size after filtering
-    needs_chunking = (chapter_split_threshold == 0 and estimated_tokens > safe_input_limit) or \
-                     (chapter_split_threshold > 0 and effective_text_size > chapter_split_threshold)
+    needs_chunking = chapter_split_enabled and (
+        (chapter_split_threshold == 0 and estimated_tokens > safe_input_limit) or
+        (chapter_split_threshold > 0 and effective_text_size > chapter_split_threshold)
+    )
+    if not chapter_split_enabled:
+        print("📑 Chapter splitting disabled (GLOSSARY_ENABLE_CHAPTER_SPLIT=0) - processing without pre-splitting")
     
     if needs_chunking:
         # Prepare chunk processing

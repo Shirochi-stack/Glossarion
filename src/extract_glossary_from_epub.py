@@ -1978,6 +1978,92 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
             'chap': chap,  # Include chapter even on error
             'error': str(e)
         }
+def process_single_chapter_with_split(idx: int,
+                                      chap: str,
+                                      build_prompt_fn,
+                                      chapter_splitter,
+                                      available_tokens: int,
+                                      chapter_split_enabled: bool,
+                                      contextual_enabled: bool,
+                                      history,
+                                      ctx_limit: int,
+                                      rolling_window: bool,
+                                      client,
+                                      temp: float,
+                                      mtoks: int,
+                                      stop_check_fn,
+                                      chunk_timeout: int = None):
+    """
+    Wrapper that performs chapter-level splitting (using output-limit budget) before calling the API.
+    Aggregates all chunk results into a single result dict to keep batch accounting identical.
+    """
+    # Decide if splitting is needed
+    chapter_tokens = chapter_splitter.count_tokens(chap)
+    if not (chapter_split_enabled and chapter_tokens > available_tokens):
+        # No split needed; build messages as usual
+        system_prompt, user_prompt = build_prompt_fn(chap)
+        if not contextual_enabled:
+            msgs = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+        else:
+            time.sleep(0.000001)
+            with _history_lock:
+                msgs = (
+                    [{"role": "system", "content": system_prompt}]
+                    + trim_context_history(history, ctx_limit, rolling_window)
+                    + [{"role": "user", "content": user_prompt}]
+                )
+        return process_single_chapter_api_call(idx, chap, msgs, client, temp, mtoks, stop_check_fn, chunk_timeout)
+
+    print(f"⚠️ Chapter {idx+1} exceeds chunk budget ({chapter_tokens:,} > {available_tokens:,}); splitting...")
+    # Wrap plain text as simple HTML for splitter
+    chapter_html = f"<html><body><p>{chap.replace(chr(10)+chr(10), '</p><p>')}</p></body></html>"
+    chunks = chapter_splitter.split_chapter(chapter_html, available_tokens)
+    print(f"📄 Chapter split into {len(chunks)} chunks (budget {available_tokens:,})")
+
+    aggregated_data = []
+    last_resp = ""
+    last_raw_obj = None
+    for chunk_html, chunk_idx, total_chunks in chunks:
+        if stop_check_fn():
+            print(f"❌ Glossary extraction stopped during chunk {chunk_idx}/{total_chunks} of chapter {idx+1}")
+            break
+        soup = BeautifulSoup(chunk_html, 'html.parser')
+        chunk_text = soup.get_text(strip=True)
+
+        system_prompt, user_prompt = build_prompt_fn(chunk_text)
+        if not contextual_enabled:
+            msgs = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+        else:
+            time.sleep(0.000001)
+            with _history_lock:
+                msgs = (
+                    [{"role": "system", "content": system_prompt}]
+                    + trim_context_history(history, ctx_limit, rolling_window)
+                    + [{"role": "user", "content": user_prompt}]
+                )
+
+        print(f"🔄 Processing chunk {chunk_idx}/{total_chunks} of Chapter {idx+1}")
+        result = process_single_chapter_api_call(idx, chunk_text, msgs, client, temp, mtoks, stop_check_fn, chunk_timeout)
+        if result.get("data"):
+            aggregated_data.extend(result["data"])
+        last_resp = result.get("resp", last_resp)
+        if result.get("raw_obj"):
+            last_raw_obj = result.get("raw_obj")
+
+    return {
+        'idx': idx,
+        'data': aggregated_data,
+        'resp': last_resp,
+        'chap': chap,
+        'raw_obj': last_raw_obj,
+        'error': None
+    }
 
 def process_merged_group_api_call(merge_group: list, msgs_builder_fn, 
                                    client, temp: float, mtoks: int,
@@ -2617,10 +2703,24 @@ def main(log_callback=None, stop_callback=None):
                                      + trim_context_history(history, ctx_limit, rolling_window) \
                                      + [{"role": "user", "content": user_prompt}]
                         
-                        # Submit to thread pool
+                        # Submit to thread pool (with optional splitting)
                         future = executor.submit(
-                            process_single_chapter_api_call,
-                            idx, chap, msgs, client, temp, mtoks, check_stop, chunk_timeout
+                            process_single_chapter_with_split,
+                            idx,
+                            chap,
+                            build_prompt,
+                            chapter_splitter,
+                            available_tokens,
+                            chapter_split_enabled,
+                            contextual_enabled,
+                            history,
+                            ctx_limit,
+                            rolling_window,
+                            client,
+                            temp,
+                            mtoks,
+                            check_stop,
+                            chunk_timeout
                         )
                         futures[future] = unit
                     
