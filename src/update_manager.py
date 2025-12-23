@@ -940,8 +940,8 @@ class UpdateManager(QObject):
         
         # Get screen dimensions and calculate size
         screen = app.primaryScreen().geometry()
-        dialog_width = int(screen.width() * 0.25)  # Half of 0.5
-        dialog_height = int(screen.height() * 0.4)  # Half of 0.8
+        dialog_width = int(screen.width() * 0.25)
+        dialog_height = int(screen.height() * 0.8) 
         dialog.resize(dialog_width, dialog_height)
         
         # Set icon if available
@@ -949,8 +949,8 @@ class UpdateManager(QObject):
         if os.path.exists(icon_path):
             dialog.setWindowIcon(QIcon(icon_path))
         
-        # Apply global stylesheet for radio buttons
-        dialog.setStyleSheet("""
+        # Apply additional widget styling (radio buttons, group boxes, tabs)
+        dialog.setStyleSheet(dialog.styleSheet() + """
             QRadioButton {
                 color: white;
                 spacing: 6px;
@@ -996,6 +996,49 @@ class UpdateManager(QObject):
                 padding: 0 5px;
                 color: #5a9fd4;
                 font-weight: bold;
+            }
+            QTabWidget {
+                background-color: #1b1b1b;
+            }
+            QTabWidget::pane {
+                border: 1px solid #5a9fd4;
+                border-radius: 6px;
+                top: 12px;
+                background-color: #111111;
+            }
+            QTabWidget::tab-bar {
+                alignment: center;
+            }
+            QTabBar::tab {
+                background: #2b2b2b;
+                color: #cfcfcf;
+                padding: 6px 14px;
+                border: 1px solid #3d3d3d;
+                border-bottom: none;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                margin-right: 4px;
+                min-width: 70px;
+                font-weight: 600;
+            }
+            QTabBar::tab:!selected {
+                margin-top: 4px;
+                color: #9fa6b2;
+                background: #1f1f1f;
+            }
+            QTabBar::tab:hover {
+                background: #3a3a3a;
+                color: white;
+                border-color: #5a9fd4;
+            }
+            QTabBar::tab:selected {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                             stop:0 #65b0ff, stop:1 #3c7dd9);
+                color: white;
+                border-color: #5a9fd4;
+            }
+            QTabBar::tab:disabled {
+                color: #555555;
             }
         """)
         
