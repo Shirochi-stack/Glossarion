@@ -1704,6 +1704,22 @@ Rules:
         compress_layout.addWidget(label3)
         compress_layout.addStretch()
         
+        # Include all characters toggle (Dynamic Max Limit)
+        include_chars_widget = QWidget()
+        include_chars_layout = QHBoxLayout(include_chars_widget)
+        include_chars_layout.setContentsMargins(0, 0, 0, 15)
+        auto_layout.addWidget(include_chars_widget)
+        
+        if not hasattr(self, 'include_all_characters_checkbox'):
+            self.include_all_characters_checkbox = self._create_styled_checkbox("Dynamic Limit: Include All Characters")
+            self.include_all_characters_checkbox.setChecked(self.config.get('glossary_include_all_characters', False))
+            self.include_all_characters_checkbox.setToolTip("Dynamically increases the Max Sentences limit to ensure every detected character name is included in the context, even if it exceeds the fixed limit.")
+        include_chars_layout.addWidget(self.include_all_characters_checkbox)
+        
+        label_chars = QLabel("(Dynamically increases sentence limit to cover ALL character names)")
+        include_chars_layout.addWidget(label_chars)
+        include_chars_layout.addStretch()
+        
         # Include gender context toggle (below compress glossary)
         gender_context_widget = QWidget()
         gender_context_layout = QHBoxLayout(gender_context_widget)

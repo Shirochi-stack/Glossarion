@@ -2597,40 +2597,83 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 else:
                     non_character_terms.append(term)
             except Exception:
-                # Fallback: if anything goes wrong, treat as non-character
                 non_character_terms.append(term)
         
-        def round_robin_terms(term_list, selected_indices, max_sentences):
+        def round_robin_terms(term_list, selected_indices, target_limit, min_per_term=None):
             """Round-robin over provided term list, updating selected_indices in-place."""
-            # Convert to list of iterators over sentence indices
             term_iterators = [iter(term_to_sentences[t]) for t in term_list]
             
-            while len(selected_indices) < max_sentences and term_iterators:
+            # If min_per_term is set, ensure we get at least that many for each term first
+            if min_per_term:
+                for term in term_list:
+                    sentences = term_to_sentences[term]
+                    for i in range(min(min_per_term, len(sentences))):
+                        selected_indices.add(sentences[i])
+            
+            while len(selected_indices) < target_limit and term_iterators:
                 active_iterators = []
                 for it in term_iterators:
-                    if len(selected_indices) >= max_sentences:
+                    if len(selected_indices) >= target_limit:
                         break
                     try:
-                        # Find next unselected sentence for this term
                         while True:
                             idx = next(it)
                             if idx not in selected_indices:
                                 selected_indices.add(idx)
-                                # Keep this iterator active if it might have more
                                 active_iterators.append(it)
                                 break
-                            # If already selected (by another term), try next one for this term
                     except StopIteration:
-                        pass  # This term has no more sentences
+                        pass
                 term_iterators = active_iterators
+
+        # Check for "Include All Characters" override
+        include_all_characters = os.getenv("GLOSSARY_INCLUDE_ALL_CHARACTERS", "0") == "1"
         
-        # First, prioritize character-like terms (honorific-based)
-        if character_terms:
-            round_robin_terms(character_terms, selected_indices, max_sentences)
+        if include_all_characters and character_terms:
+            print(f"📑 'Include All Characters' enabled: Ensuring coverage for {len(character_terms)} characters...")
+            
+            # Strategy: 
+            # 1. Force include top 1-2 sentences for EVERY character (ignoring limit initially)
+            # 2. Add original max_sentences budget for general coverage
+            
+            # Phase 1: Mandatory Character Coverage
+            # Select at least 1 best sentence for every character
+            for term in character_terms:
+                sentences = term_to_sentences[term]
+                if sentences:
+                    # Pick best sentence (highest score)
+                    selected_indices.add(sentences[0])
+                    # If detecting gender, maybe pick 2 to be safe?
+                    if include_gender_context and len(sentences) > 1:
+                        selected_indices.add(sentences[1])
+            
+            initial_count = len(selected_indices)
+            print(f"📑   - Mandatory character sentences: {initial_count}")
+            
+            # Phase 2: Add general budget on top
+            # We treat the character sentences as "free" or "base"
+            # Now run round robin for non-characters (and deeper character context) up to (current + max_sentences)
+            effective_limit = len(selected_indices) + max_sentences
+            print(f"📑   - Dynamic limit increased: {max_sentences} -> {effective_limit}")
+            
+            # Fill remaining budget with non-characters first to ensure breadth
+            if non_character_terms:
+                round_robin_terms(non_character_terms, selected_indices, effective_limit)
+                
+            # If still have room, add more character depth
+            if len(selected_indices) < effective_limit:
+                round_robin_terms(character_terms, selected_indices, effective_limit)
+                
+        else:
+            # Standard Fixed Limit Logic
+            # First, prioritize character-like terms (honorific-based)
+            if character_terms:
+                round_robin_terms(character_terms, selected_indices, max_sentences)
+            
+            # Then, if we still have room, cover remaining non-character terms
+            if len(selected_indices) < max_sentences and non_character_terms:
+                round_robin_terms(non_character_terms, selected_indices, max_sentences)
         
-        # Then, if we still have room, cover remaining non-character terms
-        if len(selected_indices) < max_sentences and non_character_terms:
-            round_robin_terms(non_character_terms, selected_indices, max_sentences)
         
         # If we still have room (rare), fill with highest scored remaining sentences
         if len(selected_indices) < max_sentences:
