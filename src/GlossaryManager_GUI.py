@@ -493,6 +493,7 @@ class GlossaryManagerMixin:
                     ('use_legacy_csv_checkbox', 'use_legacy_csv_var'),
                     ('glossary_auto_compression_checkbox', 'glossary_auto_compression_var'),
                     ('glossary_json_output_checkbox', 'glossary_output_legacy_json_var'),
+                    ('include_all_characters_checkbox', 'glossary_include_all_characters_var'),
                 ]
                 
                 # Handle inverted logic for disable_smart_filtering_checkbox
@@ -526,7 +527,6 @@ class GlossaryManagerMixin:
                     ('glossary_context_window_entry', 'glossary_context_window', 'glossary_context_window_var'),
                     ('glossary_max_text_size_entry', 'glossary_max_text_size', 'glossary_max_text_size_var'),
                     ('glossary_max_sentences_entry', 'glossary_max_sentences', 'glossary_max_sentences_var'),
-                    ('include_all_characters_checkbox', 'glossary_include_all_characters', 'glossary_include_all_characters_var'),
                     ('glossary_chapter_split_threshold_entry', 'glossary_chapter_split_threshold', 'glossary_chapter_split_threshold_var'),
                     ('glossary_request_merge_count_entry', 'glossary_request_merge_count', 'glossary_request_merge_count_var'),
                 ]
