@@ -2459,7 +2459,13 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             print(f"📑 Parallelizing sentence scoring with {extraction_workers} workers...")
             
             # Prepare batches
-            batch_size = max(500, len(filtered_sentences) // extraction_workers)
+            # Aim for ~500 sentences per batch to get updates every ~2-3 seconds (assuming ~150-200 sent/sec)
+            batch_size = 500 
+            
+            # However, ensure we don't have too few batches for the workers (utilize parallelism)
+            if len(filtered_sentences) // batch_size < extraction_workers * 4:
+                 batch_size = max(100, len(filtered_sentences) // (extraction_workers * 4))
+            
             batches = []
             for i in range(0, len(filtered_sentences), batch_size):
                 end_idx = min(i + batch_size, len(filtered_sentences))
