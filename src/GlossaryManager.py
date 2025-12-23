@@ -47,18 +47,6 @@ Focus on identifying:
 
 Critical Requirement: You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character."""
 
-def _normalize_inline_quotes(text: str) -> str:
-    """Collapse stray newlines around quotation marks and normalize spacing."""
-    if not text:
-        return ""
-    # Remove newlines immediately after opening quotes/brackets
-    text = re.sub(r'([“"\'«「『（(])\s*\n+\s*', r'\1', text)
-    # Remove newlines immediately before closing quotes/brackets
-    text = re.sub(r'\s*\n+\s*([”"\'»」』）)])', r'\1', text)
-    # Collapse runs of blank lines to at most two
-    text = re.sub(r'\n{3,}', '\n\n', text)
-    return text
-
 
 # Class-level shared lock for API submission timing
 _api_submission_lock = threading.Lock()
@@ -326,7 +314,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     def clean_html(html_text):
         """Remove HTML tags to get clean text"""
         soup = BeautifulSoup(html_text, 'html.parser')
-        return _normalize_inline_quotes(soup.get_text())
+        return soup.get_text()
     
     # Check stop before processing chapters
     if is_stop_requested():
@@ -1839,7 +1827,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     print(f"📑 Step 1/7: Cleaning HTML tags...")
     from bs4 import BeautifulSoup
     soup = BeautifulSoup(text, 'html.parser')
-    clean_text = _normalize_inline_quotes(soup.get_text())
+    clean_text = soup.get_text()
     print(f"📑 Clean text size: {len(clean_text):,} characters")
     
     # Detect primary language for better filtering
@@ -3226,6 +3214,10 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     filtered_length = len(filtered_text)
     size_change_percent = ((original_length - filtered_length) / original_length * 100) if original_length > 0 else 0
     
+    filtered_text = _normalize_filtered_text(filtered_text)
+    filtered_length = len(filtered_text)
+    size_change_percent = ((original_length - filtered_length) / original_length * 100) if original_length > 0 else 0
+    print("📑 Applied post-filter text normalization to remove orphaned quotes and extra blank lines")
     print(f"\n📑 === FILTERING COMPLETE ===")
     print(f"📑 Duration: {filter_duration:.1f} seconds")
     if size_change_percent >= 0:
@@ -3239,6 +3231,55 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     print(f"📑 ========================\n")
     
     return filtered_text, frequent_terms
+
+
+def _normalize_filtered_text(text: str) -> str:
+    """Normalize filtered text by collapsing stray blank lines and orphaned quote lines."""
+    if not text:
+        return text
+
+    quote_open = {"“", "「", "『", "\""}
+    quote_close = {"”", "」", "』", "\""}
+
+    lines = text.replace("\r\n", "\n").split("\n")
+    normalized_lines = []
+    i = 0
+
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        if stripped in quote_close:
+            # Remove trailing blank lines before attaching closing quote
+            while normalized_lines and not normalized_lines[-1].strip():
+                normalized_lines.pop()
+            if normalized_lines:
+                normalized_lines[-1] = normalized_lines[-1].rstrip() + stripped
+            else:
+                normalized_lines.append(stripped)
+        elif stripped in quote_open:
+            j = i + 1
+            while j < len(lines) and not lines[j].strip():
+                j += 1
+            if j < len(lines):
+                match = re.match(r"^(\s*)(.*)$", lines[j])
+                if match:
+                    leading, remainder = match.groups()
+                    lines[j] = f"{leading}{stripped}{remainder}"
+                else:
+                    lines[j] = f"{stripped}{lines[j]}"
+            else:
+                normalized_lines.append(stripped)
+        else:
+            normalized_lines.append(line)
+        i += 1
+
+    normalized_text = "\n".join(normalized_lines)
+    normalized_text = re.sub(r"\n{3,}", "\n\n", normalized_text)
+    normalized_text = re.sub(r"\n{2,}([”」』])", r"\n\1", normalized_text)
+    normalized_text = re.sub(r"([“「『])\n{2,}", r"\1\n", normalized_text)
+
+    return normalized_text
 
 def _extract_with_custom_prompt(custom_prompt, all_text, language, 
                               min_frequency, max_names, max_titles, 
