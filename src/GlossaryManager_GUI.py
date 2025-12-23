@@ -2271,7 +2271,7 @@ Focus on identifying:
 1. Character names with their honorifics
 2. Important terms, titles and ranks
 
-Generate a glossary with all character names, terms, titles, and other important elements found."""
+You must generate the glossary with all of the characters, and as many terms, titles, and other important elements found as possible."""
         
         # Load from config or use default
         # Note: Ignoring old 'auto_glossary_prompt' key to force update to new prompt
