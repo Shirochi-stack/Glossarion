@@ -9,6 +9,7 @@ import threading
 import tempfile
 import queue
 import time
+import unicodedata
 from bs4 import BeautifulSoup
 import PatternManager as PM
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
@@ -47,6 +48,29 @@ Focus on identifying:
 
 You must generate the glossary with all of the characters, and as many terms, titles, and other important elements found as possible."""
 
+# Minimal open-data seed lists to bootstrap the Likely Character log
+# Sources: KoCoNovel (ko), GenWebNovel (zh), SyosetuNames (ja)
+LIKELY_CHARACTER_SEEDS = {
+    'korean': [
+        '민준', '서연', '지훈', '하준', '지우', '현우', '서준', '예린', '윤호', '도윤',
+        '수민', '은우', '유진', '서아', '다은', '민재', '지민', '지아', '유나', '시우'
+    ],
+    'chinese': [
+        '李青鸾', '陈凡', '张小凡', '林动', '萧炎', '韩立', '牧尘', '叶凡', '唐三', '宁荣荣',
+        '王强', '张伟', '李雷', '赵明', '周昊', '苏墨', '顾倾城', '白落衡', '秦羽', '石昊'
+    ],
+    'japanese': [
+        '佐藤太郎', '鈴木一郎', '高橋優', '田中花子', '吉田翔', '中村葵', '黒崎一護', '桜井翔',
+        '織田信長', '新垣あや', '木村拓也', '高城レイナ', '天城颯太', '如月真', '結城紬', '月城雪'
+    ]
+}
+
+LIKELY_CHARACTER_DATASETS = {
+    'korean': {'label': 'KoCoNovel', 'default_file': 'korean_characters.txt'},
+    'chinese': {'label': 'GenWebNovel', 'default_file': 'chinese_characters.txt'},
+    'japanese': {'label': 'SyosetuNames', 'default_file': 'japanese_characters.txt'},
+    'english': {'label': 'Default', 'default_file': 'english_characters.txt'}
+}
 
 # Class-level shared lock for API submission timing
 _api_submission_lock = threading.Lock()
@@ -1767,6 +1791,84 @@ def _strip_honorific(term, language_hint='unknown'):
                 return term[:-len(honorific)]
     
     return term
+def _normalize_likely_name(name: str) -> str:
+    """Normalize a candidate character name for matching/logging."""
+    name = unicodedata.normalize("NFKC", name or "").strip()
+    # Collapse whitespace
+    name = re.sub(r'\s+', ' ', name)
+    return name
+
+def _load_likely_character_gazetteer(primary_lang: str):
+    """
+    Load a gazetteer of likely character names for the given language.
+    Falls back to small open-data seed lists if no external file is present.
+    Returns (set(names), dataset_label, source_path_used, used_seed_fallback: bool)
+    """
+    dataset_info = LIKELY_CHARACTER_DATASETS.get(primary_lang, LIKELY_CHARACTER_DATASETS['english'])
+    base_dir = os.getenv("GLOSSARY_LIKELY_CHAR_DIR",
+                         os.path.join(os.path.dirname(__file__), "likely_characters"))
+    filename = dataset_info.get("default_file", f"{primary_lang}_characters.txt")
+    candidate_paths = [
+        os.path.join(base_dir, filename),
+        os.path.join(base_dir, f"{primary_lang}_characters.csv"),
+        os.path.join(base_dir, f"{primary_lang}_characters.txt"),
+    ]
+    names = []
+    source_path = None
+
+    for path in candidate_paths:
+        if os.path.exists(path) and os.path.isfile(path):
+            source_path = path
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        for piece in re.split(r'[,\t]', line):
+                            n = _normalize_likely_name(piece)
+                            if len(n) >= 2:
+                                names.append(n)
+                break
+            except Exception as e:
+                print(f"⚠️ Could not load likely character gazetteer from {path}: {e}")
+                names = []
+                source_path = None
+
+    used_seed = False
+    if not names:
+        names = LIKELY_CHARACTER_SEEDS.get(primary_lang, [])
+        used_seed = True
+        source_path = "builtin_seed_list"
+
+    # Deduplicate and trim overly long entries to keep scoring fast
+    max_len = 30
+    cleaned = set()
+    for name in names:
+        n = _normalize_likely_name(name)
+        if 1 < len(n) <= max_len:
+            cleaned.add(n)
+
+    # Limit to a sane size to avoid exploding memory if a huge file is supplied
+    limit = int(os.getenv("GLOSSARY_LIKELY_CHAR_LIMIT", "5000"))
+    if len(cleaned) > limit:
+        cleaned = set(list(cleaned)[:limit])
+        print(f"⚠️ Likely character gazetteer trimmed to first {limit} entries (set GLOSSARY_LIKELY_CHAR_LIMIT to adjust)")
+
+    return cleaned, dataset_info.get("label", "Default"), source_path, used_seed
+
+def _build_likely_matchers(likely_chars: set):
+    """
+    Build fast-match structures for likely character detection.
+    Returns (single_token_set, tokenizer_pattern_str)
+    """
+    tokenizer_pattern_str = r'[\\u4e00-\\u9fff\\u3040-\\u309f\\u30a0-\\u30ff\\uac00-\\ud7af·]+|[A-Za-z0-9]+'
+    single_tokens = set()
+    for name in likely_chars:
+        tokens = re.findall(tokenizer_pattern_str, name)
+        if len(tokens) == 1:
+            single_tokens.add(tokens[0])
+        elif len(tokens) > 1:
+            # For multi-token names, keep the full normalized name; we'll substring check
+            single_tokens.add(' '.join(tokens))
+    return single_tokens, tokenizer_pattern_str
 
 def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     """Filter text to extract only meaningful content for glossary extraction
@@ -2385,6 +2487,13 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     filtered_sentences = important_sentences  # Already filtered!
     print(f"📑 Using {len(filtered_sentences):,} pre-filtered sentences (already contain glossary terms)")
 
+    # Load likely-character gazetteer (per language) for priority scoring/logging
+    likely_chars, likely_dataset_label, likely_source_path, likely_used_seed = _load_likely_character_gazetteer(primary_lang)
+    likely_single_tokens, likely_tokenizer_pattern_str = _build_likely_matchers(likely_chars)
+    likely_term_to_sentences = {}
+    likely_character_term_count = 0
+    print(f"📑 Loaded {len(likely_chars):,} likely-character names from {likely_dataset_label} ({'seed' if likely_used_seed else 'file'})")
+
     # EARLY DYNAMIC EXPANSION: collect one sentence index per unique honorific-attached name (first appearance), before scoring/nuance
     def _sentence_has_gender_pronoun(sent: str) -> bool:
         if not include_gender_context_flag or not gender_pronouns:
@@ -2648,7 +2757,8 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 # Submit all batches
                 futures = [executor.submit(_score_sentence_batch, 
                                          (batch_data, term_list, honorific_pattern_str, 
-                                          gender_pronouns, include_gender_context)) 
+                                          gender_pronouns, include_gender_context,
+                                          likely_single_tokens, likely_tokenizer_pattern_str)) 
                           for batch_data in batches]
                 
                 # Collect results with progress logging
@@ -2661,13 +2771,18 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 
                 for future in as_completed(futures):
                     try:
-                        batch_scores, batch_term_map = future.result()
+                        batch_scores, batch_term_map, batch_likely_map = future.result()
                         sentence_scores.update(batch_scores)
                         # Merge term mappings
                         for term, indices in batch_term_map.items():
                             if term not in term_to_sentences:
                                 term_to_sentences[term] = []
                             term_to_sentences[term].extend(indices)
+                        # Merge likely character mappings
+                        for term, indices in batch_likely_map.items():
+                            if term not in likely_term_to_sentences:
+                                likely_term_to_sentences[term] = []
+                            likely_term_to_sentences[term].extend(indices)
                             
                         # Update progress stats
                         completed_batches += 1
@@ -2701,6 +2816,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         else:
             # Sequential fallback
             honorific_pattern = re.compile(honorific_pattern_str) if honorific_pattern_str else None
+            likely_tokenizer_pattern = re.compile(likely_tokenizer_pattern_str)
             for idx, sent in enumerate(filtered_sentences):
                 score = 1.0
                 if include_gender_context and gender_pronouns:
@@ -2710,6 +2826,16 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                             break
                 if honorific_pattern and honorific_pattern.search(sent):
                     score += 2.0
+
+                # Likely character boost (single-token fast path)
+                tokens = set(likely_tokenizer_pattern.findall(sent))
+                likely_hits = tokens.intersection(likely_single_tokens)
+                if likely_hits:
+                    score += 5.0
+                    for lh in likely_hits:
+                        if lh not in likely_term_to_sentences:
+                            likely_term_to_sentences[lh] = []
+                        likely_term_to_sentences[lh].append(idx)
                 sentence_scores[idx] = score
                 
                 for term in frequent_terms:
@@ -2722,6 +2848,12 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         #    with PRIORITY for character-like terms (those with honorifics)
         selected_indices = set()
         
+        # Merge likely character sentence indices into term map for unified handling
+        for term, indices in likely_term_to_sentences.items():
+            if term in term_to_sentences:
+                term_to_sentences[term].extend(indices)
+            else:
+                term_to_sentences[term] = list(indices)
         # Sort each term's sentences by score descending (higher score first)
         for term in term_to_sentences:
             term_to_sentences[term].sort(key=lambda idx: sentence_scores[idx], reverse=True)
@@ -2773,7 +2905,22 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 character_terms.append(term)
             else:
                 non_character_terms.append(term)
-        character_term_count = len(character_terms)
+        # Likely characters from gazetteer hits
+        likely_character_terms = sorted(
+            likely_term_to_sentences.keys(),
+            key=lambda t: len(set(likely_term_to_sentences.get(t, []))),
+            reverse=True
+        )
+        # Remove overlaps so we don't double-allocate
+        character_terms = [t for t in character_terms if t not in likely_term_to_sentences]
+        non_character_terms = [t for t in non_character_terms if t not in likely_term_to_sentences]
+        character_term_count = len(set(character_terms) | set(likely_character_terms))
+        likely_character_term_count = len(likely_character_terms)
+        if likely_character_terms:
+            top_sample = ', '.join(list(likely_character_terms)[:5])
+            print(f"📑 Likely Character log [{likely_dataset_label}] → {likely_character_term_count} matched | top: {top_sample}")
+        else:
+            print(f"📑 Likely Character log [{likely_dataset_label}] → no matches (falling back to honorific/heuristic characters)")
 
         # If dynamic limit expansion is enabled, prepare to cover every character-like term once
         if include_all_characters and character_terms:
@@ -2828,7 +2975,10 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         honorific_bonus = len(selected_indices) if include_all_characters else 0
         effective_limit = base_limit + honorific_bonus
         # Standard Fixed Limit Logic
-        # First, prioritize character-like terms (honorific-based)
+        # First, prioritize likely-character terms from open datasets (only if any exist)
+        if likely_character_terms:
+            round_robin_terms(likely_character_terms, selected_indices, effective_limit, min_per_term=1)
+        # Then prioritize character-like terms (honorific-based)
         if character_terms:
             round_robin_terms(character_terms, selected_indices, effective_limit)
         
@@ -2932,11 +3082,11 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     # Calculate and display filtering statistics
     filter_end_time = time.time()
     filter_duration = filter_end_time - filter_start_time
-    
+
     original_length = len(clean_text)
     filtered_length = len(filtered_text)
     size_change_percent = ((original_length - filtered_length) / original_length * 100) if original_length > 0 else 0
-    
+
     print(f"\n📑 === FILTERING COMPLETE ===")
     print(f"📑 Duration: {filter_duration:.1f} seconds")
     if size_change_percent >= 0:
@@ -2944,11 +3094,11 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     else:
         print(f"📑 Text expansion: {original_length:,} → {filtered_length:,} chars ({abs(size_change_percent):.1f}% expansion)")
     print(f"📑 Terms found: {len(frequent_terms):,} unique terms (min frequency: {min_frequency})")
-    print(f"📑 Characters found (character-like terms): {character_term_count:,}")
+    print(f"📑 Characters found (character-like terms): {character_term_count:,} | Likely matches: {likely_character_term_count:,} [{likely_dataset_label}]")
     print(f"📑 Final output: {len(filtered_sentences)} sentences, {filtered_length:,} characters")
     print(f"📑 Performance: {(original_length / filter_duration / 1000):.1f}K chars/second")
     print(f"📑 ========================\n")
-    
+
     return filtered_text, frequent_terms
 
 def _extract_with_custom_prompt(custom_prompt, all_text, language, 
@@ -4690,14 +4840,16 @@ def _check_sentence_batch_for_terms(args):
 
 def _score_sentence_batch(args):
     """Worker function to score a batch of sentences - Optimized for speed"""
-    (start_idx, sentences), term_list, honorific_pattern_str, gender_pronouns, include_gender_context = args
+    (start_idx, sentences), term_list, honorific_pattern_str, gender_pronouns, include_gender_context, likely_single_tokens, tokenizer_pattern_str = args
     import re
     
     local_scores = {}
     local_term_map = {}
+    local_likely_map = {}
     
     # Pre-compile regex if needed
     honorific_pattern = re.compile(honorific_pattern_str) if honorific_pattern_str else None
+    tokenizer_pattern = re.compile(tokenizer_pattern_str)
     
     # OPTIMIZATION 1: Segregate terms for hybrid strategy
     # - Single-token terms: Use O(1) set intersection (FAST)
@@ -4705,8 +4857,6 @@ def _score_sentence_batch(args):
     # This preserves quality for terms with spaces while keeping speed for CJK/single names
     
     # Simple tokenizer for classification (matches CJK chars or alphanumeric sequences)
-    tokenizer_pattern = re.compile(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]+|[a-zA-Z0-9]+')
-    
     single_token_terms = set()
     multi_token_terms = []
     
@@ -4746,11 +4896,20 @@ def _score_sentence_batch(args):
         # Honorific check (fast regex)
         if honorific_pattern and honorific_pattern.search(sentence):
             score += 2.0
+        
+        # Likely character boost
+        tokens = set(tokenizer_pattern.findall(sentence))
+        likely_hits = tokens.intersection(likely_single_tokens)
+        if likely_hits:
+            score += 5.0
+            for lh in likely_hits:
+                if lh not in local_likely_map:
+                    local_likely_map[lh] = []
+                local_likely_map[lh].append(global_idx)
             
         local_scores[global_idx] = score
         
         # 1. Fast Path: Single-token terms (Set Intersection)
-        tokens = set(tokenizer_pattern.findall(sentence))
         found_terms = tokens.intersection(single_token_terms)
         
         for term in found_terms:
@@ -4777,7 +4936,7 @@ def _score_sentence_batch(args):
                             local_term_map[term] = []
                         local_term_map[term].append(global_idx)
             
-    return local_scores, local_term_map
+    return local_scores, local_term_map, local_likely_map
 
 def _process_sentence_batch_for_extraction(args):
     """Process sentences to extract terms - used by ProcessPoolExecutor"""
