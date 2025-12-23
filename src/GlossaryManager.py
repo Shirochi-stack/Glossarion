@@ -2535,8 +2535,9 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                             # This filters out one-off noise while keeping legitimate names
                             name_freq_with_honorific = Counter(ordered_names)
                             
-                            # Min frequency threshold: Use 3 to further reduce false positives
-                            min_hon_freq = 3
+                            # Use configured minimum frequency (GLOSSARY_MIN_FREQUENCY)
+                            # This allows the user to control the strictness via the GUI/Config
+                            min_hon_freq = min_frequency
                             
                             print(f"📑 Filtering by honorific attachment frequency (min {min_hon_freq} occurrences)...")
                             
@@ -4403,8 +4404,8 @@ def _extract_with_patterns(all_text, language, min_frequency,
         return {}
     
     # Combine and sort
-    sorted_names = sorted(final_terms.items(), key=lambda x: x[1], reverse=True)[:max_names]
-    sorted_titles = sorted(found_titles.items(), key=lambda x: x[1], reverse=True)[:max_titles]
+    sorted_names = sorted(final_terms.items(), key=lambda x: x[1], reverse=True)
+    sorted_titles = sorted(found_titles.items(), key=lambda x: x[1], reverse=True)
     
     all_terms = []
     for name, count in sorted_names:
