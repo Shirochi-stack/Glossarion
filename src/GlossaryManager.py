@@ -270,6 +270,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     print(f"🔍 [DEBUG] Converted to integer: {max_sentences}")
     include_all_characters_env = os.getenv("GLOSSARY_INCLUDE_ALL_CHARACTERS", "0")
     include_all_characters = include_all_characters_env == "1"
+    include_gender_context_flag = os.getenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
     print(f"📑 DEBUG: Include all characters (dynamic limit expansion) = '{include_all_characters_env}'")
     
     print(f"📑 Settings: Min frequency: {min_frequency}, Max names: {max_names}, Max titles: {max_titles}")
@@ -1834,6 +1835,19 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     
     primary_lang = detect_primary_language(clean_text)
     print(f"📑 Detected primary language: {primary_lang}")
+
+    # Gender pronouns for optional gender-context filtering in early captures
+    gender_pronouns = []
+    if include_gender_context_flag and hasattr(PM, "GENDER_PRONOUNS"):
+        lang_key = "english"
+        if primary_lang == "korean":
+            lang_key = "korean"
+        elif primary_lang == "chinese":
+            lang_key = "chinese"
+        elif primary_lang == "japanese":
+            lang_key = "japanese"
+        gp = PM.GENDER_PRONOUNS.get(lang_key, {})
+        gender_pronouns = gp.get("male", []) + gp.get("female", [])
     
     # Split into sentences for better context
     print(f"📁 Step 3/7: Splitting text into sentences...")
@@ -2367,6 +2381,11 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     print(f"📑 Using {len(filtered_sentences):,} pre-filtered sentences (already contain glossary terms)")
 
     # EARLY DYNAMIC EXPANSION: collect one sentence index per unique honorific-attached name (first appearance), before scoring/nuance
+    def _sentence_has_gender_pronoun(sent: str) -> bool:
+        if not include_gender_context_flag or not gender_pronouns:
+            return True
+        return any(p in sent for p in gender_pronouns)
+
     if include_all_characters:
         honorific_pattern_str = None
         if primary_lang in PM.CJK_HONORIFICS:
@@ -2404,6 +2423,9 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                     honor_pat = re.compile(hon_regex)
                     ordered_names = []
                     for idx, sent in enumerate(filtered_sentences):
+                        # If gender context is required, skip sentences without pronouns
+                        if not _sentence_has_gender_pronoun(sent):
+                            continue
                         for m in combined_pat.finditer(sent):
                             name = m.group("name").strip()
                             if not name or any(ch.isdigit() for ch in name):
@@ -2421,6 +2443,8 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                                 ordered_names.append(name)
                         # Fallback: token immediately before any honorific
                         for m in honor_pat.finditer(sent):
+                            if not _sentence_has_gender_pronoun(sent):
+                                continue
                             prefix = sent[:m.start()].strip()
                             token = prefix.split()[-1] if prefix.split() else ""
                             if token and not any(ch.isdigit() for ch in token):
