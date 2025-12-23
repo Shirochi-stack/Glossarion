@@ -45,7 +45,7 @@ Focus on identifying:
 1. Character names with their honorifics
 2. Important terms, titles and ranks
 
-You must generate the glossary with all of the characters, and as many terms, titles, and other important elements found as possible."""
+Critical Requirement: You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character."""
 
 
 # Class-level shared lock for API submission timing
@@ -2371,31 +2371,45 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     print(f"📑 Found {len(important_sentences):,} sentences with potential glossary terms")
     
     # Step 6/7: Deduplicate and normalize terms
-    print(f"📑 Step 6/7: Normalizing and deduplicating {len(word_freq):,} unique terms...")
-    
-    # Since should_exclude_term already filters honorifics, we just need to deduplicate
-    # based on normalized forms (lowercase, etc.)
-    combined_freq = Counter()
-    term_count = 0
-    
-    for term, count in word_freq.items():
-        # Normalize term for deduplication (but keep original form)
-        normalized = term.lower().strip()
+    # Skip this heavy deduplication if "Dynamic Limit Expansion" (include_all_characters) is disabled
+    # When disabled, we only care about exact matches of high-frequency terms, which combined_freq already handles
+    if not include_all_characters:
+        print(f"📑 Step 6/7: Skipping advanced term deduplication (Dynamic Limit Expansion disabled)...")
+        print(f"📑 Using simple normalized frequency counts for {len(word_freq):,} terms")
         
-        # Keep the version with highest count
-        if normalized in combined_freq:
-            # If we already have this normalized form, keep the one with higher count
-            if count > combined_freq[normalized]:
-                # Remove old entry and add new one
-                del combined_freq[normalized]
+        combined_freq = Counter()
+        term_count = 0
+        
+        # Simple deduplication by normalized form only
+        for term, count in word_freq.items():
+            normalized = term.lower().strip()
+            if normalized in combined_freq:
+                if count > combined_freq[normalized]:
+                    del combined_freq[normalized]
+                    combined_freq[term] = count
+            else:
                 combined_freq[term] = count
-        else:
-            combined_freq[term] = count
+            term_count += 1
+            if term_count % 5000 == 0:
+                time.sleep(0.001)
+    else:
+        print(f"📑 Step 6/7: Normalizing and deduplicating {len(word_freq):,} unique terms...")
         
-        term_count += 1
-        # Yield to GUI every 1000 terms
-        if term_count % 1000 == 0:
-            time.sleep(0.001)
+        combined_freq = Counter()
+        term_count = 0
+        
+        # Original logic with potential for future advanced features if enabled
+        for term, count in word_freq.items():
+            normalized = term.lower().strip()
+            if normalized in combined_freq:
+                if count > combined_freq[normalized]:
+                    del combined_freq[normalized]
+                    combined_freq[term] = count
+            else:
+                combined_freq[term] = count
+            term_count += 1
+            if term_count % 1000 == 0:
+                time.sleep(0.001)
     
     print(f"📑 Deduplicated to {len(combined_freq):,} unique terms")
     

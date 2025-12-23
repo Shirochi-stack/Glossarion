@@ -1069,7 +1069,7 @@ Focus on identifying:
 1. Character names with their honorifics
 2. Important terms, titles and ranks
 
-You must generate the glossary with all of the characters, and as many terms, titles, and other important elements found as possible."""
+Critical Requirement: You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character."""
         else:
             self.unified_auto_glossary_prompt = unified_prompt_from_config
         
