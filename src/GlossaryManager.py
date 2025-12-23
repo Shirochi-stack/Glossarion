@@ -47,6 +47,18 @@ Focus on identifying:
 
 Critical Requirement: You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character."""
 
+def _normalize_inline_quotes(text: str) -> str:
+    """Collapse stray newlines around quotation marks and normalize spacing."""
+    if not text:
+        return ""
+    # Remove newlines immediately after opening quotes/brackets
+    text = re.sub(r'([“"\'«「『（(])\s*\n+\s*', r'\1', text)
+    # Remove newlines immediately before closing quotes/brackets
+    text = re.sub(r'\s*\n+\s*([”"\'»」』）)])', r'\1', text)
+    # Collapse runs of blank lines to at most two
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text
+
 
 # Class-level shared lock for API submission timing
 _api_submission_lock = threading.Lock()
@@ -314,7 +326,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     def clean_html(html_text):
         """Remove HTML tags to get clean text"""
         soup = BeautifulSoup(html_text, 'html.parser')
-        return soup.get_text()
+        return _normalize_inline_quotes(soup.get_text())
     
     # Check stop before processing chapters
     if is_stop_requested():
@@ -1827,7 +1839,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     print(f"📑 Step 1/7: Cleaning HTML tags...")
     from bs4 import BeautifulSoup
     soup = BeautifulSoup(text, 'html.parser')
-    clean_text = soup.get_text()
+    clean_text = _normalize_inline_quotes(soup.get_text())
     print(f"📑 Clean text size: {len(clean_text):,} characters")
     
     # Detect primary language for better filtering
