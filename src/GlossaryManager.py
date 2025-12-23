@@ -4460,41 +4460,94 @@ def _check_sentence_batch_for_terms(args):
     return filtered
 
 def _score_sentence_batch(args):
-    """Worker function to score a batch of sentences"""
+    """Worker function to score a batch of sentences - Optimized for speed"""
     (start_idx, sentences), term_list, honorific_pattern_str, gender_pronouns, include_gender_context = args
     import re
     
     local_scores = {}
     local_term_map = {}
     
+    # Pre-compile regex if needed
     honorific_pattern = re.compile(honorific_pattern_str) if honorific_pattern_str else None
     
-    for i, sent in enumerate(sentences):
-        global_idx = start_idx + i
+    # OPTIMIZATION 1: Segregate terms for hybrid strategy
+    # - Single-token terms: Use O(1) set intersection (FAST)
+    # - Multi-token terms: Use iteration (SLOWER, but few terms)
+    # This preserves quality for terms with spaces while keeping speed for CJK/single names
+    
+    # Simple tokenizer for classification (matches CJK chars or alphanumeric sequences)
+    tokenizer_pattern = re.compile(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]+|[a-zA-Z0-9]+')
+    
+    single_token_terms = set()
+    multi_token_terms = []
+    
+    for t in term_list:
+        if len(t) < 2: continue
+        # Check if term splits into multiple tokens
+        tokens = tokenizer_pattern.findall(t)
+        if len(tokens) > 1:
+            multi_token_terms.append(t)
+        else:
+            single_token_terms.add(t)
+            
+    # Pre-compile multi-token terms regex if there are any (faster than loop)
+    multi_term_regex = None
+    if multi_token_terms:
+        # Sort by length desc to match longest first
+        multi_token_terms.sort(key=len, reverse=True)
+        # Escape terms
+        pattern = '|'.join(map(re.escape, multi_token_terms))
+        try:
+            multi_term_regex = re.compile(pattern)
+        except:
+            # Fallback if pattern is too huge (unlikely for just multi-word subset)
+            pass
+    
+    for idx, sentence in enumerate(sentences):
+        global_idx = start_idx + idx
         score = 1.0
         
-        # Gender boost
+        # Gender pronoun check (fast)
         if include_gender_context and gender_pronouns:
             for p in gender_pronouns:
-                if p in sent:
+                if p in sentence:
                     score += 5.0
                     break
         
-        # Honorific boost
-        if honorific_pattern and honorific_pattern.search(sent):
+        # Honorific check (fast regex)
+        if honorific_pattern and honorific_pattern.search(sentence):
             score += 2.0
             
         local_scores[global_idx] = score
         
-        # Term mapping
-        # Optimization: Check terms only if sentence is long enough to contain them
-        if len(sent) > 1:
-            for term in term_list:
-                if term in sent:
-                    if term not in local_term_map:
-                        local_term_map[term] = []
-                    local_term_map[term].append(global_idx)
-                    
+        # 1. Fast Path: Single-token terms (Set Intersection)
+        tokens = set(tokenizer_pattern.findall(sentence))
+        found_terms = tokens.intersection(single_token_terms)
+        
+        for term in found_terms:
+            if term not in local_term_map:
+                local_term_map[term] = []
+            local_term_map[term].append(global_idx)
+            
+        # 2. Slow Path: Multi-token terms (Regex or Iteration)
+        # Only needed if we actually have multi-word terms
+        if multi_token_terms:
+            if multi_term_regex:
+                # Fast regex batch match
+                for match in multi_term_regex.findall(sentence):
+                    if match not in local_term_map:
+                        local_term_map[match] = []
+                    # Avoid duplicates if regex matches same term multiple times
+                    if global_idx not in local_term_map[match]:
+                        local_term_map[match].append(global_idx)
+            else:
+                # Fallback iteration
+                for term in multi_token_terms:
+                    if term in sentence:
+                        if term not in local_term_map:
+                            local_term_map[term] = []
+                        local_term_map[term].append(global_idx)
+            
     return local_scores, local_term_map
 
 def _process_sentence_batch_for_extraction(args):
