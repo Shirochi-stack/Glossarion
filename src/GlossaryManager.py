@@ -1189,21 +1189,25 @@ def _incremental_update_glossary(output_dir, chunk_idx, chunk_lines, strip_honor
     _atomic_write_file(chunk_path, "\n".join(new_csv_lines))
 
     # Append to aggregator (raw append, no merging/deduping to preserve full history)
-    # Use lock to prevent concurrent appends
+    # Use lock to prevent concurrent appends - use proper file locking/flushing
     with _file_write_lock:
         try:
+            # Force close/reopen to ensure flush
+            # Read first to check header
             file_exists = os.path.exists(agg_path)
+            
             with open(agg_path, 'a', encoding='utf-8') as f:
-                # If new file, write header + chunks
+                # If new file, write header
                 if not file_exists:
-                    f.write("\n".join(new_csv_lines))
-                    # Ensure newline at end if needed (not strictly required by join but good practice)
-                    f.write("\n")
-                else:
-                    # If existing file, skip header and append chunks
-                    if chunk_lines:
-                        f.write("\n".join(chunk_lines))
-                        f.write("\n")
+                    f.write(header + "\n")
+                
+                # Append chunks
+                if chunk_lines:
+                    content_to_write = "\n".join(chunk_lines) + "\n"
+                    f.write(content_to_write)
+                    # Force flush to disk
+                    f.flush()
+                    os.fsync(f.fileno())
         except Exception as e:
             print(f"⚠️ Failed to append to incremental aggregator: {e}")
 
