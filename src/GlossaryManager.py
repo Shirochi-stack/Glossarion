@@ -2446,15 +2446,41 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                         # Fallback: token immediately before any honorific
                         for m in honor_pat.finditer(sent):
                             prefix = sent[:m.start()].strip()
-                            token = prefix.split()[-1] if prefix.split() else ""
-                            if token and not any(ch.isdigit() for ch in token):
+                            if not prefix: continue
+                            
+                            # Clean the token of punctuation
+                            token = prefix.split()[-1]
+                            token = token.strip(".,;:!?\"'()[]{}<>~`@#$%^&*-=_+|\\/")
+                            
+                            if not token: continue
+                            
+                            if not any(ch.isdigit() for ch in token):
+                                # FILTERING: Skip tokens with common noisy start characters (double check after strip)
+                                if any(token.startswith(c) for c in ['[', '(', '{', '<', '-', 'ㄴ', 'ㅇ', 'ㄹ', 'ㅁ', 'ㅂ', 'ㅋ', 'ㅎ']):
+                                    continue
+                                
+                                # FILTERING: Skip tokens that look like file extensions or paths
+                                if '.' in token or '/' in token or '\\' in token:
+                                    continue
+                                    
+                                # FILTERING: Skip tokens that are just common words/particles
+                                if token in PM.COMMON_WORDS:
+                                    continue
+                                
+                                # FILTERING: Aggressive Korean Verb/Adjective Ending Check
+                                # (Only apply if token is > 2 chars to avoid filtering 2-char names like '유나', '민지')
+                                # Heuristic: Words > 2 chars ending in these are LIKELY verbs/adjectives/adverbs in this context
+                                if len(token) > 2 and any(token.endswith(e) for e in ['겠네', '리라', '니까', '는데', '러나', '다가', '면서', '지만', '도록', '으로', '에서', '에게', '한테', '라고', '이란']):
+                                    continue
+
                                 # Require reasonable token shape
-                                if re.search(r'[\\u4e00-\\u9fff\\u3040-\\u30ff\\uac00-\\ud7af·]{2,4}', token):
+                                if re.search(r'[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af·]{2,4}', token):
                                     pass
-                                elif re.match(r'^[A-Z][a-z]{1,15}(\\s+[A-Z][a-z]{1,15})?$', token):
+                                elif re.match(r'^[A-Z][a-z]{1,15}(\s+[A-Z][a-z]{1,15})?$', token):
                                     pass
                                 else:
                                     continue
+                                    
                                 # Skip if token looks like a title term
                                 skip_title = False
                                 for pat in PM.TITLE_PATTERNS.get(primary_lang, []):
@@ -2463,6 +2489,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                                         break
                                 if skip_title:
                                     continue
+                                    
                                 if token not in honorific_first_indices:
                                     honorific_first_indices[token] = idx
                                     ordered_names.append(token)
@@ -2489,12 +2516,50 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                             kept_indices = {} # Rebuild this map
                             skipped_dupes = 0
                             
-                            # ordered_names preserves first appearance order
-                            for name in ordered_names:
-                                is_dup = False
+                            # Optimized deduplication using bucketing by first character
+                            # This avoids O(N²) all-to-all comparison while maintaining fuzzy matching quality
+                            
+                            deduped_names = []
+                            kept_indices = {} 
+                            skipped_dupes = 0
+                            
+                            # Fast lookup structures
+                            seen_normalized = set()
+                            # Bucket by first character (normalized) to reduce search space
+                            # Key: first_char, Value: list of existing names starting with that char
+                            lookup_buckets = {} 
+                            
+                            print(f"📑 Processing {len(ordered_names)} names with bucketed optimization...")
+                            
+                            for i, name in enumerate(ordered_names):
+                                # Progress logging for large sets
+                                if i > 0 and i % 1000 == 0:
+                                    print(f"📑 Dedupe progress: {i}/{len(ordered_names)}...")
+                                    
+                                norm = name.lower().strip()
+                                if not norm: continue
                                 
-                                # Compare against already kept names
-                                for existing in deduped_names:
+                                # 1. Exact normalized check (O(1) - Instant)
+                                if norm in seen_normalized:
+                                    skipped_dupes += 1
+                                    continue
+                                
+                                # 2. Fuzzy Check (Bucketed)
+                                is_dup = False
+                                first_char = norm[0]
+                                
+                                # Only compare against names starting with the same character
+                                # This reduces comparisons by ~20-50x (alphabet size)
+                                candidates = lookup_buckets.get(first_char, [])
+                                
+                                # If bucket is massive (>1000), limit to most recent 1000 to prevent slowdown
+                                # (Heuristic: duplicates usually appear near each other or we catch them early)
+                                if len(candidates) > 1000:
+                                    search_candidates = candidates[-1000:]
+                                else:
+                                    search_candidates = candidates
+                                
+                                for existing in search_candidates:
                                     score = DDC.calculate_similarity_with_config(name, existing, dd_config)
                                     if score >= effective_threshold:
                                         is_dup = True
@@ -2503,7 +2568,14 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                                 
                                 if not is_dup:
                                     deduped_names.append(name)
-                                    # Keep the original index for this name
+                                    seen_normalized.add(norm)
+                                    
+                                    # Add to bucket
+                                    if first_char not in lookup_buckets:
+                                        lookup_buckets[first_char] = []
+                                    lookup_buckets[first_char].append(name)
+                                    
+                                    # Keep the original index
                                     if name in honorific_first_indices:
                                         kept_indices[name] = honorific_first_indices[name]
                             
