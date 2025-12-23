@@ -1186,30 +1186,31 @@ def _incremental_update_glossary(output_dir, chunk_idx, chunk_lines, strip_honor
             print(f"⚠️ Failed to append to incremental aggregator: {e}")
 
     # Update visible glossary.csv (merged and deduped)
-    # We read the aggregator (now raw history), merge/dedupe it, and save as visible file
-    existing_csv = None
-    if os.path.exists(agg_path):
-        try:
-            with open(agg_path, 'r', encoding='utf-8') as f:
-                existing_csv = f.read()
-        except Exception as e:
-            print(f"⚠️ Incremental: cannot read aggregator: {e}")
+    # DISABLED: Per user request, we only do this at the very end to save performance
+    # The incremental_glossary folder maintains the safety backup
+    # existing_csv = None
+    # if os.path.exists(agg_path):
+    #     try:
+    #         with open(agg_path, 'r', encoding='utf-8') as f:
+    #             existing_csv = f.read()
+    #     except Exception as e:
+    #         print(f"⚠️ Incremental: cannot read aggregator: {e}")
             
     # Merge (exact merge, no fuzzy to keep this fast)
     # Note: _merge_csv_entries handles deduplication
     # We pass empty string as 'new' content because existing_csv already contains everything (from append above)
     # Actually, _merge_csv_entries merges two CSV strings. existing_csv is the full raw history.
     # If we pass it as 'base', it will clean it up.
-    merged_csv_lines = _merge_csv_entries([], existing_csv or "", strip_honorifics, language)
+    # merged_csv_lines = _merge_csv_entries([], existing_csv or "", strip_honorifics, language)
     
     # Optional filter mode
-    merged_csv_lines = _filter_csv_by_mode(merged_csv_lines, filter_mode)
+    # merged_csv_lines = _filter_csv_by_mode(merged_csv_lines, filter_mode)
     
     # Convert to token-efficient format for visible glossary.csv
-    token_lines = _convert_to_token_efficient_format(merged_csv_lines)
-    token_lines = _sanitize_final_glossary_lines(token_lines, use_legacy_format=False)
+    # token_lines = _convert_to_token_efficient_format(merged_csv_lines)
+    # token_lines = _sanitize_final_glossary_lines(token_lines, use_legacy_format=False)
     
-    _atomic_write_file(vis_path, "\n".join(token_lines))
+    # _atomic_write_file(vis_path, "\n".join(token_lines))
 
 def _process_single_chunk(chunk_idx, chunk_text, custom_prompt, language,
                          min_frequency, max_names, max_titles, batch_size,
