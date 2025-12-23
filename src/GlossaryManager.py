@@ -2480,6 +2480,22 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                         print(f"📑 Dynamic expansion (honorific-first): captured {base_count} unique characters before scoring")
                 else:
                     print(f"📑 Dynamic expansion (honorific-first): captured {base_count} unique characters before scoring")
+
+                # Debug: Write filtered terms to file (User request)
+                if base_count > 0 and 'ordered_names' in locals():
+                    try:
+                        # Use output_dir if available, otherwise cwd
+                        debug_base = output_dir if 'output_dir' in locals() else os.getcwd()
+                        debug_dir = os.path.join(debug_base, 'debug')
+                        os.makedirs(debug_dir, exist_ok=True)
+                        debug_file_path = os.path.join(debug_dir, 'honorific_debug.txt')
+                        
+                        with open(debug_file_path, 'w', encoding='utf-8') as f:
+                            for name in ordered_names:
+                                f.write(f"{name}\n")
+                        print(f"📑 Wrote {len(ordered_names)} terms to {debug_file_path}")
+                    except Exception as e:
+                        print(f"📑 Failed to write debug file: {e}")
             except Exception:
                 print("📑 Dynamic expansion (honorific-first): error parsing honorific names; continuing without early captures")
         else:
