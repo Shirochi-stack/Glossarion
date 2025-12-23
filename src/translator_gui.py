@@ -911,6 +911,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         if not hasattr(self, 'fuzzy_threshold_var'):
             self.fuzzy_threshold_var = self.config.get('glossary_fuzzy_threshold', 0.90)
         self.use_legacy_csv_var = self.config.get('glossary_use_legacy_csv', False)
+        # Legacy JSON output toggle (was not persisted previously)
+        self.glossary_output_legacy_json_var = self.config.get('glossary_output_legacy_json', False)
 
         
         # Initialize the variables with default values
@@ -9765,6 +9767,7 @@ Important rules:
                 ('glossary_history_rolling', ['glossary_history_rolling_checkbox', 'glossary_history_rolling_var'], False, bool),
                 ('enable_auto_glossary', ['enable_auto_glossary_checkbox', 'enable_auto_glossary_var'], False, bool),
                 ('glossary_use_legacy_csv', ['use_legacy_csv_checkbox', 'use_legacy_csv_var'], False, bool),
+                ('glossary_output_legacy_json', ['glossary_output_legacy_json_var'], False, bool),
                 ('glossary_filter_mode', ['glossary_filter_mode_var'], 'strict', str),
                 ('scan_phase_mode', ['scan_phase_mode_var'], 'translate', str),
 
@@ -10011,6 +10014,7 @@ Important rules:
                     ('GLOSSARY_STRIP_HONORIFICS', '1' if self.config.get('strip_honorifics') else '0'),
                     ('GLOSSARY_FUZZY_THRESHOLD', str(self.config.get('glossary_fuzzy_threshold', 0.90))),
                     ('GLOSSARY_USE_LEGACY_CSV', '1' if self.config.get('glossary_use_legacy_csv') else '0'),
+                    ('GLOSSARY_OUTPUT_LEGACY_JSON', '1' if self.config.get('glossary_output_legacy_json') else '0'),
                     ('GLOSSARY_USE_SMART_FILTER', '1' if self.config.get('glossary_use_smart_filter', True) else '0'),
                     ('GLOSSARY_MAX_SENTENCES', str(self.config.get('glossary_max_sentences', 200))),
                     ('COMPRESS_GLOSSARY_PROMPT', '1' if self.config.get('compress_glossary_prompt') else '0'),

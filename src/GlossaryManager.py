@@ -3385,9 +3385,11 @@ def _deduplicate_glossary_with_fuzzy(csv_lines, fuzzy_threshold):
     # PASS 2: Translated name deduplication (if enabled)
     if dedupe_translations:
         print(f"📑 🔄 PASS 2: Translated name deduplication...")
-        final_results = _deduplicate_pass2_translated_names(pass1_results)
+        final_results, replaced_count = _deduplicate_pass2_translated_names(pass1_results)
         pass2_removed = pass1_count - len(final_results)
-        print(f"📑 ✅ PASS 2 complete: {pass2_removed} duplicates removed ({len(final_results)} remaining)")
+        
+        replaced_msg = f" ({replaced_count} replaced with more complete entries)" if replaced_count > 0 else ""
+        print(f"📑 ✅ PASS 2 complete: {pass2_removed} duplicates removed{replaced_msg} ({len(final_results)} remaining)")
         total_removed = pass1_removed + pass2_removed
     else:
         final_results = pass1_results
@@ -3522,6 +3524,7 @@ def _deduplicate_pass2_translated_names(entry_lines):
     deduplicated = []
     seen_translations = {}  # translated_name.lower() -> (raw_name, line)
     removed_count = 0
+    replaced_count = 0
     
     for line in entry_lines:
         if not line.strip():
@@ -3560,6 +3563,7 @@ def _deduplicate_pass2_translated_names(entry_lines):
                 seen_translations[translated_lower] = (raw_name, line)
                 deduplicated.append(line)
                 removed_count += 1
+                replaced_count += 1
                 if removed_count <= 10:  # Only log first few
                     print(f"📋   Pass 2: Replacing '{existing_raw}' -> '{existing_translated}' ({existing_field_count} fields) with '{raw_name}' -> '{translated_name}' ({current_field_count} fields) - more detailed entry")
             else:
@@ -3573,7 +3577,7 @@ def _deduplicate_pass2_translated_names(entry_lines):
             seen_translations[translated_lower] = (raw_name, line)
             deduplicated.append(line)
     
-    return deduplicated
+    return deduplicated, replaced_count
 
 def _merge_csv_entries(new_csv_lines, existing_glossary, strip_honorifics, language):
     """Merge CSV entries with existing glossary with stop flag checks"""

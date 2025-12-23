@@ -1106,7 +1106,7 @@ class GlossaryManagerMixin:
         
         format_frame_layout.addWidget(self.glossary_json_output_checkbox)
         
-        label3 = QLabel("When enabled: Outputs a .json file containing the glossary structure (useful for backups)")
+        label3 = QLabel("When enabled: Outputs a .json file containing the glossary structure")
         format_frame_layout.addWidget(label3)
         
         # Update label when slider moves
