@@ -2696,7 +2696,7 @@ Recent translations to summarize:
             "margin-left: 8px; "
             "}"
         )
-        model_info_btn.setToolTip("Show API provider information and shortcuts")
+        model_info_btn.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Show API provider information and shortcuts.</p></qt>")
         self.frame.addWidget(model_info_btn, 1, 2, Qt.AlignLeft)
         
         # Track previous text to make autocomplete less aggressive
@@ -2802,6 +2802,7 @@ Recent translations to summarize:
         
         # Token limit
         token_limit_label = QLabel("Input Token limit:")
+        token_limit_label.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Maximum allowed tokens for the prompt the model receives (input side).</p></qt>")
         self.frame.addWidget(token_limit_label, 6, 0, Qt.AlignLeft)
         
         self.token_limit_entry = QLineEdit()
@@ -2827,7 +2828,7 @@ Recent translations to summarize:
         contextual_layout.setSpacing(8)
         
         self.contextual_checkbox = self._create_styled_checkbox("Contextual Translation")
-        self.contextual_checkbox.setToolTip("Provides the AI with context from previous chunks/chapters to improve consistency")
+        self.contextual_checkbox.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Provides the AI with context from previous chunks/chapters to improve consistency.</p></qt>")
         self.contextual_checkbox.setChecked(self.contextual_var)
         self.contextual_checkbox.stateChanged.connect(self._on_contextual_toggle)
         contextual_layout.addWidget(self.contextual_checkbox)
@@ -2859,7 +2860,7 @@ Recent translations to summarize:
         
         # Temperature (row 6)
         temp_label = QLabel("Temperature:")
-        temp_label.setToolTip("Controls AI creativity. Lower (0.1-0.3) = Literal/Stable. Higher (0.7+) = Creative/Random.")
+        temp_label.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Controls AI creativity. Lower (0.1–0.3) = literal/stable. Higher (0.7+) = creative/random.</p></qt>")
         self.frame.addWidget(temp_label, 6, 2, Qt.AlignLeft)
         
         self.trans_temp = QLineEdit()
@@ -2874,7 +2875,7 @@ Recent translations to summarize:
         batch_layout.setSpacing(8)
         
         self.batch_checkbox = self._create_styled_checkbox("Batch Translation")
-        self.batch_checkbox.setToolTip("Sends multiple chapters in parallel API requests")
+        self.batch_checkbox.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Sends multiple chapters in parallel API requests.</p></qt>")
         self.batch_checkbox.setChecked(self.batch_translation_var)
         self.batch_checkbox.stateChanged.connect(self._on_batch_toggle)
         
@@ -2918,6 +2919,20 @@ Recent translations to summarize:
         self.batch_size_entry.setMaximumWidth(60)
         self.batch_size_entry.textChanged.connect(lambda: setattr(self, 'batch_size_var', self.batch_size_entry.text()))
         self.frame.addWidget(self.batch_size_entry, 7, 3, Qt.AlignLeft)
+
+        # Output Token Limit tooltip (main output)
+        try:
+            if hasattr(self, 'output_tokens_label'):
+                self.output_tokens_label.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Maximum tokens the model may generate in responses (output side).</p></qt>")
+        except Exception:
+            pass
+
+        # Target language label tooltip (main UI sync + placeholder note)
+        try:
+            if hasattr(self, 'target_lang_label'):
+                self.target_lang_label.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Used to replace {language} in AI prompts; synced across all target language dropdowns.</p></qt>")
+        except Exception:
+            pass
         
         # Set batch entry initial state
         self.batch_size_entry.setEnabled(self.batch_translation_var)
@@ -3072,7 +3087,7 @@ Recent translations to summarize:
         
         # Remove AI Artifacts checkbox (row 7, spans all columns)
         self.remove_artifacts_checkbox = self._create_styled_checkbox("Remove AI Artifacts")
-        self.remove_artifacts_checkbox.setToolTip("Automatically cleans AI filler text like 'Here is the translation' or 'I hope this helps'")
+        self.remove_artifacts_checkbox.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Automatically cleans AI filler text like “Here is the translation” or “I hope this helps”.</p></qt>")
         self.remove_artifacts_checkbox.setChecked(self.REMOVE_AI_ARTIFACTS_var)
         self.remove_artifacts_checkbox.stateChanged.connect(self._on_remove_artifacts_toggle)
         self.frame.addWidget(self.remove_artifacts_checkbox, 7, 0, 1, 5, Qt.AlignLeft)
@@ -3102,6 +3117,7 @@ Recent translations to summarize:
         self.output_btn.clicked.connect(self.prompt_custom_token_limit)
         self.output_btn.setStyleSheet("background-color: #17a2b8; color: white; font-weight: bold; padding: 8px 6px;")  # info
         self.output_btn.setMinimumWidth(180)
+        self.output_btn.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Maximum tokens the model may generate in responses (output side).</p></qt>")
         # Place below the label in a vertical layout
         output_container = QWidget()
         output_layout = QVBoxLayout(output_container)
@@ -3112,10 +3128,12 @@ Recent translations to summarize:
         # Target Language Dropdown (below output token limit)
         lang_label = QLabel("Target Language:")
         lang_label.setStyleSheet("margin-top: 10px;")
+        lang_label.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Used to replace {language} in AI prompts; synced across all target language dropdowns.</p></qt>")
         output_layout.addWidget(lang_label)
         
         self.target_lang_combo = QComboBox()
         self.target_lang_combo.setEditable(True)
+        self.target_lang_combo.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Used to replace {language} in AI prompts; synced across all target language dropdowns.</p></qt>")
         # Disable mouse wheel scrolling to prevent accidental changes
         self.target_lang_combo.wheelEvent = lambda event: event.ignore()
         languages = [
@@ -4233,7 +4251,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             if lbl == "Save Config":
                 self.save_config_button = btn
                 btn.clicked.connect(self._on_save_config_clicked)
-                btn.setToolTip("Save all settings to config.json")
+                btn.setToolTip("<qt><p style='white-space: normal; max-width: 36em; margin: 0;'>Save all settings to config.json.</p></qt>")
             elif lbl != "Extract Glossary":  # Don't connect yet for Extract Glossary
                 btn.clicked.connect(cmd)
             

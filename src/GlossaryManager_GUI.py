@@ -940,6 +940,8 @@ class GlossaryManagerMixin:
             "Aggressive - Maximum duplicate detection",
             "Basic Only - Simple Levenshtein distance"
         ])
+        # Prevent accidental changes via mouse wheel
+        self._disable_combobox_mousewheel(self.duplicate_algo_combo)
         
         # Load saved setting or default to Auto
         saved_algo = self.config.get('glossary_duplicate_algorithm', 'auto')
@@ -1421,6 +1423,8 @@ Rules:
         token_layout.addStretch()
         
         settings_grid.addWidget(_m_pair("Output Token Limit:", token_cont), 2, 0)
+        # Label tooltip
+        token_cont.parentWidget().layout().itemAt(0).widget().setToolTip("Maximum tokens allowed in AI responses. -1 inherits main translation output limit.")
         
         if not hasattr(self, 'glossary_request_merging_checkbox'):
             self.glossary_request_merging_checkbox = self._create_styled_checkbox("Glossary Request Merging")
@@ -2022,7 +2026,14 @@ Rules:
         
         self.glossary_target_language_combo.currentTextChanged.connect(sync_auto_to_manual)
         
-        extraction_grid.addWidget(_pair("Target language:", self.glossary_target_language_combo), 2, 2, 1, 2)
+        # Add tooltip explaining prompt placeholder + sync behavior
+        target_lang_label = QLabel("Target language:")
+        target_lang_label.setToolTip("Replaces {language} placeholder in AI prompts; synced across all target language dropdowns.")
+        target_lang_pair = _pair("", self.glossary_target_language_combo)
+        # swap label inside helper
+        target_lang_pair.layout().itemAt(0).widget().setText("Target language:")
+        target_lang_pair.layout().itemAt(0).widget().setToolTip("Replaces {language} placeholder in AI prompts; synced across all target language dropdowns.")
+        extraction_grid.addWidget(target_lang_pair, 2, 2, 1, 2)
         
         # Row 4 - Max sentences and chapter split threshold
         # Max sentences for glossary (with inline hint)
