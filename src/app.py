@@ -531,7 +531,7 @@ class GlossarionWeb:
         os.environ['MANUAL_GLOSSARY_MIN_FREQUENCY'] = str(config('manual_glossary_min_frequency', 2))
         os.environ['MANUAL_GLOSSARY_MAX_NAMES'] = str(config('manual_glossary_max_names', 50))
         os.environ['MANUAL_GLOSSARY_MAX_TITLES'] = str(config('manual_glossary_max_titles', 30))
-        os.environ['GLOSSARY_MAX_TEXT_SIZE'] = str(config('glossary_max_text_size', 50000))
+        os.environ['GLOSSARY_MAX_TEXT_SIZE'] = str(config('glossary_max_text_size', 0))
         os.environ['GLOSSARY_MAX_SENTENCES'] = str(config('glossary_max_sentences', 200))
         os.environ['GLOSSARY_CHAPTER_SPLIT_THRESHOLD'] = str(config('glossary_chapter_split_threshold', 8192))
         os.environ['MANUAL_GLOSSARY_FILTER_MODE'] = config('manual_glossary_filter_mode', 'all')
@@ -1235,7 +1235,7 @@ class GlossarionWeb:
         min_frequency,
         max_names,
         max_titles=30,
-        max_text_size=50000,
+        max_text_size=0,
         max_sentences=200,
         translation_batch=50,
         chapter_split_threshold=8192,
@@ -4624,7 +4624,7 @@ class GlossarionWeb:
                                                 
                                                 max_text_size = gr.Number(
                                                     label="Max text size",
-                                                    value=self.get_config_value('glossary_max_text_size', 50000),
+                                                    value=self.get_config_value('glossary_max_text_size', 0),
                                                     info="Characters to analyze (0 = entire text)"
                                                 )
                                                 
@@ -5506,7 +5506,7 @@ class GlossarionWeb:
                     self.get_config_value('manual_glossary_min_frequency', self.get_config_value('glossary_min_frequency', 2)),  # min_freq
                     self.get_config_value('manual_glossary_max_names', self.get_config_value('glossary_max_names', 50)),  # max_names_slider
                     self.get_config_value('manual_glossary_max_titles', self.get_config_value('glossary_max_titles', 30)),  # max_titles
-                    self.get_config_value('glossary_max_text_size', 50000),  # max_text_size
+                    self.get_config_value('glossary_max_text_size', 0),  # max_text_size
                     self.get_config_value('glossary_max_sentences', 200),  # max_sentences
                     self.get_config_value('manual_glossary_batch_size', self.get_config_value('glossary_batch_size', 50)),  # translation_batch
                     self.get_config_value('glossary_chapter_split_threshold', 8192),  # chapter_split_threshold

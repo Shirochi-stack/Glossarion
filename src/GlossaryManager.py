@@ -284,7 +284,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     batch_size = int(os.getenv("GLOSSARY_BATCH_SIZE", "50"))
     strip_honorifics = os.getenv("GLOSSARY_STRIP_HONORIFICS", "1") == "1"
     fuzzy_threshold = float(os.getenv("GLOSSARY_FUZZY_THRESHOLD", "0.90"))
-    max_text_size = int(os.getenv("GLOSSARY_MAX_TEXT_SIZE", "50000"))
+    max_text_size = int(os.getenv("GLOSSARY_MAX_TEXT_SIZE", "0"))
     
     # DEBUG: Show what we're reading from environment
     max_sentences_env = os.getenv("GLOSSARY_MAX_SENTENCES", "200")
