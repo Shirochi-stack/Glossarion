@@ -1025,9 +1025,9 @@ CRITICAL EXTRACTION RULES:
 - Create at least one glossary entry for EVERY context marker window (lines ending with "=== CONTEXT N END ==="); treat each marker boundary as a required extraction point.
 - You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character.""")
         
-        # Note: Ignoring old 'auto_glossary_prompt' key to force update to new prompt
+        # Note: Ignoring old 'auto_glosary_prompt2' key to force update to new prompt
         # Also treat empty strings as missing to ensure users get the new default
-        unified_prompt_from_config = self.config.get('unified_auto_glossary_prompt',
+        unified_prompt_from_config = self.config.get('unified_auto_glosary_prompt2',
             """You are a novel glossary extraction assistant.
 
 You must strictly return ONLY CSV format with 2-4 columns in this exact order: type,raw_name,translated_name,gender,description.
@@ -1053,9 +1053,9 @@ CRITICAL EXTRACTION RULES:
 - You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character.""")
 
         if not unified_prompt_from_config or not unified_prompt_from_config.strip():
-            self.unified_auto_glossary_prompt = self.default_unified_auto_glossary_prompt
+            self.unified_auto_glosary_prompt2 = self.default_unified_auto_glosary_prompt2
         else:
-            self.unified_auto_glossary_prompt = unified_prompt_from_config
+            self.unified_auto_glosary_prompt2 = unified_prompt_from_config
         
         # Get append_glossary_prompt from config, but treat empty string as missing
         default_append_prompt = '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n'
@@ -1913,7 +1913,7 @@ CRITICAL EXTRACTION RULES:
 - The description column must contain detailed context/explanation
 - You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character."""
         
-        self.default_unified_auto_glossary_prompt = """You are a novel glossary extraction assistant.
+        self.default_unified_auto_glosary_prompt2 = """You are a novel glossary extraction assistant.
 
 You must strictly return ONLY CSV format with 2-4 columns in this exact order: type,raw_name,translated_name,gender,description.
 For character entries, determine gender from context, leave empty if context is insufficient.
@@ -1981,13 +1981,13 @@ Recent translations to summarize:
         """Initialize all configuration variables"""
         # Load saved prompts
         self.manual_glossary_prompt = self.config.get('manual_glossary_prompt2', self.default_manual_glossary_prompt)
-        # Note: Ignoring old 'auto_glossary_prompt' key to force update to new prompt
+        # Note: Ignoring old 'auto_glosary_prompt2' key to force update to new prompt
         # Also treat empty strings as missing to ensure users get the new default
-        unified_prompt_temp = self.config.get('unified_auto_glossary_prompt', self.default_unified_auto_glossary_prompt)
+        unified_prompt_temp = self.config.get('unified_auto_glosary_prompt2', self.default_unified_auto_glosary_prompt2)
         if not unified_prompt_temp or not unified_prompt_temp.strip():
-            self.unified_auto_glossary_prompt = self.default_unified_auto_glossary_prompt
+            self.unified_auto_glosary_prompt2 = self.default_unified_auto_glosary_prompt2
         else:
-            self.unified_auto_glossary_prompt = unified_prompt_temp
+            self.unified_auto_glosary_prompt2 = unified_prompt_temp
         self.rolling_summary_system_prompt = self.config.get('rolling_summary_system_prompt', self.default_rolling_summary_system_prompt)
         self.rolling_summary_user_prompt = self.config.get('rolling_summary_user_prompt', self.default_rolling_summary_user_prompt)
         self.append_glossary_prompt = self.config.get('append_glossary_prompt', "- Follow this reference glossary for consistent translation (Do not output any raw entries):\n")
@@ -6444,7 +6444,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GLOSSARY_FILTER_MODE': self.glossary_filter_mode_var,
             'GLOSSARY_SKIP_FREQUENCY_CHECK': "1" if self.config.get('glossary_skip_frequency_check', False) else "0",
             'ENABLE_AUTO_GLOSSARY': "1" if self.enable_auto_glossary_var else "0",
-            'AUTO_GLOSSARY_PROMPT': self.unified_auto_glossary_prompt if hasattr(self, 'unified_auto_glossary_prompt') else '',
+            'AUTO_GLOSSARY_PROMPT': self.unified_auto_glosary_prompt2 if hasattr(self, 'unified_auto_glosary_prompt2') else '',
             'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt if hasattr(self, 'append_glossary_prompt') and self.append_glossary_prompt else '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n',
             'GLOSSARY_TRANSLATION_PROMPT': self.glossary_translation_prompt if hasattr(self, 'glossary_translation_prompt') else '',
             'GLOSSARY_FORMAT_INSTRUCTIONS': self.glossary_format_instructions if hasattr(self, 'glossary_format_instructions') else '',
@@ -7560,7 +7560,7 @@ Important rules:
                     'ENABLE_AUTO_GLOSSARY': "1" if self.enable_auto_glossary_var else "0",
                     'APPEND_GLOSSARY': "1" if self.append_glossary_var else "0",
                     'GLOSSARY_STRIP_HONORIFICS': '1' if hasattr(self, 'strip_honorifics_var') and self.strip_honorifics_var else '1',
-                    'AUTO_GLOSSARY_PROMPT': getattr(self, 'unified_auto_glossary_prompt', ''),
+                    'AUTO_GLOSSARY_PROMPT': getattr(self, 'unified_auto_glosary_prompt2', ''),
                     'APPEND_GLOSSARY_PROMPT': getattr(self, 'append_glossary_prompt', '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n'),
                     'GLOSSARY_TRANSLATION_PROMPT': getattr(self, 'glossary_translation_prompt', ''),
                     'GLOSSARY_CUSTOM_ENTRY_TYPES': json.dumps(getattr(self, 'custom_entry_types', {})),
@@ -10012,7 +10012,7 @@ Important rules:
             # Save prompts from text widgets
             prompt_widgets = {
                 'manual_glossary_prompt': 'manual_prompt_text',
-                'unified_auto_glossary_prompt': 'auto_prompt_text',
+                'unified_auto_glosary_prompt2': 'auto_prompt_text',
                 'append_glossary_prompt': 'append_prompt_text',
                 'glossary_translation_prompt': 'translation_prompt_text',
                 'glossary_format_instructions': 'format_instructions_text',
@@ -10068,13 +10068,13 @@ Important rules:
             if show_message and debug_enabled: self.append_log("🔍 [DEBUG] Setting glossary environment variables...")
             try:
                 # Normalize and align glossary prompts
-                prompt_keys = ['manual_glossary_prompt', 'append_glossary_prompt', 'unified_auto_glossary_prompt', 'glossary_translation_prompt', 'glossary_format_instructions']
+                prompt_keys = ['manual_glossary_prompt', 'append_glossary_prompt', 'unified_auto_glosary_prompt2', 'glossary_translation_prompt', 'glossary_format_instructions']
                 for key in prompt_keys:
                     self.config[key] = self.config.get(key, '') or ''
 
                 glossary_env_mappings = [
                     ('GLOSSARY_SYSTEM_PROMPT', self.config.get('manual_glossary_prompt', '')),
-                    ('AUTO_GLOSSARY_PROMPT', self.config.get('unified_auto_glossary_prompt', '')),
+                    ('AUTO_GLOSSARY_PROMPT', self.config.get('unified_auto_glosary_prompt2', '')),
                     ('APPEND_GLOSSARY_PROMPT', self.config.get('append_glossary_prompt', '')),
                     ('APPEND_GLOSSARY', '1' if self.config.get('append_glossary') else '0'),
                     ('ADD_ADDITIONAL_GLOSSARY', '1' if self.config.get('add_additional_glossary') else '0'),
@@ -10450,7 +10450,7 @@ Important rules:
             # Initialize glossary-related environment variables
             env_mappings = [
                 ('GLOSSARY_SYSTEM_PROMPT', self.config.get('manual_glossary_prompt', getattr(self, 'manual_glossary_prompt', ''))),
-                ('AUTO_GLOSSARY_PROMPT', self.config.get('auto_glossary_prompt', getattr(self, 'auto_glossary_prompt', ''))),
+                ('AUTO_GLOSSARY_PROMPT', self.config.get('auto_glosary_prompt2', getattr(self, 'auto_glosary_prompt2', ''))),
                 ('GLOSSARY_DISABLE_HONORIFICS_FILTER', '1' if self.config.get('glossary_disable_honorifics_filter', False) else '0'),
                 ('GLOSSARY_STRIP_HONORIFICS', '1' if self.config.get('strip_honorifics', False) else '0'),
                 ('GLOSSARY_FUZZY_THRESHOLD', str(self.config.get('glossary_fuzzy_threshold', 0.90))),
