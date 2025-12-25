@@ -1022,6 +1022,7 @@ CRITICAL EXTRACTION RULES:
 - Do NOT output any entries that are rejected by the above rules; skip them entirely
 - If unsure whether something is a proper noun/name, skip it
 - The description column must contain detailed context/explanation
+- Create at least one glossary entry for EVERY context marker window (lines ending with "=== CONTEXT N END ==="); treat each marker boundary as a required extraction point.
 - You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character.""")
         
         # Note: Ignoring old 'auto_glossary_prompt' key to force update to new prompt
@@ -1048,32 +1049,11 @@ CRITICAL EXTRACTION RULES:
 - Do NOT output any entries that are rejected by the above rules; skip them entirely
 - If unsure whether something is a proper noun/name, skip it
 - The description column must contain detailed context/explanation
+- Create at least one glossary entry for EVERY context marker window (lines ending with "=== CONTEXT N END ==="); treat each marker boundary as a required extraction point.
 - You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character.""")
-        
-        # If the config value is empty, use the default
+
         if not unified_prompt_from_config or not unified_prompt_from_config.strip():
-            self.unified_auto_glossary_prompt = """You are a novel glossary extraction assistant.
-
-You must strictly return ONLY CSV format with 2-4 columns in this exact order: type,raw_name,translated_name,gender,description.
-For character entries, determine gender from context, leave empty if context is insufficient.
-For non-character entries, leave gender empty.
-The description column is optional and can contain brief context (role, location, significance).
-
-Critical Requirement: The translated name column should be in {language}.
-
-For example:
-character,ᫀ이히리ᄐ 나애,Dihirit Ade,female,The enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision
-character,ᫀ뢔사난,Kim Sang-hyu,male,A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress
-
-CRITICAL EXTRACTION RULES:
-- Extract ONLY: Character names, Location names, Ability/Skill names, Item names, Organization names, Titles/Ranks
-- Do NOT extract sentences, dialogue, actions, questions, or statements as glossary entries
-- REJECT entries that contain verbs or end with punctuation (?, !, .)
-- REJECT entries starting with: "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But". (The description column is excluded from this restriction)
-- Do NOT output any entries that are rejected by the above rules; skip them entirely
-- If unsure whether something is a proper noun/name, skip it
-- The description column must contain detailed context/explanation
-- You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character."""
+            self.unified_auto_glossary_prompt = self.default_unified_auto_glossary_prompt
         else:
             self.unified_auto_glossary_prompt = unified_prompt_from_config
         
@@ -1954,6 +1934,7 @@ CRITICAL EXTRACTION RULES:
 - Do NOT output any entries that are rejected by the above rules; skip them entirely
 - If unsure whether something is a proper noun/name, skip it
 - The description column must contain detailed context/explanation
+- Create at least one glossary entry for EVERY context marker window (lines ending with "=== CONTEXT N END ==="); treat each marker boundary as a required extraction point.
 - You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character."""
         
         self.default_rolling_summary_system_prompt = """You are a context summarization assistant. Create concise, informative summaries that preserve key story elements for translation continuity."""

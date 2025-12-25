@@ -36,6 +36,7 @@ CRITICAL EXTRACTION RULES:
 - Do NOT output any entries that are rejected by the above rules; skip them entirely
 - If unsure whether something is a proper noun/name, skip it
 - The description column must contain detailed context/explanation
+- Create at least one glossary entry for EVERY context marker window (lines ending with "=== CONTEXT N END ==="); treat each marker boundary as a required extraction point.
 - You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character."""
 
 
@@ -3189,7 +3190,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             if filtered_sent not in sentence_to_index:
                 window_num = len(context_groups) + 1
                 context_groups.append(
-                    f"{filtered_sent}\n=== CONTEXT WINDOW {window_num} END ==="
+                    f"{filtered_sent}\n=== CONTEXT {window_num} END ==="
                 )
                 continue
             
@@ -3212,14 +3213,18 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             context_group_body = ' '.join(window_sentences)
             window_num = len(context_groups) + 1
             context_groups.append(
-                f"{context_group_body}\n=== CONTEXT WINDOW {window_num} END ==="
+                f"{context_group_body}\n=== CONTEXT {window_num} END ==="
             )
         
         print(f"📑 Created {len(context_groups):,} context windows (up to {context_window*2+1} sentences each)")
         filtered_text = '\n\n'.join(context_groups)  # Separate windows with double newline
         print(f"📑 Context-expanded text: {len(filtered_text):,} characters")
     else:
-        filtered_text = ' '.join(filtered_sentences)
+        # Even without gender context, add footer markers to preserve boundaries for chapter splitting
+        context_groups = []
+        for idx, sent in enumerate(filtered_sentences, 1):
+            context_groups.append(f"{sent}\n=== CONTEXT {idx} END ===")
+        filtered_text = '\n\n'.join(context_groups)
     
     # Determine character count for summary (use dynamic-expansion tally when available)
     if include_all_characters and honorific_first_indices:
