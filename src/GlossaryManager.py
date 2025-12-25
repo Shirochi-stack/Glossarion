@@ -567,6 +567,11 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
             # Final sanitize to prevent stray headers
             all_csv_lines = _sanitize_final_glossary_lines(all_csv_lines, use_legacy_format)
 
+            # If user stopped and we have no entries, keep existing file to avoid wiping it
+            if is_stop_requested() and len(all_csv_lines) <= 1:
+                print("🛑 Stop requested with no new entries — preserving existing glossary.csv")
+                return _parse_csv_to_dict(existing_glossary_content) if existing_glossary_content else {}
+
             # Save
             csv_content = '\n'.join(all_csv_lines)
             glossary_path = os.path.join(output_dir, "glossary.csv")
@@ -747,7 +752,12 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         
         # Final sanitize to prevent stray headers and section titles at end
         csv_lines = _sanitize_final_glossary_lines(csv_lines, use_legacy_format)
-        
+        # If user stopped and we have no entries, keep existing file to avoid wiping it
+        if is_stop_requested() and len(csv_lines) <= 1 and os.path.exists(on_disk_path):
+            print("🛑 Stop requested with no new entries — preserving existing glossary.csv")
+            return _parse_csv_to_dict(existing_glossary_content) if existing_glossary_content else {}
+
+        # Copy glossary extension file if configured
         # Copy glossary extension file if configured
         add_additional_glossary = os.getenv('ADD_ADDITIONAL_GLOSSARY', '0') == '1'
         additional_glossary_path = os.getenv('ADDITIONAL_GLOSSARY_PATH', '')
