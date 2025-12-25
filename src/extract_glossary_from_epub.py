@@ -83,6 +83,25 @@ def create_client_with_multi_key_support(api_key, model, output_dir, config):
 def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None):
     """Send API request with interrupt capability and optional timeout retry"""
     result_queue = queue.Queue()
+
+    # Honor runtime toggle: if RETRY_TIMEOUT is off, disable chunk timeout entirely.
+    env_retry = os.getenv("RETRY_TIMEOUT")
+    if env_retry is not None:
+        retry_enabled = env_retry.strip().lower() not in ("0", "false", "off", "")
+    else:
+        retry_enabled = True  # legacy default
+
+    if not retry_enabled:
+        chunk_timeout = None
+    else:
+        # Allow overriding timeout via env; treat non-positive/blank as disabled
+        env_ct = os.getenv("CHUNK_TIMEOUT")
+        if env_ct is not None and str(env_ct).strip() not in ("", "none"):
+            try:
+                ct_val = float(env_ct)
+                chunk_timeout = None if ct_val <= 0 else ct_val
+            except Exception:
+                pass
     
     def api_call():
         try:
@@ -108,11 +127,11 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     api_thread.daemon = True
     api_thread.start()
     
-    timeout = chunk_timeout if chunk_timeout is not None else 86400
+    timeout = chunk_timeout  # None means wait indefinitely
     check_interval = 0.1
     elapsed = 0
     
-    while elapsed < timeout:
+    while True:
         try:
             # Check for results with shorter timeout
             result = result_queue.get(timeout=check_interval)
@@ -161,14 +180,14 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                 # Don't wait for the thread to finish - just raise immediately
                 raise UnifiedClientError("Glossary extraction stopped by user")
             
-            elapsed += check_interval
-    
-    # Timeout occurred
-    if hasattr(client, '_in_cleanup'):
-        client._in_cleanup = True
-    if hasattr(client, 'cancel_current_operation'):
-        client.cancel_current_operation()
-    raise UnifiedClientError(f"API call timed out after {timeout} seconds")
+            if timeout is not None:
+                elapsed += check_interval
+                if elapsed >= timeout:
+                    if hasattr(client, '_in_cleanup'):
+                        client._in_cleanup = True
+                    if hasattr(client, 'cancel_current_operation'):
+                        client.cancel_current_operation()
+                    raise UnifiedClientError(f"API call timed out after {timeout} seconds")
 
 # Parse token limit from environment variable (same logic as translation)
 def parse_glossary_token_limit():

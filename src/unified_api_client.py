@@ -7397,7 +7397,8 @@ class UnifiedClient:
         Respects master toggle ENABLE_HTTP_TUNING (defaults to disabled).
         If RETRY_TIMEOUT is disabled, returns None for read_timeout (no timeout)."""
         # Check if timeout retry is disabled
-        retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "0") == "1"
+        retry_env = os.getenv("RETRY_TIMEOUT")
+        retry_timeout_enabled = retry_env is None or retry_env.strip().lower() not in ("0", "false", "off", "")
         
         connect = 10.0
         
@@ -7409,12 +7410,26 @@ class UnifiedClient:
         if not enabled:
             # Use conservative, very high read timeout to avoid request timeouts (e.g., Gemini)
             chunk_timeout = os.getenv("CHUNK_TIMEOUT")
-            read = float(chunk_timeout) if chunk_timeout not in (None, "", "None") else None
+            if chunk_timeout in (None, "", "None"):
+                read = None
+            else:
+                try:
+                    ct_val = float(chunk_timeout)
+                    read = None if ct_val <= 0 else ct_val
+                except Exception:
+                    read = None
             return (connect, read)
         
         connect = float(os.getenv("CONNECT_TIMEOUT", "10"))
         read_timeout = os.getenv("READ_TIMEOUT", os.getenv("CHUNK_TIMEOUT", None))
-        read = float(read_timeout) if read_timeout not in (None, "", "None") else None
+        if read_timeout in (None, "", "None"):
+            read = None
+        else:
+            try:
+                rt_val = float(read_timeout)
+                read = None if rt_val <= 0 else rt_val
+            except Exception:
+                read = None
         return (connect, read)
 
     def _parse_retry_after(self, value: str) -> int:

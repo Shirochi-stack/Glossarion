@@ -3164,9 +3164,31 @@ class TranslationProcessor:
         idx = c.get('__index', 0)
         actual_num = c.get('actual_chapter_num', c.get('num', idx + 1))
         
+        # Determine chunk timeout respecting runtime env overrides.
+        # If RETRY_TIMEOUT is "0"/false/blank, disable chunk timeouts entirely.
+        env_retry = os.getenv("RETRY_TIMEOUT")
+        if env_retry is not None:
+            retry_timeout_enabled = env_retry.strip().lower() not in ("0", "false", "off", "")
+        else:
+            retry_timeout_enabled = bool(getattr(self.config, "RETRY_TIMEOUT", False))
+
         chunk_timeout = None
-        if self.config.RETRY_TIMEOUT:
-            chunk_timeout = self.config.CHUNK_TIMEOUT
+        if retry_timeout_enabled:
+            env_ct = os.getenv("CHUNK_TIMEOUT")
+            if env_ct and str(env_ct).strip().lower() not in ("", "none", "0"):
+                try:
+                    chunk_timeout = int(float(env_ct))
+                except Exception:
+                    chunk_timeout = getattr(self.config, "CHUNK_TIMEOUT", None)
+            else:
+                chunk_timeout = getattr(self.config, "CHUNK_TIMEOUT", None)
+
+            # Treat non-positive timeouts as disabled
+            try:
+                if chunk_timeout is not None and float(chunk_timeout) <= 0:
+                    chunk_timeout = None
+            except Exception:
+                chunk_timeout = None
         
         result = None
         finish_reason = None
