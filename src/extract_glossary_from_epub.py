@@ -2556,7 +2556,22 @@ def main(log_callback=None, stop_callback=None):
             print(f"⚠️ Could not load existing glossary, starting fresh: {e}")
             glossary = []
     else:
-        glossary = []
+        # Try loading CSV if JSON not found (legacy support)
+        csv_path = os.path.splitext(output_glossary_path)[0] + '.csv'
+        if os.path.exists(csv_path):
+             try:
+                 import csv
+                 glossary = []
+                 with open(csv_path, 'r', encoding='utf-8') as f:
+                     reader = csv.DictReader(f)
+                     for row in reader:
+                         glossary.append(row)
+                 print(f"📂 Loaded existing glossary from CSV: {len(glossary)} entries")
+             except Exception as e:
+                 print(f"⚠️ Could not load existing CSV glossary, starting fresh: {e}")
+                 glossary = []
+        else:
+            glossary = []
     merged_indices = prog.get('merged_indices', [])
     
     # Request merging configuration (glossary-specific with fallback to global)
