@@ -17,35 +17,26 @@ from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_compl
 # NOTE: This matches the GUI's default_unified_prompt in GlossaryManager_GUI.py.
 DEFAULT_AUTO_GLOSSARY_PROMPT = """You are a novel glossary extraction assistant.
 
-You must strictly return ONLY CSV format with 3-5 columns in this exact order: type,raw_name,translated_name,gender,description.
+You must strictly return ONLY CSV format with 2-4 columns in this exact order: type,raw_name,translated_name,gender,description.
 For character entries, determine gender from context, leave empty if context is insufficient.
 For non-character entries, leave gender empty.
 The description column is optional and can contain brief context (role, location, significance).
-Only include terms that actually appear in the text.
-Do not use quotes around values unless they contain commas.
+
+Critical Requirement: The translated name column should be in {language}.
+
+For example:
+character,ᫀ이히리ᄐ 나애,Dihirit Ade,female,The enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision
+character,ᫀ뢔사난,Kim Sang-hyu,male,A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress
 
 CRITICAL EXTRACTION RULES:
 - Extract ONLY: Character names, Location names, Ability/Skill names, Item names, Organization names, Titles/Ranks
 - Do NOT extract sentences, dialogue, actions, questions, or statements as glossary entries
-- The raw_name and translated_name must be SHORT NOUNS ONLY (1-5 words max)
 - REJECT entries that contain verbs or end with punctuation (?, !, .)
 - REJECT entries starting with: "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But". (The description column is excluded from this restriction)
 - Do NOT output any entries that are rejected by the above rules; skip them entirely
 - If unsure whether something is a proper noun/name, skip it
 - The description column must contain detailed context/explanation
-
-Critical Requirement: The translated name column should be in {language}.
-
-For example:
-character,ᫀ뢔사난,Kim Sang-hyu,male
-character,ᫀ간편헤,Gale Hardest  
-character,ᫀ이히리ᄐ 나애,Dihirit Ade,female
-
-Focus on identifying:
-1. Character names with their honorifics
-2. Important terms, titles and ranks
-
-Critical Requirement: You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character."""
+- You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character."""
 
 
 # Class-level shared lock for API submission timing
@@ -3198,9 +3189,9 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             if filtered_sent not in sentence_to_index:
                 window_num = len(context_groups) + 1
                 context_groups.append(
-                    f"=== GENDER CONTEXT WINDOW {window_num} START ===\n"
+                    f"=== CONTEXT WINDOW {window_num} START ===\n"
                     f"{filtered_sent}\n"
-                    f"=== GENDER CONTEXT WINDOW {window_num} END ==="
+                    f"=== CONTEXT WINDOW {window_num} END ==="
                 )
                 continue
             
@@ -3223,9 +3214,9 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             context_group_body = ' '.join(window_sentences)
             window_num = len(context_groups) + 1
             context_groups.append(
-                f"=== GENDER CONTEXT WINDOW {window_num} START ===\n"
+                f"=== CONTEXT WINDOW {window_num} START ===\n"
                 f"{context_group_body}\n"
-                f"=== GENDER CONTEXT WINDOW {window_num} END ==="
+                f"=== CONTEXT WINDOW {window_num} END ==="
             )
         
         print(f"📑 Created {len(context_groups):,} context windows (up to {context_window*2+1} sentences each)")

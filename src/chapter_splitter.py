@@ -120,7 +120,7 @@ class ChapterSplitter:
             # Pre-compute marker indices for gender-context boundaries
             gender_footer_indices = {
                 idx for idx, line in enumerate(lines)
-                if line.strip().startswith("=== GENDER CONTEXT WINDOW") and "END ===" in line
+                if line.strip().startswith("=== CONTEXT WINDOW") and "END ===" in line
             }
             # Build prefix sums for fast token range queries
             prefix_tokens = [0]

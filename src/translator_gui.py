@@ -1029,70 +1029,51 @@ CRITICAL EXTRACTION RULES:
         unified_prompt_from_config = self.config.get('unified_auto_glossary_prompt',
             """You are a novel glossary extraction assistant.
 
-You must strictly return ONLY CSV format with 3-5 columns in this exact order: type,raw_name,translated_name,gender,description.
+You must strictly return ONLY CSV format with 2-4 columns in this exact order: type,raw_name,translated_name,gender,description.
 For character entries, determine gender from context, leave empty if context is insufficient.
 For non-character entries, leave gender empty.
 The description column is optional and can contain brief context (role, location, significance).
-Only include terms that actually appear in the text.
-Do not use quotes around values unless they contain commas.
+
+Critical Requirement: The translated name column should be in {language}.
+
+For example:
+character,ᫀ이히리ᄐ 나애,Dihirit Ade,female,The enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision
+character,ᫀ뢔사난,Kim Sang-hyu,male,A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress
 
 CRITICAL EXTRACTION RULES:
 - Extract ONLY: Character names, Location names, Ability/Skill names, Item names, Organization names, Titles/Ranks
 - Do NOT extract sentences, dialogue, actions, questions, or statements as glossary entries
-- The raw_name and translated_name must be SHORT NOUNS ONLY (1-5 words max)
 - REJECT entries that contain verbs or end with punctuation (?, !, .)
 - REJECT entries starting with: "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But". (The description column is excluded from this restriction)
 - Do NOT output any entries that are rejected by the above rules; skip them entirely
 - If unsure whether something is a proper noun/name, skip it
 - The description column must contain detailed context/explanation
-
-Critical Requirement: The translated name column should be in {language}.
-
-For example:
-character,겹상현,Kim Sang-hyu,male
-character,갈편제,Gale Hardest  
-character,디히릿 아데,Dihirit Ade,female
-
-Focus on identifying:
-1. Character names with their honorifics
-2. Important terms, titles and ranks
-
-Extract up to {max_names} character names and {max_titles} titles.
-Prioritize names that appear with honorifics or in important contexts.""")
+- You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character.""")
         
         # If the config value is empty, use the default
         if not unified_prompt_from_config or not unified_prompt_from_config.strip():
             self.unified_auto_glossary_prompt = """You are a novel glossary extraction assistant.
 
-You must strictly return ONLY CSV format with 3-5 columns in this exact order: type,raw_name,translated_name,gender,description.
+You must strictly return ONLY CSV format with 2-4 columns in this exact order: type,raw_name,translated_name,gender,description.
 For character entries, determine gender from context, leave empty if context is insufficient.
 For non-character entries, leave gender empty.
 The description column is optional and can contain brief context (role, location, significance).
-Only include terms that actually appear in the text.
-Do not use quotes around values unless they contain commas.
+
+Critical Requirement: The translated name column should be in {language}.
+
+For example:
+character,ᫀ이히리ᄐ 나애,Dihirit Ade,female,The enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision
+character,ᫀ뢔사난,Kim Sang-hyu,male,A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress
 
 CRITICAL EXTRACTION RULES:
 - Extract ONLY: Character names, Location names, Ability/Skill names, Item names, Organization names, Titles/Ranks
 - Do NOT extract sentences, dialogue, actions, questions, or statements as glossary entries
-- The raw_name and translated_name must be SHORT NOUNS ONLY (1-5 words max)
 - REJECT entries that contain verbs or end with punctuation (?, !, .)
 - REJECT entries starting with: "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But". (The description column is excluded from this restriction)
 - Do NOT output any entries that are rejected by the above rules; skip them entirely
 - If unsure whether something is a proper noun/name, skip it
 - The description column must contain detailed context/explanation
-
-Critical Requirement: The translated name column should be in {language}.
-
-For example:
-character,겹상현,Kim Sang-hyu,male
-character,갈편제,Gale Hardest  
-character,디히릿 아데,Dihirit Ade,female
-
-Focus on identifying:
-1. Character names with their honorifics
-2. Important terms, titles and ranks
-
-Critical Requirement: You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character."""
+- You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character."""
         else:
             self.unified_auto_glossary_prompt = unified_prompt_from_config
         
@@ -1954,37 +1935,26 @@ CRITICAL EXTRACTION RULES:
         
         self.default_unified_auto_glossary_prompt = """You are a novel glossary extraction assistant.
 
-You must strictly return ONLY CSV format with 3-5 columns in this exact order: type,raw_name,translated_name,gender,description.
+You must strictly return ONLY CSV format with 2-4 columns in this exact order: type,raw_name,translated_name,gender,description.
 For character entries, determine gender from context, leave empty if context is insufficient.
 For non-character entries, leave gender empty.
 The description column is optional and can contain brief context (role, location, significance).
-Only include terms that actually appear in the text.
-Do not use quotes around values unless they contain commas.
+
+Critical Requirement: The translated name column should be in {language}.
+
+For example:
+character,ᫀ이히리ᄐ 나애,Dihirit Ade,female,The enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision
+character,ᫀ뢔사난,Kim Sang-hyu,male,A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress
 
 CRITICAL EXTRACTION RULES:
 - Extract ONLY: Character names, Location names, Ability/Skill names, Item names, Organization names, Titles/Ranks
 - Do NOT extract sentences, dialogue, actions, questions, or statements as glossary entries
-- The raw_name and translated_name must be SHORT NOUNS ONLY (1-5 words max)
 - REJECT entries that contain verbs or end with punctuation (?, !, .)
 - REJECT entries starting with: "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But". (The description column is excluded from this restriction)
 - Do NOT output any entries that are rejected by the above rules; skip them entirely
 - If unsure whether something is a proper noun/name, skip it
 - The description column must contain detailed context/explanation
-
-Critical Requirement: The translated name column should be in {language}.
-
-For example:
-character,김상현,Kim Sang-hyu,male
-character,갈편제,Gale Hardest  
-character,디히릿 아데,Dihirit Ade,female
-
-Focus on identifying:
-1. Character names with their honorifics
-2. Important titles and ranks
-3. Frequently mentioned terms (min frequency: {min_frequency})
-
-Extract up to {max_names} character names and {max_titles} titles.
-Prioritize names that appear with honorifics or in important contexts."""
+- You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character."""
         
         self.default_rolling_summary_system_prompt = """You are a context summarization assistant. Create concise, informative summaries that preserve key story elements for translation continuity."""
         
