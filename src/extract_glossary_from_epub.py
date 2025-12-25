@@ -1140,7 +1140,10 @@ def build_prompt(chapter_text: str) -> tuple:
         # If no custom prompt, create a default
         custom_prompt = """You are a novel glossary extraction assistant.
 
-You must strictly return ONLY CSV format with these columns and entry types {fields} in this exact order provided
+You must strictly return ONLY CSV format with these columns and entry types in this exact order provided:
+
+{fields}
+
 For character entries, determine gender from context, leave empty if context is insufficient.
 For non-character entries, leave gender empty.
 The description column is mandatory and must be detailed
@@ -1186,12 +1189,12 @@ CRITICAL EXTRACTION RULES:
             header_parts = ['type', 'raw_name', 'translated_name', 'gender']
             if custom_fields:
                 header_parts.extend(custom_fields)
-            fields_spec.append(','.join(header_parts))
+            fields_spec.append(f"Columns:\n{','.join(header_parts)}")
             
             # List valid entry types
             type_names = [t[0] for t in enabled_types]
             if type_names:
-                fields_spec.append(f"(Valid entry types: {', '.join(type_names)})")
+                fields_spec.append(f"Entry Types:\n{', '.join(type_names)}")
             
             fields_str = '\\n'.join(fields_spec)
         else:

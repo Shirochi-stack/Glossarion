@@ -997,9 +997,32 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         # Glossary prompts
         self.manual_glossary_prompt = self.config.get('manual_glossary_prompt', 
-            """Extract character names and important terms from the text.
-Format each entry as: type,raw_name,translated_name,gender
-For terms use: term,raw_name,translated_name,""")
+            """You are a novel glossary extraction assistant.
+
+You must strictly return ONLY CSV format with these columns and entry types in this exact order provided
+
+{fields}
+
+For character entries, determine gender from context, leave empty if context is insufficient.
+For non-character entries, leave gender empty.
+The description column is mandatory and must be detailed
+
+Critical Requirement: The translated name column must be in {language}.
+
+For example:
+character,ᫀ이히리ᄐ 나애,Dihirit Ade,female,The enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision
+character,ᫀ뢔사난,Kim Sang-hyu,male,A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress
+character,ᫀ간편헤,Gale Hardest,,A legendary ancient artifact forged by the Wind God said to control the atmospheric currents, currently sought by the Empire's elite guard to quell the rebellion
+
+CRITICAL EXTRACTION RULES:
+- Extract ONLY: Character names, Location names, Ability/Skill names, Item names, Organization names, Titles/Ranks
+- Do NOT extract sentences, dialogue, actions, questions, or statements as glossary entries
+- REJECT entries that contain verbs or end with punctuation (?, !, .)
+- REJECT entries starting with: "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But". (The description column is excluded from this restriction)
+- Do NOT output any entries that are rejected by the above rules; skip them entirely
+- If unsure whether something is a proper noun/name, skip it
+- The description column must contain detailed context/explanation
+- You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character.""")
         
         # Note: Ignoring old 'auto_glossary_prompt' key to force update to new prompt
         # Also treat empty strings as missing to ensure users get the new default
@@ -1904,7 +1927,10 @@ Text to analyze:
         """Initialize all default prompt templates"""
         self.default_manual_glossary_prompt = """You are a novel glossary extraction assistant.
 
-You must strictly return ONLY CSV format with these columns and entry types {fields} in this exact order provided
+You must strictly return ONLY CSV format with these columns and entry types in this exact order provided:
+
+{fields}
+
 For character entries, determine gender from context, leave empty if context is insufficient.
 For non-character entries, leave gender empty.
 The description column is mandatory and must be detailed
@@ -7688,16 +7714,34 @@ Important rules:
                     self.append_log("⏹️ Glossary extraction was stopped")
                     return False
                 
-                # Check if output file exists
-                if not self.stop_requested and os.path.exists(output_path):
-                    self.append_log(f"✅ Glossary saved to: {output_path}")
-                    return True
+                # Check if output file exists - check both JSON and CSV
+                if not self.stop_requested:
+                    success = False
+                    # Check explicit output path (likely JSON based on construction)
+                    if os.path.exists(output_path):
+                        self.append_log(f"✅ Glossary saved to: {output_path}")
+                        success = True
+                    
+                    # Check CSV variant (since glossary extractor saves both)
+                    csv_path = os.path.splitext(output_path)[0] + '.csv'
+                    if os.path.exists(csv_path):
+                        self.append_log(f"✅ Glossary saved to: {csv_path}")
+                        success = True
+                        
+                    # Check in Glossary subfolder if not found
+                    if not success:
+                        glossary_json_sub = os.path.join("Glossary", os.path.basename(output_path))
+                        glossary_csv_sub = os.path.splitext(glossary_json_sub)[0] + '.csv'
+                        
+                        if os.path.exists(glossary_json_sub):
+                            self.append_log(f"✅ Glossary saved to: {glossary_json_sub}")
+                            success = True
+                        if os.path.exists(glossary_csv_sub):
+                            self.append_log(f"✅ Glossary saved to: {glossary_csv_sub}")
+                            success = True
+                            
+                    return success
                 else:
-                    # Check if it was saved in Glossary folder by the script
-                    glossary_path = os.path.join("Glossary", output_path)
-                    if os.path.exists(glossary_path):
-                        self.append_log(f"✅ Glossary saved to: {glossary_path}")
-                        return True
                     return False
                 
             finally:

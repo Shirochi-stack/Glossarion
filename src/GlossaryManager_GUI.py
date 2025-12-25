@@ -1284,7 +1284,10 @@ class GlossaryManagerMixin:
         # Treat empty strings as missing so users always get a usable default.
         default_manual_prompt = """You are a novel glossary extraction assistant.
 
-You must strictly return ONLY CSV format with these columns and entry types {fields} in this exact order provided
+You must strictly return ONLY CSV format with these columns and entry types in this exact order provided:
+
+{fields}
+
 For character entries, determine gender from context, leave empty if context is insufficient.
 For non-character entries, leave gender empty.
 The description column is mandatory and must be detailed
