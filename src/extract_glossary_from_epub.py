@@ -1067,6 +1067,26 @@ def parse_api_response(response_text: str) -> List[Dict]:
         if parts and parts[-1] == '':
             parts = parts[:-1]
         
+        # --- NEW CLEANUP LOGIC ---
+        # Reject entries if raw_name or translated_name are just empty brackets "()"
+        if len(parts) >= 3:
+            raw_check = parts[1].strip()
+            trans_check = parts[2].strip()
+            
+            # Check 1: Empty brackets
+            if raw_check == '()' or trans_check == '()':
+                print(f"[Warning] Filtered invalid entry with empty brackets: {line}")
+                continue
+                
+            # Check 2: Raw name same as Translated name (likely untranslated)
+            # Only filter if it's not a short acronym or number which might legitimately be same
+            if raw_check.lower() == trans_check.lower() and len(raw_check) > 3:
+                # Exceptions for common untranslated proper nouns in Roman script context could be added here
+                # But generally, glossary extraction should provide some translation or romanization diff
+                print(f"[Warning] Filtered untranslated entry (raw==translated): {line}")
+                continue
+        # -------------------------
+        
         if len(parts) >= 3:
             entry_type = parts[0].lower()
             
