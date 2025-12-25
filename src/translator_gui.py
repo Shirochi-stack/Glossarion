@@ -976,7 +976,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.glossary_max_names_var = str(self.config.get('glossary_max_names', 50))
         self.glossary_max_titles_var = str(self.config.get('glossary_max_titles', 30))
         self.context_window_size_var = str(self.config.get('context_window_size', 5))
-        self.glossary_max_text_size_var = str(self.config.get('glossary_max_text_size', 50000))
+        self.glossary_max_text_size_var = str(self.config.get('glossary_max_text_size', 0))
         self.glossary_chapter_split_threshold_var = self.config.get('glossary_chapter_split_threshold', '0')
         self.glossary_max_sentences_var = str(self.config.get('glossary_max_sentences', 200))
         self.glossary_filter_mode_var = self.config.get('glossary_filter_mode', 'all')
@@ -7569,7 +7569,7 @@ Important rules:
                     'MANUAL_GLOSSARY': self.manual_glossary_path if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path else '',
                     'GLOSSARY_FORMAT_INSTRUCTIONS': self.glossary_format_instructions if hasattr(self, 'glossary_format_instructions') else '',
                     'GLOSSARY_MAX_SENTENCES': str(self.config.get('glossary_max_sentences', 200)),
-                    'GLOSSARY_MAX_TEXT_SIZE': str(self.config.get('glossary_max_text_size', 50000)),
+                    'GLOSSARY_MAX_TEXT_SIZE': str(self.config.get('glossary_max_text_size', 0)),
                     'GLOSSARY_FILTER_MODE': self.config.get('glossary_filter_mode', 'all'),
                     'COMPRESSION_FACTOR': str(getattr(self, 'compression_factor_var', self.config.get('compression_factor', 3.0))),
                     'GLOSSARY_INCLUDE_ALL_CHARACTERS': '1' if getattr(self, 'glossary_include_all_characters_var', False) else '0',
