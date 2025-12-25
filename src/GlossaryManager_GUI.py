@@ -2309,6 +2309,7 @@ CRITICAL EXTRACTION RULES:
 - Do NOT output any entries that are rejected by the above rules; skip them entirely
 - If unsure whether something is a proper noun/name, skip it
 - The description column must contain detailed context/explanation
+- Create at least one glossary entry for EVERY context marker window (lines ending with "=== CONTEXT N END ==="); treat each marker boundary as a required extraction point.
 - You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character."""
         
         # Load from config or use default
