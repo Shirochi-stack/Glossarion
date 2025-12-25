@@ -742,7 +742,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 65536
         self.proc = self.glossary_proc = None
-        __version__ = "6.7.5"
+        __version__ = "6.7.6"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -1902,19 +1902,29 @@ Text to analyze:
         
     def _init_default_prompts(self):
         """Initialize all default prompt templates"""
-        self.default_manual_glossary_prompt = """Extract character names and important terms from the following text.
+        self.default_manual_glossary_prompt = """You are a novel glossary extraction assistant.
 
-Output format:
-{fields}
+You must strictly return ONLY CSV format with these columns and entry types {fields} in this exact order provided
+For character entries, determine gender from context, leave empty if context is insufficient.
+For non-character entries, leave gender empty.
+The description column is mandatory and must be detailed
 
-Rules:
-- Output ONLY CSV lines in the exact format shown above
-- No headers, no extra text, no JSON
-- One entry per line
-- Leave gender empty for terms (just end with comma)
-- Do not add generic pronoun only entries (Example: I, you, he, she, etc.) and common nouns (father, mother, etc.)
-- For all fields except 'raw_name', use {language} translation
-"""
+Critical Requirement: The translated name column must be in {language}.
+
+For example:
+character,ᫀ이히리ᄐ 나애,Dihirit Ade,female,The enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision
+character,ᫀ뢔사난,Kim Sang-hyu,male,A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress
+character,ᫀ간편헤,Gale Hardest,,A legendary ancient artifact forged by the Wind God said to control the atmospheric currents, currently sought by the Empire's elite guard to quell the rebellion
+
+CRITICAL EXTRACTION RULES:
+- Extract ONLY: Character names, Location names, Ability/Skill names, Item names, Organization names, Titles/Ranks
+- Do NOT extract sentences, dialogue, actions, questions, or statements as glossary entries
+- REJECT entries that contain verbs or end with punctuation (?, !, .)
+- REJECT entries starting with: "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But". (The description column is excluded from this restriction)
+- Do NOT output any entries that are rejected by the above rules; skip them entirely
+- If unsure whether something is a proper noun/name, skip it
+- The description column must contain detailed context/explanation
+- You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character."""
         
         self.default_unified_auto_glossary_prompt = """You are a novel glossary extraction assistant.
 
@@ -2226,7 +2236,7 @@ Recent translations to summarize:
             # Set the initial active profile for autosave
             self._active_profile_for_autosave = self.profile_var
         
-        self.append_log("🚀 Glossarion v6.7.5 - Ready to use!")
+        self.append_log("🚀 Glossarion v6.7.6 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -10869,7 +10879,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v6.7.5...")
+    print("🚀 Starting Glossarion v6.7.6...")
     
     # Initialize splash screen
     splash_manager = None

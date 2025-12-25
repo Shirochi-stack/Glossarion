@@ -4723,14 +4723,29 @@ class GlossarionWeb:
                                         label="Extraction Template (Use placeholders: {language}, {min_frequency}, {max_names}, {max_titles})",
                                         lines=10,
                                         value=self.get_config_value('manual_glossary_prompt', 
-                                            "Extract character names and important terms from the following text.\n\n"
-                                            "Output format:\n{fields}\n\n"
-                                            "Rules:\n- Output ONLY CSV lines in the exact format shown above\n"
-                                            "- No headers, no extra text, no JSON\n"
-                                            "- One entry per line\n"
-                                            "- Leave gender empty for terms (just end with comma)\n"
-                                            "- Do not add generic pronoun only entries (Example: I, you, he, she, etc.) and common nouns (father, mother, etc.)\n"
-                                            "- For all fields except 'raw_name', use {language} translation")
+                                            """You are a novel glossary extraction assistant.
+
+You must strictly return ONLY CSV format with these columns and entry types {fields} in this exact order provided
+For character entries, determine gender from context, leave empty if context is insufficient.
+For non-character entries, leave gender empty.
+The description column is mandatory and must be detailed
+
+Critical Requirement: The translated name column must be in {language}.
+
+For example:
+character,ᫀ이히리ᄐ 나애,Dihirit Ade,female,The enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision
+character,ᫀ뢔사난,Kim Sang-hyu,male,A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress
+character,ᫀ간편헤,Gale Hardest,,A legendary ancient artifact forged by the Wind God said to control the atmospheric currents, currently sought by the Empire's elite guard to quell the rebellion
+
+CRITICAL EXTRACTION RULES:
+- Extract ONLY: Character names, Location names, Ability/Skill names, Item names, Organization names, Titles/Ranks
+- Do NOT extract sentences, dialogue, actions, questions, or statements as glossary entries
+- REJECT entries that contain verbs or end with punctuation (?, !, .)
+- REJECT entries starting with: "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But". (The description column is excluded from this restriction)
+- Do NOT output any entries that are rejected by the above rules; skip them entirely
+- If unsure whether something is a proper noun/name, skip it
+- The description column must contain detailed context/explanation
+- You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character.""")
                                     )
                                     
                                     reset_extraction_prompt_btn = gr.Button(

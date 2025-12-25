@@ -1138,13 +1138,30 @@ def build_prompt(chapter_text: str) -> tuple:
     
     if not custom_prompt:
         # If no custom prompt, create a default
-        custom_prompt = """Extract all character names and important terms from the text.
+        custom_prompt = """You are a novel glossary extraction assistant.
 
-{fields}
+You must strictly return ONLY CSV format with these columns and entry types {fields} in this exact order provided
+For character entries, determine gender from context, leave empty if context is insufficient.
+For non-character entries, leave gender empty.
+The description column is mandatory and must be detailed
 
-Only include entries that appear in the text.
-Return the data in the exact format specified above."""
-    
+Critical Requirement: The translated name column must be in {language}.
+
+For example:
+character,ᫀ이히리ᄐ 나애,Dihirit Ade,female,The enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision
+character,ᫀ뢔사난,Kim Sang-hyu,male,A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress
+character,ᫀ간편헤,Gale Hardest,,A legendary ancient artifact forged by the Wind God said to control the atmospheric currents, currently sought by the Empire's elite guard to quell the rebellion
+
+CRITICAL EXTRACTION RULES:
+- Extract ONLY: Character names, Location names, Ability/Skill names, Item names, Organization names, Titles/Ranks
+- Do NOT extract sentences, dialogue, actions, questions, or statements as glossary entries
+- REJECT entries that contain verbs or end with punctuation (?, !, .)
+- REJECT entries starting with: "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But". (The description column is excluded from this restriction)
+- Do NOT output any entries that are rejected by the above rules; skip them entirely
+- If unsure whether something is a proper noun/name, skip it
+- The description column must contain detailed context/explanation
+- You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character."""
+
     # Check if the prompt contains {fields} placeholder
     if '{fields}' in custom_prompt:
         # Get enabled types
@@ -1160,8 +1177,8 @@ Return the data in the exact format specified above."""
             custom_fields = []
         
         # Build fields specification based on what the prompt expects
-        # Check if the prompt mentions CSV or JSON to determine format
-        if 'CSV' in custom_prompt.upper():
+        # We now assume CSV format for the default prompt, but keep JSON fallback if custom prompt requests it
+        if 'CSV' in custom_prompt.upper() or 'COMMA' in custom_prompt.upper():
             # CSV format
             fields_spec = []
             
@@ -1171,25 +1188,12 @@ Return the data in the exact format specified above."""
                 header_parts.extend(custom_fields)
             fields_spec.append(','.join(header_parts))
             
-            # Show examples for each type
-            # Get target language from environment
-            target_language = os.getenv('GLOSSARY_TARGET_LANGUAGE', 'English')
-            for type_name, type_config in enabled_types:
-                example_parts = [type_name, '<name in original language>', f'<{target_language} translation>']
-                
-                # Add gender field
-                if type_config.get('has_gender', False):
-                    example_parts.append('<Male/Female/Unknown>')
-                else:
-                    example_parts.append('')  # Empty for non-character types
-                
-                # Add custom field placeholders
-                for field in custom_fields:
-                    example_parts.append(f'<{field} value>')
-                
-                fields_spec.append(','.join(example_parts))
+            # List valid entry types
+            type_names = [t[0] for t in enabled_types]
+            if type_names:
+                fields_spec.append(f"(Valid entry types: {', '.join(type_names)})")
             
-            fields_str = '\n'.join(fields_spec)
+            fields_str = '\\n'.join(fields_spec)
         else:
             # JSON format (default)
             fields_spec = []
