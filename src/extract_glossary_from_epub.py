@@ -965,6 +965,7 @@ def load_progress() -> Dict:
 def parse_api_response(response_text: str) -> List[Dict]:
     """Parse API response to extract glossary entries - handles custom types"""
     entries = []
+    import csv
     
     # Get enabled types from custom configuration
     custom_types = get_custom_entry_types()
@@ -1043,104 +1044,95 @@ def parse_api_response(response_text: str) -> List[Dict]:
     
     # CSV-like format parsing
     lines = response_text.strip().split('\n')
-    
+    header_fields = None
+
     for line in lines:
         line = line.strip()
         if not line or line.startswith('#'):
             continue
-        
-        # Skip header lines
+
+        # Detect and store header to preserve every returned column
         if 'type' in line.lower() and 'raw_name' in line.lower():
+            try:
+                header_fields = [c.strip() for c in next(csv.reader([line])) if c.strip()]
+            except Exception:
+                header_fields = [c.strip() for c in line.split(',') if c.strip()]
             continue
-        
-        # Parse CSV
-        parts = []
-        current_part = []
-        in_quotes = False
-        
-        for char in line + ',':
-            if char == '"':
-                in_quotes = not in_quotes
-            elif char == ',' and not in_quotes:
-                parts.append(''.join(current_part).strip())
-                current_part = []
-            else:
-                current_part.append(char)
-        
-        if parts and parts[-1] == '':
-            parts = parts[:-1]
-        
+
+        try:
+            row = next(csv.reader([line]))
+        except Exception:
+            row = [p.strip() for p in line.split(',')]
+
         # --- NEW CLEANUP LOGIC ---
-        # Reject entries if raw_name or translated_name are just empty brackets "()"
-        if len(parts) >= 3:
-            raw_check = parts[1].strip()
-            trans_check = parts[2].strip()
-            
-            # Check 1: Empty brackets
+        if len(row) >= 3:
+            raw_check = row[1].strip()
+            trans_check = row[2].strip()
             if raw_check == '()' or trans_check == '()':
                 print(f"[Warning] Filtered invalid entry with empty brackets: {line}")
                 continue
-                
-            # Check 2: Raw name same as Translated name (likely untranslated)
-            # Only filter if it's not a short acronym or number which might legitimately be same
             if raw_check.lower() == trans_check.lower() and len(raw_check) > 3:
-                # Exceptions for common untranslated proper nouns in Roman script context could be added here
-                # But generally, glossary extraction should provide some translation or romanization diff
                 print(f"[Warning] Filtered untranslated entry (raw==translated): {line}")
                 continue
         # -------------------------
-        
+
+        # If we saw a header, map every column by name to keep all AI-returned data
+        if header_fields:
+            if len(row) < len(header_fields):
+                row += [''] * (len(header_fields) - len(row))
+            entry_map = {header_fields[i]: row[i] for i in range(len(header_fields))}
+            entry_type = (entry_map.get('type') or '').lower() or 'term'
+            if entry_type not in enabled_types:
+                continue
+            entry_map['type'] = entry_type
+
+            # Default gender if column exists but value missing for gendered types
+            if custom_types.get(entry_type, {}).get('has_gender', False):
+                if 'gender' not in entry_map or not entry_map.get('gender'):
+                    entry_map['gender'] = 'Unknown'
+
+            # Require essential fields
+            if not entry_map.get('raw_name') or not entry_map.get('translated_name'):
+                continue
+
+            entries.append(entry_map)
+            continue
+
+        # Legacy fallback (no header detected)
+        parts = row
         if len(parts) >= 3:
             entry_type = parts[0].lower()
-            
+
             # Check if type is enabled
             if entry_type not in enabled_types:
                 continue
-            
+
             entry = {
                 'type': entry_type,
                 'raw_name': parts[1],
                 'translated_name': parts[2]
             }
-            
+
             # Add gender if type supports it and it's provided
             type_config = custom_types.get(entry_type, {})
             if type_config.get('has_gender', False) and len(parts) > 3 and parts[3]:
                 entry['gender'] = parts[3]
             elif type_config.get('has_gender', False):
                 entry['gender'] = 'Unknown'
-            
+
             # Add any custom fields
             custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
             try:
                 custom_fields = json.loads(custom_fields_json)
                 start_idx = 4  # Always 4, not conditional
-                
-                # Handle description specifically - merge all remaining parts if it's the last field
-                if len(custom_fields) > 0 and custom_fields[-1] == 'description':
-                    # Process normal fields
-                    for i, field in enumerate(custom_fields[:-1]):
-                        if len(parts) > start_idx + i:
-                            field_value = parts[start_idx + i]
-                            if field_value:
-                                entry[field] = field_value
-                    
-                    # Process description (last field) - merge remaining parts
-                    desc_idx = start_idx + len(custom_fields) - 1
-                    if len(parts) > desc_idx:
-                        description = ','.join(parts[desc_idx:])
-                        if description:
-                            entry['description'] = description
-                else:
-                    # Standard processing for all fields
-                    for i, field in enumerate(custom_fields):
-                        if len(parts) > start_idx + i:
-                            field_value = parts[start_idx + i]
-                            if field_value:  # Only add if not empty
-                                entry[field] = field_value
+                for i, field in enumerate(custom_fields):
+                    if len(parts) > start_idx + i:
+                        field_value = parts[start_idx + i]
+                        if field_value:  # Only add if not empty
+                            entry[field] = field_value
             except:
                 pass
-            
+
             entries.append(entry)
     
     return entries

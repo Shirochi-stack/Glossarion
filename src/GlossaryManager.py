@@ -906,6 +906,7 @@ def _convert_to_token_efficient_format(csv_lines):
     
     # Group by type (only from valid CSV lines)
     import re as _re
+    import csv as _csv
     grouped = {}
     for line in entries:
         if not line.strip():
@@ -926,7 +927,10 @@ def _convert_to_token_efficient_format(csv_lines):
     # Extract column headers from CSV to show in dynamic header
     columns = ['translated_name', 'raw_name']
     # Check for gender and description columns
-    header_parts = [p.strip() for p in header.split(',')] if header else []
+    try:
+        header_parts = [p.strip() for p in next(_csv.reader([header]))] if header else []
+    except Exception:
+        header_parts = [p.strip() for p in header.split(',')] if header else []
     if 'gender' in header_parts:
         columns.append('gender')
     if 'description' in header_parts:
@@ -941,6 +945,15 @@ def _convert_to_token_efficient_format(csv_lines):
     # Process in order: character first, then term, then others
     type_order = ['character', 'term'] + [t for t in grouped.keys() if t not in ['character', 'term']]
     
+    # Precompute column indices for richer rendering
+    lower_header = [h.lower() for h in header_parts]
+    def _idx(name):
+        return lower_header.index(name) if name in lower_header else -1
+    type_idx = _idx('type')
+    raw_idx = _idx('raw_name')
+    trans_idx = _idx('translated_name')
+    gender_idx = _idx('gender')
+    desc_idx = _idx('description')
     for entry_type in type_order:
         if entry_type not in grouped:
             continue
@@ -953,29 +966,52 @@ def _convert_to_token_efficient_format(csv_lines):
         
         # Add entries in new format
         for line in entries:
-            parts = [p.strip() for p in line.split(',')]
-            if len(parts) >= 3:
-                raw_name = parts[1]
-                translated_name = parts[2]
-                
-                # Format: * TranslatedName (RawName)
-                entry_line = f"* {translated_name} ({raw_name})"
-                
-                # Add gender if present and not Unknown - ONLY for character entries
-                if entry_type == 'character' and len(parts) > 3 and parts[3] and parts[3] != 'Unknown':
-                    # Validate gender field - reject if malformed
-                    gender_val = parts[3].strip()
-                    if not gender_val.startswith(('[', '(')):
-                        entry_line += f" [{gender_val}]"
-                
-                # Add any additional fields as description
-                if len(parts) > 4:
-                    # Rejoin all remaining parts to handle commas within description
-                    description = ','.join(parts[4:])
-                    if description.strip():
-                        entry_line += f": {description}"
-                
-                result.append(entry_line)
+            try:
+                parts = next(_csv.reader([line]))
+            except Exception:
+                parts = [p.strip() for p in line.split(',')]
+
+            if header_parts and len(parts) < len(header_parts):
+                parts += [''] * (len(header_parts) - len(parts))
+
+            # Extract core fields using header positions when available
+            entry_type_val = (parts[type_idx] if type_idx != -1 and len(parts) > type_idx else entry_type).lower()
+            raw_name = parts[raw_idx] if raw_idx != -1 and len(parts) > raw_idx else (parts[1] if len(parts) > 1 else '')
+            translated_name = parts[trans_idx] if trans_idx != -1 and len(parts) > trans_idx else (parts[2] if len(parts) > 2 else '')
+            if not raw_name or not translated_name:
+                continue
+
+            entry_line = f"* {translated_name} ({raw_name})"
+
+            # Gender support (any type that supplies it)
+            if gender_idx != -1 and len(parts) > gender_idx:
+                gender_val = parts[gender_idx].strip()
+                if gender_val and gender_val != 'Unknown':
+                    entry_line += f" [{gender_val}]"
+
+            # Description + extra fields
+            desc_val = parts[desc_idx].strip() if desc_idx != -1 and len(parts) > desc_idx else ''
+            extra_segments = []
+            for idx, col in enumerate(header_parts):
+                col_lower = col.lower()
+                if col_lower in ['type', 'raw_name', 'translated_name', 'gender', 'description']:
+                    continue
+                if idx < len(parts):
+                    val = parts[idx].strip()
+                    if val:
+                        extra_segments.append(f"{col}: {val}")
+
+            base_desc = desc_val
+            if not base_desc and extra_segments:
+                base_desc = extra_segments[0]
+                extra_segments = extra_segments[1:]
+
+            if base_desc:
+                entry_line += f": {base_desc}"
+            for seg in extra_segments:
+                entry_line += f" | {seg}"
+
+            result.append(entry_line)
         
         result.append("")  # Blank line between sections
     
@@ -1030,8 +1066,6 @@ def _sanitize_final_glossary_lines(lines, use_legacy_format=False):
                     header_seen = True
                 # skip duplicates
             else:
-                # Ensure commas inside quoted fields don't break simple parsing in other tools
-                # But allow them for now as we use standard CSV
                 sanitized.append(ln)
         # ensure header at top
         if sanitized and not sanitized[0].strip().lower().startswith("type,raw_name"):
@@ -3628,7 +3662,45 @@ def _process_ai_response(response_text, all_text, min_frequency,
     # Normalize line endings
     response_text = response_text.replace('\r\n', '\n').replace('\r', '\n')
     lines = [line.strip() for line in response_text.strip().split('\n') if line.strip()]
-    
+
+    import csv
+
+    # --- Dynamic header capture: accept every column the AI returns ---
+    dynamic_header = None
+    dynamic_rows = []
+    for ln in lines:
+        low = ln.lower()
+        if 'type' in low and 'raw_name' in low:
+            try:
+                dynamic_header = [c.strip() for c in next(csv.reader([ln])) if c.strip()]
+            except Exception:
+                dynamic_header = [c.strip() for c in ln.split(',') if c.strip()]
+            continue
+        if dynamic_header:
+            try:
+                dynamic_rows.append(next(csv.reader([ln])))
+            except Exception:
+                dynamic_rows.append([c.strip() for c in ln.split(',')])
+
+    if dynamic_header:
+        required = {h.lower(): i for i, h in enumerate(dynamic_header)}
+        if all(k in required for k in ('type', 'raw_name', 'translated_name')):
+            csv_lines = [','.join(dynamic_header)]
+            for row in dynamic_rows:
+                if len(row) < len(dynamic_header):
+                    row += [''] * (len(dynamic_header) - len(row))
+                # Clean stop tokens
+                row = ['' if cell in ("'stop'", "stop") else cell for cell in row]
+                entry_type = row[required['type']].strip() if len(row) > required['type'] else ''
+                raw_name = row[required['raw_name']].strip() if len(row) > required['raw_name'] else ''
+                translated_name = row[required['translated_name']].strip() if len(row) > required['translated_name'] else ''
+                if not raw_name or not translated_name:
+                    continue
+                csv_lines.append(','.join(row[:len(dynamic_header)]))
+            if csv_lines:
+                print(f"📑 Dynamic header detected from AI: {dynamic_header}")
+                return csv_lines
+
     csv_lines = []
     header_found = False
     
@@ -3656,28 +3728,25 @@ def _process_ai_response(response_text, all_text, min_frequency,
             if 'type' in line.lower() and 'raw_name' in line.lower():
                 continue
                 
-            # Parse CSV line (basic split)
+            # Parse CSV line
             parts = [p.strip() for p in line.split(',')]
             
             # Replace invalid 'stop' values with empty string
             parts = ['' if p == "'stop'" or p == "stop" else p for p in parts]
             
-            if include_description:
-                # Need at least 3 parts (type, raw, trans)
-                if len(parts) >= 3:
-                    entry_type = parts[0]
-                    raw_name = parts[1]
-                    translated_name = parts[2]
-                    gender = parts[3] if len(parts) > 3 else ''
-                    # Handle comma in description: join all remaining parts
-                    description = ','.join(parts[4:]) if len(parts) > 4 else ''
-                    
-                    # Validate
-                    if (raw_name and translated_name and 
-                        not (raw_name.startswith(('[', '(', "'", '"')) or translated_name.startswith(('[', '(', "'", '"'))) and
-                        not (raw_name.endswith(("'", '"')) or translated_name.endswith(("'", '"')))):
-                        csv_lines.append(f"{entry_type},{raw_name},{translated_name},{gender},{description}")
-            
+            if include_description and len(parts) >= 5:
+                # Has all 5 columns (with gender and description)
+                entry_type = parts[0]
+                raw_name = parts[1]
+                translated_name = parts[2]
+                gender = parts[3] if len(parts) > 3 else ''
+                description = parts[4] if len(parts) > 4 else ''
+                
+                # Validate - reject malformed entries that look like tuples/lists or quoted strings
+                if (raw_name and translated_name and 
+                    not (raw_name.startswith(('[', '(', "'", '"')) or translated_name.startswith(('[', '(', "'", '"'))) and
+                    not (raw_name.endswith(("'", '"')) or translated_name.endswith(("'", '"')))):
+                    csv_lines.append(f"{entry_type},{raw_name},{translated_name},{gender},{description}")
             elif include_gender_context and len(parts) >= 4:
                 # Has all 4 columns (with gender)
                 entry_type = parts[0]
