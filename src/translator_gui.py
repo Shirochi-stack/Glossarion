@@ -6776,6 +6776,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
             image_files = []
             text_files = []
             
+            # Track successful items for summary
+            successful_items = []
+            
             for file_path in self.selected_files:
                 ext = os.path.splitext(file_path)[1].lower()
                 if ext in image_extensions:
@@ -6814,6 +6817,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # Process all images in this folder and extract glossary
                 if self._process_image_folder_for_glossary(folder_name, images):
                     successful += 1
+                    successful_items.append(f"📁 Glossary/{folder_name}_glossary.json (Images)")
                 else:
                     failed += 1
             
@@ -6830,17 +6834,28 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 
                 if self._extract_glossary_from_text_file(text_file):
                     successful += 1
+                    base_name = os.path.splitext(os.path.basename(text_file))[0]
+                    successful_items.append(f"📄 Glossary/{base_name}_glossary.json")
                 else:
                     failed += 1
             
             # Final summary
             self.append_log(f"\n{'='*60}")
             self.append_log(f"📊 Glossary Extraction Summary:")
-            self.append_log(f"   ✅ Successful: {successful} glossaries")
+            if successful > 0:
+                self.append_log(f"   ✅ Successful ({successful}):")
+                for item in successful_items:
+                    self.append_log(f"      - {item}")
+            else:
+                self.append_log(f"   ✅ Successful: 0")
+            
             if failed > 0:
-                self.append_log(f"   ❌ Failed: {failed} glossaries")
-            self.append_log(f"   📁 Total: {total_groups} glossaries")
-            self.append_log(f"   📂 All glossaries saved in: Glossary/")
+                self.append_log(f"   ❌ Failed: {failed}")
+            
+            if successful == 0 and failed > 0 and self.stop_requested:
+                self.append_log(f"   🛑 Process stopped by user (incomplete files marked as failed)")
+            
+            self.append_log(f"   📁 Total processed: {total_groups}")
             self.append_log(f"{'='*60}")
             
         except Exception as e:
