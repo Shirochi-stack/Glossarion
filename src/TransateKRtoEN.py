@@ -5528,11 +5528,11 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     api_thread.daemon = True
     api_thread.start()
     
-    timeout = chunk_timeout if chunk_timeout is not None else 86400
+    timeout = chunk_timeout
     check_interval = 0.5
     elapsed = 0
     
-    while elapsed < timeout:
+    while True:
         try:
             result = result_queue.get(timeout=check_interval)
             if isinstance(result, Exception):
@@ -5560,7 +5560,7 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     # Backward compatibility for old format
                     api_result, api_time = result
                     
-                if chunk_timeout and api_time > chunk_timeout:
+                if chunk_timeout is not None and api_time > chunk_timeout:
                     # Set cleanup flag when chunk timeout occurs
                     if hasattr(client, '_in_cleanup'):
                         client._in_cleanup = True
@@ -5578,13 +5578,12 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
                     client.cancel_current_operation()
                 raise UnifiedClientError("Translation stopped by user")
             elapsed += check_interval
-    
-    # Set cleanup flag when timeout occurs
-    if hasattr(client, '_in_cleanup'):
-        client._in_cleanup = True
-    if hasattr(client, 'cancel_current_operation'):
-        client.cancel_current_operation()
-    raise UnifiedClientError(f"API call timed out after {timeout} seconds")
+            if chunk_timeout is not None and elapsed >= chunk_timeout:
+                if hasattr(client, '_in_cleanup'):
+                    client._in_cleanup = True
+                if hasattr(client, 'cancel_current_operation'):
+                    client.cancel_current_operation()
+                raise UnifiedClientError(f"API call timed out after {chunk_timeout} seconds")
 
 def handle_api_error(processor, error, chunk_info=""):
     """Handle API errors with multi-key support"""

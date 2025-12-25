@@ -70,12 +70,12 @@ def send_image_with_interrupt(client, messages, image_data, temperature, max_tok
     api_thread.daemon = True
     api_thread.start()
     
-    # Use chunk timeout if provided, otherwise use default
-    timeout = chunk_timeout if chunk_timeout else 300
+    # Respect caller-provided timeout; if None, wait indefinitely
+    timeout = chunk_timeout
     check_interval = 0.5
     elapsed = 0
     
-    while elapsed < timeout:
+    while True:
         try:
             result = result_queue.get(timeout=check_interval)
             if isinstance(result, Exception):
@@ -83,7 +83,7 @@ def send_image_with_interrupt(client, messages, image_data, temperature, max_tok
             if isinstance(result, tuple):
                 api_result, api_time = result
                 # Check if it took too long
-                if chunk_timeout and api_time > chunk_timeout:
+                if chunk_timeout is not None and api_time > chunk_timeout:
                     raise UnifiedClientError(f"Image API call took {api_time:.1f}s (timeout: {chunk_timeout}s)")
                 return api_result
             return result
@@ -91,8 +91,8 @@ def send_image_with_interrupt(client, messages, image_data, temperature, max_tok
             if stop_check_fn and stop_check_fn():
                 raise UnifiedClientError("Image translation stopped by user")
             elapsed += check_interval
-    
-    raise UnifiedClientError(f"Image API call timed out after {timeout} seconds")
+            if chunk_timeout is not None and elapsed >= chunk_timeout:
+                raise UnifiedClientError(f"Image API call timed out after {chunk_timeout} seconds")
 
 class ImageTranslator:
     def __init__(self, client, output_dir: str, profile_name: str = "", system_prompt: str = "", 
@@ -893,11 +893,11 @@ class ImageTranslator:
                     api_thread.start()
                     
                     # Check for completion or stop
-                    timeout = chunk_timeout if chunk_timeout else 900
+                    timeout = chunk_timeout
                     check_interval = 0.5
                     elapsed_check = 0
                     
-                    while elapsed_check < timeout:
+                    while True:
                         try:
                             result = result_queue.get(timeout=check_interval)
                             if isinstance(result, Exception):
@@ -910,8 +910,8 @@ class ImageTranslator:
                             if check_stop_fn and check_stop_fn():
                                 raise UnifiedClientError("Translation stopped by user")
                             elapsed_check += check_interval
-                    else:
-                        raise UnifiedClientError("API call timed out after " + str(timeout) + " seconds")
+                            if timeout is not None and elapsed_check >= timeout:
+                                raise UnifiedClientError("API call timed out after " + str(timeout) + " seconds")
                         
                 except UnifiedClientError as e:
                     if "stopped by user" in str(e).lower():

@@ -7408,13 +7408,13 @@ class UnifiedClient:
         enabled = os.getenv("ENABLE_HTTP_TUNING", "0") == "1"
         if not enabled:
             # Use conservative, very high read timeout to avoid request timeouts (e.g., Gemini)
-            chunk_timeout = os.getenv("CHUNK_TIMEOUT", "900")
-            read = float(chunk_timeout) if chunk_timeout else None
+            chunk_timeout = os.getenv("CHUNK_TIMEOUT")
+            read = float(chunk_timeout) if chunk_timeout not in (None, "", "None") else None
             return (connect, read)
         
         connect = float(os.getenv("CONNECT_TIMEOUT", "10"))
-        read_timeout = os.getenv("READ_TIMEOUT", os.getenv("CHUNK_TIMEOUT", "900"))
-        read = float(read_timeout) if read_timeout else None
+        read_timeout = os.getenv("READ_TIMEOUT", os.getenv("CHUNK_TIMEOUT", None))
+        read = float(read_timeout) if read_timeout not in (None, "", "None") else None
         return (connect, read)
 
     def _parse_retry_after(self, value: str) -> int:

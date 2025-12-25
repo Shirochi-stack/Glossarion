@@ -742,7 +742,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 65536
         self.proc = self.glossary_proc = None
-        __version__ = "6.7.4"
+        __version__ = "6.7.5"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -976,7 +976,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.glossary_max_names_var = str(self.config.get('glossary_max_names', 50))
         self.glossary_max_titles_var = str(self.config.get('glossary_max_titles', 30))
         self.context_window_size_var = str(self.config.get('context_window_size', 5))
-        self.glossary_max_text_size_var = str(self.config.get('glossary_max_text_size', 0))
+        self.glossary_max_text_size_var = str(self.config.get('glossary_max_text_size', 50000))
         self.glossary_chapter_split_threshold_var = self.config.get('glossary_chapter_split_threshold', '0')
         self.glossary_max_sentences_var = str(self.config.get('glossary_max_sentences', 200))
         self.glossary_filter_mode_var = self.config.get('glossary_filter_mode', 'all')
@@ -2226,7 +2226,7 @@ Recent translations to summarize:
             # Set the initial active profile for autosave
             self._active_profile_for_autosave = self.profile_var
         
-        self.append_log("🚀 Glossarion v6.7.4 - Ready to use!")
+        self.append_log("🚀 Glossarion v6.7.5 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -6496,7 +6496,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             "ATTACH_CSS_TO_CHAPTERS": "1" if self.attach_css_to_chapters_var else "0",
             "EPUB_USE_HTML_METHOD": "1" if self.epub_use_html_method_var else "0",
             'GLOSSARY_FUZZY_THRESHOLD': str(self.config.get('glossary_fuzzy_threshold', 0.90)),
-            'GLOSSARY_MAX_TEXT_SIZE': str(self.config.get('glossary_max_text_size', 0)),
+            'GLOSSARY_MAX_TEXT_SIZE': str(self.config.get('glossary_max_text_size', 50000)),
             'GLOSSARY_MAX_SENTENCES': str(self.config.get('glossary_max_sentences', 200)),
             'USE_FALLBACK_KEYS': '1' if self.config.get('use_fallback_keys', False) else '0',
             'FALLBACK_KEYS': json.dumps(self.config.get('fallback_keys', [])),
@@ -9786,7 +9786,7 @@ Important rules:
                 ('glossary_max_names', ['glossary_max_names_entry', 'glossary_max_names_var'], 50, lambda v: safe_int(v, 50)),
                 ('glossary_max_titles', ['glossary_max_titles_entry', 'glossary_max_titles_var'], 30, lambda v: safe_int(v, 30)),
                 ('context_window_size', ['context_window_size_entry', 'context_window_size_var'], 5, lambda v: safe_int(v, 5)),
-                ('glossary_max_text_size', ['glossary_max_text_size_entry', 'glossary_max_text_size_var'], 0, lambda v: safe_int(v, 0)),
+                ('glossary_max_text_size', ['glossary_max_text_size_entry', 'glossary_max_text_size_var'], 50000, lambda v: safe_int(v, 50000)),
                 ('glossary_chapter_split_threshold', ['glossary_chapter_split_threshold_entry', 'glossary_chapter_split_threshold_var'], 8192, lambda v: safe_int(v, 8192)),
                 ('glossary_max_sentences', ['glossary_max_sentences_entry', 'glossary_max_sentences_var'], 200, lambda v: safe_int(v, 200)),
                 ('strip_honorifics', ['strip_honorifics_checkbox', 'strip_honorifics_var'], False, bool),
@@ -10056,7 +10056,7 @@ Important rules:
                     ('GLOSSARY_MAX_NAMES', str(self.config.get('glossary_max_names', 50))),
                     ('GLOSSARY_MAX_TITLES', str(self.config.get('glossary_max_titles', 30))),
                     ('CONTEXT_WINDOW_SIZE', str(self.config.get('context_window_size', 5))),
-                    ('GLOSSARY_MAX_TEXT_SIZE', str(self.config.get('glossary_max_text_size', 0))),
+                    ('GLOSSARY_MAX_TEXT_SIZE', str(self.config.get('glossary_max_text_size', 50000))),
                     ('GLOSSARY_CHAPTER_SPLIT_THRESHOLD', str(self.config.get('glossary_chapter_split_threshold', 8192))),
                     ('GLOSSARY_FILTER_MODE', self.config.get('glossary_filter_mode', 'strict')),
                     ('GLOSSARY_DUPLICATE_ALGORITHM', self.config.get('glossary_duplicate_algorithm', 'auto')),
@@ -10869,7 +10869,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v6.7.4...")
+    print("🚀 Starting Glossarion v6.7.5...")
     
     # Initialize splash screen
     splash_manager = None
