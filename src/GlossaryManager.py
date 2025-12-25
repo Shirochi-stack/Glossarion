@@ -3430,7 +3430,8 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     stop_check_fn=is_stop_requested,
-                    chunk_timeout=chunk_timeout
+                    chunk_timeout=chunk_timeout,
+                    context='glossary'
                 )
                 api_time = time.time() - api_start
                 print(f"📑 API call completed in {api_time:.1f}s")

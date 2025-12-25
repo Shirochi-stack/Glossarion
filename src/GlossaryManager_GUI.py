@@ -2250,7 +2250,7 @@ CRITICAL EXTRACTION RULES:
             "• Max names/titles: AI Prompt placeholder only (limits are suggestions)",
             "• Context window size: Number of sentences before/after for gender detection (default: 2)",
             "• Max text size: Characters to analyze (0 = entire text, 50000 = first 50k chars)",
-            "• Chapter split: Split large texts into chunks (0 = no splitting, 100000 = split at 100k chars)",
+            "• Chapter split: Split large texts into chunks (0 = Token based splitting, 100000 = split at 100k chars)",
             "• Max sentences: Maximum sentences to send to AI. Dynamically expands if 'Include All Characters' is on.",
             "• Filter mode:",
             "  - All names & terms: Extract character names (with/without honorifics) + titles/terms",
