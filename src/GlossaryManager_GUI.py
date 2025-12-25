@@ -645,8 +645,14 @@ class GlossaryManagerMixin:
         # Always reload custom entry types from config to ensure latest saved state
         self.custom_entry_types = self.config.get('custom_entry_types', {
             'character': {'enabled': True, 'has_gender': True},
-            'term': {'enabled': True, 'has_gender': False}
+            'terms': {'enabled': True, 'has_gender': False}
         })
+        # Normalize legacy key "term" -> "terms"
+        if 'term' in self.custom_entry_types and 'terms' not in self.custom_entry_types:
+            self.custom_entry_types['terms'] = self.custom_entry_types.pop('term')
+        # If both exist, prefer "terms" and drop legacy duplicate
+        if 'term' in self.custom_entry_types and 'terms' in self.custom_entry_types:
+            self.custom_entry_types.pop('term', None)
         
         # Main container with grid for better control
         type_main_grid = QGridLayout()
@@ -690,8 +696,8 @@ class GlossaryManagerMixin:
                     item.widget().deleteLater()
             
             # Sort types: built-in first, then custom alphabetically
-            sorted_types = sorted(self.custom_entry_types.items(), 
-                                key=lambda x: (x[0] not in ['character', 'term'], x[0]))
+            sorted_types = sorted(self.custom_entry_types.items(),
+                                key=lambda x: (x[0] not in ['character', 'terms'], x[0]))
             
             # Create checkboxes for each type
             for type_name, type_config in sorted_types:
@@ -713,7 +719,7 @@ class GlossaryManagerMixin:
                     row_layout.addWidget(label)
                 
                 # Delete button for custom types (place right after the label/text)
-                if type_name not in ['character', 'term']:
+                if type_name not in ['character', 'terms']:
                     delete_btn = QPushButton("×")
                     delete_btn.setFixedWidth(24)
                     delete_btn.setStyleSheet("""
@@ -1297,7 +1303,6 @@ Critical Requirement: The translated name column must be in {language}.
 For example:
 character,ᫀ이히리ᄐ 나애,Dihirit Ade,female,The enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision
 character,ᫀ뢔사난,Kim Sang-hyu,male,A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress
-term,ᫀ간편헤,Gale Hardest,,A legendary ancient artifact forged by the Wind God said to control the atmospheric currents, currently sought by the Empire's elite guard to quell the rebellion
 
 CRITICAL EXTRACTION RULES:
 - Extract ONLY: Character names, Location names, Ability/Skill names, Item names, Organization names, Titles/Ranks
@@ -2509,7 +2514,7 @@ Critical Requirement: You must include absolutely all characters found in the pr
                    # Map section -> type (from custom entry types only, plus simple plurals)
                    custom_types = getattr(self, 'custom_entry_types', {}) or {
                        'character': {'enabled': True, 'has_gender': True},
-                       'term': {'enabled': True, 'has_gender': False},
+                       'terms': {'enabled': True, 'has_gender': False},
                    }
 
                    type_map = {}
@@ -2568,7 +2573,7 @@ Critical Requirement: You must include absolutely all characters found in the pr
                                desc = f"{bracket}: {desc}".strip(': ').strip() if desc else bracket
 
                        entry = {
-                           'type': type_map.get((current_section or 'term').lower(), 'term'),
+                           'type': type_map.get((current_section or 'terms').lower(), 'terms'),
                            'raw_name': raw_name,
                            'translated_name': translated,
                            'gender': gender,
@@ -2745,7 +2750,7 @@ Critical Requirement: You must include absolutely all characters found in the pr
                if self.current_glossary_format in ['list', 'token_csv'] and entries and 'type' in entries[0]:
                    # New format stats
                    characters = sum(1 for e in entries if e.get('type') == 'character')
-                   terms = sum(1 for e in entries if e.get('type') == 'term')
+                   terms = sum(1 for e in entries if e.get('type') == 'terms')
                    stats.append(f"Characters: {characters}, Terms: {terms}")
                elif self.current_glossary_format == 'list':
                    # Old format stats
@@ -2796,14 +2801,14 @@ Critical Requirement: You must include absolutely all characters found in the pr
                        def save_token_csv(entries, path_out):
                            sections = getattr(self, 'current_glossary_sections', []) or []
                            if not sections:
-                               sections = ['CHARACTERS', 'TITLES', 'ORGANIZATIONS', 'LOCATIONS', 'ITEMS', 'ABILITYS']
+                               sections = ['CHARACTERS', 'TERMS', 'TITLES', 'ORGANIZATIONS', 'LOCATIONS', 'ITEMS', 'ABILITYS']
 
                            grouped = {sec: [] for sec in sections}
-                           default_map = {'character': 'CHARACTERS', 'term': 'TITLES'}
+                           default_map = {'character': 'CHARACTERS', 'terms': 'TERMS'}
                            for entry in entries:
                                sec = entry.get('_section')
                                if not sec:
-                                   sec = default_map.get(entry.get('type', 'term'), 'TITLES')
+                                   sec = default_map.get(entry.get('type', 'terms'), 'TITLES')
                                if sec not in grouped:
                                    grouped[sec] = []
                                    sections.append(sec)
@@ -3256,7 +3261,7 @@ Critical Requirement: You must include absolutely all characters found in the pr
             # For new format, show type breakdown
             if self.current_glossary_format in ['list', 'token_csv'] and self.current_glossary_data and 'type' in self.current_glossary_data[0]:
                 characters = sum(1 for e in self.current_glossary_data if e.get('type') == 'character')
-                terms = sum(1 for e in self.current_glossary_data if e.get('type') == 'term')
+                terms = sum(1 for e in self.current_glossary_data if e.get('type') == 'terms')
                 stats_layout.addWidget(QLabel(f"Characters: {characters}, Terms: {terms}"))
             
             main_layout.addSpacing(15)
@@ -4253,7 +4258,7 @@ Critical Requirement: You must include absolutely all characters found in the pr
             # Get custom types for gender info
             custom_types = self.config.get('custom_entry_types', {
                 'character': {'enabled': True, 'has_gender': True},
-                'term': {'enabled': True, 'has_gender': False}
+                'terms': {'enabled': True, 'has_gender': False}
             })
             
             # Get custom fields
@@ -4275,7 +4280,7 @@ Critical Requirement: You must include absolutely all characters found in the pr
                     if 'type' in self.current_glossary_data[0]:
                         # New format - direct export
                         for entry in self.current_glossary_data:
-                            entry_type = entry.get('type', 'term')
+                            entry_type = entry.get('type', 'terms')
                             type_config = custom_types.get(entry_type, {})
                             
                             row = [
@@ -4306,7 +4311,7 @@ Critical Requirement: You must include absolutely all characters found in the pr
                                                          for term in ['location', 'place', 'city', 'region']):
                                 is_location = True
                             
-                            entry_type = 'term' if is_location else 'character'
+                            entry_type = 'terms' if is_location else 'character'
                             type_config = custom_types.get(entry_type, {})
                             
                             row = [
