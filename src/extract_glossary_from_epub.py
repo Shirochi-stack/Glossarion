@@ -1115,11 +1115,29 @@ def parse_api_response(response_text: str) -> List[Dict]:
             try:
                 custom_fields = json.loads(custom_fields_json)
                 start_idx = 4  # Always 4, not conditional
-                for i, field in enumerate(custom_fields):
-                    if len(parts) > start_idx + i:
-                        field_value = parts[start_idx + i]
-                        if field_value:  # Only add if not empty
-                            entry[field] = field_value
+                
+                # Handle description specifically - merge all remaining parts if it's the last field
+                if len(custom_fields) > 0 and custom_fields[-1] == 'description':
+                    # Process normal fields
+                    for i, field in enumerate(custom_fields[:-1]):
+                        if len(parts) > start_idx + i:
+                            field_value = parts[start_idx + i]
+                            if field_value:
+                                entry[field] = field_value
+                    
+                    # Process description (last field) - merge remaining parts
+                    desc_idx = start_idx + len(custom_fields) - 1
+                    if len(parts) > desc_idx:
+                        description = ','.join(parts[desc_idx:])
+                        if description:
+                            entry['description'] = description
+                else:
+                    # Standard processing for all fields
+                    for i, field in enumerate(custom_fields):
+                        if len(parts) > start_idx + i:
+                            field_value = parts[start_idx + i]
+                            if field_value:  # Only add if not empty
+                                entry[field] = field_value
             except:
                 pass
             

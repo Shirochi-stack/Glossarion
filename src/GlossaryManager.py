@@ -970,7 +970,8 @@ def _convert_to_token_efficient_format(csv_lines):
                 
                 # Add any additional fields as description
                 if len(parts) > 4:
-                    description = ', '.join(parts[4:])
+                    # Rejoin all remaining parts to handle commas within description
+                    description = ','.join(parts[4:])
                     if description.strip():
                         entry_line += f": {description}"
                 
@@ -1029,6 +1030,8 @@ def _sanitize_final_glossary_lines(lines, use_legacy_format=False):
                     header_seen = True
                 # skip duplicates
             else:
+                # Ensure commas inside quoted fields don't break simple parsing in other tools
+                # But allow them for now as we use standard CSV
                 sanitized.append(ln)
         # ensure header at top
         if sanitized and not sanitized[0].strip().lower().startswith("type,raw_name"):
