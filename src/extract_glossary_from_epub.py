@@ -1,6 +1,7 @@
 # extract_glossary_from_epub.py
 import os
 import json
+import re
 import argparse
 import zipfile
 import time
@@ -1460,6 +1461,114 @@ def _skip_raw_name_duplicates_matrix(glossary, fuzzy_threshold):
     print(f"[Dedup] ✅ Matrix deduplication complete: {skipped_count} duplicates removed ({replaced_count} replaced), {len(deduplicated)} remaining")
     return deduplicated
 
+def _parse_token_efficient_glossary(text: str) -> List[Dict]:
+    """
+    Parse token-efficient glossary text (section headers + bullet lines) into entry dicts.
+    Supports custom entry types and arbitrary extra columns from the header line.
+    """
+    lines = text.splitlines()
+    first = next((ln.strip() for ln in lines if ln.strip()), "")
+    if not (first.lower().startswith("glossary columns:") or first.startswith("===") or first.startswith("* ")):
+        return []
+
+    header_cols = ['translated_name', 'raw_name', 'gender', 'description']
+    section_re = re.compile(r"^===\s*(.+?)\s*===\s*$")
+    line_re = re.compile(r"^\*\s+(.*?)\s*(?:\((.*?)\))?\s*(?:\[(.*?)\])?\s*(?::\s*(.*))?$")
+    entries: List[Dict] = []
+    current_section = None
+
+    # Map section names back to type using enabled custom types (with plural tolerance)
+    custom_types = get_custom_entry_types()
+    type_map = {}
+    for t in custom_types.keys():
+        type_map[t.lower()] = t
+        if not t.lower().endswith('s'):
+            type_map[f"{t.lower()}s"] = t
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        # Header line
+        if line.lower().startswith("glossary columns:"):
+            cols_text = line.split(":", 1)[1]
+            header_cols = [c.strip() for c in cols_text.split(",") if c.strip()]
+            if not header_cols:
+                header_cols = ['translated_name', 'raw_name', 'gender', 'description']
+            continue
+
+        # Section line
+        m_sec = section_re.match(line)
+        if m_sec:
+            sec = m_sec.group(1).strip()
+            current_section = sec
+            continue
+
+        # Entry line
+        if not line.startswith("* "):
+            continue
+        m = line_re.match(line)
+        if not m:
+            continue
+        translated, raw_name, gender_field, desc = m.groups()
+        translated = (translated or "").strip()
+        raw_name = (raw_name or "").strip()
+        desc = (desc or "").strip()
+        gender = (gender_field or "").strip()
+
+        entry = {
+            "type": type_map.get((current_section or "").lower(), type_map.get("terms", "terms")),
+            "raw_name": raw_name,
+            "translated_name": translated,
+        }
+        if gender:
+            entry["gender"] = gender
+        if desc:
+            entry["description"] = desc
+
+        # Extra columns beyond the standard four
+        extra_cols = header_cols[4:] if len(header_cols) > 4 else []
+        if extra_cols and desc and " | " in desc:
+            desc_main, *extra_parts = desc.split(" | ")
+            entry["description"] = desc_main
+            for part in extra_parts:
+                if ":" in part:
+                    k, v = part.split(":", 1)
+                    k = k.strip()
+                    v = v.strip()
+                    if k in extra_cols:
+                        entry[k] = v
+
+        entries.append(entry)
+
+    return entries
+
+
+def _load_glossary_file(path: str) -> List[Dict]:
+    """
+    Load a glossary file that may be in token-efficient or legacy CSV format.
+    """
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+        token_entries = _parse_token_efficient_glossary(text)
+        if token_entries:
+            print(f"📂 Loaded token-efficient glossary: {len(token_entries)} entries")
+            return token_entries
+        # Legacy CSV
+        import csv
+        rows = []
+        reader = csv.DictReader(text.splitlines())
+        for row in reader:
+            rows.append(row)
+        print(f"📂 Loaded legacy CSV glossary: {len(rows)} entries")
+        return rows
+    except Exception as e:
+        print(f"⚠️ Could not load glossary file {path}: {e}")
+        return []
 
 def _dedupe_worker_chunk(chunk_items, all_items, fuzzy_threshold, use_rapidfuzz):
     """Process a chunk of items in parallel - reduces memory overhead"""
@@ -2579,17 +2688,7 @@ def main(log_callback=None, stop_callback=None):
         # Try loading CSV if JSON not found (legacy support)
         csv_path = os.path.splitext(output_glossary_path)[0] + '.csv'
         if os.path.exists(csv_path):
-             try:
-                 import csv
-                 glossary = []
-                 with open(csv_path, 'r', encoding='utf-8') as f:
-                     reader = csv.DictReader(f)
-                     for row in reader:
-                         glossary.append(row)
-                 print(f"📂 Loaded existing glossary from CSV: {len(glossary)} entries")
-             except Exception as e:
-                 print(f"⚠️ Could not load existing CSV glossary, starting fresh: {e}")
-                 glossary = []
+            glossary = _load_glossary_file(csv_path)
         else:
             glossary = []
     merged_indices = prog.get('merged_indices', [])
