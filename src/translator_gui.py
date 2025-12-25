@@ -6837,12 +6837,25 @@ If you see multiple p-b cookies, use the one with the longest value."""
                     base_name = os.path.splitext(os.path.basename(text_file))[0]
                     successful_items.append(f"📄 Glossary/{base_name}_glossary.json")
                 else:
+                    # If failed but we have a partial file (checked inside _extract...), add to success list with note
+                    base_name = os.path.splitext(os.path.basename(text_file))[0]
+                    # We need to manually check if partial file exists since _extract returns False on stop
+                    partial_path = os.path.join("Glossary", f"{base_name}_glossary.csv")
+                    if os.path.exists(partial_path):
+                        successful_items.append(f"📄 Glossary/{base_name}_glossary.csv (Partial)")
                     failed += 1
             
             # Final summary
             self.append_log(f"\n{'='*60}")
             self.append_log(f"📊 Glossary Extraction Summary:")
-            if successful > 0:
+            
+            # If successful count is 0 but we have items in successful_items, it means we had partial success
+            # This happens when a file was stopped mid-process but some chapters were saved
+            if successful == 0 and len(successful_items) > 0:
+                self.append_log(f"   ⚠️ Partial Success ({len(successful_items)}):")
+                for item in successful_items:
+                    self.append_log(f"      - {item} (Partial)")
+            elif successful > 0:
                 self.append_log(f"   ✅ Successful ({successful}):")
                 for item in successful_items:
                     self.append_log(f"      - {item}")
@@ -6852,8 +6865,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
             if failed > 0:
                 self.append_log(f"   ❌ Failed: {failed}")
             
-            if successful == 0 and failed > 0 and self.stop_requested:
-                self.append_log(f"   🛑 Process stopped by user (incomplete files marked as failed)")
+            if self.stop_requested:
+                self.append_log(f"   🛑 Process stopped by user")
+                if successful == 0 and failed > 0:
+                     self.append_log(f"      (Incomplete files marked as failed)")
             
             self.append_log(f"   📁 Total processed: {total_groups}")
             self.append_log(f"{'='*60}")
@@ -7730,32 +7745,39 @@ Important rules:
                     return False
                 
                 # Check if output file exists - check both JSON and CSV
-                if not self.stop_requested:
-                    success = False
-                    # Check explicit output path (likely JSON based on construction)
-                    if os.path.exists(output_path):
-                        self.append_log(f"✅ Glossary saved to: {output_path}")
-                        success = True
+                # Even if stopped, we consider it a partial success if the file exists and has content
+                
+                has_content = False
+                success_type = "Full"
+                
+                # Check explicit output path (likely JSON)
+                if os.path.exists(output_path):
+                    has_content = True
+                
+                # Check CSV variant
+                csv_path = os.path.splitext(output_path)[0] + '.csv'
+                if os.path.exists(csv_path):
+                    has_content = True
                     
-                    # Check CSV variant (since glossary extractor saves both)
-                    csv_path = os.path.splitext(output_path)[0] + '.csv'
-                    if os.path.exists(csv_path):
-                        self.append_log(f"✅ Glossary saved to: {csv_path}")
-                        success = True
-                        
-                    # Check in Glossary subfolder if not found
-                    if not success:
-                        glossary_json_sub = os.path.join("Glossary", os.path.basename(output_path))
-                        glossary_csv_sub = os.path.splitext(glossary_json_sub)[0] + '.csv'
-                        
-                        if os.path.exists(glossary_json_sub):
-                            self.append_log(f"✅ Glossary saved to: {glossary_json_sub}")
-                            success = True
-                        if os.path.exists(glossary_csv_sub):
-                            self.append_log(f"✅ Glossary saved to: {glossary_csv_sub}")
-                            success = True
-                            
-                    return success
+                # Check in Glossary subfolder if not found
+                if not has_content:
+                    glossary_json_sub = os.path.join("Glossary", os.path.basename(output_path))
+                    glossary_csv_sub = os.path.splitext(glossary_json_sub)[0] + '.csv'
+                    
+                    if os.path.exists(glossary_json_sub):
+                        has_content = True
+                    if os.path.exists(glossary_csv_sub):
+                        has_content = True
+                
+                if has_content:
+                    if self.stop_requested:
+                        self.append_log(f"⚠️ Partial glossary saved (stopped by user): {output_path}")
+                        # Don't return True here so it doesn't count as fully successful, 
+                        # but we can track it as partial if needed
+                        return False 
+                    else:
+                        self.append_log(f"✅ Glossary saved to: {output_path}")
+                        return True
                 else:
                     return False
                 

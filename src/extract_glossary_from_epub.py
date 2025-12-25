@@ -3065,7 +3065,9 @@ def main(log_callback=None, stop_callback=None):
                         save_progress(completed, glossary)
                         save_glossary_json(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
                         save_glossary_csv(glossary, os.path.join(glossary_dir, os.path.basename(args.output)))
-                        print(f"✅ Saved {len(glossary)} deduplicated entries before exit")
+                    
+                        # Log the final size after deduplication
+                        print(f"✅ Saved {len(glossary)} entries (after {removed if 'removed' in locals() else 0} duplicates removed) before exit")
                     return
     
     else:
