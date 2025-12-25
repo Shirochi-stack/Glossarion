@@ -3189,9 +3189,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             if filtered_sent not in sentence_to_index:
                 window_num = len(context_groups) + 1
                 context_groups.append(
-                    f"=== CONTEXT WINDOW {window_num} START ===\n"
-                    f"{filtered_sent}\n"
-                    f"=== CONTEXT WINDOW {window_num} END ==="
+                    f"{filtered_sent}\n=== CONTEXT WINDOW {window_num} END ==="
                 )
                 continue
             
@@ -3214,9 +3212,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             context_group_body = ' '.join(window_sentences)
             window_num = len(context_groups) + 1
             context_groups.append(
-                f"=== CONTEXT WINDOW {window_num} START ===\n"
-                f"{context_group_body}\n"
-                f"=== CONTEXT WINDOW {window_num} END ==="
+                f"{context_group_body}\n=== CONTEXT WINDOW {window_num} END ==="
             )
         
         print(f"📑 Created {len(context_groups):,} context windows (up to {context_window*2+1} sentences each)")
