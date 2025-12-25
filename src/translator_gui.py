@@ -6532,7 +6532,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             "ATTACH_CSS_TO_CHAPTERS": "1" if self.attach_css_to_chapters_var else "0",
             "EPUB_USE_HTML_METHOD": "1" if self.epub_use_html_method_var else "0",
             'GLOSSARY_FUZZY_THRESHOLD': str(self.config.get('glossary_fuzzy_threshold', 0.90)),
-            'GLOSSARY_MAX_TEXT_SIZE': str(self.config.get('glossary_max_text_size', 50000)),
+            'GLOSSARY_MAX_TEXT_SIZE': str(self.config.get('glossary_max_text_size', 0)),
             'GLOSSARY_MAX_SENTENCES': str(self.config.get('glossary_max_sentences', 200)),
             'USE_FALLBACK_KEYS': '1' if self.config.get('use_fallback_keys', False) else '0',
             'FALLBACK_KEYS': json.dumps(self.config.get('fallback_keys', [])),

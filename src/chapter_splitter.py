@@ -117,6 +117,20 @@ class ChapterSplitter:
             target_tokens_per_chunk = total_tokens / num_chunks
             current_lines = []
             current_tokens = 0
+            # Pre-compute marker indices for gender-context boundaries
+            gender_footer_indices = {
+                idx for idx, line in enumerate(lines)
+                if line.strip().startswith("=== GENDER CONTEXT WINDOW") and "END ===" in line
+            }
+            # Build prefix sums for fast token range queries
+            prefix_tokens = [0]
+            for tok in line_tokens:
+                prefix_tokens.append(prefix_tokens[-1] + tok)
+            
+            def tokens_between(start_idx, end_exclusive):
+                return prefix_tokens[end_exclusive] - prefix_tokens[start_idx]
+            
+            chunk_start = 0
             
             for i, line in enumerate(lines):
                 line_tok = line_tokens[i]
@@ -145,9 +159,43 @@ class ChapterSplitter:
                     should_split = True
                 
                 if should_split:
-                    chunks.append('\n'.join(current_lines))
-                    current_lines = []
-                    current_tokens = 0
+                    # Prefer to split near a gender footer that is closest to the token target
+                    prev_footer = max((idx for idx in gender_footer_indices if chunk_start <= idx <= i), default=None)
+                    next_footer = min((idx for idx in gender_footer_indices if idx > i), default=None)
+                    
+                    # Token counts if we snap to footer
+                    def tokens_to(idx_inclusive):
+                        return tokens_between(chunk_start, idx_inclusive + 1)
+                    
+                    # Candidate selection: pick footer with tokens closest to target, within 15% of hard cap if forward
+                    best_split_idx = None
+                    best_diff = None
+                    
+                    target = target_tokens_per_chunk
+                    
+                    if prev_footer is not None:
+                        t_prev = tokens_to(prev_footer)
+                        diff = abs(t_prev - target)
+                        best_split_idx, best_diff = prev_footer + 1, diff
+                    
+                    if next_footer is not None:
+                        t_next = tokens_to(next_footer)
+                        # Allow slight overflow beyond effective_max_tokens
+                        if t_next <= effective_max_tokens * 1.15:
+                            diff = abs(t_next - target)
+                            if best_diff is None or diff < best_diff:
+                                best_split_idx, best_diff = next_footer + 1, diff
+                    
+                    if best_split_idx is None:
+                        best_split_idx = i + 1  # fallback to current boundary
+                    
+                    chunk_lines = lines[chunk_start:best_split_idx]
+                    chunks.append('\n'.join(chunk_lines))
+                    
+                    # Prepare next chunk state
+                    chunk_start = best_split_idx
+                    current_lines = lines[chunk_start:i + 1]
+                    current_tokens = tokens_between(chunk_start, i + 1)
             
             # Safety: add any remaining lines
             if current_lines:

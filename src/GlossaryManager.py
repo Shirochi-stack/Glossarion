@@ -2905,8 +2905,16 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             gender_pronouns = PM.GENDER_PRONOUNS.get(lang_key, {}).get('male', []) + \
                               PM.GENDER_PRONOUNS.get(lang_key, {}).get('female', [])
 
-        # Parallelize scoring if dataset is large enough
-        if use_parallel and len(filtered_sentences) > 2000:
+        # If gender context is OFF, skip expensive scoring and just build simple coverage map
+        if not include_gender_context:
+            print("📑 Gender context disabled: skipping gender-nuance scoring (using simple term coverage).")
+            for idx, sent in enumerate(filtered_sentences):
+                sentence_scores[idx] = 1.0
+                for term in frequent_terms:
+                    if term in sent:
+                        term_to_sentences.setdefault(term, []).append(idx)
+        # Parallelize scoring if dataset is large enough and gender context is ON
+        elif use_parallel and len(filtered_sentences) > 2000:
             print(f"📑 Parallelizing sentence scoring with {extraction_workers} workers...")
             
             # Prepare batches
@@ -3181,14 +3189,17 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                             sentence_to_index[filtered_sent] = idx
                             break
         
-        # Build context windows
+        # Build context windows with explicit boundaries to avoid cross-window leakage
         context_groups = []
         included_indices = set()
         
         for filtered_sent in filtered_sentences:
+            # If we can't locate the sentence in the master list, wrap it individually
             if filtered_sent not in sentence_to_index:
-                # If we can't find it, just use the sentence as-is
-                context_groups.append(filtered_sent)
+                window_num = len(context_groups) + 1
+                context_groups.append(
+                    f\"=== GENDER CONTEXT WINDOW {window_num} START ===\\n{filtered_sent}\\n=== GENDER CONTEXT WINDOW {window_num} END ===\"
+                )
                 continue
             
             idx = sentence_to_index[filtered_sent]
@@ -3205,9 +3216,15 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             for i in range(start_idx, end_idx):
                 included_indices.add(i)
             
-            # Extract the window
+            # Extract the window and wrap with start/end markers for splitter safety
             window_sentences = all_sentences_list[start_idx:end_idx]
-            context_group = ' '.join(window_sentences)
+            context_group_body = ' '.join(window_sentences)
+            window_num = len(context_groups) + 1
+            context_group = (
+                f\"=== GENDER CONTEXT WINDOW {window_num} START ===\\n\"
+                f\"{context_group_body}\\n\"
+                f\"=== GENDER CONTEXT WINDOW {window_num} END ===\"
+            )
             context_groups.append(context_group)
         
         print(f"📑 Created {len(context_groups):,} context windows (up to {context_window*2+1} sentences each)")
