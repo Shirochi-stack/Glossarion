@@ -3656,25 +3656,28 @@ def _process_ai_response(response_text, all_text, min_frequency,
             if 'type' in line.lower() and 'raw_name' in line.lower():
                 continue
                 
-            # Parse CSV line
+            # Parse CSV line (basic split)
             parts = [p.strip() for p in line.split(',')]
             
             # Replace invalid 'stop' values with empty string
             parts = ['' if p == "'stop'" or p == "stop" else p for p in parts]
             
-            if include_description and len(parts) >= 5:
-                # Has all 5 columns (with gender and description)
-                entry_type = parts[0]
-                raw_name = parts[1]
-                translated_name = parts[2]
-                gender = parts[3] if len(parts) > 3 else ''
-                description = parts[4] if len(parts) > 4 else ''
-                
-                # Validate - reject malformed entries that look like tuples/lists or quoted strings
-                if (raw_name and translated_name and 
-                    not (raw_name.startswith(('[', '(', "'", '"')) or translated_name.startswith(('[', '(', "'", '"'))) and
-                    not (raw_name.endswith(("'", '"')) or translated_name.endswith(("'", '"')))):
-                    csv_lines.append(f"{entry_type},{raw_name},{translated_name},{gender},{description}")
+            if include_description:
+                # Need at least 3 parts (type, raw, trans)
+                if len(parts) >= 3:
+                    entry_type = parts[0]
+                    raw_name = parts[1]
+                    translated_name = parts[2]
+                    gender = parts[3] if len(parts) > 3 else ''
+                    # Handle comma in description: join all remaining parts
+                    description = ','.join(parts[4:]) if len(parts) > 4 else ''
+                    
+                    # Validate
+                    if (raw_name and translated_name and 
+                        not (raw_name.startswith(('[', '(', "'", '"')) or translated_name.startswith(('[', '(', "'", '"'))) and
+                        not (raw_name.endswith(("'", '"')) or translated_name.endswith(("'", '"')))):
+                        csv_lines.append(f"{entry_type},{raw_name},{translated_name},{gender},{description}")
+            
             elif include_gender_context and len(parts) >= 4:
                 # Has all 4 columns (with gender)
                 entry_type = parts[0]
