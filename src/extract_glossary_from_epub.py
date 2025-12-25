@@ -1080,6 +1080,13 @@ def parse_api_response(response_text: str) -> List[Dict]:
         if header_fields:
             if len(row) < len(header_fields):
                 row += [''] * (len(header_fields) - len(row))
+            elif len(row) > len(header_fields):
+                # If the model failed to quote a comma-containing description, merge overflow into the last column
+                desc_idx = next((i for i, h in enumerate(header_fields) if h.lower() == 'description'), None)
+                if desc_idx is not None and desc_idx < len(header_fields):
+                    row = row[:desc_idx] + [','.join(row[desc_idx:])]
+                else:
+                    row = row[:len(header_fields)]
             entry_map = {header_fields[i]: row[i] for i in range(len(header_fields))}
             entry_type = (entry_map.get('type') or '').lower() or 'term'
             if entry_type not in enabled_types:

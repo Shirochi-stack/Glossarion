@@ -973,6 +973,12 @@ def _convert_to_token_efficient_format(csv_lines):
 
             if header_parts and len(parts) < len(header_parts):
                 parts += [''] * (len(header_parts) - len(parts))
+            elif header_parts and len(parts) > len(header_parts):
+                # If unquoted commas split the description, merge overflow into the description column
+                if desc_idx != -1 and desc_idx < len(header_parts):
+                    parts = parts[:desc_idx] + [",".join(parts[desc_idx:])]
+                else:
+                    parts = parts[:len(header_parts)]
 
             # Extract core fields using header positions when available
             entry_type_val = (parts[type_idx] if type_idx != -1 and len(parts) > type_idx else entry_type).lower()
@@ -991,6 +997,14 @@ def _convert_to_token_efficient_format(csv_lines):
 
             # Description + extra fields
             desc_val = parts[desc_idx].strip() if desc_idx != -1 and len(parts) > desc_idx else ''
+            # Fallback: if no description column exists in header but there are trailing columns,
+            # join everything after the last known core column as description.
+            if desc_idx == -1:
+                core_max = max(idx for idx in [type_idx, raw_idx, trans_idx, gender_idx] if idx != -1) if any(idx != -1 for idx in [type_idx, raw_idx, trans_idx, gender_idx]) else 2
+                if len(parts) > core_max + 1:
+                    desc_tail = ",".join(parts[core_max + 1:]).strip()
+                    if desc_tail and not desc_val:
+                        desc_val = desc_tail
             extra_segments = []
             for idx, col in enumerate(header_parts):
                 col_lower = col.lower()
@@ -3689,6 +3703,12 @@ def _process_ai_response(response_text, all_text, min_frequency,
             for row in dynamic_rows:
                 if len(row) < len(dynamic_header):
                     row += [''] * (len(dynamic_header) - len(row))
+                elif len(row) > len(dynamic_header):
+                    desc_idx = required.get('description')
+                    if desc_idx is not None and desc_idx < len(dynamic_header):
+                        row = row[:desc_idx] + [','.join(row[desc_idx:])]
+                    else:
+                        row = row[:len(dynamic_header)]
                 # Clean stop tokens
                 row = ['' if cell in ("'stop'", "stop") else cell for cell in row]
                 entry_type = row[required['type']].strip() if len(row) > required['type'] else ''
