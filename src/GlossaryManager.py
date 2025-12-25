@@ -3190,7 +3190,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                             break
         
         # Build context windows with explicit boundaries to avoid cross-window leakage
-        context_groups = []
+        context_groups: list[str] = []
         included_indices = set()
         
         for filtered_sent in filtered_sentences:
@@ -3198,7 +3198,9 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             if filtered_sent not in sentence_to_index:
                 window_num = len(context_groups) + 1
                 context_groups.append(
-                    f\"=== GENDER CONTEXT WINDOW {window_num} START ===\\n{filtered_sent}\\n=== GENDER CONTEXT WINDOW {window_num} END ===\"
+                    f"=== GENDER CONTEXT WINDOW {window_num} START ===\n"
+                    f"{filtered_sent}\n"
+                    f"=== GENDER CONTEXT WINDOW {window_num} END ==="
                 )
                 continue
             
@@ -3220,12 +3222,11 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             window_sentences = all_sentences_list[start_idx:end_idx]
             context_group_body = ' '.join(window_sentences)
             window_num = len(context_groups) + 1
-            context_group = (
-                f\"=== GENDER CONTEXT WINDOW {window_num} START ===\\n\"
-                f\"{context_group_body}\\n\"
-                f\"=== GENDER CONTEXT WINDOW {window_num} END ===\"
+            context_groups.append(
+                f"=== GENDER CONTEXT WINDOW {window_num} START ===\n"
+                f"{context_group_body}\n"
+                f"=== GENDER CONTEXT WINDOW {window_num} END ==="
             )
-            context_groups.append(context_group)
         
         print(f"📑 Created {len(context_groups):,} context windows (up to {context_window*2+1} sentences each)")
         filtered_text = '\n\n'.join(context_groups)  # Separate windows with double newline
@@ -3233,6 +3234,11 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     else:
         filtered_text = ' '.join(filtered_sentences)
     
+    # Determine character count for summary (use dynamic-expansion tally when available)
+    if include_all_characters and honorific_first_indices:
+        character_term_count = len(honorific_first_indices)
+    elif 'character_terms' in locals() and character_terms:
+        character_term_count = len(set(character_terms))
     # Calculate and display filtering statistics
     filter_end_time = time.time()
     filter_duration = filter_end_time - filter_start_time
