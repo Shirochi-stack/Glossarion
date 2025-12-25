@@ -76,7 +76,9 @@ def create_client_with_multi_key_support(api_key, model, output_dir, config):
         os.environ['USE_MULTI_API_KEYS'] = '0'
         
     # Create UnifiedClient normally - it will check environment variables
-    return UnifiedClient(api_key=api_key, model=model, output_dir=output_dir)
+    client = UnifiedClient(api_key=api_key, model=model, output_dir=output_dir)
+    client.context = 'glossary'
+    return client
     
 def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None):
     """Send API request with interrupt capability and optional timeout retry"""

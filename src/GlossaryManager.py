@@ -3358,6 +3358,7 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
             
             from unified_api_client import UnifiedClient, UnifiedClientError
             client = UnifiedClient(model=MODEL, api_key=API_KEY, output_dir=output_dir)
+            client.context = 'glossary'
             if hasattr(client, 'reset_cleanup_state'):
                 client.reset_cleanup_state()
             
