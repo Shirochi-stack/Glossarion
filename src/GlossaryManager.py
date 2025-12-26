@@ -2897,6 +2897,58 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             print(f"📑 Filtered to {len(filtered_sentences):,} sentences containing top terms")
     
     print(f"📑 Selected {len(filtered_sentences):,} sentences containing frequent terms")
+    # Global sentence-level deduplication before window limiting (uses the same configured algorithm/threshold)
+    # Optional: controlled by GLOSSARY_GLOBAL_SENTENCE_DEDUPE (default off)
+    if filtered_sentences and os.getenv("GLOSSARY_GLOBAL_SENTENCE_DEDUPE", "0") == "1":
+        try:
+            import duplicate_detection_config as DDC
+            dd_config = DDC.get_duplicate_detection_config()
+            algo_desc = dd_config.get('description', 'Unknown')
+            threshold = dd_config.get('threshold', float(os.getenv("GLOSSARY_FUZZY_THRESHOLD", "0.90")))
+            algo = os.getenv("GLOSSARY_DUPLICATE_ALGORITHM", "AUTO").upper()
+            print(f"📑 Global context dedup: algo={algo} ({algo_desc}), threshold={threshold:.2f}")
+
+            deduped = []
+            seen_norm = set()
+            buckets = {}  # bucket by first character for faster fuzzy filtering
+            skipped = 0
+
+            for idx, sent in enumerate(filtered_sentences):
+                norm = sent.strip().lower()
+                if not norm:
+                    continue
+
+                # exact check
+                if norm in seen_norm:
+                    skipped += 1
+                    continue
+
+                is_dup = False
+                key = norm[0]
+                candidates = buckets.get(key, [])
+                # keep candidate list bounded to recent 800 to avoid quadratic blowup
+                candidates = candidates[-800:]
+                for c in candidates:
+                    score = DDC.calculate_similarity_with_config(sent, c, dd_config)
+                    if score >= threshold:
+                        is_dup = True
+                        skipped += 1
+                        break
+
+                if not is_dup:
+                    deduped.append(sent)
+                    seen_norm.add(norm)
+                    buckets.setdefault(key, []).append(sent)
+
+                if idx and idx % 2000 == 0:
+                    print(f"📑 Context dedup progress: {idx}/{len(filtered_sentences)} (kept {len(deduped)}, skipped {skipped})")
+
+            filtered_sentences = deduped
+            print(f"📑 Context dedup complete: kept {len(filtered_sentences)} / {len(filtered_sentences)+skipped}, removed {skipped}")
+        except ImportError:
+            print("⚠️ duplicate_detection_config not found; skipping global context dedup")
+        except Exception as e:
+            print(f"⚠️ Global context dedup failed: {e}")
     
     # Track character-like term count for final summary
     character_term_count = 0
