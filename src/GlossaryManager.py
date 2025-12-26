@@ -155,27 +155,6 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     # Only redirect if we're NOT in a subprocess (i.e., log_callback is a real GUI callback)
     import sys
     in_subprocess = hasattr(sys.stdout, 'queue')  # Worker's LogCapture has a queue attribute
-
-    # Normalize config from instructions (if provided), then augment with config.json fallback
-    config = instructions if isinstance(instructions, dict) else {}
-    if not config:
-        try:
-            import json
-            from api_key_encryption import decrypt_config
-            with open('config.json', 'r', encoding='utf-8') as cf:
-                _cfg = json.load(cf)
-                _cfg = decrypt_config(_cfg)
-                if isinstance(_cfg, dict):
-                    config = _cfg
-        except Exception:
-            pass
-
-    # Keep environment in sync with config for global sentence dedupe
-    try:
-        cfg_global = config.get('glossary_global_sentence_dedupe', False) if isinstance(config, dict) else False
-        os.environ['GLOSSARY_GLOBAL_SENTENCE_DEDUPE'] = '1' if cfg_global else '0'
-    except Exception:
-        pass
     
     if log_callback and not in_subprocess:
         set_output_redirect(log_callback)
@@ -304,9 +283,6 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     print(f"🔍 [DEBUG] Reading GLOSSARY_MAX_SENTENCES from environment: '{max_sentences_env}'")
     max_sentences = int(max_sentences_env)
     print(f"🔍 [DEBUG] Converted to integer: {max_sentences}")
-    global_dedupe_env = os.getenv("GLOSSARY_GLOBAL_SENTENCE_DEDUPE", "0")
-    cfg_global_dedupe = config.get('glossary_global_sentence_dedupe', False) if isinstance(config, dict) else False
-    print(f"📑 DEBUG: Global sentence dedupe = env:'{global_dedupe_env}' config:{cfg_global_dedupe}")
     include_all_characters_env = os.getenv("GLOSSARY_INCLUDE_ALL_CHARACTERS", "0")
     include_all_characters = include_all_characters_env == "1"
     include_gender_context_flag = os.getenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
@@ -365,7 +341,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     if use_smart_filter and custom_prompt:  # Only apply for AI extraction
         print(f"📁 Smart filtering enabled - checking effective text size after filtering...")
         # Perform filtering ONCE and reuse for chunking
-        filtered_sample, _ = _filter_text_for_glossary(all_text, min_frequency, max_sentences, config)
+        filtered_sample, _ = _filter_text_for_glossary(all_text, min_frequency, max_sentences)
         filtered_text_cache = filtered_sample
         effective_text_size = len(filtered_sample)
         # Calculate token count using tiktoken
@@ -468,7 +444,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
             # If using smart filter, we need to split the FILTERED text, not raw text
             if use_smart_filter and custom_prompt:
                 # Split the filtered text into chunks (reuse cached filtered text)
-                filtered_text = filtered_text_cache if filtered_text_cache is not None else _filter_text_for_glossary(all_text, min_frequency, max_sentences, config)[0]
+                filtered_text = filtered_text_cache if filtered_text_cache is not None else _filter_text_for_glossary(all_text, min_frequency, max_sentences)[0]
                 chunks_to_process = []
                 
                 # Split filtered text into chunks of appropriate size
@@ -1877,7 +1853,7 @@ def _strip_honorific(term, language_hint='unknown'):
     
     return term
 
-def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None, config=None):
+def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     """Filter text to extract only meaningful content for glossary extraction
     
     Args:
@@ -2921,60 +2897,6 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None, config=
             print(f"📑 Filtered to {len(filtered_sentences):,} sentences containing top terms")
     
     print(f"📑 Selected {len(filtered_sentences):,} sentences containing frequent terms")
-    # Global sentence-level deduplication before window limiting (uses the same configured algorithm/threshold)
-    # Optional: controlled by env or config flag
-    cfg_global = config.get('glossary_global_sentence_dedupe') if isinstance(config, dict) else False
-    global_dedupe_enabled = (os.getenv("GLOSSARY_GLOBAL_SENTENCE_DEDUPE", "0") == "1") or bool(cfg_global)
-    if filtered_sentences and global_dedupe_enabled:
-        try:
-            import duplicate_detection_config as DDC
-            dd_config = DDC.get_duplicate_detection_config()
-            algo_desc = dd_config.get('description', 'Unknown')
-            threshold = dd_config.get('threshold', float(os.getenv("GLOSSARY_FUZZY_THRESHOLD", "0.90")))
-            algo = os.getenv("GLOSSARY_DUPLICATE_ALGORITHM", "AUTO").upper()
-            print(f"📑 Global context dedup: algo={algo} ({algo_desc}), threshold={threshold:.2f}")
-
-            deduped = []
-            seen_norm = set()
-            buckets = {}  # bucket by first character for faster fuzzy filtering
-            skipped = 0
-
-            for idx, sent in enumerate(filtered_sentences):
-                norm = sent.strip().lower()
-                if not norm:
-                    continue
-
-                # exact check
-                if norm in seen_norm:
-                    skipped += 1
-                    continue
-
-                is_dup = False
-                key = norm[0]
-                candidates = buckets.get(key, [])
-                # keep candidate list bounded to recent 800 to avoid quadratic blowup
-                candidates = candidates[-800:]
-                for c in candidates:
-                    score = DDC.calculate_similarity_with_config(sent, c, dd_config)
-                    if score >= threshold:
-                        is_dup = True
-                        skipped += 1
-                        break
-
-                if not is_dup:
-                    deduped.append(sent)
-                    seen_norm.add(norm)
-                    buckets.setdefault(key, []).append(sent)
-
-                if idx and idx % 2000 == 0:
-                    print(f"📑 Context dedup progress: {idx}/{len(filtered_sentences)} (kept {len(deduped)}, skipped {skipped})")
-
-            filtered_sentences = deduped
-            print(f"📑 Context dedup complete: kept {len(filtered_sentences)} / {len(filtered_sentences)+skipped}, removed {skipped}")
-        except ImportError:
-            print("⚠️ duplicate_detection_config not found; skipping global context dedup")
-        except Exception as e:
-            print(f"⚠️ Global context dedup failed: {e}")
     
     # Track character-like term count for final summary
     character_term_count = 0
@@ -3516,7 +3438,7 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                     print("📁 Applying smart text filtering to reduce noise...")
                     # Use max_sentences parameter (passed from parent, already read from environment)
                     print(f"🔍 [DEBUG] In _extract_with_custom_prompt: max_sentences={max_sentences}")
-                    text_sample, detected_terms = _filter_text_for_glossary(all_text, min_frequency, max_sentences, None)
+                    text_sample, detected_terms = _filter_text_for_glossary(all_text, min_frequency, max_sentences)
             
             # Replace placeholders in prompt
             # Get target language from environment (used in the prompt for translation output)
@@ -4898,16 +4820,18 @@ Provide translations in the same numbered format."""
         
         all_translations = {}
         all_responses = []  # Collect raw responses
+        # Respect Auto-retry Slow Chunks toggle (RETRY_TIMEOUT env): when off, disable chunk timeouts entirely
         retry_env = os.getenv("RETRY_TIMEOUT")
         retry_timeout_enabled = retry_env is None or retry_env.strip().lower() not in ("0", "false", "off", "")
-        chunk_timeout = None
         if retry_timeout_enabled:
-            env_ct = os.getenv("CHUNK_TIMEOUT", "300")  # legacy default
+            env_ct = os.getenv("CHUNK_TIMEOUT", "900")  # legacy default when retry is on
             try:
                 ct_val = float(env_ct)
                 chunk_timeout = None if ct_val <= 0 else ct_val
             except Exception:
                 chunk_timeout = None
+        else:
+            chunk_timeout = None
         
         for i in range(0, len(term_list), batch_size):
             # Check stop flag before each batch

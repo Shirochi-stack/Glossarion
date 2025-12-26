@@ -485,7 +485,6 @@ class GlossaryManagerMixin:
                     ('enable_auto_glossary_checkbox', 'enable_auto_glossary_var'),
                     ('add_additional_glossary_checkbox', 'add_additional_glossary_var'),
                     ('compress_glossary_checkbox', 'compress_glossary_prompt_var'),
-                    ('glossary_global_sentence_dedupe_checkbox', 'glossary_global_sentence_dedupe_var'),
                     ('include_gender_context_checkbox', 'include_gender_context_var'),
                     ('include_description_checkbox', 'include_description_var'),
                     ('glossary_history_rolling_checkbox', 'glossary_history_rolling_var'),
@@ -1743,26 +1742,6 @@ CRITICAL EXTRACTION RULES:
         # label3.setStyleSheet("color: white; font-size: 10pt; font-style: italic;")
         compress_layout.addWidget(label3)
         compress_layout.addStretch()
-        # Global context dedupe toggle (pre-window)
-        global_dedupe_widget = QWidget()
-        global_dedupe_layout = QHBoxLayout(global_dedupe_widget)
-        global_dedupe_layout.setContentsMargins(0, 0, 0, 15)
-        auto_layout.addWidget(global_dedupe_widget)
-
-        if not hasattr(self, 'glossary_global_sentence_dedupe_checkbox'):
-            self.glossary_global_sentence_dedupe_checkbox = self._create_styled_checkbox("Global deduplicate context sentences (pre-limit)")
-            self.glossary_global_sentence_dedupe_checkbox.setChecked(self.config.get('glossary_global_sentence_dedupe', False))
-        global_dedupe_layout.addWidget(self.glossary_global_sentence_dedupe_checkbox)
-
-        label_global_dedupe = QLabel("(Runs fuzzy dedupe across all sentences before the Max Sentences limit)")
-        global_dedupe_layout.addWidget(label_global_dedupe)
-        global_dedupe_layout.addStretch()
-
-        def _on_global_dedupe_toggle(state):
-            val = bool(state)
-            self.config['glossary_global_sentence_dedupe'] = val
-            os.environ['GLOSSARY_GLOBAL_SENTENCE_DEDUPE'] = '1' if val else '0'
-        self.glossary_global_sentence_dedupe_checkbox.stateChanged.connect(_on_global_dedupe_toggle)
         
         
         # Include all characters toggle (Dynamic Max Limit)

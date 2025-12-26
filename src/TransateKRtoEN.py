@@ -5502,6 +5502,12 @@ def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn
     # The client.send() call will handle multi-key rotation automatically
     
     result_queue = queue.Queue()
+
+    # Honor RETRY_TIMEOUT toggle: when off, disable chunk timeout entirely
+    retry_env = os.getenv("RETRY_TIMEOUT")
+    retry_timeout_enabled = retry_env is None or retry_env.strip().lower() not in ("0", "false", "off", "")
+    if not retry_timeout_enabled:
+        chunk_timeout = None
     
     def api_call():
         try:
@@ -6615,8 +6621,19 @@ def main(log_callback=None, stop_callback=None):
                 completion_callback=on_extraction_complete
             )
             
-            # Wait for completion (with timeout)
-            timeout = 300  # 5 minutes timeout
+            # Wait for completion (with timeout if retry-timeout is enabled)
+            retry_env = os.getenv("RETRY_TIMEOUT")
+            retry_timeout_enabled = retry_env is None or retry_env.strip().lower() not in ("0", "false", "off", "")
+            if retry_timeout_enabled:
+                env_ct = os.getenv("CHUNK_TIMEOUT", "900")  # legacy default
+                try:
+                    timeout = float(env_ct)
+                    if timeout <= 0:
+                        timeout = None
+                except Exception:
+                    timeout = None
+            else:
+                timeout = None
             start_time = time.time()
             
             while not extraction_result["completed"]:
@@ -6624,7 +6641,7 @@ def main(log_callback=None, stop_callback=None):
                     extraction_manager.stop_extraction()
                     return
                 
-                if time.time() - start_time > timeout:
+                if timeout is not None and time.time() - start_time > timeout:
                     log_callback("⚠️ Chapter extraction timeout")
                     extraction_manager.stop_extraction()
                     return
