@@ -1890,6 +1890,7 @@ def _create_response_handling_section(self, parent):
     def _on_retry_slow_toggle(checked):
         try:
             self.retry_timeout_var = bool(checked)
+            timeout_edit.setEnabled(bool(checked))
         except Exception:
             pass
     retry_slow_cb.toggled.connect(_on_retry_slow_toggle)
