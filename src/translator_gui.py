@@ -5892,7 +5892,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                         temperature,
                         max_tokens,
                         lambda: self.stop_requested,
-                        chunk_timeout=self.config.get('chunk_timeout', 300)  # 5 min default
+                        chunk_timeout=self.config.get('chunk_timeout', 1200)  # 20 min default
                     )
                 else:
                     # Fallback to direct call

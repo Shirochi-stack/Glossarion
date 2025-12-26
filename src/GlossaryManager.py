@@ -3467,12 +3467,18 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                 
                 # Use send_with_interrupt for interruptible API call
                 # Respect RETRY_TIMEOUT toggle - if disabled, use None for infinite timeout
-                retry_timeout_enabled = os.getenv("RETRY_TIMEOUT", "0") == "1"
+                retry_env = os.getenv("RETRY_TIMEOUT")
+                retry_timeout_enabled = retry_env is None or retry_env.strip().lower() not in ("0", "false", "off", "")
+                chunk_timeout = None
                 if retry_timeout_enabled:
-                    chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "900"))
-                    print(f"📑 Sending AI extraction request (timeout: {chunk_timeout}s, interruptible)...")
+                    env_ct = os.getenv("CHUNK_TIMEOUT", "900")
+                    try:
+                        ct_val = float(env_ct)
+                        chunk_timeout = None if ct_val <= 0 else ct_val
+                    except Exception:
+                        chunk_timeout = None
+                    print(f"📑 Sending AI extraction request (timeout: {chunk_timeout if chunk_timeout is not None else 'disabled'}s, interruptible)...")
                 else:
-                    chunk_timeout = None
                     print(f"📑 Sending AI extraction request (timeout: disabled, interruptible)...")
                 
                 # Before API call
@@ -4814,7 +4820,16 @@ Provide translations in the same numbered format."""
         
         all_translations = {}
         all_responses = []  # Collect raw responses
-        chunk_timeout = int(os.getenv("CHUNK_TIMEOUT", "300"))  # 5 minute default
+        retry_env = os.getenv("RETRY_TIMEOUT")
+        retry_timeout_enabled = retry_env is None or retry_env.strip().lower() not in ("0", "false", "off", "")
+        chunk_timeout = None
+        if retry_timeout_enabled:
+            env_ct = os.getenv("CHUNK_TIMEOUT", "300")  # legacy default
+            try:
+                ct_val = float(env_ct)
+                chunk_timeout = None if ct_val <= 0 else ct_val
+            except Exception:
+                chunk_timeout = None
         
         for i in range(0, len(term_list), batch_size):
             # Check stop flag before each batch
