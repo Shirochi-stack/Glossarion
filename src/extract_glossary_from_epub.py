@@ -1066,100 +1066,104 @@ def parse_api_response(response_text: str) -> List[Dict]:
     header_fields = None
 
     for line in lines:
-        line = line.strip()
-        if not line or line.startswith('#'):
-            continue
-
-        # Detect and store header to preserve every returned column
-        if 'type' in line.lower() and 'raw_name' in line.lower():
-            try:
-                header_fields = [c.strip() for c in next(csv.reader([line])) if c.strip()]
-            except Exception:
-                header_fields = [c.strip() for c in line.split(',') if c.strip()]
-            continue
-
         try:
-            row = next(csv.reader([line]))
-        except Exception:
-            row = [p.strip() for p in line.split(',')]
-
-        # --- NEW CLEANUP LOGIC ---
-        if len(row) >= 3:
-            raw_check = row[1].strip()
-            trans_check = row[2].strip()
-            if raw_check == '()' or trans_check == '()':
-                print(f"[Warning] Filtered invalid entry with empty brackets: {line}")
-                continue
-            if raw_check.lower() == trans_check.lower() and len(raw_check) > 3:
-                print(f"[Warning] Filtered untranslated entry (raw==translated): {line}")
-                continue
-        # -------------------------
-
-        # If we saw a header, map every column by name to keep all AI-returned data
-        if header_fields:
-            if len(row) < len(header_fields):
-                row += [''] * (len(header_fields) - len(row))
-            elif len(row) > len(header_fields):
-                # If the model failed to quote a comma-containing description, merge overflow into the last column
-                desc_idx = next((i for i, h in enumerate(header_fields) if h.lower() == 'description'), None)
-                if desc_idx is not None and desc_idx < len(header_fields):
-                    row = row[:desc_idx] + [','.join(row[desc_idx:])]
-                else:
-                    row = row[:len(header_fields)]
-            entry_map = {header_fields[i]: row[i] for i in range(len(header_fields))}
-            entry_type = (entry_map.get('type') or '').lower() or 'term'
-            if entry_type not in enabled_types:
-                continue
-            entry_map['type'] = entry_type
-
-            # Default gender if column exists but value missing for gendered types
-            if custom_types.get(entry_type, {}).get('has_gender', False):
-                if 'gender' not in entry_map or not entry_map.get('gender'):
-                    entry_map['gender'] = 'Unknown'
-
-            # Require essential fields
-            if not entry_map.get('raw_name') or not entry_map.get('translated_name'):
+            line = line.strip()
+            if not line or line.startswith('#'):
                 continue
 
-            entries.append(entry_map)
-            continue
-
-        # Legacy fallback (no header detected)
-        parts = row
-        if len(parts) >= 3:
-            entry_type = parts[0].lower()
-
-            # Check if type is enabled
-            if entry_type not in enabled_types:
+            # Detect and store header to preserve every returned column
+            if 'type' in line.lower() and 'raw_name' in line.lower():
+                try:
+                    header_fields = [c.strip() for c in next(csv.reader([line])) if c.strip()]
+                except Exception:
+                    header_fields = [c.strip() for c in line.split(',') if c.strip()]
                 continue
 
-            entry = {
-                'type': entry_type,
-                'raw_name': parts[1],
-                'translated_name': parts[2]
-            }
-
-            # Add gender if type supports it and it's provided
-            type_config = custom_types.get(entry_type, {})
-            if type_config.get('has_gender', False) and len(parts) > 3 and parts[3]:
-                entry['gender'] = parts[3]
-            elif type_config.get('has_gender', False):
-                entry['gender'] = 'Unknown'
-
-            # Add any custom fields
-            custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
             try:
-                custom_fields = json.loads(custom_fields_json)
-                start_idx = 4  # Always 4, not conditional
-                for i, field in enumerate(custom_fields):
-                    if len(parts) > start_idx + i:
-                        field_value = parts[start_idx + i]
-                        if field_value:  # Only add if not empty
-                            entry[field] = field_value
-            except:
-                pass
+                row = next(csv.reader([line]))
+            except Exception:
+                row = [p.strip() for p in line.split(',')]
 
-            entries.append(entry)
+            # --- NEW CLEANUP LOGIC ---
+            if len(row) >= 3:
+                raw_check = row[1].strip()
+                trans_check = row[2].strip()
+                if raw_check == '()' or trans_check == '()':
+                    print(f"[Warning] Filtered invalid entry with empty brackets: {line}")
+                    continue
+                if raw_check.lower() == trans_check.lower() and len(raw_check) > 3:
+                    print(f"[Warning] Filtered untranslated entry (raw==translated): {line}")
+                    continue
+            # -------------------------
+
+            # If we saw a header, map every column by name to keep all AI-returned data
+            if header_fields:
+                if len(row) < len(header_fields):
+                    row += [''] * (len(header_fields) - len(row))
+                elif len(row) > len(header_fields):
+                    # If the model failed to quote a comma-containing description, merge overflow into the last column
+                    desc_idx = next((i for i, h in enumerate(header_fields) if h.lower() == 'description'), None)
+                    if desc_idx is not None and desc_idx < len(header_fields):
+                        row = row[:desc_idx] + [','.join(row[desc_idx:])]
+                    else:
+                        row = row[:len(header_fields)]
+                entry_map = {header_fields[i]: row[i] for i in range(len(header_fields))}
+                entry_type = (entry_map.get('type') or '').lower() or 'term'
+                if entry_type not in enabled_types:
+                    continue
+                entry_map['type'] = entry_type
+
+                # Default gender if column exists but value missing for gendered types
+                if custom_types.get(entry_type, {}).get('has_gender', False):
+                    if 'gender' not in entry_map or not entry_map.get('gender'):
+                        entry_map['gender'] = 'Unknown'
+
+                # Require essential fields
+                if not entry_map.get('raw_name') or not entry_map.get('translated_name'):
+                    continue
+
+                entries.append(entry_map)
+                continue
+
+            # Legacy fallback (no header detected)
+            parts = row
+            if len(parts) >= 3:
+                entry_type = parts[0].lower()
+
+                # Check if type is enabled
+                if entry_type not in enabled_types:
+                    continue
+
+                entry = {
+                    'type': entry_type,
+                    'raw_name': parts[1],
+                    'translated_name': parts[2]
+                }
+
+                # Add gender if type supports it and it's provided
+                type_config = custom_types.get(entry_type, {})
+                if type_config.get('has_gender', False) and len(parts) > 3 and parts[3]:
+                    entry['gender'] = parts[3]
+                elif type_config.get('has_gender', False):
+                    entry['gender'] = 'Unknown'
+
+                # Add any custom fields
+                custom_fields_json = os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]')
+                try:
+                    custom_fields = json.loads(custom_fields_json)
+                    start_idx = 4  # Always 4, not conditional
+                    for i, field in enumerate(custom_fields):
+                        if len(parts) > start_idx + i:
+                            field_value = parts[start_idx + i]
+                            if field_value:  # Only add if not empty
+                                entry[field] = field_value
+                except:
+                    pass
+
+                entries.append(entry)
+        except IndexError as e:
+            print(f"[Error] Malformed glossary line (IndexError): {line} -> {e}")
+            continue
     
     return entries
 
