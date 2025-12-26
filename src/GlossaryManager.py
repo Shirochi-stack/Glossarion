@@ -283,6 +283,8 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     print(f"🔍 [DEBUG] Reading GLOSSARY_MAX_SENTENCES from environment: '{max_sentences_env}'")
     max_sentences = int(max_sentences_env)
     print(f"🔍 [DEBUG] Converted to integer: {max_sentences}")
+    global_dedupe_env = os.getenv("GLOSSARY_GLOBAL_SENTENCE_DEDUPE", "0")
+    print(f"📑 DEBUG: Global sentence dedupe = '{global_dedupe_env}'")
     include_all_characters_env = os.getenv("GLOSSARY_INCLUDE_ALL_CHARACTERS", "0")
     include_all_characters = include_all_characters_env == "1"
     include_gender_context_flag = os.getenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
@@ -341,7 +343,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     if use_smart_filter and custom_prompt:  # Only apply for AI extraction
         print(f"📁 Smart filtering enabled - checking effective text size after filtering...")
         # Perform filtering ONCE and reuse for chunking
-        filtered_sample, _ = _filter_text_for_glossary(all_text, min_frequency, max_sentences)
+        filtered_sample, _ = _filter_text_for_glossary(all_text, min_frequency, max_sentences, config)
         filtered_text_cache = filtered_sample
         effective_text_size = len(filtered_sample)
         # Calculate token count using tiktoken
@@ -444,7 +446,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
             # If using smart filter, we need to split the FILTERED text, not raw text
             if use_smart_filter and custom_prompt:
                 # Split the filtered text into chunks (reuse cached filtered text)
-                filtered_text = filtered_text_cache if filtered_text_cache is not None else _filter_text_for_glossary(all_text, min_frequency, max_sentences)[0]
+                filtered_text = filtered_text_cache if filtered_text_cache is not None else _filter_text_for_glossary(all_text, min_frequency, max_sentences, config)[0]
                 chunks_to_process = []
                 
                 # Split filtered text into chunks of appropriate size
@@ -1853,7 +1855,7 @@ def _strip_honorific(term, language_hint='unknown'):
     
     return term
 
-def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
+def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None, config=None):
     """Filter text to extract only meaningful content for glossary extraction
     
     Args:
@@ -2898,8 +2900,12 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     
     print(f"📑 Selected {len(filtered_sentences):,} sentences containing frequent terms")
     # Global sentence-level deduplication before window limiting (uses the same configured algorithm/threshold)
-    # Optional: controlled by GLOSSARY_GLOBAL_SENTENCE_DEDUPE (default off)
-    if filtered_sentences and os.getenv("GLOSSARY_GLOBAL_SENTENCE_DEDUPE", "0") == "1":
+    # Optional: controlled by env or config flag
+    global_dedupe_enabled = (
+        os.getenv("GLOSSARY_GLOBAL_SENTENCE_DEDUPE", "0") == "1"
+        or (config.get('glossary_global_sentence_dedupe') if isinstance(config, dict) else False)
+    )
+    if filtered_sentences and global_dedupe_enabled:
         try:
             import duplicate_detection_config as DDC
             dd_config = DDC.get_duplicate_detection_config()
@@ -3490,7 +3496,7 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                     print("📁 Applying smart text filtering to reduce noise...")
                     # Use max_sentences parameter (passed from parent, already read from environment)
                     print(f"🔍 [DEBUG] In _extract_with_custom_prompt: max_sentences={max_sentences}")
-                    text_sample, detected_terms = _filter_text_for_glossary(all_text, min_frequency, max_sentences)
+                    text_sample, detected_terms = _filter_text_for_glossary(all_text, min_frequency, max_sentences, None)
             
             # Replace placeholders in prompt
             # Get target language from environment (used in the prompt for translation output)
