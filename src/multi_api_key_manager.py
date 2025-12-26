@@ -328,7 +328,7 @@ class APIKeyPool:
                         current_time = time.time()
                         expired_threads = [
                             tid for tid, (_, ts) in self._thread_assignments.items()
-                            if current_time - ts > 300  # 5 minutes
+                            if current_time - ts > 310  # 5 minutes
                         ]
                         for tid in expired_threads:
                             del self._thread_assignments[tid]
