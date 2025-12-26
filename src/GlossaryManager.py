@@ -155,6 +155,9 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     # Only redirect if we're NOT in a subprocess (i.e., log_callback is a real GUI callback)
     import sys
     in_subprocess = hasattr(sys.stdout, 'queue')  # Worker's LogCapture has a queue attribute
+
+    # Normalize config from instructions (if provided)
+    config = instructions if isinstance(instructions, dict) else {}
     
     if log_callback and not in_subprocess:
         set_output_redirect(log_callback)
