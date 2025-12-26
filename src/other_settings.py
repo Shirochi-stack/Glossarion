@@ -1891,6 +1891,10 @@ def _create_response_handling_section(self, parent):
         try:
             self.retry_timeout_var = bool(checked)
             timeout_edit.setEnabled(bool(checked))
+            if checked:
+                timeout_edit.setStyleSheet("")  # default enabled style
+            else:
+                timeout_edit.setStyleSheet("color: #888; background-color: #1f1f1f;")
         except Exception:
             pass
     retry_slow_cb.toggled.connect(_on_retry_slow_toggle)
@@ -1921,6 +1925,15 @@ def _create_response_handling_section(self, parent):
     timeout_desc.setStyleSheet("color: gray; font-size: 10pt;")
     timeout_desc.setContentsMargins(20, 0, 0, 5)
     section_v.addWidget(timeout_desc)
+    # Apply initial styling based on current toggle state
+    try:
+        timeout_edit.setEnabled(bool(self.retry_timeout_var))
+        if bool(self.retry_timeout_var):
+            timeout_edit.setStyleSheet("")
+        else:
+            timeout_edit.setStyleSheet("color: #888; background-color: #1f1f1f;")
+    except Exception:
+        pass
     
     # Separator
     sep7 = QFrame()
