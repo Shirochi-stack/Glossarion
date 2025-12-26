@@ -169,6 +169,13 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
                     config = _cfg
         except Exception:
             pass
+
+    # Keep environment in sync with config for global sentence dedupe
+    try:
+        cfg_global = config.get('glossary_global_sentence_dedupe', False) if isinstance(config, dict) else False
+        os.environ['GLOSSARY_GLOBAL_SENTENCE_DEDUPE'] = '1' if cfg_global else '0'
+    except Exception:
+        pass
     
     if log_callback and not in_subprocess:
         set_output_redirect(log_callback)
