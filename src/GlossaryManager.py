@@ -156,8 +156,19 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     import sys
     in_subprocess = hasattr(sys.stdout, 'queue')  # Worker's LogCapture has a queue attribute
 
-    # Normalize config from instructions (if provided)
+    # Normalize config from instructions (if provided), then augment with config.json fallback
     config = instructions if isinstance(instructions, dict) else {}
+    if not config:
+        try:
+            import json
+            from api_key_encryption import decrypt_config
+            with open('config.json', 'r', encoding='utf-8') as cf:
+                _cfg = json.load(cf)
+                _cfg = decrypt_config(_cfg)
+                if isinstance(_cfg, dict):
+                    config = _cfg
+        except Exception:
+            pass
     
     if log_callback and not in_subprocess:
         set_output_redirect(log_callback)
@@ -287,7 +298,8 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     max_sentences = int(max_sentences_env)
     print(f"🔍 [DEBUG] Converted to integer: {max_sentences}")
     global_dedupe_env = os.getenv("GLOSSARY_GLOBAL_SENTENCE_DEDUPE", "0")
-    print(f"📑 DEBUG: Global sentence dedupe = '{global_dedupe_env}'")
+    cfg_global_dedupe = config.get('glossary_global_sentence_dedupe', False) if isinstance(config, dict) else False
+    print(f"📑 DEBUG: Global sentence dedupe = env:'{global_dedupe_env}' config:{cfg_global_dedupe}")
     include_all_characters_env = os.getenv("GLOSSARY_INCLUDE_ALL_CHARACTERS", "0")
     include_all_characters = include_all_characters_env == "1"
     include_gender_context_flag = os.getenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
@@ -2904,10 +2916,8 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None, config=
     print(f"📑 Selected {len(filtered_sentences):,} sentences containing frequent terms")
     # Global sentence-level deduplication before window limiting (uses the same configured algorithm/threshold)
     # Optional: controlled by env or config flag
-    global_dedupe_enabled = (
-        os.getenv("GLOSSARY_GLOBAL_SENTENCE_DEDUPE", "0") == "1"
-        or (config.get('glossary_global_sentence_dedupe') if isinstance(config, dict) else False)
-    )
+    cfg_global = config.get('glossary_global_sentence_dedupe') if isinstance(config, dict) else False
+    global_dedupe_enabled = (os.getenv("GLOSSARY_GLOBAL_SENTENCE_DEDUPE", "0") == "1") or bool(cfg_global)
     if filtered_sentences and global_dedupe_enabled:
         try:
             import duplicate_detection_config as DDC
