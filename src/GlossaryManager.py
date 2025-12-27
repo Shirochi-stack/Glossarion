@@ -11,6 +11,7 @@ import queue
 import time
 from bs4 import BeautifulSoup
 import PatternManager as PM
+import duplicate_detection_config as ddc
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
 # Default unified auto-glossary prompt (used when AUTO_GLOSSARY_PROMPT is unset/empty).
@@ -3211,28 +3212,71 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             base_idx_set = set(final_indices[:pre_base])
             bonus_idx_set = set(final_indices[pre_base:])
 
-            # Sentence-level dedup post-selection (shrinks cap if duplicates exist) — only in dynamic mode
-            dedup_seen = set()
-            dedup_sentences = []
+            # Sentence-level dedup post-selection using duplicate_detection_config + slider threshold
+            dup_config = ddc.get_duplicate_detection_config()
+            # Fallback to env slider if save_glossary scope variable isn't in this function
+            fuzzy_threshold_env = float(os.getenv("GLOSSARY_FUZZY_THRESHOLD", "0.90"))
+            dup_threshold = dup_config.get('threshold', fuzzy_threshold_env)
+            algo_list = dup_config.get('algorithms', [])
+            print(f"📋 Sentence dedup config: algos={algo_list}, threshold={dup_threshold:.2f}")
+
+            dedup_seen_exact = set()
+            kept_sentences = []
+            kept_indices = []
             base_kept = bonus_kept = 0
             base_dropped = bonus_dropped = 0
 
             for idx, sent in zip(final_indices, pre_dedup_sentences):
                 key = sent.strip()
-                if key in dedup_seen:
+                if not key:
                     if idx in base_idx_set:
                         base_dropped += 1
                     else:
                         bonus_dropped += 1
                     continue
-                dedup_seen.add(key)
-                dedup_sentences.append(sent)
+
+                # Exact duplicate quick check
+                if key in dedup_seen_exact:
+                    if idx in base_idx_set:
+                        base_dropped += 1
+                    else:
+                        bonus_dropped += 1
+                    continue
+
+                is_dup = False
+                if kept_sentences:
+                    klen = len(key)
+                    min_len = int(klen * 0.7)
+                    max_len = int(klen * 1.3)
+                    for other in kept_sentences:
+                        if not (min_len <= len(other) <= max_len):
+                            continue
+                        if len(set(key) & set(other)) < klen * 0.5:
+                            continue
+                        sim = ddc.calculate_similarity_with_config(key, other, dup_config)
+                        if sim >= dup_threshold:
+                            is_dup = True
+                            break
+
+                if is_dup:
+                    if idx in base_idx_set:
+                        base_dropped += 1
+                    else:
+                        bonus_dropped += 1
+                    continue
+
+                # Keep
+                dedup_seen_exact.add(key)
+                kept_sentences.append(key)
+                kept_indices.append(idx)
                 if idx in base_idx_set:
                     base_kept += 1
                 else:
                     bonus_kept += 1
 
-            filtered_sentences = dedup_sentences
+            # Rebuild filtered_sentences preserving original ordering
+            kept_index_set = set(kept_indices)
+            filtered_sentences = [sent for idx, sent in zip(final_indices, pre_dedup_sentences) if idx in kept_index_set]
             total_kept = base_kept + bonus_kept
             total_dropped = base_dropped + bonus_dropped
 
