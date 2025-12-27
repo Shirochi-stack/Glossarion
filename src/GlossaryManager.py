@@ -3202,25 +3202,49 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         filtered_sentences = [filtered_sentences[i] for i in final_indices]
 
         if include_all_characters:
+            # Determine base vs bonus allocation before dedup
+            pre_dedup_sentences = filtered_sentences  # already ordered by final_indices
+            pre_total = len(pre_dedup_sentences)
+            pre_base = min(base_limit, pre_total)
+            pre_bonus = max(0, pre_total - pre_base)
+
+            base_idx_set = set(final_indices[:pre_base])
+            bonus_idx_set = set(final_indices[pre_base:])
+
             # Sentence-level dedup post-selection (shrinks cap if duplicates exist) — only in dynamic mode
             dedup_seen = set()
             dedup_sentences = []
-            for sent in filtered_sentences:
+            base_kept = bonus_kept = 0
+            base_dropped = bonus_dropped = 0
+
+            for idx, sent in zip(final_indices, pre_dedup_sentences):
                 key = sent.strip()
                 if key in dedup_seen:
+                    if idx in base_idx_set:
+                        base_dropped += 1
+                    else:
+                        bonus_dropped += 1
                     continue
                 dedup_seen.add(key)
                 dedup_sentences.append(sent)
-
-            if len(dedup_sentences) < len(filtered_sentences):
-                dropped_dupes = len(filtered_sentences) - len(dedup_sentences)
-                print(f"📁 Sentence/content dedup: dropped {dropped_dupes} duplicates after selection")
-            else:
-                dropped_dupes = 0
+                if idx in base_idx_set:
+                    base_kept += 1
+                else:
+                    bonus_kept += 1
 
             filtered_sentences = dedup_sentences
+            total_kept = base_kept + bonus_kept
+            total_dropped = base_dropped + bonus_dropped
+
+            print(
+                f"📁 Deduped sentence budget: base {pre_base}->{base_kept} (dropped {base_dropped}), "
+                f"bonus {pre_bonus}->{bonus_kept} (dropped {bonus_dropped}), total {total_kept}"
+            )
             # Re-log with dedup-applied cap shrink
-            print(f"📁 Smart selection complete: Kept {len(filtered_sentences)} sentences covering {len(term_to_sentences)} unique terms (cap shrink by {dropped_dupes})")
+            print(
+                f"📁 Smart selection complete: Kept {len(filtered_sentences)} sentences covering "
+                f"{len(term_to_sentences)} unique terms (cap shrink by {total_dropped})"
+            )
         else:
             print(f"📁 Smart selection complete: Kept {len(filtered_sentences)} sentences covering {len(term_to_sentences)} unique terms")
 
