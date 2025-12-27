@@ -3201,6 +3201,8 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         # Sort indices to maintain narrative flow
         final_indices = sorted(list(selected_indices))
         filtered_sentences = [filtered_sentences[i] for i in final_indices]
+        dropped_windows = 0
+        dropped_sentence_indices = set()
 
         if include_all_characters:
             # Determine base vs bonus allocation before dedup
@@ -3278,8 +3280,10 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             # Rebuild filtered_sentences preserving original ordering
             kept_index_set = set(kept_indices)
             filtered_sentences = [sent for idx, sent in zip(final_indices, pre_dedup_sentences) if idx in kept_index_set]
+            dropped_sentence_indices = set(final_indices) - kept_index_set
             total_kept = base_kept + bonus_kept
             total_dropped = base_dropped + bonus_dropped
+            dropped_windows = total_dropped
 
             print(
                 f"📁 Deduped sentence budget: base {pre_base}->{base_kept} (dropped {base_dropped}), "
@@ -3292,6 +3296,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             )
         else:
             print(f"📁 Smart selection complete: Kept {len(filtered_sentences)} sentences covering {len(term_to_sentences)} unique terms")
+            dropped_windows = 0
 
     elif max_sentences == 0:
         print(f"📁 Including ALL {len(filtered_sentences):,} sentences (max_sentences=0)")
@@ -3302,6 +3307,8 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     if include_gender_context:
         context_window = int(os.getenv("GLOSSARY_CONTEXT_WINDOW", "2"))
         print(f"📑 Gender context enabled: Expanding snippets with {context_window}-sentence windows...")
+        if 'dropped_windows' in locals() and dropped_windows:
+            print(f"📑 Context windows skipped due to dedup: {dropped_windows}")
         
         # Split full text into sentences for context extraction
         all_sentences_list = re.split(r'[.!?。！？]+', clean_text)
@@ -3313,6 +3320,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         all_sentences_normalized = {s.strip(): idx for idx, s in enumerate(all_sentences_list)}
         
         print(f"📑 Mapping {len(filtered_sentences):,} filtered sentences to context positions...")
+        kept_windows = 0
         for filtered_sent in filtered_sentences:
             filtered_normalized = filtered_sent.strip()
             
@@ -3342,6 +3350,8 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         for filtered_sent in filtered_sentences:
             # If we can't locate the sentence in the master list, wrap it individually
             if filtered_sent not in sentence_to_index:
+                if 'dropped_sentence_indices' in locals() and filtered_sent in dropped_sentence_indices:
+                    continue  # skip entire window if its seed sentence was deduped
                 window_num = len(context_groups) + 1
                 context_groups.append(
                     f"{filtered_sent}\n=== CONTEXT {window_num} END ==="
@@ -3352,6 +3362,9 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             
             # Skip if already included in a previous window
             if idx in included_indices:
+                continue
+            # Skip window if its seed sentence was deduped
+            if 'dropped_sentence_indices' in locals() and filtered_sent in dropped_sentence_indices:
                 continue
             
             # Get context window: [idx-context_window ... idx ... idx+context_window]
@@ -3369,8 +3382,12 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             context_groups.append(
                 f"{context_group_body}\n=== CONTEXT {window_num} END ==="
             )
+            kept_windows += 1
         
+        skipped_windows = (len(filtered_sentences) - kept_windows) if 'kept_windows' in locals() else 0
         print(f"📑 Created {len(context_groups):,} context windows (up to {context_window*2+1} sentences each)")
+        if skipped_windows:
+            print(f"📑 Context windows removed after dedup: {skipped_windows}")
         filtered_text = '\n\n'.join(context_groups)  # Separate windows with double newline
         print(f"📑 Context-expanded text: {len(filtered_text):,} characters")
     else:
