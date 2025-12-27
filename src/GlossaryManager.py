@@ -3388,7 +3388,14 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         print(f"📑 Created {len(context_groups):,} context windows (up to {context_window*2+1} sentences each)")
         if skipped_windows:
             print(f"📑 Context windows removed after dedup: {skipped_windows}")
-            print(f"📑 Final kept windows: {kept_windows}, final kept sentences: {len(filtered_sentences) - skipped_windows}")
+        # Compute true total sentences emitted in kept windows
+        total_window_sentences = 0
+        for ctx in context_groups:
+            # split on end marker to avoid counting it
+            body = ctx.split('=== CONTEXT ')[0]
+            # crude split by sentence separators
+            total_window_sentences += len([s for s in re.split(r'[.!?。！？]+', body) if s.strip()])
+        print(f"📑 Final kept windows: {kept_windows}, final kept sentences (within windows): {total_window_sentences}")
         filtered_text = '\n\n'.join(context_groups)  # Separate windows with double newline
         print(f"📑 Context-expanded text: {len(filtered_text):,} characters")
     else:
