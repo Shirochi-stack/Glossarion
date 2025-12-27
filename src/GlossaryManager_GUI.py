@@ -1533,9 +1533,9 @@ CRITICAL EXTRACTION RULES:
                     print(f"🔍 [UPDATE] manual_glossary_prompt2: {len(self.manual_glossary_prompt)} chars")
             
             if hasattr(self, 'auto_prompt_text'):
-                self.unified_auto_glosary_prompt2 = self.auto_prompt_text.toPlainText().strip()
+                self.unified_auto_glosary_prompt3 = self.auto_prompt_text.toPlainText().strip()
                 if debug_enabled:
-                    print(f"🔍 [UPDATE] unified_auto_glosary_prompt2: {len(self.unified_auto_glosary_prompt2)} chars")
+                    print(f"🔍 [UPDATE] unified_auto_glosary_prompt3: {len(self.unified_auto_glosary_prompt3)} chars")
             
             if hasattr(self, 'append_prompt_text'):
                 old_value = getattr(self, 'append_glossary_prompt', '<NOT SET>')
@@ -2319,12 +2319,12 @@ CRITICAL EXTRACTION RULES:
 - You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character."""
         
         # Load from config or use default
-        # Note: Ignoring old 'auto_glosary_prompt2' key to force update to new prompt
+        # Note: Ignoring old '...prompt2' key to force update to new prompt
         # Also treat empty strings as missing to ensure users get the new default
-        self.unified_auto_glosary_prompt2 = self.config.get('unified_auto_glosary_prompt2', default_unified_prompt)
-        if not self.unified_auto_glosary_prompt2 or not self.unified_auto_glosary_prompt2.strip():
-            self.unified_auto_glosary_prompt2 = default_unified_prompt
-        self.auto_prompt_text.setPlainText(self.unified_auto_glosary_prompt2)
+        self.unified_auto_glosary_prompt3 = self.config.get('unified_auto_glosary_prompt3', default_unified_prompt)
+        if not self.unified_auto_glosary_prompt3 or not self.unified_auto_glosary_prompt3.strip():
+            self.unified_auto_glosary_prompt3 = default_unified_prompt
+        self.auto_prompt_text.setPlainText(self.unified_auto_glosary_prompt3)
         
         glossary_prompt_controls_widget = QWidget()
         glossary_prompt_controls_layout = QHBoxLayout(glossary_prompt_controls_widget)

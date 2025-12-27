@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_compl
 
 # Default unified auto-glossary prompt (used when AUTO_GLOSSARY_PROMPT is unset/empty).
 # NOTE: This matches the GUI's default_unified_prompt in GlossaryManager_GUI.py.
-DEFAULT_AUTO_GLOSARY_PROMPT2 = """You are a novel glossary extraction assistant.
+DEFAULT_AUTO_GLOSARY_PROMPT3 = """You are a novel glossary extraction assistant.
 
 You must strictly return ONLY CSV format with 2-4 columns in this exact order: type,raw_name,translated_name,gender,description.
 For character entries, determine gender from context, leave empty if context is insufficient.
@@ -301,7 +301,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     # Initialize to the default unified prompt when unset/empty.
     # Pattern-based extraction remains disabled elsewhere.
     if not custom_prompt:
-        custom_prompt = DEFAULT_AUTO_GLOSARY_PROMPT2.strip()
+        custom_prompt = DEFAULT_AUTO_GLOSARY_PROMPT3.strip()
         os.environ["AUTO_GLOSSARY_PROMPT"] = custom_prompt
         print("📑 AUTO_GLOSSARY_PROMPT not set - initialized to default unified prompt")
     
