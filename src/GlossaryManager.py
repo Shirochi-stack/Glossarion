@@ -3654,7 +3654,7 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
             # Get target language from environment (used in the prompt for translation output)
             target_language = os.getenv('GLOSSARY_TARGET_LANGUAGE', 'English')
             # Count context marker windows for {marker} placeholder
-            marker_matches = re.findall(r"===\\s*CONTEXT\\s+\\d+\\s+END\\s*===", all_text or "")
+            marker_matches = re.findall(r"===\s*CONTEXT\s+\d+\s+END\s*===", all_text or "")
             marker_count = len(marker_matches)
             system_prompt = custom_prompt.replace('{language}', target_language)
             system_prompt = system_prompt.replace('{min_frequency}', str(min_frequency))
