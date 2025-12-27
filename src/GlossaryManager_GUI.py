@@ -2071,7 +2071,11 @@ CRITICAL EXTRACTION RULES:
         # Include All Characters toggle (dynamic limit)
         if not hasattr(self, 'include_all_characters_checkbox'):
             self.include_all_characters_checkbox = self._create_styled_checkbox("Dynamic Limit Expansion")
-            self.include_all_characters_checkbox.setToolTip("Dynamic Limit Expansion: Ensures all detected characters are included FIRST, then adds the 'Max sentences' limit on top for general context.")
+            self.include_all_characters_checkbox.setToolTip(
+                "Dynamic Limit Expansion: Adds one sentence per detected character on top of 'Max sentences'. "
+                "After selection, duplicate sentences are removed, so both the bonus and the base cap can shrink "
+                "(e.g., 200+700 requested may dedupe down to ~120 total)."
+            )
             self.include_all_characters_checkbox.setChecked(self.config.get('glossary_include_all_characters', False))
         ms_layout.addWidget(self.include_all_characters_checkbox)
         
@@ -2251,7 +2255,8 @@ CRITICAL EXTRACTION RULES:
             "• Context window size: Number of sentences before/after for gender detection (default: 2)",
             "• Max text size: Characters to analyze (0 = entire text, 50000 = first 50k chars)",
             "• Chapter split: Split large texts into chunks (0 = Token based splitting, 100000 = split at 100k chars)",
-            "• Max sentences: Maximum sentences to send to AI. Dynamically expands if 'Include All Characters' is on.",
+            "• Max sentences: Maximum sentences to send to AI. With Dynamic Limit on, base + character bonus is applied then deduped; duplicates can shrink both caps.",
+            "• Dynamic Limit Expansion: Adds one sentence per detected character before the cap; post-selection dedup drops overlapping sentences so final total may be lower than requested.",
             "• Filter mode:",
             "  - All names & terms: Extract character names (with/without honorifics) + titles/terms",
             "  - Names with honorifics only: ONLY character names with honorifics (no titles/terms)",

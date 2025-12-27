@@ -3157,14 +3157,18 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
 
         # Base limit from user/config
         base_limit = max_sentences
+        requested_bonus = 0
         # If we collected honorific-first sentences, seed the selection with them
         if include_all_characters and honorific_first_indices:
             for idx in honorific_first_indices.values():
                 if 0 <= idx < len(filtered_sentences):
                     selected_indices.add(idx)
+            requested_bonus = len(honorific_first_indices)
         # Dynamic expansion should ADD to the base limit, not replace it
         honorific_bonus = len(selected_indices) if include_all_characters else 0
         effective_limit = base_limit + honorific_bonus
+        requested_total = base_limit + requested_bonus
+        print(f"📁 Requested sentence budget: base {base_limit} + bonus {requested_bonus} = {requested_total}")
         # Standard Fixed Limit Logic
         # First, prioritize character-like terms (honorific-based)
         if character_terms:
@@ -3184,11 +3188,41 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 reverse=True
             )
             selected_indices.update(remaining[:target_limit - len(selected_indices)])
+
+        # Log the actual unique sentence count vs requested (base + bonus)
+        unique_count = len(selected_indices)
+        dropped = max(0, requested_total - unique_count)
+        if include_all_characters:
+            print(f"📁 Deduped sentence budget: requested {base_limit}+{requested_bonus} -> {unique_count} unique (dropped {dropped})")
+        else:
+            print(f"📁 Deduped sentence budget: requested {base_limit} -> {unique_count} unique (dropped {dropped})")
             
         # Sort indices to maintain narrative flow
         final_indices = sorted(list(selected_indices))
         filtered_sentences = [filtered_sentences[i] for i in final_indices]
-        print(f"📁 Smart selection complete: Kept {len(filtered_sentences)} sentences covering {len(term_to_sentences)} unique terms")
+
+        if include_all_characters:
+            # Sentence-level dedup post-selection (shrinks cap if duplicates exist) — only in dynamic mode
+            dedup_seen = set()
+            dedup_sentences = []
+            for sent in filtered_sentences:
+                key = sent.strip()
+                if key in dedup_seen:
+                    continue
+                dedup_seen.add(key)
+                dedup_sentences.append(sent)
+
+            if len(dedup_sentences) < len(filtered_sentences):
+                dropped_dupes = len(filtered_sentences) - len(dedup_sentences)
+                print(f"📁 Sentence/content dedup: dropped {dropped_dupes} duplicates after selection")
+            else:
+                dropped_dupes = 0
+
+            filtered_sentences = dedup_sentences
+            # Re-log with dedup-applied cap shrink
+            print(f"📁 Smart selection complete: Kept {len(filtered_sentences)} sentences covering {len(term_to_sentences)} unique terms (cap shrink by {dropped_dupes})")
+        else:
+            print(f"📁 Smart selection complete: Kept {len(filtered_sentences)} sentences covering {len(term_to_sentences)} unique terms")
 
     elif max_sentences == 0:
         print(f"📁 Including ALL {len(filtered_sentences):,} sentences (max_sentences=0)")
