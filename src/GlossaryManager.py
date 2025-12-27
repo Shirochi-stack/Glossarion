@@ -3218,7 +3218,8 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             fuzzy_threshold_env = float(os.getenv("GLOSSARY_FUZZY_THRESHOLD", "0.90"))
             dup_threshold = dup_config.get('threshold', fuzzy_threshold_env)
             algo_list = dup_config.get('algorithms', [])
-            print(f"📋 Sentence dedup config: algos={algo_list}, threshold={dup_threshold:.2f}")
+            algo_mode = os.getenv("GLOSSARY_DUPLICATE_ALGORITHM", "auto")
+            print(f"📋 Sentence dedup config: mode={algo_mode}, algos={algo_list}, slider={fuzzy_threshold_env:.2f}, threshold_used={dup_threshold:.2f}, available={ddc.get_algorithm_display_info()}")
 
             dedup_seen_exact = set()
             kept_sentences = []
