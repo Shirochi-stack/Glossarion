@@ -3444,12 +3444,16 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 kept_window_seeds.append(seed_idx)
                 continue
             drop = False
-            if terms.issubset(covered_terms_global):
+            # STRICT: one window per character. If any character term here is already covered, drop this window.
+            char_terms = set(t for t in terms if 'character_term_set' in locals() and t in character_term_set)
+            if char_terms and char_terms & covered_char_terms:
                 drop = True
+            elif not char_terms and terms.issubset(covered_terms_global):
+                drop = True
+            # If no character terms yet covered, allow first appearance
             if drop:
-                # character guard: keep if this would lose an uncovered character term
                 keep_for_char = any((t in character_term_set and t not in covered_char_terms) for t in terms) if 'character_term_set' in locals() else False
-                if keep_for_char:
+                if keep_for_char and not (char_terms & covered_char_terms):
                     drop = False
             if drop:
                 continue
