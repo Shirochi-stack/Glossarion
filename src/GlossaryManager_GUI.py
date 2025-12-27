@@ -1305,7 +1305,7 @@ character,ᫀ이히리ᄐ 나애,Dihirit Ade,female,The enigmatic
 character,ᫀ뢔사난,Kim Sang-hyu,male,A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress
 
 CRITICAL EXTRACTION RULES:
-- Extract ONLY: Character names, Location names, Ability/Skill names, Item names, Organization names, Titles/Ranks
+- Extract All Character names, Terms, Location names, Ability/Skill names, Item names, Organization names, and Titles/Ranks.
 - Do NOT extract sentences, dialogue, actions, questions, or statements as glossary entries
 - REJECT entries that contain verbs or end with punctuation (?, !, .)
 - REJECT entries starting with: "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But". (The description column is excluded from this restriction)
@@ -2283,7 +2283,7 @@ CRITICAL EXTRACTION RULES:
         desc_label = QLabel("This prompt guides the AI to extract character names, terms, and titles from the text:")
         glossary_prompt_frame_layout.addWidget(desc_label)
         
-        placeholder_label = QLabel("Available placeholders: {language}, {min_frequency}, {max_names}, {max_titles}")
+        placeholder_label = QLabel("Available placeholders: {language}, {min_frequency}, {max_names}, {max_titles}, {marker}")
         placeholder_label.setStyleSheet("color: #5a9fd4; font-size: 9pt; font-style: italic;")
         glossary_prompt_frame_layout.addWidget(placeholder_label)
         
@@ -2315,6 +2315,7 @@ CRITICAL EXTRACTION RULES:
 - If unsure whether something is a proper noun/name, skip it
 - The description column must contain detailed context/explanation
 - Create at least one glossary entry for EVERY context marker window (lines ending with "=== CONTEXT N END ==="); treat each marker boundary as a required extraction point.
+- You must create {marker} glossary entries (one or more per window; do not invent placeholders).
 - You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character."""
         
         # Load from config or use default

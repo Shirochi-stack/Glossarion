@@ -30,7 +30,7 @@ character,ᫀ이히리ᄐ 나애,Dihirit Ade,female,The enigmatic
 character,ᫀ뢔사난,Kim Sang-hyu,male,A master swordsman from the Northern Sect known for his icy demeanor and unparalleled skill with the Frost Blade technique which he uses to defend the border fortress
 
 CRITICAL EXTRACTION RULES:
-- Extract ONLY: Character names, Location names, Ability/Skill names, Item names, Organization names, Titles/Ranks
+- Extract All Character names, Terms, Location names, Ability/Skill names, Item names, Organization names, and Titles/Ranks.
 - Do NOT extract sentences, dialogue, actions, questions, or statements as glossary entries
 - REJECT entries that contain verbs or end with punctuation (?, !, .)
 - REJECT entries starting with: "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But". (The description column is excluded from this restriction)
@@ -38,6 +38,7 @@ CRITICAL EXTRACTION RULES:
 - If unsure whether something is a proper noun/name, skip it
 - The description column must contain detailed context/explanation
 - Create at least one glossary entry for EVERY context marker window (lines ending with "=== CONTEXT N END ==="); treat each marker boundary as a required extraction point.
+- You must create {marker} glossary entries (one or more per window; do not invent placeholders).
 - You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character."""
 
 
@@ -3652,10 +3653,14 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
             # Replace placeholders in prompt
             # Get target language from environment (used in the prompt for translation output)
             target_language = os.getenv('GLOSSARY_TARGET_LANGUAGE', 'English')
+            # Count context marker windows for {marker} placeholder
+            marker_matches = re.findall(r"===\\s*CONTEXT\\s+\\d+\\s+END\\s*===", all_text or "")
+            marker_count = len(marker_matches)
             system_prompt = custom_prompt.replace('{language}', target_language)
             system_prompt = system_prompt.replace('{min_frequency}', str(min_frequency))
             system_prompt = system_prompt.replace('{max_names}', str(max_names))
             system_prompt = system_prompt.replace('{max_titles}', str(max_titles))
+            system_prompt = system_prompt.replace('{marker}', str(marker_count))
             
             # Send system prompt and text as separate messages
             messages = [
@@ -3939,8 +3944,9 @@ def _process_ai_response(response_text, all_text, min_frequency,
     csv_lines = []
     header_found = False
     
-    # Check if we should skip frequency check
-    skip_frequency_check = os.getenv("GLOSSARY_SKIP_FREQUENCY_CHECK", "0") == "1"
+    # Post-response min_frequency filtering is disabled (accept all AI rows);
+    # skip_frequency_check forced true to bypass frequency gating.
+    skip_frequency_check = True
 
     # Add option to completely skip ALL validation for maximum speed
     skip_all_validation = os.getenv("GLOSSARY_SKIP_ALL_VALIDATION", "0") == "1"
@@ -4037,10 +4043,10 @@ def _process_ai_response(response_text, all_text, min_frequency,
         skip_frequency_check = True
         print("📑 Filter mode 'only_with_honorifics': Bypassing frequency checks")
     
-    print(f"📑 Processing {len(lines)} lines from AI response...")
-    print(f"📑 Text corpus size: {len(all_text):,} chars")
-    print(f"📑 Frequency checking: {'DISABLED' if skip_frequency_check else f'ENABLED (min: {min_frequency})'}")  
-    print(f"📑 Fuzzy threshold: {fuzzy_threshold}")
+    print(f'📑 Processing {len(lines)} lines from AI response...')
+    print(f'📑 Text corpus size: {len(all_text):,} chars')
+    print(f'📑 Frequency checking: DISABLED (post-response min_frequency bypassed)')
+    print(f'📑 Fuzzy threshold: {fuzzy_threshold}')
     
     # Collect all terms first for batch processing
     all_terms_to_check = []
