@@ -3388,6 +3388,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         print(f"📑 Created {len(context_groups):,} context windows (up to {context_window*2+1} sentences each)")
         if skipped_windows:
             print(f"📑 Context windows removed after dedup: {skipped_windows}")
+            print(f"📑 Final kept windows: {kept_windows}, final kept sentences: {len(filtered_sentences) - skipped_windows}")
         filtered_text = '\n\n'.join(context_groups)  # Separate windows with double newline
         print(f"📑 Context-expanded text: {len(filtered_text):,} characters")
     else:
