@@ -3213,6 +3213,16 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
 
             base_idx_set = set(final_indices[:pre_base])
             bonus_idx_set = set(final_indices[pre_base:])
+            # Map sentences to terms (characters and others) for coverage-aware dedup
+            sentence_terms = {}
+            if 'term_to_sentences' in locals():
+                for term, idx_list in term_to_sentences.items():
+                    for idx in idx_list:
+                        if idx in final_indices:
+                            sentence_terms.setdefault(idx, set()).add(term)
+            character_term_set = set(character_terms) if 'character_terms' in locals() else set()
+            covered_char_terms = set()
+            covered_terms_global = set()
 
             # Sentence-level dedup post-selection using duplicate_detection_config + slider threshold
             dup_config = ddc.get_duplicate_detection_config()
@@ -3246,32 +3256,52 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                         bonus_dropped += 1
                     continue
 
+                terms_here = sentence_terms.get(idx, set()) if sentence_terms else set()
+
+                # Term-based dedup: drop if this sentence contributes no new terms (all terms already covered)
                 is_dup = False
-                if kept_sentences:
-                    klen = len(key)
-                    min_len = int(klen * 0.7)
-                    max_len = int(klen * 1.3)
-                    for other in kept_sentences:
-                        if not (min_len <= len(other) <= max_len):
-                            continue
-                        if len(set(key) & set(other)) < klen * 0.5:
-                            continue
-                        sim = ddc.calculate_similarity_with_config(key, other, dup_config)
-                        if sim >= dup_threshold:
-                            is_dup = True
-                            break
+                if terms_here and terms_here.issubset(covered_terms_global):
+                    is_dup = True
+                else:
+                    if kept_sentences:
+                        klen = len(key)
+                        min_len = int(klen * 0.7)
+                        max_len = int(klen * 1.3)
+                        for other in kept_sentences:
+                            if not (min_len <= len(other) <= max_len):
+                                continue
+                            if len(set(key) & set(other)) < klen * 0.5:
+                                continue
+                            sim = ddc.calculate_similarity_with_config(key, other, dup_config)
+                            if sim >= dup_threshold:
+                                is_dup = True
+                                break
 
                 if is_dup:
-                    if idx in base_idx_set:
-                        base_dropped += 1
-                    else:
-                        bonus_dropped += 1
-                    continue
+                    # Guard: keep if this sentence is the only coverage for an uncovered character term
+                    keep_for_character = False
+                    if sentence_terms:
+                        for t in sentence_terms.get(idx, set()):
+                            if t in character_term_set and t not in covered_char_terms:
+                                keep_for_character = True
+                                break
+                    if not keep_for_character:
+                        if idx in base_idx_set:
+                            base_dropped += 1
+                        else:
+                            bonus_dropped += 1
+                        continue
 
                 # Keep
                 dedup_seen_exact.add(key)
                 kept_sentences.append(key)
                 kept_indices.append(idx)
+                # Mark covered character terms
+                if sentence_terms:
+                    for t in terms_here:
+                        if t in character_term_set:
+                            covered_char_terms.add(t)
+                        covered_terms_global.add(t)
                 if idx in base_idx_set:
                     base_kept += 1
                 else:
@@ -3345,6 +3375,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         
         # Build context windows with explicit boundaries to avoid cross-window leakage
         context_groups: list[str] = []
+        window_seeds: list[int] = []
         included_indices = set()
         
         for filtered_sent in filtered_sentences:
@@ -3356,6 +3387,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
                 context_groups.append(
                     f"{filtered_sent}\n=== CONTEXT {window_num} END ==="
                 )
+                window_seeds.append(-1)
                 continue
             
             idx = sentence_to_index[filtered_sent]
@@ -3382,21 +3414,66 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             context_groups.append(
                 f"{context_group_body}\n=== CONTEXT {window_num} END ==="
             )
+            window_seeds.append(idx)
             kept_windows += 1
         
         skipped_windows = (len(filtered_sentences) - kept_windows) if 'kept_windows' in locals() else 0
         print(f"📑 Created {len(context_groups):,} context windows (up to {context_window*2+1} sentences each)")
         if skipped_windows:
             print(f"📑 Context windows removed after dedup: {skipped_windows}")
+
+        # Window-level dedup: drop windows whose term set is already covered, while keeping one per character
+        window_terms = []
+        if 'sentence_terms' in locals():
+            for seed_idx in window_seeds:
+                if seed_idx == -1:
+                    window_terms.append(set())
+                else:
+                    window_terms.append(sentence_terms.get(seed_idx, set()))
+        else:
+            window_terms = [set() for _ in window_seeds]
+
+        covered_terms_global = set()
+        covered_char_terms = set()
+        kept_context_groups = []
+        kept_window_seeds = []
+        for cg, seed_idx, terms in zip(context_groups, window_seeds, window_terms):
+            if not terms:
+                # keep empty-term windows to preserve structure
+                kept_context_groups.append(cg)
+                kept_window_seeds.append(seed_idx)
+                continue
+            drop = False
+            if terms.issubset(covered_terms_global):
+                drop = True
+            if drop:
+                # character guard: keep if this would lose an uncovered character term
+                keep_for_char = any((t in character_term_set and t not in covered_char_terms) for t in terms) if 'character_term_set' in locals() else False
+                if keep_for_char:
+                    drop = False
+            if drop:
+                continue
+            # keep and mark coverage
+            kept_context_groups.append(cg)
+            kept_window_seeds.append(seed_idx)
+            for t in terms:
+                covered_terms_global.add(t)
+                if 'character_term_set' in locals() and t in character_term_set:
+                    covered_char_terms.add(t)
+
+        dropped_windows_after_terms = len(context_groups) - len(kept_context_groups)
+        if dropped_windows_after_terms:
+            print(f"📑 Context windows removed after term-aware dedup: {dropped_windows_after_terms}")
+
         # Compute true total sentences emitted in kept windows
         total_window_sentences = 0
-        for ctx in context_groups:
+        for ctx in kept_context_groups:
             # split on end marker to avoid counting it
             body = ctx.split('=== CONTEXT ')[0]
             # crude split by sentence separators
             total_window_sentences += len([s for s in re.split(r'[.!?。！？]+', body) if s.strip()])
-        print(f"📑 Final kept windows: {kept_windows}, final kept sentences (within windows): {total_window_sentences}")
-        filtered_text = '\n\n'.join(context_groups)  # Separate windows with double newline
+        print(f"📑 Final kept windows: {len(kept_context_groups)}, final kept sentences (within windows): {total_window_sentences}")
+        filtered_text = '\n\n'.join(kept_context_groups)  # Separate windows with double newline
         print(f"📑 Context-expanded text: {len(filtered_text):,} characters")
     else:
         # Even without gender context, add footer markers to preserve boundaries for chapter splitting
