@@ -1392,11 +1392,7 @@ async def translate(
 
         # CRITICAL: Auto glossary uses AUTO_GLOSSARY_PROMPT (unified prompt used by the GUI).
         # If this is missing, GlossaryManager falls back to the legacy honorific/title regex scanner.
-        os.environ['AUTO_GLOSSARY_PROMPT'] = (
-            config.get('unified_auto_glosary_prompt2', '')
-            or config.get('auto_glosary_prompt2', '')
-            or ''
-        )
+        os.environ['AUTO_GLOSSARY_PROMPT'] = config.get('unified_auto_glosary_prompt3', '') or ''
         # Ensure glossary translations target the same language as the main translation
         os.environ['GLOSSARY_TARGET_LANGUAGE'] = target_language
         os.environ['OUTPUT_LANGUAGE'] = target_language
