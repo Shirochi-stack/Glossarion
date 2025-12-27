@@ -2283,9 +2283,12 @@ CRITICAL EXTRACTION RULES:
         desc_label = QLabel("This prompt guides the AI to extract character names, terms, and titles from the text:")
         glossary_prompt_frame_layout.addWidget(desc_label)
         
-        placeholder_label = QLabel("Available placeholders: {language}, {min_frequency}, {max_names}, {max_titles}, {marker}")
-        placeholder_label.setStyleSheet("color: #5a9fd4; font-size: 9pt; font-style: italic;")
-        glossary_prompt_frame_layout.addWidget(placeholder_label)
+        placeholder_line = QLineEdit("Available placeholders: {language}, {min_frequency}, {max_names}, {max_titles}, {marker}")
+        placeholder_line.setReadOnly(True)
+        placeholder_line.setFrame(False)
+        placeholder_line.setCursorPosition(0)
+        placeholder_line.setStyleSheet("color: #5a9fd4; font-size: 9pt;")
+        glossary_prompt_frame_layout.addWidget(placeholder_line)
         
         self.auto_prompt_text = QTextEdit()
         self.auto_prompt_text.setMinimumHeight(250)
