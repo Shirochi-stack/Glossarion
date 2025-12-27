@@ -4044,9 +4044,9 @@ def _process_ai_response(response_text, all_text, min_frequency,
         print("📑 Filter mode 'only_with_honorifics': Bypassing frequency checks")
     
     print(f'📑 Processing {len(lines)} lines from AI response...')
-    print(f'📑 Text corpus size: {len(all_text):,} chars')
-    print(f'📑 Frequency checking: DISABLED (post-response min_frequency bypassed)')
-    print(f'📑 Fuzzy threshold: {fuzzy_threshold}')
+    # print(f'📑 Text corpus size: {len(all_text):,} chars')
+    # print(f'📑 Frequency checking: DISABLED (post-response min_frequency bypassed)')
+    # print(f'📑 Fuzzy threshold: {fuzzy_threshold}')
     
     # Collect all terms first for batch processing
     all_terms_to_check = []
