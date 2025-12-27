@@ -1881,7 +1881,7 @@ def _create_response_handling_section(self, parent):
     update_ai_hunter_visibility()
     
     # Retry Slow
-    retry_slow_cb = self._create_styled_checkbox("Auto-retry Slow Chunks")
+    retry_slow_cb = self._create_styled_checkbox("Auto-retry Slow Processing (API Timeouts)")
     retry_slow_cb.setContentsMargins(0, 15, 0, 0)
     try:
         retry_slow_cb.setChecked(bool(self.retry_timeout_var))
@@ -1921,7 +1921,7 @@ def _create_response_handling_section(self, parent):
     timeout_h.addStretch()
     section_v.addWidget(timeout_w)
     
-    timeout_desc = QLabel("Retry chunks/images that take too long\n(reduces tokens for faster response)")
+    timeout_desc = QLabel("Adds API timeout logic to text/images chunks that take too long\nThis will also affect chapter extraction timeout")
     timeout_desc.setStyleSheet("color: gray; font-size: 10pt;")
     timeout_desc.setContentsMargins(20, 0, 0, 5)
     section_v.addWidget(timeout_desc)
