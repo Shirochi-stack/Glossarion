@@ -3948,6 +3948,9 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                 # Merge with existing glossary if present
                 if existing_glossary:
                     csv_lines = _merge_csv_entries(csv_lines, existing_glossary, strip_honorifics, language)
+                # Always inject the book title BEFORE any deduplication or filtering so it
+                # survives the first run (previously only happened after a second run/merge)
+                csv_lines = _ensure_book_title_csv_lines(csv_lines)
 
                 # Fuzzy matching deduplication
                 skip_frequency_check = os.getenv("GLOSSARY_SKIP_FREQUENCY_CHECK", "0") == "1"
