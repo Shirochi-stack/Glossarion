@@ -2303,8 +2303,9 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
     
     # Prepare gender context check
     include_gender_context = os.getenv("GLOSSARY_INCLUDE_GENDER_CONTEXT", "0") == "1"
+    gender_nuance_enabled = include_gender_context and os.getenv("GLOSSARY_ENABLE_GENDER_NUANCE", "1") == "1"
     gender_pronouns = []
-    if include_gender_context and hasattr(PM, 'GENDER_PRONOUNS'):
+    if gender_nuance_enabled and hasattr(PM, 'GENDER_PRONOUNS'):
         # Get pronouns for the detected language
         lang_key = 'english'
         if primary_lang == 'korean': lang_key = 'korean'
@@ -2329,7 +2330,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             
             # Check for gender pronouns if enabled - include sentence if pronoun found
             has_pronoun = False
-            if include_gender_context and gender_pronouns:
+            if gender_nuance_enabled and gender_pronouns:
                 for pronoun in gender_pronouns:
                     if pronoun in sentence:
                         has_pronoun = True
@@ -2350,7 +2351,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             # If include_gender_context is True, we include sentences with pronouns even if they don't have new terms,
             # but ONLY if the pronouns match known characters. However, we don't know the characters yet.
             # So, we include pronoun sentences to provide context for the LLM to infer gender.
-            if valid_term_found or (include_gender_context and has_pronoun):
+            if valid_term_found or (gender_nuance_enabled and has_pronoun):
                 sentence_key = sentence[:50] # Use prefix as key to avoid duplicates
                 if sentence_key not in local_seen:
                     local_important.append(sentence)
@@ -3135,7 +3136,10 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         
         # 1. Identify which terms appear in which sentences
         # We need to re-scan briefly or pass this info along. Re-scanning is safer/easier here.
-        print(f"📑 analyzing sentences for term coverage and gender nuance...")
+        if gender_nuance_enabled:
+            print(f\"📑 analyzing sentences for term coverage and gender nuance...\")
+        else:
+            print(f\"📑 analyzing sentences for term coverage (gender nuance disabled)...\")
         term_to_sentences = {} # term -> list of (score, sentence_index)
         sentence_scores = {}   # index -> score
         
@@ -3149,16 +3153,16 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
 
         # Get pronouns for scoring
         gender_pronouns = []
-        if include_gender_context and hasattr(PM, 'GENDER_PRONOUNS'):
+        if gender_nuance_enabled and hasattr(PM, 'GENDER_PRONOUNS'):
             lang_key = 'english'
             if primary_lang == 'korean': lang_key = 'korean'
             elif primary_lang == 'chinese': lang_key = 'chinese'
             elif primary_lang == 'japanese': lang_key = 'japanese'
             gender_pronouns = PM.GENDER_PRONOUNS.get(lang_key, {}).get('male', []) + \
                               PM.GENDER_PRONOUNS.get(lang_key, {}).get('female', [])
-
-        # If gender context is OFF, skip expensive scoring and just build simple coverage map
-        if not include_gender_context:
+        # If gender context is OFF or nuance scoring is disabled, skip expensive scoring and just build simple coverage map
+        if not gender_nuance_enabled:
+            print("📑 Gender context or nuance toggle disabled: using simple term coverage (no pronoun weighting).")
             print("📑 Gender context disabled: skipping gender-nuance scoring (using simple term coverage).")
             for idx, sent in enumerate(filtered_sentences):
                 sentence_scores[idx] = 1.0
@@ -3250,7 +3254,7 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
             honorific_pattern = re.compile(honorific_pattern_str) if honorific_pattern_str else None
             for idx, sent in enumerate(filtered_sentences):
                 score = 1.0
-                if include_gender_context and gender_pronouns:
+                if gender_nuance_enabled and gender_pronouns:
                     for p in gender_pronouns:
                         if p in sent:
                             score += 5.0

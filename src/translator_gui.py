@@ -2023,6 +2023,7 @@ Recent translations to summarize:
             ('enable_auto_glossary_var', 'enable_auto_glossary', True),
             ('append_glossary_var', 'append_glossary', True),
             ('include_gender_context_var', 'include_gender_context', True),
+            ('enable_gender_nuance_var', 'enable_gender_nuance', True),
             ('include_description_var', 'include_description', True),
             ('retry_truncated_var', 'retry_truncated', False),
             ('retry_duplicate_var', 'retry_duplicate_bodies', False),
@@ -9851,6 +9852,7 @@ Important rules:
                 ('additional_glossary_path', [('config', 'additional_glossary_path')], '', str),
                 ('compress_glossary_prompt', ['compress_glossary_checkbox', 'compress_glossary_prompt_var'], True, bool),
                 ('include_gender_context', ['include_gender_context_checkbox', 'include_gender_context_var'], False, bool),
+                ('enable_gender_nuance', ['enable_gender_nuance_checkbox', 'enable_gender_nuance_var'], True, bool),
                 ('include_description', ['include_description_checkbox', 'include_description_var'], False, bool),
                 ('glossary_use_smart_filter', ['glossary_use_smart_filter_var'], True, bool),
                 ('glossary_min_frequency', ['glossary_min_frequency_entry', 'glossary_min_frequency_var'], 2, lambda v: safe_int(v, 2)),
@@ -10121,6 +10123,7 @@ Important rules:
                     ('GLOSSARY_MAX_SENTENCES', str(self.config.get('glossary_max_sentences', 200))),
                     ('COMPRESS_GLOSSARY_PROMPT', '1' if self.config.get('compress_glossary_prompt') else '0'),
                     ('GLOSSARY_INCLUDE_GENDER_CONTEXT', '1' if self.config.get('include_gender_context') else '0'),
+                    ('GLOSSARY_ENABLE_GENDER_NUANCE', '1' if self.config.get('enable_gender_nuance', True) else '0'),
                     ('GLOSSARY_INCLUDE_DESCRIPTION', '1' if self.config.get('include_description') else '0'),
                     # Add missing environment variables that GlossaryManager.py reads
                     ('GLOSSARY_MIN_FREQUENCY', str(self.config.get('glossary_min_frequency', 2))),

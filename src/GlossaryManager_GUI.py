@@ -485,6 +485,7 @@ class GlossaryManagerMixin:
                     ('enable_auto_glossary_checkbox', 'enable_auto_glossary_var'),
                     ('add_additional_glossary_checkbox', 'add_additional_glossary_var'),
                     ('compress_glossary_checkbox', 'compress_glossary_prompt_var'),
+                    ('enable_gender_nuance_checkbox', 'enable_gender_nuance_var'),
                     ('include_gender_context_checkbox', 'include_gender_context_var'),
                     ('include_description_checkbox', 'include_description_var'),
                     ('glossary_history_rolling_checkbox', 'glossary_history_rolling_var'),
@@ -1780,6 +1781,20 @@ CRITICAL EXTRACTION RULES:
         label4 = QLabel("(Expands text snippets to include surrounding sentences for better gender detection)")
         gender_context_layout.addWidget(label4)
         gender_context_layout.addStretch()
+        # Gender nuance analysis toggle (depends on gender context)
+        gender_nuance_widget = QWidget()
+        gender_nuance_layout = QHBoxLayout(gender_nuance_widget)
+        gender_nuance_layout.setContentsMargins(0, 0, 0, 15)
+        auto_layout.addWidget(gender_nuance_widget)
+
+        if not hasattr(self, 'enable_gender_nuance_checkbox'):
+            self.enable_gender_nuance_checkbox = self._create_styled_checkbox("Enable Gender Nuance Analysis")
+            self.enable_gender_nuance_checkbox.setChecked(self.config.get('enable_gender_nuance', True))
+        gender_nuance_layout.addWidget(self.enable_gender_nuance_checkbox)
+
+        gender_nuance_label = QLabel("(Prioritizes pronoun/honorific cues to improve gender assignment; adds a scoring pass)")
+        gender_nuance_layout.addWidget(gender_nuance_label)
+        gender_nuance_layout.addStretch()
         
         # Include description column toggle (below gender context)
         description_widget = QWidget()
@@ -1801,9 +1816,12 @@ CRITICAL EXTRACTION RULES:
             gender_enabled = self.include_gender_context_checkbox.isChecked()
             self.include_description_checkbox.setEnabled(gender_enabled)
             label5.setEnabled(gender_enabled)
+            self.enable_gender_nuance_checkbox.setEnabled(gender_enabled)
+            gender_nuance_label.setEnabled(gender_enabled)
             if not gender_enabled:
                 # Uncheck if disabled
                 self.include_description_checkbox.setChecked(False)
+                self.enable_gender_nuance_checkbox.setChecked(False)
         
         # Connect gender context checkbox to update description state
         self.include_gender_context_checkbox.stateChanged.connect(update_description_state)
