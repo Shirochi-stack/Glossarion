@@ -1804,23 +1804,14 @@ def _create_response_handling_section(self, parent):
     
     # Retry Duplicate
     retry_duplicate_cb = self._create_styled_checkbox("Auto-retry Duplicate Content")
-    try:
-        retry_duplicate_cb.setChecked(bool(self.retry_duplicate_var))
-    except Exception:
-        pass
-    def _on_retry_duplicate_toggle(checked):
-        try:
-            self.retry_duplicate_var = bool(checked)
-            update_detection_visibility()
-        except Exception:
-            pass
-    retry_duplicate_cb.toggled.connect(_on_retry_duplicate_toggle)
-    section_v.addWidget(retry_duplicate_cb)
     
     duplicate_w = QWidget()
     duplicate_h = QHBoxLayout(duplicate_w)
     duplicate_h.setContentsMargins(20, 5, 0, 0)
-    duplicate_h.addWidget(QLabel("Check last"))
+    
+    duplicate_label_1 = QLabel("Check last")
+    duplicate_h.addWidget(duplicate_label_1)
+    
     duplicate_edit = QLineEdit()
     duplicate_edit.setFixedWidth(40)
     try:
@@ -1834,13 +1825,46 @@ def _create_response_handling_section(self, parent):
             pass
     duplicate_edit.textChanged.connect(_on_duplicate_lookback_changed)
     duplicate_h.addWidget(duplicate_edit)
-    duplicate_h.addWidget(QLabel("chapters"))
+    
+    duplicate_label_2 = QLabel("chapters")
+    duplicate_h.addWidget(duplicate_label_2)
     duplicate_h.addStretch()
-    section_v.addWidget(duplicate_w)
     
     duplicate_desc = QLabel("Detects when AI returns same content\nfor different chapters")
-    duplicate_desc.setStyleSheet("color: gray; font-size: 10pt;")
     duplicate_desc.setContentsMargins(20, 5, 0, 10)
+
+    def _on_retry_duplicate_toggle(checked):
+        try:
+            self.retry_duplicate_var = bool(checked)
+            update_detection_visibility()
+            
+            # Update UI state
+            duplicate_edit.setEnabled(bool(checked))
+            duplicate_label_1.setEnabled(bool(checked))
+            duplicate_label_2.setEnabled(bool(checked))
+            duplicate_desc.setEnabled(bool(checked))
+            
+            # Update styles
+            if checked:
+                duplicate_label_1.setStyleSheet("color: white;")
+                duplicate_label_2.setStyleSheet("color: white;")
+                duplicate_desc.setStyleSheet("color: gray; font-size: 10pt;")
+                duplicate_edit.setStyleSheet("")
+            else:
+                duplicate_label_1.setStyleSheet("color: #606060;")
+                duplicate_label_2.setStyleSheet("color: #606060;")
+                duplicate_desc.setStyleSheet("color: #606060; font-size: 10pt;")
+        except Exception:
+            pass
+
+    try:
+        retry_duplicate_cb.setChecked(bool(self.retry_duplicate_var))
+    except Exception:
+        pass
+    retry_duplicate_cb.toggled.connect(_on_retry_duplicate_toggle)
+    
+    section_v.addWidget(retry_duplicate_cb)
+    section_v.addWidget(duplicate_w)
     section_v.addWidget(duplicate_desc)
     
     # Container for detection-related options (to show/hide based on toggle)
@@ -1860,6 +1884,9 @@ def _create_response_handling_section(self, parent):
                 self.detection_options_container.setVisible(False)
         except Exception:
             pass
+            
+    # Apply initial styling and visibility
+    _on_retry_duplicate_toggle(retry_duplicate_cb.isChecked())
     
     # Detection Method subsection (now inside the container)
     method_label = QLabel("Detection Method:")
