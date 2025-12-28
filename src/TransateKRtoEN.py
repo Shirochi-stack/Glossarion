@@ -7205,11 +7205,88 @@ def main(log_callback=None, stop_callback=None):
         elif (os.path.exists(existing_glossary_csv) and _has_glossary_data(existing_glossary_csv)) or \
              (os.path.exists(existing_glossary_json) and _has_glossary_data(existing_glossary_json)):
             print("📑 Existing glossary file detected in source folder - skipping automatic generation")
+            target_glossary_path = None
             if os.path.exists(existing_glossary_csv) and _has_glossary_data(existing_glossary_csv):
                 print(f"📑 Using existing glossary.csv: {existing_glossary_csv}")
+                target_glossary_path = existing_glossary_csv
             elif os.path.exists(existing_glossary_json) and _has_glossary_data(existing_glossary_json):
                 print(f"📑 Using existing glossary.json: {existing_glossary_json}")
+                target_glossary_path = existing_glossary_json
             
+            # --- Check and inject book title if missing ---
+            if target_glossary_path and target_glossary_path.endswith('.csv'):
+                try:
+                    include_title = os.getenv("GLOSSARY_INCLUDE_BOOK_TITLE", "0") == "1"
+                    if include_title:
+                        # Read existing content
+                        with open(target_glossary_path, 'r', encoding='utf-8') as f:
+                            lines = f.readlines()
+                        
+                        # Check if book entry exists
+                        has_book_entry = False
+                        for line in lines:
+                            if line.lower().startswith("book,"):
+                                has_book_entry = True
+                                break
+                        
+                        if not has_book_entry:
+                            print("📑 Checking for missing book title entry in existing glossary...")
+                            # Use GlossaryManager to find/translate title
+                            import GlossaryManager
+                            
+                            # Get raw title from input EPUB
+                            epub_path_env = os.getenv("EPUB_PATH", "")
+                            raw_title = GlossaryManager._extract_raw_title_from_epub(epub_path_env)
+                            
+                            # Get translated title from output metadata
+                            trans_title = GlossaryManager._extract_translated_title_from_metadata(out)
+                            
+                            if raw_title or trans_title:
+                                # Determine values (prefer distinct, fallback to what we have)
+                                r_val = raw_title if raw_title else (trans_title if trans_title else "")
+                                t_val = trans_title if trans_title else (raw_title if raw_title else "")
+                                
+                                # Insert book entry in token-efficient format if detected, or standard CSV
+                                is_token_format = any(l.strip().startswith("Glossary Columns:") for l in lines)
+                                
+                                if is_token_format:
+                                    # Insert into token efficient format
+                                    # Find start of BOOKS section or create it at top
+                                    book_lines = [
+                                        f"=== BOOKS ===\n",
+                                        f"* {t_val} ({r_val})\n",
+                                        "\n"
+                                    ]
+                                    
+                                    # Find where to insert (after Glossary Columns)
+                                    insert_idx = 0
+                                    for i, l in enumerate(lines):
+                                        if l.strip().startswith("Glossary Columns:"):
+                                            insert_idx = i + 2 # Skip blank line
+                                            break
+                                    
+                                    # Check if BOOKS section already exists to avoid duplication
+                                    has_books_section = any(l.strip() == "=== BOOKS ===" for l in lines)
+                                    if not has_books_section:
+                                        for bl in reversed(book_lines):
+                                            lines.insert(insert_idx, bl)
+                                else:
+                                    # Standard CSV injection
+                                    book_line = f"book,{r_val},{t_val},,\n"
+                                    # Find insertion point (after header if present)
+                                    insert_idx = 0
+                                    if lines and "type," in lines[0].lower():
+                                        insert_idx = 1
+                                    lines.insert(insert_idx, book_line)
+                                
+                                # Write back
+                                with open(target_glossary_path, 'w', encoding='utf-8') as f:
+                                    f.writelines(lines)
+                                print(f"📚 Auto-injected book title into existing glossary: {t_val} ({r_val})")
+                except Exception as e:
+                    print(f"⚠️ Failed to inject book title: {e}")
+            # ----------------------------------------------
+
             # Copy glossary extension if configured
             if os.getenv('ADD_ADDITIONAL_GLOSSARY', '0') == '1':
                 additional_glossary_path = os.getenv('ADDITIONAL_GLOSSARY_PATH', '')

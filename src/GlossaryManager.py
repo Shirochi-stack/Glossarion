@@ -48,7 +48,9 @@ _api_submission_lock = threading.Lock()
 _last_api_submission_time = 0
 _results_lock = threading.Lock()
 _file_write_lock = threading.Lock()
-BOOK_TITLE_VALUE = None
+BOOK_TITLE_RAW = None
+BOOK_TITLE_TRANSLATED = None
+BOOK_TITLE_VALUE = None  # Legacy support if needed, or remove? Keeping for safety but won't use.
 
 
 def _extract_title_from_metadata(meta):
@@ -78,17 +80,71 @@ def _extract_title_from_metadata(meta):
     return None
 
 
-def _derive_book_title(output_dir):
-    """Derive book title from translated output metadata.json only; skip if absent."""
+def _extract_raw_title_from_epub(epub_path):
+    """Extract the raw untranslated title from the input EPUB content.opf."""
+    if not epub_path or not os.path.exists(epub_path):
+        return None
+        
+    print(f"[Metadata] Checking input EPUB for raw title: {epub_path}")
+    
+    # Try manual parsing first (more robust)
+    try:
+        import zipfile
+        with zipfile.ZipFile(epub_path, 'r') as zf:
+            # Find opf
+            opf_name = next((n for n in zf.namelist() if n.lower().endswith('.opf')), None)
+            if opf_name:
+                content = zf.read(opf_name).decode('utf-8', errors='ignore')
+                # Use BS4 with xml parser
+                try:
+                    soup = BeautifulSoup(content, 'xml')
+                except Exception:
+                    soup = BeautifulSoup(content, 'html.parser')
+                    
+                # Try dc:title
+                title_tag = soup.find('dc:title')
+                if not title_tag:
+                    # Fallback to any title tag
+                    title_tag = soup.find('title')
+                
+                if title_tag:
+                    val = title_tag.get_text(strip=True)
+                    if val:
+                        return val
+    except Exception as e:
+        print(f"[Warning] Manual EPUB title extraction failed: {e}")
+
+    # Fallback: ebooklib
+    try:
+        from ebooklib import epub
+        book = epub.read_epub(epub_path)
+        titles = book.get_metadata("DC", "title")
+        if titles:
+            val = titles[0][0]
+            if val:
+                return str(val).strip()
+    except Exception as e:
+        print(f"[Warning] Could not read EPUB metadata via ebooklib: {e}")
+        
+    return None
+
+
+def _extract_translated_title_from_metadata(output_dir):
+    """Extract translated title from metadata.json in output directory."""
     base_dir = os.path.abspath(output_dir or ".")
     epub_path = os.getenv("EPUB_PATH", "")
     epub_base = os.path.splitext(os.path.basename(epub_path or ""))[0] if epub_path else None
+    
     candidates = []
+    # Only check output directory logic for translated title
     if epub_base:
         candidates.append(os.path.join(base_dir, epub_base, "metadata.json"))
+        
+    # Also check direct output dir
+    candidates.append(os.path.join(base_dir, "metadata.json"))
 
     for meta_path in candidates:
-        print(f"[Metadata] Checking for book title at: {meta_path}")
+        # print(f"[Metadata] Checking for translated book title at: {meta_path}")
         if os.path.exists(meta_path):
             try:
                 with open(meta_path, "r", encoding="utf-8") as f:
@@ -98,67 +154,58 @@ def _derive_book_title(output_dir):
                     return meta_title.strip()
             except Exception as e:
                 print(f"[Warning] Could not read metadata.json for book title: {e}")
+                
+    return None
 
-    # Fallback: read untranslated title from EPUB metadata (manual parse for robustness)
-    try:
-        if epub_path and os.path.exists(epub_path):
-            print(f"[Metadata] Checking EPUB metadata for title (manual parse): {epub_path}")
-            import zipfile
-            with zipfile.ZipFile(epub_path, 'r') as zf:
-                # Find opf
-                opf_name = next((n for n in zf.namelist() if n.lower().endswith('.opf')), None)
-                if opf_name:
-                    content = zf.read(opf_name).decode('utf-8', errors='ignore')
-                    # Use simple regex to avoid heavy XML parsing deps if possible, or fall back to BS4
-                    # But since BS4 is imported, let's use it
-                    soup = BeautifulSoup(content, 'xml')
-                    # Try dc:title
-                    title_tag = soup.find('dc:title')
-                    if not title_tag:
-                        title_tag = soup.find('title')
-                    
-                    if title_tag:
-                        val = title_tag.get_text(strip=True)
-                        if val:
-                            return val
-    except Exception as e:
-        print(f"[Warning] Manual EPUB title extraction failed: {e}")
 
-    # Fallback: ebooklib
-    try:
-        if epub_path and os.path.exists(epub_path):
-            print(f"[Metadata] Checking EPUB metadata for title: {epub_path}")
-            from ebooklib import epub
-            book = epub.read_epub(epub_path)
-            titles = book.get_metadata("DC", "title")
-            if titles:
-                val = titles[0][0]
-                if val:
-                    return str(val).strip()
-    except Exception as e:
-        print(f"[Warning] Could not read EPUB metadata for title: {e}")
-
+def _derive_book_title(output_dir):
+    """Legacy wrapper - logic moved to save_glossary main flow."""
     return None
 
 
 def _ensure_book_title_csv_lines(csv_lines):
     """
     Ensure the CSV (header + rows) contains a leading book title entry when enabled.
+    Uses distinct raw and translated titles.
     """
     if not csv_lines:
         return csv_lines
     include = os.getenv("GLOSSARY_INCLUDE_BOOK_TITLE", "1").lower() not in ("0", "false", "no")
-    title = BOOK_TITLE_VALUE.strip() if BOOK_TITLE_VALUE else None
-    if not include or not title:
+    
+    raw_title = BOOK_TITLE_RAW
+    trans_title = BOOK_TITLE_TRANSLATED
+    
+    # If we don't have BOTH, we can't create a perfect entry.
+    # But user said "no scenarios with untranslated and untranslated".
+    # So if one is missing, we might skip OR just use what we have?
+    # User said "we only need untranslated text and translated text".
+    # Assuming if both aren't available, we might default to what we have but prefer distinct.
+    
+    # Logic: if we have raw but no translated, use raw for both? No, user hates that.
+    # But if we literally don't have a translation, we can't invent one.
+    # The requirement seems to be: Get the CORRECT source for each field.
+    
+    if not include:
+        return csv_lines
+        
+    if not raw_title and not trans_title:
         return csv_lines
 
-    header = csv_lines[0]
-    norm = title.lower()
+    # Normalize for dedup check
+    norm_raw = raw_title.lower() if raw_title else ""
+    norm_trans = trans_title.lower() if trans_title else ""
+    
     # Skip if already present
+    header = csv_lines[0]
     for line in csv_lines[1:]:
         parts = [p.strip() for p in line.split(",")]
         if len(parts) >= 3:
-            if parts[1].lower() == norm or parts[2].lower() == norm:
+            # Check if this line is already the book title
+            p_raw = parts[1].lower()
+            p_trans = parts[2].lower()
+            
+            # Match if we find our raw title or our translated title in the respective columns
+            if (raw_title and p_raw == norm_raw) or (trans_title and p_trans == norm_trans):
                 return csv_lines
 
     fields = [f.strip() for f in header.split(",")]
@@ -168,14 +215,13 @@ def _ensure_book_title_csv_lines(csv_lines):
         if key == "type":
             row.append("book")
         elif key == "raw_name":
-            row.append(title)
+            row.append(raw_title if raw_title else (trans_title if trans_title else ""))
         elif key == "translated_name":
-            row.append(title)
+            row.append(trans_title if trans_title else (raw_title if raw_title else ""))
         else:
             row.append("")
     book_line = ",".join(row)
     return [header, book_line] + csv_lines[1:]
-
 
 def _csv_sort_key(line: str):
     """Sort book first, then characters, then others by raw name."""
@@ -355,8 +401,20 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     
     # Rest of the method continues as before...
     print("📁 Extracting names and terms with configurable options")
-    global BOOK_TITLE_VALUE
-    BOOK_TITLE_VALUE = _derive_book_title(output_dir)
+    global BOOK_TITLE_RAW, BOOK_TITLE_TRANSLATED
+    
+    # 1. Get raw title from input EPUB (input path)
+    epub_path = os.getenv("EPUB_PATH", "")
+    BOOK_TITLE_RAW = _extract_raw_title_from_epub(epub_path)
+    
+    # 2. Get translated title from output metadata (output path)
+    BOOK_TITLE_TRANSLATED = _extract_translated_title_from_metadata(output_dir)
+    
+    # Debug info
+    if BOOK_TITLE_RAW:
+        print(f"📚 Raw book title: {BOOK_TITLE_RAW}")
+    if BOOK_TITLE_TRANSLATED:
+        print(f"📚 Translated book title: {BOOK_TITLE_TRANSLATED}")
     
     # Check stop flag before processing
     if is_stop_requested():
