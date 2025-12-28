@@ -6541,7 +6541,8 @@ def test_api_connections(self):
                     test_client = openai.OpenAI(
                         api_key=api_key,
                         base_url=base_url,
-                        timeout=5.0  # Keep model test short to avoid UI freeze
+                        timeout=5.0,  # Keep model test short to avoid UI freeze
+                        max_retries=0  # Fail fast on 404/connection errors
                     )
                     
                     # Try a minimal completion
