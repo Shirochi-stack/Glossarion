@@ -14,7 +14,7 @@ try:
         QTreeWidget, QTreeWidgetItem, QAbstractItemView, QHeaderView, QMenu, QFrame,
         QCompleter
     )
-    from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPropertyAnimation, QEasingCurve
+    from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPropertyAnimation, QEasingCurve, Slot
     from PySide6.QtGui import QIcon, QFont, QPixmap, QShortcut, QKeySequence, QTransform
     from spinning import create_icon_label, animate_icon
     HAS_GUI = True
@@ -2137,6 +2137,8 @@ class MultiAPIKeyDialog(QDialog):
         # Run test on main thread using QTimer (non-blocking)
         QTimer.singleShot(100, lambda: self._test_single_fallback_key(key_data, index))
 
+    # Decorate _update_fallback_test_result as a slot for invokeMethod
+    @Slot(int, bool) if HAS_GUI else lambda x: x
     def _update_fallback_test_result(self, index, success):
         """Update fallback tree item with test result and bump times used"""
         # Increment times_used in config
@@ -2186,6 +2188,15 @@ class MultiAPIKeyDialog(QDialog):
                     output_dir=None
                 )
                 
+                # Force 0 retries for testing to speed up failure detection
+                try:
+                    tls = client._get_thread_local_client()
+                    tls.max_retries_override = 0
+                    print(f"[DEBUG] Set max_retries_override=0 for fallback key test")
+                except Exception:
+                    pass
+                
+                
                 # Set Google credentials and other key-specific settings
                 google_credentials = key_data.get('google_credentials')
                 if google_credentials:
@@ -2226,16 +2237,25 @@ class MultiAPIKeyDialog(QDialog):
                     content, _ = response
                     if content and "test successful" in content.lower():
                         print(f"[DEBUG] Fallback key test completed for {model}: PASSED")
-                        # Update directly - we're in executor thread
-                        self._update_fallback_test_result(index, True)
+                        # Update directly - we're in executor thread, so use invokeMethod or signals
+                        if HAS_GUI:
+                            QMetaObject.invokeMethod(self, "_update_fallback_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, True))
+                        else:
+                            self._update_fallback_test_result(index, True)
                         return
                 
                 # Failed
                 print(f"[DEBUG] Fallback key test completed for {model}: FAILED")
-                self._update_fallback_test_result(index, False)
+                if HAS_GUI:
+                    QMetaObject.invokeMethod(self, "_update_fallback_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False))
+                else:
+                    self._update_fallback_test_result(index, False)
             except Exception as e:
                 print(f"[DEBUG] Fallback key test error for {model}: {e}")
-                self._update_fallback_test_result(index, False)
+                if HAS_GUI:
+                    QMetaObject.invokeMethod(self, "_update_fallback_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False))
+                else:
+                    self._update_fallback_test_result(index, False)
         
         # Submit to shared executor like translation does
         if executor:
@@ -3971,12 +3991,17 @@ class MultiAPIKeyDialog(QDialog):
             self._submit_single_test(index)
 
     def _test_all(self):
-        """Test all API keys with inline progress"""
+        """Test all enabled API keys with inline progress"""
         if not self.key_pool.keys:
             QMessageBox.warning(self, "Warning", "No keys to test")
             return
         
-        indices = list(range(len(self.key_pool.keys)))
+        # Only test enabled keys
+        indices = [i for i, key in enumerate(self.key_pool.keys) if key.enabled]
+        
+        if not indices:
+            QMessageBox.warning(self, "Warning", "No enabled keys to test")
+            return
         
         # Mark keys as testing BEFORE starting thread (in main thread)
         for index in indices:
@@ -4031,6 +4056,15 @@ class MultiAPIKeyDialog(QDialog):
                     output_dir=None
                 )
                 
+                # Force 0 retries for testing to speed up failure detection
+                try:
+                    tls = client._get_thread_local_client()
+                    tls.max_retries_override = 0
+                    print(f"[DEBUG] Set max_retries_override=0 for key test")
+                except Exception:
+                    pass
+                
+                
                 # Set Google credentials and other key-specific settings
                 if hasattr(key, 'google_credentials') and key.google_credentials:
                     client.current_key_google_creds = key.google_credentials
@@ -4065,15 +4099,24 @@ class MultiAPIKeyDialog(QDialog):
                 if response and isinstance(response, tuple):
                     content, _ = response
                     if content and "test successful" in content.lower():
-                        # Success - update directly from executor thread
-                        self._handle_test_result(index, True, "Test passed")
+                        # Success - update via signal/slot for thread safety
+                        if HAS_GUI:
+                            QMetaObject.invokeMethod(self, "_handle_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, True), Q_ARG(str, "Test passed"))
+                        else:
+                            self._handle_test_result(index, True, "Test passed")
                         return
                 
-                # Failed - update directly
-                self._handle_test_result(index, False, "Unexpected response")
+                # Failed - update via signal/slot
+                if HAS_GUI:
+                    QMetaObject.invokeMethod(self, "_handle_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False), Q_ARG(str, "Unexpected response"))
+                else:
+                    self._handle_test_result(index, False, "Unexpected response")
             except Exception as e:
                 error_msg = str(e)[:50]
-                self._handle_test_result(index, False, f"Error: {error_msg}")
+                if HAS_GUI:
+                    QMetaObject.invokeMethod(self, "_handle_test_result", Qt.QueuedConnection, Q_ARG(int, index), Q_ARG(bool, False), Q_ARG(str, f"Error: {error_msg}"))
+                else:
+                    self._handle_test_result(index, False, f"Error: {error_msg}")
         
         # Submit to shared executor like translation does
         if executor:
@@ -4083,6 +4126,8 @@ class MultiAPIKeyDialog(QDialog):
             thread = threading.Thread(target=run_api_test, daemon=True)
             thread.start()
     
+    # Decorate _handle_test_result as a slot
+    @Slot(int, bool, str) if HAS_GUI else lambda x: x
     def _handle_test_result(self, index, success, message):
         """Handle test result from background thread"""
         if index < len(self.key_pool.keys):
