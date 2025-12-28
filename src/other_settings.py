@@ -6322,9 +6322,10 @@ def toggle_more_endpoints(self):
 def test_api_connections(self):
     """Test all configured API connections (Qt version)"""
     import os
-    from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QMessageBox
-    from PySide6.QtCore import Qt, QSize
+    from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QMessageBox, QPushButton
+    from PySide6.QtCore import Qt, QSize, QTimer, QObject, Signal
     from PySide6.QtGui import QIcon, QPixmap
+    import threading
 
     # Resolve app icon once for all dialogs
     icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
@@ -6333,6 +6334,7 @@ def test_api_connections(self):
     # Show immediate feedback
     progress_dialog = QDialog(self.current_dialog if hasattr(self, 'current_dialog') else None)
     progress_dialog.setWindowTitle("Testing Connections...")
+    progress_dialog.setModal(True)  # modal, but we'll provide Cancel
     # Use screen ratios for sizing
     from PySide6.QtWidgets import QApplication
     screen = QApplication.primaryScreen().geometry()
@@ -6371,6 +6373,15 @@ def test_api_connections(self):
     progress_label.setAlignment(Qt.AlignCenter)
     progress_label.setStyleSheet("font-size: 10pt;")
     layout.addWidget(progress_label)
+
+    # Cancel button to stop background work
+    cancel_event = threading.Event()
+    cancel_btn = QPushButton("Cancel")
+    def _cancel():
+        cancel_event.set()
+        progress_dialog.close()
+    cancel_btn.clicked.connect(_cancel)
+    layout.addWidget(cancel_btn)
     
     # Show dialog non-modally so it's visible
     progress_dialog.show()
@@ -6463,97 +6474,115 @@ def test_api_connections(self):
         QMessageBox.information(None, "Info", "No custom endpoints configured. Using default API endpoints.")
         return
     
-    # Test each endpoint
-    # Test each endpoint
-    results = []
-    for endpoint_info in endpoints_to_test:
-        if len(endpoint_info) == 4 and endpoint_info[3] == "azure":
-            # Azure endpoint
-            name, base_url, model, endpoint_type = endpoint_info
-            try:
-                # Azure uses different headers
-                import requests
-                headers = {
-                    "api-key": api_key,
-                    "Content-Type": "application/json"
-                }
-                
-                response = requests.post(
-                    base_url,
-                    headers=headers,
-                    json={
-                        "messages": [{"role": "user", "content": "Hi"}],
-                        "max_tokens": 5
-                    },
-                    timeout=5.0
-                )
-                
-                if response.status_code == 200:
-                    results.append(f"✅ {name}: Connected successfully! (Deployment: {model})")
-                else:
-                    results.append(f"❌ {name}: {response.status_code} - {response.text[:100]}")
-                    
-            except Exception as e:
-                error_msg = str(e)[:100]
-                results.append(f"❌ {name}: {error_msg}")
-        else:
-            # Regular OpenAI-compatible endpoint
-            name, base_url, model = endpoint_info[:3]
-            try:
-                # Quick endpoint reachability probe (low timeout)
+    class _ConnTestBridge(QObject):
+        finished = Signal(list)
+
+    bridge = _ConnTestBridge()
+
+    def run_tests_background():
+        results = []
+        for endpoint_info in endpoints_to_test:
+            if cancel_event.is_set():
+                break
+            if len(endpoint_info) == 4 and endpoint_info[3] == "azure":
+                # Azure endpoint
+                name, base_url, model, endpoint_type = endpoint_info
                 try:
-                    import httpx
-                    probe_timeout = 3.0
-                    probe_url = base_url.rstrip("/")  # tolerate missing path
-                    httpx.get(probe_url, timeout=probe_timeout)
-                except Exception as probe_err:
-                    results.append(f"❌ {name}: Endpoint unreachable ({probe_err})")
-                    continue
-                # Create client for this endpoint
-                test_client = openai.OpenAI(
-                    api_key=api_key,
-                    base_url=base_url,
-                    timeout=5.0  # Keep model test short to avoid UI freeze
-                )
-                
-                # Try a minimal completion
-                response = test_client.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "user", "content": "Hi"}],
-                    max_tokens=5
-                )
-                
-                results.append(f"✅ {name}: Connected successfully! (Model: {model})")
-            except Exception as e:
-                error_msg = str(e)
-                # Simplify common error messages
-                if "timed out" in error_msg.lower():
-                    error_msg = f"Connection timed out. The endpoint is running but the model '{model}' may be too slow to respond."
-                elif "404" in error_msg:
-                    error_msg = "404 - Endpoint not found. Check URL and model name."
-                elif "401" in error_msg or "403" in error_msg:
-                    error_msg = "Authentication failed. Check API key."
-                elif "model" in error_msg.lower() and "not found" in error_msg.lower():
-                    error_msg = f"Model '{model}' not found at this endpoint."
-                
-                results.append(f"❌ {name}: {error_msg}")
-    
-    # Show results
-    result_message = "Connection Test Results:\n\n" + "\n\n".join(results)
-    
-    # Close progress dialog
-    progress_dialog.close()
-    
-    # Determine if all succeeded
-    all_success = all("✅" in r for r in results)
-    
-    msg_box = QMessageBox(progress_dialog.parent() if progress_dialog.parent() else None)
-    msg_box.setWindowTitle("Success" if all_success else "Test Results")
-    msg_box.setText(result_message)
-    msg_box.setIcon(QMessageBox.Information if all_success else QMessageBox.Warning)
-    msg_box.setWindowIcon(app_icon)
-    msg_box.setStandardButtons(QMessageBox.Ok)
-    msg_box.exec()
+                    # Azure uses different headers
+                    import requests
+                    headers = {
+                        "api-key": api_key,
+                        "Content-Type": "application/json"
+                    }
+                    
+                    response = requests.post(
+                        base_url,
+                        headers=headers,
+                        json={
+                            "messages": [{"role": "user", "content": "Hi"}],
+                            "max_tokens": 5
+                        },
+                        timeout=5.0
+                    )
+                    
+                    if response.status_code == 200:
+                        results.append(f"✅ {name}: Connected successfully! (Deployment: {model})")
+                    else:
+                        results.append(f"❌ {name}: {response.status_code} - {response.text[:100]}")
+                        
+                except Exception as e:
+                    error_msg = str(e)[:100]
+                    results.append(f"❌ {name}: {error_msg}")
+            else:
+                # Regular OpenAI-compatible endpoint
+                name, base_url, model = endpoint_info[:3]
+                try:
+                    # Quick endpoint reachability probe (low timeout)
+                    try:
+                        import httpx
+                        probe_timeout = 3.0
+                        probe_url = base_url.rstrip("/")  # tolerate missing path
+                        httpx.get(probe_url, timeout=probe_timeout)
+                    except Exception as probe_err:
+                        results.append(f"❌ {name}: Endpoint unreachable ({probe_err})")
+                        continue
+                    if cancel_event.is_set():
+                        break
+                    # Create client for this endpoint
+                    test_client = openai.OpenAI(
+                        api_key=api_key,
+                        base_url=base_url,
+                        timeout=5.0  # Keep model test short to avoid UI freeze
+                    )
+                    
+                    # Try a minimal completion
+                    response = test_client.chat.completions.create(
+                        model=model,
+                        messages=[{"role": "user", "content": "Hi"}],
+                        max_tokens=5
+                    )
+                    
+                    results.append(f"✅ {name}: Connected successfully! (Model: {model})")
+                except Exception as e:
+                    error_msg = str(e)
+                    # Simplify common error messages
+                    if "timed out" in error_msg.lower():
+                        error_msg = f"Connection timed out. The endpoint is running but the model '{model}' may be too slow to respond."
+                    elif "404" in error_msg:
+                        error_msg = "404 - Endpoint not found. Check URL and model name."
+                    elif "401" in error_msg or "403" in error_msg:
+                        error_msg = "Authentication failed. Check API key."
+                    elif "model" in error_msg.lower() and "not found" in error_msg.lower():
+                        error_msg = f"Model '{model}' not found at this endpoint."
+                    
+                    results.append(f"❌ {name}: {error_msg}")
+
+        if not cancel_event.is_set():
+            bridge.finished.emit(results)
+
+    threading.Thread(target=run_tests_background, daemon=True).start()
+
+    def finish_ui(results):
+        if cancel_event.is_set():
+            return
+        # Show results
+        result_message = "Connection Test Results:\n\n" + "\n\n".join(results)
+        
+        # Close progress dialog
+        progress_dialog.close()
+        
+        # Determine if all succeeded
+        all_success = all("✅" in r for r in results)
+        
+        msg_box = QMessageBox(progress_dialog.parent() if progress_dialog.parent() else None)
+        msg_box.setWindowTitle("Success" if all_success else "Test Results")
+        msg_box.setText(result_message)
+        msg_box.setIcon(QMessageBox.Information if all_success else QMessageBox.Warning)
+        msg_box.setWindowIcon(app_icon)
+        msg_box.setStandardButtons(QMessageBox.Ok)
+        msg_box.exec()
+
+    bridge.finished.connect(finish_ui)
     
 
 def run_standalone_translate_headers(self):
