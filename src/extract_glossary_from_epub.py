@@ -358,9 +358,6 @@ def _ensure_book_title_entry(glossary: List[Dict]) -> List[Dict]:
     """Insert a 'book' entry (raw + translated title) at the top if enabled and not present."""
     global BOOK_TITLE_PRESENT, BOOK_TITLE_VALUE, BOOK_TITLE_RAW, BOOK_TITLE_TRANSLATED
     
-    if BOOK_TITLE_PRESENT:
-        return glossary
-        
     include = os.getenv("GLOSSARY_INCLUDE_BOOK_TITLE", "1").lower() not in ("0", "false", "no")
     
     # Determine titles to use
@@ -2739,9 +2736,24 @@ def main(log_callback=None, stop_callback=None):
     config = load_config(args.config)
     
     # Retrieve book titles (raw from input, translated from metadata/output)
-    global BOOK_TITLE_RAW, BOOK_TITLE_TRANSLATED
+    global BOOK_TITLE_RAW, BOOK_TITLE_TRANSLATED, BOOK_TITLE_PRESENT, BOOK_TITLE_VALUE
     BOOK_TITLE_RAW = _extract_raw_title_from_epub(epub_path)
     BOOK_TITLE_TRANSLATED = _extract_translated_title_from_metadata(args.output, epub_path)
+    
+    # Check progress file for saved book title to avoid re-translation
+    if not BOOK_TITLE_TRANSLATED and os.path.exists(PROGRESS_FILE):
+        try:
+            with open(PROGRESS_FILE, 'r', encoding='utf-8') as f:
+                saved_prog = json.load(f)
+                saved_title = saved_prog.get('book_title')
+                if saved_title:
+                    print(f"📂 Loaded translated book title from progress: {saved_title}")
+                    BOOK_TITLE_TRANSLATED = saved_title
+                    BOOK_TITLE_VALUE = saved_title
+                    BOOK_TITLE_PRESENT = saved_prog.get('book_title_present', False)
+        except Exception:
+            # If reading progress fails, just fall back to standard behavior
+            pass
     
     # Get API key from environment variables (set by GUI) or config file
     api_key = (os.getenv("API_KEY") or 
