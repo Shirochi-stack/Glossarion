@@ -3248,11 +3248,44 @@ def _create_prompt_management_section(self, parent):
         translate_title_cb.setChecked(bool(self.translate_book_title_var))
     except Exception:
         pass
+        
+    # Toggle: include book title in glossary header/output
+    glossary_title_cb = self._create_styled_checkbox("Include book title at top of glossary")
+    try:
+        # Default to False if not present in config
+        if not hasattr(self, 'include_book_title_glossary_var'):
+            self.include_book_title_glossary_var = False
+        glossary_title_cb.setChecked(bool(self.include_book_title_glossary_var))
+    except Exception:
+        glossary_title_cb.setChecked(False)
+        
+    glossary_title_cb.setToolTip(
+        "If enabled, glossary outputs add a first entry for the book title, taken from the translated output's metadata.json (skipped if metadata is missing)."
+    )
+    
+    def _update_glossary_title_state(checked):
+        """Update enabled state and styling of glossary title toggle"""
+        try:
+            glossary_title_cb.setEnabled(checked)
+            if checked:
+                # Normal styling
+                glossary_title_cb.setStyleSheet("")
+            else:
+                # Disabled styling (grayed out)
+                glossary_title_cb.setStyleSheet("QCheckBox { color: #666666; }")
+                # Also uncheck it if parent is unchecked
+                if glossary_title_cb.isChecked():
+                    glossary_title_cb.setChecked(False)
+        except Exception:
+            pass
+
     def _on_translate_title_toggle(checked):
         try:
             self.translate_book_title_var = bool(checked)
+            _update_glossary_title_state(checked)
         except Exception:
             pass
+            
     translate_title_cb.toggled.connect(_on_translate_title_toggle)
     title_h.addWidget(translate_title_cb)
     
@@ -3278,15 +3311,6 @@ def _create_prompt_management_section(self, parent):
     title_desc.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(title_desc)
     
-    # Toggle: include book title in glossary header/output
-    glossary_title_cb = self._create_styled_checkbox("Include book title at top of glossary")
-    try:
-        glossary_title_cb.setChecked(bool(self.include_book_title_glossary_var))
-    except Exception:
-        pass
-    glossary_title_cb.setToolTip(
-        "If enabled, glossary outputs add a first entry for the book title, taken from the translated output's metadata.json (skipped if metadata is missing)."
-    )
     def _on_glossary_title_toggle(checked):
         try:
             self.include_book_title_glossary_var = bool(checked)
@@ -3297,6 +3321,9 @@ def _create_prompt_management_section(self, parent):
             pass
     glossary_title_cb.toggled.connect(_on_glossary_title_toggle)
     section_v.addWidget(glossary_title_cb)
+    
+    # Initialize state based on current value
+    _update_glossary_title_state(translate_title_cb.isChecked())
     
     # Separator
     sep1 = QFrame()
