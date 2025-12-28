@@ -279,10 +279,10 @@ def _extract_title_from_metadata(meta: Dict) -> str:
     return None
 
 
-def _derive_book_title(epub_path: str, output_path: str) -> str:
+def _derive_book_title(epub_path: str, output_path: str) -> Tuple[str, bool]:
     """
-    Derive book title from translated output metadata.json only.
-    If metadata.json is missing or has no title, return None (no book entry).
+    Derive book title from translated output metadata.json or EPUB metadata.
+    Returns (title, is_translated_from_metadata_json).
     """
     # metadata.json next to the output
     meta_dir = os.path.abspath(os.path.dirname(output_path) or ".")
@@ -299,7 +299,7 @@ def _derive_book_title(epub_path: str, output_path: str) -> str:
                     meta = json.load(f)
                 meta_title = _extract_title_from_metadata(meta)
                 if meta_title:
-                    return meta_title.strip()
+                    return meta_title.strip(), True
             except Exception as e:
                 print(f"[Warning] Could not read metadata.json for book title: {e}")
 
@@ -312,12 +312,12 @@ def _derive_book_title(epub_path: str, output_path: str) -> str:
             if titles:
                 val = titles[0][0]
                 if val:
-                    return str(val).strip()
+                    return str(val).strip(), False
     except Exception as e:
         print(f"[Warning] Could not read EPUB metadata for title: {e}")
 
     # No metadata.json title found; skip adding book entry
-    return None
+    return None, False
 
 
 def _ensure_book_title_entry(glossary: List[Dict]) -> List[Dict]:
@@ -2685,7 +2685,8 @@ def main(log_callback=None, stop_callback=None):
 
     config = load_config(args.config)
     global BOOK_TITLE_VALUE
-    BOOK_TITLE_VALUE = _derive_book_title(epub_path, args.output)
+    raw_title, is_translated = _derive_book_title(epub_path, args.output)
+    BOOK_TITLE_VALUE = raw_title
     
     # Get API key from environment variables (set by GUI) or config file
     api_key = (os.getenv("API_KEY") or 
@@ -2702,6 +2703,31 @@ def main(log_callback=None, stop_callback=None):
 
     # Use the variables we just retrieved
     client = create_client_with_multi_key_support(api_key, model, out, config)
+    
+    # Translate book title if needed (only if it came from raw EPUB metadata)
+    if BOOK_TITLE_VALUE and not is_translated:
+        include_title = os.getenv("GLOSSARY_INCLUDE_BOOK_TITLE", "1").lower() not in ("0", "false", "no")
+        if include_title:
+            try:
+                # Try to import translate_title from TransateKRtoEN
+                # Use local import to avoid top-level circular dependencies
+                from TransateKRtoEN import translate_title
+                
+                print(f"📚 Translating book title: {BOOK_TITLE_VALUE}")
+                translated = translate_title(
+                    BOOK_TITLE_VALUE, 
+                    client, 
+                    None, # system_prompt (uses default/env)
+                    None, # user_prompt (uses default/env)
+                    float(os.getenv("GLOSSARY_TEMPERATURE") or config.get('temperature', 0.1))
+                )
+                if translated and translated != BOOK_TITLE_VALUE:
+                    print(f"📚 Translated title for glossary: {translated}")
+                    BOOK_TITLE_VALUE = translated
+            except ImportError:
+                print("⚠️ Could not import translate_title from TransateKRtoEN - using raw title")
+            except Exception as e:
+                print(f"⚠️ Failed to translate book title: {e} - using raw title")
     
     # Check for batch mode
     batch_enabled = os.getenv("BATCH_TRANSLATION", "0") == "1"
