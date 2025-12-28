@@ -3285,7 +3285,7 @@ def _create_prompt_management_section(self, parent):
     except Exception:
         pass
     glossary_title_cb.setToolTip(
-        "If enabled, glossary outputs add a first entry for the book title using metadata.json or the source filename when missing."
+        "If enabled, glossary outputs add a first entry for the book title, taken from the translated output's metadata.json (skipped if metadata is missing)."
     )
     def _on_glossary_title_toggle(checked):
         try:

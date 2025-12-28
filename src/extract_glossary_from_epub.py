@@ -270,36 +270,27 @@ def _extract_title_from_metadata(meta: Dict) -> str:
 
 def _derive_book_title(epub_path: str, output_path: str) -> str:
     """
-    Derive book title from translated output metadata.json (preferred),
-    otherwise from EPUB embedded metadata. Do NOT fall back to filenames.
+    Derive book title from translated output metadata.json only.
+    If metadata.json is missing or has no title, return None (no book entry).
     """
-    # 1) metadata.json next to the output
-    meta_dir = os.path.dirname(output_path) or "."
-    meta_path = os.path.join(meta_dir, "metadata.json")
-    if os.path.exists(meta_path):
-        try:
-            with open(meta_path, "r", encoding="utf-8") as f:
-                meta = json.load(f)
-            meta_title = _extract_title_from_metadata(meta)
-            if meta_title:
-                return meta_title.strip()
-        except Exception as e:
-            print(f"[Warning] Could not read metadata.json for book title: {e}")
-
-    # 2) EPUB internal metadata (untranslated source title)
-    try:
-        book = epub.read_epub(epub_path) if epub_path else None
-        if book:
-            titles = book.get_metadata("DC", "title")
-            if titles:
-                # titles is list of tuples (value, attrs)
-                val = titles[0][0]
-                if val:
-                    return str(val).strip()
-    except Exception as e:
-        print(f"[Warning] Could not read EPUB metadata for title: {e}")
-
-    # No title found
+    # metadata.json next to the output
+    meta_dir = os.path.abspath(os.path.dirname(output_path) or ".")
+    candidates = [
+        os.path.join(meta_dir, "metadata.json"),
+        os.path.join(os.path.dirname(meta_dir), "metadata.json"),  # parent (e.g., when output is in Glossary/)
+    ]
+    for meta_path in candidates:
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                meta_title = _extract_title_from_metadata(meta)
+                if meta_title:
+                    return meta_title.strip()
+            except Exception as e:
+                print(f"[Warning] Could not read metadata.json for book title: {e}")
+    # No metadata.json title found; skip adding book entry
+    return None
     return None
 
 

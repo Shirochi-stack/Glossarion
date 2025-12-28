@@ -79,33 +79,23 @@ def _extract_title_from_metadata(meta):
 
 
 def _derive_book_title(output_dir):
-    """Derive book title from translated output metadata.json, else EPUB metadata; no filename fallback."""
-    # 1) metadata.json in output directory
-    meta_path = os.path.join(output_dir or ".", "metadata.json")
-    if os.path.exists(meta_path):
-        try:
-            with open(meta_path, "r", encoding="utf-8") as f:
-                meta = json.load(f)
-            meta_title = _extract_title_from_metadata(meta)
-            if meta_title:
-                return meta_title.strip()
-        except Exception as e:
-            print(f"[Warning] Could not read metadata.json for book title: {e}")
-
-    # 2) EPUB internal metadata
-    epub_path = os.getenv("EPUB_PATH", "")
-    if epub_path and os.path.exists(epub_path):
-        try:
-            import ebooklib
-            from ebooklib import epub
-            book = epub.read_epub(epub_path)
-            titles = book.get_metadata("DC", "title")
-            if titles:
-                val = titles[0][0]
-                if val:
-                    return str(val).strip()
-        except Exception as e:
-            print(f"[Warning] Could not read EPUB metadata for title: {e}")
+    """Derive book title from translated output metadata.json only; skip if absent."""
+    # metadata.json in output directory
+    base_dir = os.path.abspath(output_dir or ".")
+    candidates = [
+        os.path.join(base_dir, "metadata.json"),
+        os.path.join(os.path.dirname(base_dir), "metadata.json"),  # parent if glossary saved in subfolder
+    ]
+    for meta_path in candidates:
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                meta_title = _extract_title_from_metadata(meta)
+                if meta_title:
+                    return meta_title.strip()
+            except Exception as e:
+                print(f"[Warning] Could not read metadata.json for book title: {e}")
 
     return None
 
