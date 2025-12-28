@@ -4886,14 +4886,35 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
             break
             
         img_src = img_info['src']
-        
-        if img_src.startswith('../'):
+        original_img_src = img_src  # keep for DOM matching
+        img_path = None
+
+        # Handle inline data URI images (e.g., PDF image render mode)
+        if img_src.startswith('data:image'):
+            try:
+                import base64, uuid, mimetypes
+                header, b64data = img_src.split(',', 1)
+                mime = 'image/png'
+                if ':' in header and ';' in header:
+                    mime = header.split(';')[0].split(':')[1] or mime
+                ext = mimetypes.guess_extension(mime) or '.png'
+                os.makedirs(image_translator.images_dir, exist_ok=True)
+                temp_name = f"datauri_{actual_num}_{idx}_{uuid.uuid4().hex}{ext}"
+                img_path = os.path.join(image_translator.images_dir, temp_name)
+                with open(img_path, 'wb') as f:
+                    f.write(base64.b64decode(b64data))
+                # Keep img_src pointing to original so DOM match works; translator uses img_path
+            except Exception as e:
+                print(f"   ❌ Failed to decode data URI image: {e}")
+                continue
+
+        if img_path is None and img_src.startswith('../'):
             img_path = os.path.join(image_translator.output_dir, img_src[3:])
-        elif img_src.startswith('./'):
+        elif img_path is None and img_src.startswith('./'):
             img_path = os.path.join(image_translator.output_dir, img_src[2:])
-        elif img_src.startswith('/'):
+        elif img_path is None and img_src.startswith('/'):
             img_path = os.path.join(image_translator.output_dir, img_src[1:])
-        else:
+        elif img_path is None:
             possible_paths = [
                 os.path.join(image_translator.images_dir, os.path.basename(img_src)),
                 os.path.join(image_translator.output_dir, img_src),
@@ -4947,7 +4968,7 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
         if translation_result:
             img_tag = None
             for img in soup.find_all('img'):
-                if img.get('src') == img_src:
+                if img.get('src') == original_img_src:
                     img_tag = img
                     break
             
@@ -4956,7 +4977,10 @@ def process_chapter_images(chapter_html: str, actual_num: int, image_translator:
                 
                 print(f"   🔍 DEBUG: Integration Phase")
                 print(f"   🏷️ Hide label mode: {hide_label}")
-                print(f"   📍 Found img tag: {img_tag.get('src')}")
+                src_display = img_tag.get('src', '')
+                if src_display.startswith('data:image'):
+                    src_display = src_display[:80] + '...'
+                print(f"   📍 Found img tag: {src_display}")
                 
                 # Store the translation result in the dictionary FIRST
                 image_translations[img_path] = translation_result
@@ -8825,7 +8849,7 @@ def main(log_callback=None, stop_callback=None):
                         print(f"✅ Translated {len(image_translations)} images")
                         
                         # Store the body with images for later merging
-                        c["body_with_images"] = c["body"]
+                        c["body_with_images"] = body_with_images
                         
                         # For chapters with only images and title, we still need to translate the title
                         # Extract clean text for translation from ORIGINAL body
@@ -8845,10 +8869,26 @@ def main(log_callback=None, stop_callback=None):
                         
                         # Update text_size to reflect actual text to translate
                         text_size = len(c["body"])
-                        
+
                         # Recalculate the actual token count for clean text
                         actual_text_tokens = chapter_splitter.count_tokens(c["body"])
                         print(f"   📊 Actual text tokens: {actual_text_tokens} (was counting {original_chapter_tokens} with images)")
+
+                        # IMPORTANT: use the cleaned text for downstream chunking/translation
+                        chapter_body = c["body"]
+
+                        # If render mode is image and there's essentially no text, skip text translation
+                        render_mode = os.getenv("PDF_RENDER_MODE", "xhtml").lower()
+                        stripped_text_len = len(soup_clean.get_text(strip=True))
+                        if render_mode == "image" and image_translations and stripped_text_len < 20:
+                            print("🖼️ Image-rendered page with no meaningful text — skipping text translation.")
+                            fname = FileUtilities.create_chapter_filename(c, actual_num)
+                            with open(os.path.join(out, fname), 'w', encoding='utf-8') as f:
+                                f.write(body_with_images)
+                            progress_manager.update(idx, actual_num, content_hash, fname, status="completed_image_only", chapter_obj=c)
+                            progress_manager.save()
+                            chapters_completed += 1
+                            continue
                     else:
                         print(f"ℹ️ No translatable text found in images")
                         # Keep original body if no image translations

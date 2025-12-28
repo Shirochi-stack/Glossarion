@@ -97,13 +97,16 @@ class TextFileProcessor:
             # Content is list of (page_num, html) tuples from page_by_page mode
             # page_num is already 1-indexed from pdf_extractor
             raw_chapters = []
+            render_mode = self.pdf_render_mode
             for page_num, page_html in content:
                 raw_chapters.append({
                     'num': page_num,  # Already 1-indexed
                     'title': f"{self.file_base} - Page {page_num}",
                     'content': page_html,
                     'is_html': is_html_content,
-                    'images_info': {}  # Images already embedded in page HTML
+                    'images_info': {},
+                    'has_images': True if render_mode == 'image' else False,
+                    'image_count': 1 if render_mode == 'image' else 0
                 })
         else:
             # Treat entire file as single document - no chapter detection
@@ -234,7 +237,8 @@ class TextFileProcessor:
                         'source_file': self.file_path,  # Add source file path for PDF detection
                         'content_hash': self._generate_hash(chunk_content),
                         'file_size': len(chunk_content),
-                        'has_images': False,
+                        'has_images': chapter_data.get('has_images', False),
+                        'image_count': chapter_data.get('image_count', 0),
                         'is_chunk': True,
                         'chunk_info': {
                             'chunk_idx': chunk_idx,
@@ -287,7 +291,8 @@ class TextFileProcessor:
                     'source_file': self.file_path,  # Add source file path for PDF detection
                     'content_hash': self._generate_hash(chapter_content),
                     'file_size': len(chapter_content),
-                    'has_images': False,
+                    'has_images': chapter_data.get('has_images', False),
+                    'image_count': chapter_data.get('image_count', 0),
                     'is_chunk': False
                 }
                 # Only set original_basename for non-PDF files
@@ -312,7 +317,8 @@ class TextFileProcessor:
                 'source_file': self.file_path,  # Add source file path for PDF detection
                 'content_hash': self._generate_hash(all_content or ''),
                 'file_size': len(all_content or ''),
-                'has_images': False,
+                'has_images': any(ch.get('has_images') for ch in raw_chapters),
+                'image_count': sum(ch.get('image_count', 0) for ch in raw_chapters),
                 'is_chunk': False
             })
         
