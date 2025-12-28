@@ -1934,27 +1934,14 @@ def _create_response_handling_section(self, parent):
     # Retry Slow
     retry_slow_cb = self._create_styled_checkbox("Auto-retry Slow Processing (API Timeouts)")
     retry_slow_cb.setContentsMargins(0, 15, 0, 0)
-    try:
-        retry_slow_cb.setChecked(bool(self.retry_timeout_var))
-    except Exception:
-        pass
-    def _on_retry_slow_toggle(checked):
-        try:
-            self.retry_timeout_var = bool(checked)
-            timeout_edit.setEnabled(bool(checked))
-            if checked:
-                timeout_edit.setStyleSheet("")  # default enabled style
-            else:
-                timeout_edit.setStyleSheet("color: #888; background-color: #1f1f1f;")
-        except Exception:
-            pass
-    retry_slow_cb.toggled.connect(_on_retry_slow_toggle)
-    section_v.addWidget(retry_slow_cb)
     
     timeout_w = QWidget()
     timeout_h = QHBoxLayout(timeout_w)
     timeout_h.setContentsMargins(20, 5, 0, 0)
-    timeout_h.addWidget(QLabel("Timeout after"))
+    
+    timeout_label_1 = QLabel("Timeout after")
+    timeout_h.addWidget(timeout_label_1)
+    
     timeout_edit = QLineEdit()
     timeout_edit.setFixedWidth(60)
     try:
@@ -1968,23 +1955,48 @@ def _create_response_handling_section(self, parent):
             pass
     timeout_edit.textChanged.connect(_on_timeout_changed)
     timeout_h.addWidget(timeout_edit)
-    timeout_h.addWidget(QLabel("seconds"))
+    
+    timeout_label_2 = QLabel("seconds")
+    timeout_h.addWidget(timeout_label_2)
     timeout_h.addStretch()
-    section_v.addWidget(timeout_w)
     
     timeout_desc = QLabel("Adds API timeout logic to text/images chunks that take too long\nThis will also affect chapter extraction timeout")
-    timeout_desc.setStyleSheet("color: gray; font-size: 10pt;")
     timeout_desc.setContentsMargins(20, 0, 0, 5)
-    section_v.addWidget(timeout_desc)
-    # Apply initial styling based on current toggle state
+    
+    def _on_retry_slow_toggle(checked):
+        try:
+            self.retry_timeout_var = bool(checked)
+            
+            # Update UI state
+            timeout_edit.setEnabled(bool(checked))
+            timeout_label_1.setEnabled(bool(checked))
+            timeout_label_2.setEnabled(bool(checked))
+            timeout_desc.setEnabled(bool(checked))
+
+            # Update styles
+            if checked:
+                timeout_label_1.setStyleSheet("color: white;")
+                timeout_label_2.setStyleSheet("color: white;")
+                timeout_desc.setStyleSheet("color: gray; font-size: 10pt;")
+            else:
+                timeout_label_1.setStyleSheet("color: #606060;")
+                timeout_label_2.setStyleSheet("color: #606060;")
+                timeout_desc.setStyleSheet("color: #606060; font-size: 10pt;")
+        except Exception:
+            pass
+
     try:
-        timeout_edit.setEnabled(bool(self.retry_timeout_var))
-        if bool(self.retry_timeout_var):
-            timeout_edit.setStyleSheet("")
-        else:
-            timeout_edit.setStyleSheet("color: #888; background-color: #1f1f1f;")
+        retry_slow_cb.setChecked(bool(self.retry_timeout_var))
     except Exception:
         pass
+    retry_slow_cb.toggled.connect(_on_retry_slow_toggle)
+    
+    # Apply initial styling
+    _on_retry_slow_toggle(retry_slow_cb.isChecked())
+    
+    section_v.addWidget(retry_slow_cb)
+    section_v.addWidget(timeout_w)
+    section_v.addWidget(timeout_desc)
     
     # Separator
     sep7 = QFrame()
