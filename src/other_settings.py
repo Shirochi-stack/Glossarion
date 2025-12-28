@@ -3260,7 +3260,8 @@ def _create_prompt_management_section(self, parent):
         glossary_title_cb.setChecked(False)
         
     glossary_title_cb.setToolTip(
-        "Adds the book title row while generating the glossary (before deduplication). Uses translated metadata if available; skipped if metadata is missing."
+        "Adds the book title row while generating the glossary (before deduplication).\n"
+        "Uses translated metadata if available; skipped if metadata is missing."
     )
 
     # Toggle: auto-inject book title before dedup
@@ -3273,7 +3274,8 @@ def _create_prompt_management_section(self, parent):
         auto_inject_title_cb.setChecked(False)
 
     auto_inject_title_cb.setToolTip(
-        "When loading an existing glossary file, inject the book title row after load (not part of dedup). Use only if your saved glossary lacks the title."
+        "When loading an existing glossary file, inject the book title row after load\n"
+        "(not part of dedup). Use only if your saved glossary lacks the title."
     )
     
     def _update_glossary_title_state(checked):
@@ -3299,6 +3301,10 @@ def _create_prompt_management_section(self, parent):
         except Exception:
             pass
             
+    translate_title_cb.setToolTip(
+        "Translate the book title and selected metadata fields\n"
+        "using your current model/profile."
+    )
     translate_title_cb.toggled.connect(_on_translate_title_toggle)
     title_h.addWidget(translate_title_cb)
     
@@ -3370,6 +3376,10 @@ def _create_prompt_management_section(self, parent):
         batch_toggle_cb.setChecked(bool(self.batch_translate_headers_var))
     except Exception:
         pass
+    batch_toggle_cb.setToolTip(
+        "Translate chapter headers in batches instead of per file.\n"
+        "Uses the settings below for batching and output."
+    )
     
     header_h1.addWidget(batch_toggle_cb)
     header_h1.addSpacing(20)
@@ -3434,6 +3444,10 @@ def _create_prompt_management_section(self, parent):
         except Exception:
             pass
     update_cb.toggled.connect(_on_update_html_toggle)
+    update_cb.setToolTip(
+        "Write translated headers back into the HTML chapters.\n"
+        "Disable if you only want preview/exports."
+    )
     update_h.addWidget(update_cb)
     
     update_h.addSpacing(20)
@@ -3449,6 +3463,10 @@ def _create_prompt_management_section(self, parent):
         except Exception:
             pass
     save_cb.toggled.connect(_on_save_translations_toggle)
+    save_cb.setToolTip(
+        "Export header translation mappings to translated_headers.txt\n"
+        "for auditing or reuse."
+    )
     update_h.addWidget(save_cb)
     update_h.addStretch()
     
@@ -3470,6 +3488,10 @@ def _create_prompt_management_section(self, parent):
         except Exception:
             pass
     ignore_header_cb.toggled.connect(_on_ignore_header_toggle)
+    ignore_header_cb.setToolTip(
+        "Skip translating visible header tags (h1/h2/h3) inside chapters.\n"
+        "Useful if headers are already translated."
+    )
     ignore_h.addWidget(ignore_header_cb)
     
     ignore_h.addSpacing(15)
@@ -3485,6 +3507,10 @@ def _create_prompt_management_section(self, parent):
         except Exception:
             pass
     ignore_title_cb.toggled.connect(_on_ignore_title_toggle)
+    ignore_title_cb.setToolTip(
+        "Skip translating the title tag in the HTML head.\n"
+        "Keeps original document titles."
+    )
     ignore_h.addWidget(ignore_title_cb)
     
     ignore_h.addStretch()
@@ -3512,7 +3538,7 @@ def _create_prompt_management_section(self, parent):
             pass
     remove_dup_cb.toggled.connect(_on_remove_dup_toggle)
     remove_dup_cb.setToolTip(
-        "Remove <p> tags that immediately follow <h1> tags with identical text.\n"
+        "Remove paragraph tags that immediately follow H1 tags with identical text.\n"
         "Useful for novels that repeat chapter titles."
     )
     ignore_h2.addWidget(remove_dup_cb)
