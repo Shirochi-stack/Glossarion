@@ -6813,7 +6813,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             if successful == 0 and len(successful_items) > 0:
                 self.append_log(f"   ⚠️ Partial Success ({len(successful_items)}):")
                 for item in successful_items:
-                    self.append_log(f"      - {item} (Partial)")
+                    self.append_log(f"      - {item}")
             elif successful > 0:
                 self.append_log(f"   ✅ Successful ({successful}):")
                 for item in successful_items:
