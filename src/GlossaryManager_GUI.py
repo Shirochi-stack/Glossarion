@@ -1818,10 +1818,6 @@ CRITICAL EXTRACTION RULES:
             label5.setEnabled(gender_enabled)
             self.enable_gender_nuance_checkbox.setEnabled(gender_enabled)
             gender_nuance_label.setEnabled(gender_enabled)
-            if not gender_enabled:
-                # Uncheck if disabled
-                self.include_description_checkbox.setChecked(False)
-                self.enable_gender_nuance_checkbox.setChecked(False)
         
         # Connect gender context checkbox to update description state
         self.include_gender_context_checkbox.stateChanged.connect(update_description_state)
