@@ -79,8 +79,8 @@ def _extract_title_from_metadata(meta):
 
 
 def _derive_book_title(output_dir):
-    """Derive book title from metadata.json in output_dir or EPUB_PATH basename."""
-    candidates = []
+    """Derive book title from translated output metadata.json, else EPUB metadata; no filename fallback."""
+    # 1) metadata.json in output directory
     meta_path = os.path.join(output_dir or ".", "metadata.json")
     if os.path.exists(meta_path):
         try:
@@ -88,19 +88,25 @@ def _derive_book_title(output_dir):
                 meta = json.load(f)
             meta_title = _extract_title_from_metadata(meta)
             if meta_title:
-                candidates.append(meta_title)
+                return meta_title.strip()
         except Exception as e:
             print(f"[Warning] Could not read metadata.json for book title: {e}")
 
+    # 2) EPUB internal metadata
     epub_path = os.getenv("EPUB_PATH", "")
-    base = os.path.splitext(os.path.basename(epub_path or ""))[0]
-    if base:
-        candidates.append(base)
+    if epub_path and os.path.exists(epub_path):
+        try:
+            import ebooklib
+            from ebooklib import epub
+            book = epub.read_epub(epub_path)
+            titles = book.get_metadata("DC", "title")
+            if titles:
+                val = titles[0][0]
+                if val:
+                    return str(val).strip()
+        except Exception as e:
+            print(f"[Warning] Could not read EPUB metadata for title: {e}")
 
-    for cand in candidates:
-        cand = str(cand).strip()
-        if cand:
-            return cand
     return None
 
 

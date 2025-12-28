@@ -270,12 +270,9 @@ def _extract_title_from_metadata(meta: Dict) -> str:
 
 def _derive_book_title(epub_path: str, output_path: str) -> str:
     """
-    Derive book title from metadata.json (preferred) or the source filename.
-    - epub_path: source book path (may be txt/pdf as well)
-    - output_path: glossary output path (metadata.json is expected alongside)
+    Derive book title from translated output metadata.json (preferred),
+    otherwise from EPUB embedded metadata. Do NOT fall back to filenames.
     """
-    candidates = []
-
     # 1) metadata.json next to the output
     meta_dir = os.path.dirname(output_path) or "."
     meta_path = os.path.join(meta_dir, "metadata.json")
@@ -285,19 +282,24 @@ def _derive_book_title(epub_path: str, output_path: str) -> str:
                 meta = json.load(f)
             meta_title = _extract_title_from_metadata(meta)
             if meta_title:
-                candidates.append(meta_title)
+                return meta_title.strip()
         except Exception as e:
             print(f"[Warning] Could not read metadata.json for book title: {e}")
 
-    # 2) source file name (fallback)
-    base = os.path.splitext(os.path.basename(epub_path or ""))[0]
-    if base:
-        candidates.append(base)
+    # 2) EPUB internal metadata (untranslated source title)
+    try:
+        book = epub.read_epub(epub_path) if epub_path else None
+        if book:
+            titles = book.get_metadata("DC", "title")
+            if titles:
+                # titles is list of tuples (value, attrs)
+                val = titles[0][0]
+                if val:
+                    return str(val).strip()
+    except Exception as e:
+        print(f"[Warning] Could not read EPUB metadata for title: {e}")
 
-    for cand in candidates:
-        cand = str(cand).strip()
-        if cand:
-            return cand
+    # No title found
     return None
 
 
