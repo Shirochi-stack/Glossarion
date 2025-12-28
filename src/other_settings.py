@@ -3839,6 +3839,10 @@ def _create_prompt_management_section(self, parent):
             pass
     ncx_cb.toggled.connect(_on_ncx_toggle)
     ncx_cb.setContentsMargins(0, 5, 0, 5)
+    ncx_cb.setToolTip(
+        "Force NCX-only navigation in the output EPUB (no modern nav file).\n"
+        "Use for older readers that choke on EPUB3 navigation documents."
+    )
     section_v.addWidget(ncx_cb)
     
     # CSS Attachment toggle + Load CSS button
@@ -3847,6 +3851,10 @@ def _create_prompt_management_section(self, parent):
         css_cb.setChecked(bool(self.attach_css_to_chapters_var))
     except Exception:
         pass
+    css_cb.setToolTip(
+        "Reattach the original EPUB's CSS to each chapter when rebuilding.\n"
+        "If you click 'Load CSS…', the selected file overrides the original CSS."
+    )
 
     # Ensure we have a variable to store the override CSS path
     if not hasattr(self, 'epub_css_override_path_var'):
@@ -3946,6 +3954,10 @@ def _create_prompt_management_section(self, parent):
             pass
     html_method_cb.toggled.connect(_on_html_method_toggle)
     html_method_cb.setContentsMargins(0, 5, 0, 5)
+    html_method_cb.setToolTip(
+        "Serialize using HTML path instead of strict XHTML/XML.\n"
+        "Preserves whitespace/layout better; may be slightly slower."
+    )
     section_v.addWidget(html_method_cb)
     
     # Output file naming
@@ -3961,6 +3973,10 @@ def _create_prompt_management_section(self, parent):
             pass
     retain_cb.toggled.connect(_on_retain_toggle)
     retain_cb.setContentsMargins(0, 5, 0, 5)
+    retain_cb.setToolTip(
+        "Keep the original chapter filename extension instead of adding 'response_'.\n"
+        "Helps when downstream tools depend on the original naming."
+    )
     section_v.addWidget(retain_cb)
     
     # Place the section at row 0, column 0 to match the original grid
