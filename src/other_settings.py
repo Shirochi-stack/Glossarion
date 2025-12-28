@@ -6403,6 +6403,77 @@ def test_api_connections(self):
     icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
     app_icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon("Halgakos.ico")
     
+    # Collect all configured endpoints
+    endpoints_to_test = []
+    
+    # OpenAI endpoint - only test if checkbox is enabled
+    if self.use_custom_openai_endpoint_var:
+        openai_url = self.openai_base_url_var
+        if openai_url:
+            # Check if it's Azure
+            if '.azure.com' in openai_url or '.cognitiveservices' in openai_url:
+                # Azure endpoint
+                deployment = self.model_var if hasattr(self, 'model_var') else "gpt-35-turbo"
+                api_version = self.azure_api_version_var if hasattr(self, 'azure_api_version_var') else "2024-08-01-preview"
+                
+                # Format Azure URL
+                if '/openai/deployments/' not in openai_url:
+                    azure_url = f"{openai_url.rstrip('/')}/openai/deployments/{deployment}/chat/completions?api-version={api_version}"
+                else:
+                    azure_url = openai_url
+                
+                endpoints_to_test.append(("Azure OpenAI", azure_url, deployment, "azure"))
+            else:
+                # Regular custom endpoint
+                endpoints_to_test.append(("OpenAI (Custom)", openai_url, self.model_var if hasattr(self, 'model_var') else "gpt-3.5-turbo"))
+        else:
+            # Use default OpenAI endpoint if checkbox is on but no custom URL provided
+            endpoints_to_test.append(("OpenAI (Default)", "https://api.openai.com/v1", self.model_var if hasattr(self, 'model_var') else "gpt-3.5-turbo"))
+    
+    # Groq endpoint
+    if hasattr(self, 'groq_base_url_var'):
+        groq_url = self.groq_base_url_var
+        if groq_url:
+            # For Groq, we need a groq-prefixed model
+            current_model = self.model_var if hasattr(self, 'model_var') else "llama-3-70b"
+            groq_model = current_model if current_model.startswith('groq/') else current_model.replace('groq/', '')
+            endpoints_to_test.append(("Groq/Local", groq_url, groq_model))
+    
+    # Fireworks endpoint
+    if hasattr(self, 'fireworks_base_url_var'):
+        fireworks_url = self.fireworks_base_url_var
+        if fireworks_url:
+            # For Fireworks, we need the accounts/ prefix
+            current_model = self.model_var if hasattr(self, 'model_var') else "llama-v3-70b-instruct"
+            fw_model = current_model if current_model.startswith('accounts/') else f"accounts/fireworks/models/{current_model.replace('fireworks/', '')}"
+            endpoints_to_test.append(("Fireworks", fireworks_url, fw_model))
+    
+    # Gemini OpenAI-Compatible endpoint
+    if hasattr(self, 'use_gemini_openai_endpoint_var') and self.use_gemini_openai_endpoint_var:
+        gemini_url = self.gemini_openai_endpoint_var
+        if gemini_url:
+            # Ensure the endpoint ends with /openai/ for compatibility
+            if not gemini_url.endswith('/openai/'):
+                if gemini_url.endswith('/'):
+                    gemini_url = gemini_url + 'openai/'
+                else:
+                    gemini_url = gemini_url + '/openai/'
+            
+            # For Gemini OpenAI-compatible endpoints, use the current model or a suitable default
+            current_model = self.model_var if hasattr(self, 'model_var') else "gemini-2.0-flash-exp"
+            # Remove any 'gemini/' prefix for the OpenAI-compatible endpoint
+            gemini_model = current_model.replace('gemini/', '') if current_model.startswith('gemini/') else current_model
+            endpoints_to_test.append(("Gemini (OpenAI-Compatible)", gemini_url, gemini_model))
+    
+    if not endpoints_to_test:
+        msg_box = QMessageBox()
+        msg_box.setWindowTitle("Info")
+        msg_box.setText("No custom endpoints configured.")
+        msg_box.setIcon(QMessageBox.Information)
+        msg_box.setWindowIcon(app_icon)
+        msg_box.exec()
+        return
+
     # Show immediate feedback
     progress_dialog = QDialog(self.current_dialog if hasattr(self, 'current_dialog') else None)
     progress_dialog.setWindowTitle("Testing Connections...")
@@ -6514,79 +6585,7 @@ def test_api_connections(self):
         api_key = self.config.get('api_key', '')
     if not api_key:
         api_key = "sk-dummy-key"  # For local models
-    
-    # Collect all configured endpoints
-    endpoints_to_test = []
-    
-    # OpenAI endpoint - only test if checkbox is enabled
-    if self.use_custom_openai_endpoint_var:
-        openai_url = self.openai_base_url_var
-        if openai_url:
-            # Check if it's Azure
-            if '.azure.com' in openai_url or '.cognitiveservices' in openai_url:
-                # Azure endpoint
-                deployment = self.model_var if hasattr(self, 'model_var') else "gpt-35-turbo"
-                api_version = self.azure_api_version_var if hasattr(self, 'azure_api_version_var') else "2024-08-01-preview"
-                
-                # Format Azure URL
-                if '/openai/deployments/' not in openai_url:
-                    azure_url = f"{openai_url.rstrip('/')}/openai/deployments/{deployment}/chat/completions?api-version={api_version}"
-                else:
-                    azure_url = openai_url
-                
-                endpoints_to_test.append(("Azure OpenAI", azure_url, deployment, "azure"))
-            else:
-                # Regular custom endpoint
-                endpoints_to_test.append(("OpenAI (Custom)", openai_url, self.model_var if hasattr(self, 'model_var') else "gpt-3.5-turbo"))
-        else:
-            # Use default OpenAI endpoint if checkbox is on but no custom URL provided
-            endpoints_to_test.append(("OpenAI (Default)", "https://api.openai.com/v1", self.model_var if hasattr(self, 'model_var') else "gpt-3.5-turbo"))
-    
-    # Groq endpoint
-    if hasattr(self, 'groq_base_url_var'):
-        groq_url = self.groq_base_url_var
-        if groq_url:
-            # For Groq, we need a groq-prefixed model
-            current_model = self.model_var if hasattr(self, 'model_var') else "llama-3-70b"
-            groq_model = current_model if current_model.startswith('groq/') else current_model.replace('groq/', '')
-            endpoints_to_test.append(("Groq/Local", groq_url, groq_model))
-    
-    # Fireworks endpoint
-    if hasattr(self, 'fireworks_base_url_var'):
-        fireworks_url = self.fireworks_base_url_var
-        if fireworks_url:
-            # For Fireworks, we need the accounts/ prefix
-            current_model = self.model_var if hasattr(self, 'model_var') else "llama-v3-70b-instruct"
-            fw_model = current_model if current_model.startswith('accounts/') else f"accounts/fireworks/models/{current_model.replace('fireworks/', '')}"
-            endpoints_to_test.append(("Fireworks", fireworks_url, fw_model))
-    
-    # Gemini OpenAI-Compatible endpoint
-    if hasattr(self, 'use_gemini_openai_endpoint_var') and self.use_gemini_openai_endpoint_var:
-        gemini_url = self.gemini_openai_endpoint_var
-        if gemini_url:
-            # Ensure the endpoint ends with /openai/ for compatibility
-            if not gemini_url.endswith('/openai/'):
-                if gemini_url.endswith('/'):
-                    gemini_url = gemini_url + 'openai/'
-                else:
-                    gemini_url = gemini_url + '/openai/'
-            
-            # For Gemini OpenAI-compatible endpoints, use the current model or a suitable default
-            current_model = self.model_var if hasattr(self, 'model_var') else "gemini-2.0-flash-exp"
-            # Remove any 'gemini/' prefix for the OpenAI-compatible endpoint
-            gemini_model = current_model.replace('gemini/', '') if current_model.startswith('gemini/') else current_model
-            endpoints_to_test.append(("Gemini (OpenAI-Compatible)", gemini_url, gemini_model))
-    
-    if not endpoints_to_test:
-        progress_dialog.close()
-        msg_box = QMessageBox()
-        msg_box.setWindowTitle("Info")
-        msg_box.setText("No custom endpoints configured.")
-        msg_box.setIcon(QMessageBox.Information)
-        msg_box.setWindowIcon(app_icon)
-        msg_box.exec()
-        return
-    
+
     # Use module-level Bridge class
     self.conn_test_bridge = ConnTestBridge()
 
