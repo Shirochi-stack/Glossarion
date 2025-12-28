@@ -20,8 +20,11 @@ class ChapterSplitter:
         self.compression_factor = compression_factor
     
     def count_tokens(self, text):
-        """Count tokens in text"""
+        """Count tokens in text (strips data URIs to avoid huge overestimates)."""
         try:
+            # Remove/shorten base64 data URIs (e.g., data:image/png;base64,AAAA...)
+            # They are not meaningful for token budgeting and can explode counts.
+            text = re.sub(r'data:image/[^;]+;base64,[A-Za-z0-9+/=]+', 'data:image;base64,', text)
             return len(self.enc.encode(text))
         except:
             # Fallback estimation

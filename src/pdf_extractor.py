@@ -1149,10 +1149,18 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
                 filepath = os.path.join(images_dir, filename)
                 pix.save(filepath)
 
+                # Inline the image as base64 so downstream API payloads include the page pixels
+                try:
+                    png_bytes = pix.tobytes("png")
+                except Exception:
+                    png_bytes = pix.tobytes()
+                b64 = base64.b64encode(png_bytes).decode("ascii")
+                data_uri = f"data:image/png;base64,{b64}"
+
                 html = "\n".join([
                     "<!-- render:image -->",
                     f"<div class=\"pdf-page image\" id=\"page-{i+1}\" style=\"text-align:center;\">",
-                    f"  <img src=\"images/{filename}\" alt=\"Page {i+1}\" style=\"width:100%;height:auto;\" />",
+                    f"  <img src=\"{data_uri}\" alt=\"Page {i+1}\" style=\"width:100%;height:auto;\" />",
                     "</div>"
                 ])
 

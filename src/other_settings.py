@@ -3974,7 +3974,7 @@ def _create_prompt_management_section(self, parent):
     retain_cb.toggled.connect(_on_retain_toggle)
     retain_cb.setContentsMargins(0, 5, 0, 5)
     retain_cb.setToolTip(
-        "Keep the original chapter filename extension instead of adding 'response_'.\n"
+        "Keep the original chapter filename/extension instead of adding 'response_' and replacing the extension with '.html'.\n"
         "Helps when downstream tools depend on the original naming."
     )
     section_v.addWidget(retain_cb)
