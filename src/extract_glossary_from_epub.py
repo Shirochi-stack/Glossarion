@@ -238,6 +238,17 @@ _progress_lock = threading.Lock()
 _history_lock = threading.Lock()  # For thread-safe history access in batch mode
 # Global book title cache (set in main)
 BOOK_TITLE_VALUE = None
+BOOK_TITLE_PRESENT = False
+
+def _mark_book_title_from_csv(csv_text: str):
+    """Detect existing book entry in CSV content and mark presence flag."""
+    global BOOK_TITLE_PRESENT
+    if not csv_text:
+        return
+    for line in csv_text.splitlines():
+        if line.lower().startswith("book,"):
+            BOOK_TITLE_PRESENT = True
+            return
 
 
 def _extract_title_from_metadata(meta: Dict) -> str:
@@ -279,7 +290,20 @@ def _derive_book_title(epub_path: str, output_path: str) -> str:
         os.path.join(meta_dir, "metadata.json"),
         os.path.join(os.path.dirname(meta_dir), "metadata.json"),  # parent (e.g., when output is in Glossary/)
     ]
+    epub_base = os.path.splitext(os.path.basename(epub_path or ""))[0] if epub_path else None
+    if epub_base:
+        # Same-name subfolder beside output and its parent
+        candidates.append(os.path.join(meta_dir, epub_base, "metadata.json"))
+        candidates.append(os.path.join(os.path.dirname(meta_dir), epub_base, "metadata.json"))
+    # Also check near the input source path (same-name output folders)
+    epub_dir = os.path.abspath(os.path.dirname(epub_path or "")) if epub_path else None
+    if epub_dir:
+        candidates.append(os.path.join(epub_dir, "metadata.json"))
+        if epub_base:
+            candidates.append(os.path.join(epub_dir, epub_base, "metadata.json"))
+
     for meta_path in candidates:
+        print(f"[Metadata] Checking for book title at: {meta_path}")
         if os.path.exists(meta_path):
             try:
                 with open(meta_path, "r", encoding="utf-8") as f:
@@ -289,13 +313,29 @@ def _derive_book_title(epub_path: str, output_path: str) -> str:
                     return meta_title.strip()
             except Exception as e:
                 print(f"[Warning] Could not read metadata.json for book title: {e}")
+
+    # Fallback: read untranslated title from EPUB metadata
+    try:
+        if epub_path and os.path.exists(epub_path):
+            print(f"[Metadata] Checking EPUB metadata for title: {epub_path}")
+            book = epub.read_epub(epub_path)
+            titles = book.get_metadata("DC", "title")
+            if titles:
+                val = titles[0][0]
+                if val:
+                    return str(val).strip()
+    except Exception as e:
+        print(f"[Warning] Could not read EPUB metadata for title: {e}")
+
     # No metadata.json title found; skip adding book entry
-    return None
     return None
 
 
 def _ensure_book_title_entry(glossary: List[Dict]) -> List[Dict]:
     """Insert a 'book' entry (raw + translated title) at the top if enabled and not present."""
+    global BOOK_TITLE_PRESENT
+    if BOOK_TITLE_PRESENT:
+        return glossary
     include = os.getenv("GLOSSARY_INCLUDE_BOOK_TITLE", "1").lower() not in ("0", "false", "no")
     title = BOOK_TITLE_VALUE.strip() if BOOK_TITLE_VALUE else None
     if not include or not title:
@@ -306,6 +346,7 @@ def _ensure_book_title_entry(glossary: List[Dict]) -> List[Dict]:
         raw = str(entry.get("raw_name", "")).strip().lower()
         trans = str(entry.get("translated_name", "")).strip().lower()
         if raw == norm or trans == norm:
+            BOOK_TITLE_PRESENT = True
             return glossary  # Already present
 
     book_entry = {
@@ -315,6 +356,7 @@ def _ensure_book_title_entry(glossary: List[Dict]) -> List[Dict]:
         "gender": ""
     }
     glossary.insert(0, book_entry)
+    BOOK_TITLE_PRESENT = True
     return glossary
 
 def set_stop_flag(value):
@@ -573,9 +615,17 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
     global _glossary_csv_lock
     import csv
     
-    glossary = _ensure_book_title_entry(glossary)
     with _glossary_csv_lock:
         csv_path = output_path.replace('.json', '.csv')
+        # If a glossary already exists on disk, mark whether it already has the book entry
+        if not BOOK_TITLE_PRESENT and os.path.exists(csv_path):
+            try:
+                with open(csv_path, 'r', encoding='utf-8') as f:
+                    _mark_book_title_from_csv(f.read())
+            except Exception:
+                pass
+
+        glossary = _ensure_book_title_entry(glossary)
         custom_types = get_custom_entry_types()
         type_order = {'book': -1, 'character': 0, 'term': 1}
         other_types = sorted([t for t in custom_types.keys() if t not in ['character', 'term']])
@@ -4060,6 +4110,8 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
     with _progress_lock:
         progress_data = {
             "completed": completed,
+            "book_title_present": bool(BOOK_TITLE_PRESENT),
+            "book_title": BOOK_TITLE_VALUE if BOOK_TITLE_PRESENT else None,
             # Glossary is saved separately to output files, not in progress
             # This prevents the progress file from overwriting manual edits
         }

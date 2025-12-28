@@ -80,13 +80,24 @@ def _extract_title_from_metadata(meta):
 
 def _derive_book_title(output_dir):
     """Derive book title from translated output metadata.json only; skip if absent."""
-    # metadata.json in output directory
     base_dir = os.path.abspath(output_dir or ".")
     candidates = [
         os.path.join(base_dir, "metadata.json"),
         os.path.join(os.path.dirname(base_dir), "metadata.json"),  # parent if glossary saved in subfolder
     ]
+    epub_path = os.getenv("EPUB_PATH", "")
+    epub_dir = os.path.abspath(os.path.dirname(epub_path or "")) if epub_path else None
+    epub_base = os.path.splitext(os.path.basename(epub_path or ""))[0] if epub_path else None
+    if epub_base:
+        candidates.append(os.path.join(base_dir, epub_base, "metadata.json"))
+        candidates.append(os.path.join(os.path.dirname(base_dir), epub_base, "metadata.json"))
+    if epub_dir:
+        candidates.append(os.path.join(epub_dir, "metadata.json"))
+        if epub_base:
+            candidates.append(os.path.join(epub_dir, epub_base, "metadata.json"))
+
     for meta_path in candidates:
+        print(f"[Metadata] Checking for book title at: {meta_path}")
         if os.path.exists(meta_path):
             try:
                 with open(meta_path, "r", encoding="utf-8") as f:
@@ -96,6 +107,20 @@ def _derive_book_title(output_dir):
                     return meta_title.strip()
             except Exception as e:
                 print(f"[Warning] Could not read metadata.json for book title: {e}")
+
+    # Fallback: read untranslated title from EPUB metadata
+    try:
+        if epub_path and os.path.exists(epub_path):
+            print(f"[Metadata] Checking EPUB metadata for title: {epub_path}")
+            from ebooklib import epub
+            book = epub.read_epub(epub_path)
+            titles = book.get_metadata("DC", "title")
+            if titles:
+                val = titles[0][0]
+                if val:
+                    return str(val).strip()
+    except Exception as e:
+        print(f"[Warning] Could not read EPUB metadata for title: {e}")
 
     return None
 
