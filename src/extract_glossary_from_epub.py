@@ -237,7 +237,8 @@ _glossary_csv_lock = threading.Lock()
 _progress_lock = threading.Lock()
 _history_lock = threading.Lock()  # For thread-safe history access in batch mode
 # Global book title cache (set in main)
-BOOK_TITLE_VALUE = None
+BOOK_TITLE_RAW = None
+BOOK_TITLE_TRANSLATED = None
 BOOK_TITLE_PRESENT = False
 
 def _mark_book_title_from_csv(csv_text: str):
@@ -279,11 +280,57 @@ def _extract_title_from_metadata(meta: Dict) -> str:
     return None
 
 
-def _derive_book_title(epub_path: str, output_path: str) -> Tuple[str, bool]:
-    """
-    Derive book title from translated output metadata.json or EPUB metadata.
-    Returns (title, is_translated_from_metadata_json).
-    """
+def _extract_raw_title_from_epub(epub_path: str) -> str:
+    """Extract the raw untranslated title from the input EPUB."""
+    if not epub_path or not os.path.exists(epub_path):
+        return None
+        
+    print(f"[Metadata] Checking input EPUB for raw title: {epub_path}")
+    
+    # Try manual parsing first (more robust)
+    try:
+        import zipfile
+        from bs4 import BeautifulSoup
+        with zipfile.ZipFile(epub_path, 'r') as zf:
+            # Find opf
+            opf_name = next((n for n in zf.namelist() if n.lower().endswith('.opf')), None)
+            if opf_name:
+                content = zf.read(opf_name).decode('utf-8', errors='ignore')
+                # Use BS4 with xml parser
+                try:
+                    soup = BeautifulSoup(content, 'xml')
+                except Exception:
+                    soup = BeautifulSoup(content, 'html.parser')
+                    
+                # Try dc:title
+                title_tag = soup.find('dc:title')
+                if not title_tag:
+                    # Fallback to any title tag
+                    title_tag = soup.find('title')
+                
+                if title_tag:
+                    val = title_tag.get_text(strip=True)
+                    if val:
+                        return val
+    except Exception as e:
+        print(f"[Warning] Manual EPUB title extraction failed: {e}")
+
+    # Fallback: ebooklib
+    try:
+        from ebooklib import epub
+        book = epub.read_epub(epub_path)
+        titles = book.get_metadata("DC", "title")
+        if titles:
+            val = titles[0][0]
+            if val:
+                return str(val).strip()
+    except Exception as e:
+        print(f"[Warning] Could not read EPUB metadata via ebooklib: {e}")
+        
+    return None
+
+def _extract_translated_title_from_metadata(output_path: str, epub_path: str) -> str:
+    """Extract translated title from metadata.json in output directory."""
     # metadata.json next to the output
     meta_dir = os.path.abspath(os.path.dirname(output_path) or ".")
     epub_base = os.path.splitext(os.path.basename(epub_path or ""))[0] if epub_path else None
@@ -292,85 +339,59 @@ def _derive_book_title(epub_path: str, output_path: str) -> Tuple[str, bool]:
         candidates.append(os.path.join(meta_dir, epub_base, "metadata.json"))
 
     for meta_path in candidates:
-        print(f"[Metadata] Checking for book title at: {meta_path}")
+        # print(f"[Metadata] Checking for translated book title at: {meta_path}")
         if os.path.exists(meta_path):
             try:
                 with open(meta_path, "r", encoding="utf-8") as f:
                     meta = json.load(f)
                 meta_title = _extract_title_from_metadata(meta)
                 if meta_title:
-                    return meta_title.strip(), True
+                    return meta_title.strip()
             except Exception as e:
                 print(f"[Warning] Could not read metadata.json for book title: {e}")
-
-    # Fallback: read untranslated title from EPUB metadata
-    # Try manual parsing first (more robust)
-    try:
-        if epub_path and os.path.exists(epub_path):
-            print(f"[Metadata] Checking EPUB metadata for title (manual parse): {epub_path}")
-            with zipfile.ZipFile(epub_path, 'r') as zf:
-                # Find opf
-                opf_name = next((n for n in zf.namelist() if n.lower().endswith('.opf')), None)
-                if opf_name:
-                    content = zf.read(opf_name).decode('utf-8', errors='ignore')
-                    # Use BS4 with xml parser
-                    try:
-                        soup = BeautifulSoup(content, 'xml')
-                    except Exception:
-                        soup = BeautifulSoup(content, 'html.parser')
-                        
-                    # Try dc:title
-                    title_tag = soup.find('dc:title')
-                    if not title_tag:
-                        # Fallback to any title tag
-                        title_tag = soup.find('title')
-                    
-                    if title_tag:
-                        val = title_tag.get_text(strip=True)
-                        if val:
-                            return val, False
-    except Exception as e:
-        print(f"[Warning] Manual EPUB title extraction failed: {e}")
-
-    # Fallback: ebooklib
-    try:
-        if epub_path and os.path.exists(epub_path):
-            print(f"[Metadata] Checking EPUB metadata for title (ebooklib): {epub_path}")
-            book = epub.read_epub(epub_path)
-            titles = book.get_metadata("DC", "title")
-            if titles:
-                val = titles[0][0]
-                if val:
-                    return str(val).strip(), False
-    except Exception as e:
-        print(f"[Warning] Could not read EPUB metadata via ebooklib: {e}")
-
-    # No metadata.json title found; skip adding book entry
-    return None, False
+                
+    return None
 
 
 def _ensure_book_title_entry(glossary: List[Dict]) -> List[Dict]:
     """Insert a 'book' entry (raw + translated title) at the top if enabled and not present."""
-    global BOOK_TITLE_PRESENT
+    global BOOK_TITLE_PRESENT, BOOK_TITLE_RAW, BOOK_TITLE_TRANSLATED
+    
     if BOOK_TITLE_PRESENT:
         return glossary
+        
     include = os.getenv("GLOSSARY_INCLUDE_BOOK_TITLE", "1").lower() not in ("0", "false", "no")
-    title = BOOK_TITLE_VALUE.strip() if BOOK_TITLE_VALUE else None
-    if not include or not title:
+    
+    # Determine titles to use
+    # Prefer specific raw/translated values if available
+    raw_title = BOOK_TITLE_RAW
+    trans_title = BOOK_TITLE_TRANSLATED
+    
+    # Fallback logic if one is missing
+    if not raw_title and trans_title:
+        raw_title = trans_title
+    if not trans_title and raw_title:
+        trans_title = raw_title
+        
+    if not include or not raw_title:
         return glossary
 
-    norm = title.lower()
+    norm_raw = raw_title.lower() if raw_title else ""
+    norm_trans = trans_title.lower() if trans_title else ""
+    
     for entry in glossary:
         raw = str(entry.get("raw_name", "")).strip().lower()
         trans = str(entry.get("translated_name", "")).strip().lower()
-        if raw == norm or trans == norm:
+        # Check against both raw and translated to avoid duplicates
+        if (raw == norm_raw or trans == norm_trans or 
+            raw == norm_trans or trans == norm_raw):
             BOOK_TITLE_PRESENT = True
             return glossary  # Already present
 
     book_entry = {
         "type": "book",
-        "raw_name": title,
-        "translated_name": title,
+        "raw_name": raw_title,
+        "translated_name": trans_title,
         "gender": ""
     }
     glossary.insert(0, book_entry)
@@ -2713,9 +2734,11 @@ def main(log_callback=None, stop_callback=None):
     )
 
     config = load_config(args.config)
-    global BOOK_TITLE_VALUE
-    raw_title, is_translated = _derive_book_title(epub_path, args.output)
-    BOOK_TITLE_VALUE = raw_title
+    
+    # Retrieve book titles (raw from input, translated from metadata/output)
+    global BOOK_TITLE_RAW, BOOK_TITLE_TRANSLATED
+    BOOK_TITLE_RAW = _extract_raw_title_from_epub(epub_path)
+    BOOK_TITLE_TRANSLATED = _extract_translated_title_from_metadata(args.output, epub_path)
     
     # Get API key from environment variables (set by GUI) or config file
     api_key = (os.getenv("API_KEY") or 
@@ -2733,8 +2756,11 @@ def main(log_callback=None, stop_callback=None):
     # Use the variables we just retrieved
     client = create_client_with_multi_key_support(api_key, model, out, config)
     
-    # Translate book title if needed (only if it came from raw EPUB metadata)
-    if BOOK_TITLE_VALUE and not is_translated:
+    # Translate book title if needed:
+    # 1. We have a raw title
+    # 2. We don't have a translated title from metadata
+    # 3. Translation is enabled
+    if BOOK_TITLE_RAW and not BOOK_TITLE_TRANSLATED:
         include_title = os.getenv("GLOSSARY_INCLUDE_BOOK_TITLE", "1").lower() not in ("0", "false", "no")
         if include_title:
             try:
@@ -2742,21 +2768,32 @@ def main(log_callback=None, stop_callback=None):
                 # Use local import to avoid top-level circular dependencies
                 from TransateKRtoEN import translate_title
                 
-                print(f"📚 Translating book title: {BOOK_TITLE_VALUE}")
+                print(f"📚 Translating book title: {BOOK_TITLE_RAW}")
                 translated = translate_title(
-                    BOOK_TITLE_VALUE, 
+                    BOOK_TITLE_RAW, 
                     client, 
                     None, # system_prompt (uses default/env)
                     None, # user_prompt (uses default/env)
                     float(os.getenv("GLOSSARY_TEMPERATURE") or config.get('temperature', 0.1))
                 )
-                if translated and translated != BOOK_TITLE_VALUE:
+                if translated and translated != BOOK_TITLE_RAW:
                     print(f"📚 Translated title for glossary: {translated}")
-                    BOOK_TITLE_VALUE = translated
+                    BOOK_TITLE_TRANSLATED = translated
+                else:
+                    # Translation failed or returned same, assume raw is best we have
+                    BOOK_TITLE_TRANSLATED = BOOK_TITLE_RAW
             except ImportError:
                 print("⚠️ Could not import translate_title from TransateKRtoEN - using raw title")
+                BOOK_TITLE_TRANSLATED = BOOK_TITLE_RAW
             except Exception as e:
                 print(f"⚠️ Failed to translate book title: {e} - using raw title")
+                BOOK_TITLE_TRANSLATED = BOOK_TITLE_RAW
+    
+    # Ensure fallback if no translation occurred
+    if not BOOK_TITLE_TRANSLATED:
+        BOOK_TITLE_TRANSLATED = BOOK_TITLE_RAW
+    if not BOOK_TITLE_RAW:
+        BOOK_TITLE_RAW = BOOK_TITLE_TRANSLATED
     
     # Check for batch mode
     batch_enabled = os.getenv("BATCH_TRANSLATION", "0") == "1"

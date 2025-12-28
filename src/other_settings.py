@@ -3271,11 +3271,8 @@ def _create_prompt_management_section(self, parent):
                 # Normal styling
                 glossary_title_cb.setStyleSheet("")
             else:
-                # Disabled styling (grayed out)
+                # Disabled styling (grayed out) - do NOT change checked state
                 glossary_title_cb.setStyleSheet("QCheckBox { color: #666666; }")
-                # Also uncheck it if parent is unchecked
-                if glossary_title_cb.isChecked():
-                    glossary_title_cb.setChecked(False)
         except Exception:
             pass
 
