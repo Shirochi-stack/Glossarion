@@ -7336,7 +7336,8 @@ def main(log_callback=None, stop_callback=None):
                         'GLOSSARY_PARALLEL_ENABLED', 'GLOSSARY_FILTER_MODE', 'GLOSSARY_SKIP_FREQUENCY_CHECK',
                         'GLOSSARY_SKIP_ALL_VALIDATION', 'MODEL', 'API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY',
                         'MAX_OUTPUT_TOKENS', 'GLOSSARY_TEMPERATURE', 'MANUAL_GLOSSARY', 'ENABLE_AUTO_GLOSSARY',
-                        'GLOSSARY_DUPLICATE_ALGORITHM', 'GLOSSARY_INCLUDE_GENDER_CONTEXT', 'GLOSSARY_CONTEXT_WINDOW'
+                        'GLOSSARY_DUPLICATE_ALGORITHM', 'GLOSSARY_INCLUDE_GENDER_CONTEXT', 'GLOSSARY_CONTEXT_WINDOW',
+                        'GLOSSARY_INCLUDE_BOOK_TITLE', 'EPUB_PATH'
                     ]
                     
                     for var in important_vars:
