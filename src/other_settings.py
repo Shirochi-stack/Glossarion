@@ -3268,8 +3268,8 @@ def _create_prompt_management_section(self, parent):
         try:
             glossary_title_cb.setEnabled(checked)
             if checked:
-                # Normal styling
-                glossary_title_cb.setStyleSheet("")
+                # Force white color for enabled state to ensure visibility
+                glossary_title_cb.setStyleSheet("QCheckBox { color: white; }")
             else:
                 # Disabled styling (grayed out) - do NOT change checked state
                 glossary_title_cb.setStyleSheet("QCheckBox { color: #666666; }")
