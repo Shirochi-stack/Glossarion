@@ -3860,6 +3860,11 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                     print(f"🔍 [DEBUG] In _extract_with_custom_prompt: max_sentences={max_sentences}")
                     text_sample, detected_terms = _filter_text_for_glossary(all_text, min_frequency, max_sentences)
             
+            # If there is no content left, skip API call
+            if not text_sample or not str(text_sample).strip():
+                print("📑 No text available after filtering - skipping automatic glossary generation")
+                return {}
+
             # Replace placeholders in prompt
             # Get target language from environment (used in the prompt for translation output)
             target_language = os.getenv('GLOSSARY_TARGET_LANGUAGE', 'English')
