@@ -3137,9 +3137,9 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         # 1. Identify which terms appear in which sentences
         # We need to re-scan briefly or pass this info along. Re-scanning is safer/easier here.
         if gender_nuance_enabled:
-            print(f\"📑 analyzing sentences for term coverage and gender nuance...\")
+            print("📑 analyzing sentences for term coverage and gender nuance...")
         else:
-            print(f\"📑 analyzing sentences for term coverage (gender nuance disabled)...\")
+            print("📑 analyzing sentences for term coverage (gender nuance disabled)...")
         term_to_sentences = {} # term -> list of (score, sentence_index)
         sentence_scores = {}   # index -> score
         
@@ -3163,7 +3163,6 @@ def _filter_text_for_glossary(text, min_frequency=2, max_sentences=None):
         # If gender context is OFF or nuance scoring is disabled, skip expensive scoring and just build simple coverage map
         if not gender_nuance_enabled:
             print("📑 Gender context or nuance toggle disabled: using simple term coverage (no pronoun weighting).")
-            print("📑 Gender context disabled: skipping gender-nuance scoring (using simple term coverage).")
             for idx, sent in enumerate(filtered_sentences):
                 sentence_scores[idx] = 1.0
                 for term in frequent_terms:
