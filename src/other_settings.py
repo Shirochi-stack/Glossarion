@@ -1652,11 +1652,13 @@ def _create_response_handling_section(self, parent):
             retry_desc.setEnabled(checked)
             
             # Update styles
-            label_color = "white" if checked else "#808080"
-            retry_tokens_label.setStyleSheet(f"color: {label_color};")
-            
-            desc_color = "gray" if checked else "#606060"
-            retry_desc.setStyleSheet(f"color: {desc_color}; font-size: 10pt;")
+            if checked:
+                retry_tokens_label.setStyleSheet("color: white;")
+                retry_desc.setStyleSheet("color: gray; font-size: 10pt;")
+                retry_tokens_edit.setStyleSheet("")
+            else:
+                retry_tokens_label.setStyleSheet("color: #606060;")
+                retry_desc.setStyleSheet("color: #606060; font-size: 10pt;")
         except Exception:
             pass
 
