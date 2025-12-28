@@ -4657,7 +4657,7 @@ def _create_processing_options_section(self, parent):
     pdf_render_h.addWidget(pdf_render_label)
     
     pdf_render_combo = QComboBox()
-    pdf_render_combo.addItems(["absolute", "semantic", "xhtml", "html"])
+    pdf_render_combo.addItems(["absolute", "semantic", "xhtml", "html", "image"])
     pdf_render_combo.setFixedWidth(100)
     pdf_render_combo.setStyleSheet("""
         QComboBox::down-arrow {
@@ -4686,7 +4686,13 @@ def _create_processing_options_section(self, parent):
     pdf_render_h.addStretch()
     section_v.addWidget(pdf_render_row)
     
-    pdf_render_desc = QLabel("PDF extraction mode:\n• absolute: Fixed positioning (perfect layout, smaller payloads)\n• semantic: Semantic HTML (better text flow, larger payloads)\n• xhtml/html: MuPDF native rendering (1:1 layout)")
+    pdf_render_desc = QLabel(
+        "PDF extraction mode:\n"
+        "• absolute: Fixed positioning (perfect layout, smaller payloads)\n"
+        "• semantic: Semantic HTML (better text flow, larger payloads)\n"
+        "• xhtml/html: MuPDF native rendering (1:1 layout)\n"
+        "• image: Render each page as a raster image (no text extraction)"
+    )
     pdf_render_desc.setStyleSheet("color: gray; font-size: 10pt;")
     pdf_render_desc.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(pdf_render_desc)

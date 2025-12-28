@@ -1116,16 +1116,64 @@ def extract_pdf_with_formatting(pdf_path: str, output_dir: str, extract_images: 
         
         print(f"📄 Extracting PDF with formatting: {os.path.basename(pdf_path)}")
         
-        # Extract images first if enabled (semantic path). In XHTML path we also export embedded images to files.
+        # Determine render mode early
+        render_mode = os.getenv("PDF_RENDER_MODE", "absolute").lower()  # pdf2htmlex | absolute | xhtml | html | semantic | image
+
+        # Extract embedded images unless we're rasterizing whole pages
         images_by_page = {}
-        if extract_images:
+        if extract_images and render_mode != "image":
             images_by_page = extract_images_from_pdf(pdf_path, output_dir)
         images_dir = os.path.join(output_dir, 'images')
-        
+
         doc = fitz.open(pdf_path)
-        
+
+        # New: render each page as a raster image (independent of image translation toggle)
+        if render_mode == "image":
+            os.makedirs(images_dir, exist_ok=True)
+            try:
+                zoom = float(os.getenv("PDF_IMAGE_RENDER_SCALE", "2.0") or 2.0)
+            except Exception:
+                zoom = 2.0
+            zoom = max(0.5, min(4.0, zoom))  # prevent extreme memory use
+            matrix = fitz.Matrix(zoom, zoom)
+            total_pages = len(doc)
+            print(f"🖼️ Rendering {total_pages} pages as images (scale {zoom}x)...")
+
+            page_list: List[Tuple[int, str]] = []
+            images_by_page = {}
+
+            for i in range(total_pages):
+                page = doc[i]
+                pix = page.get_pixmap(matrix=matrix, alpha=False)
+                filename = f"page_{i + 1}.png"
+                filepath = os.path.join(images_dir, filename)
+                pix.save(filepath)
+
+                html = "\n".join([
+                    "<!-- render:image -->",
+                    f"<div class=\"pdf-page image\" id=\"page-{i+1}\" style=\"text-align:center;\">",
+                    f"  <img src=\"images/{filename}\" alt=\"Page {i+1}\" style=\"width:100%;height:auto;\" />",
+                    "</div>"
+                ])
+
+                page_list.append((i + 1, html))
+                images_by_page[i + 1] = [{
+                    'index': 0,
+                    'filename': filename,
+                    'path': filepath,
+                    'bbox': [0, 0, pix.width, pix.height],
+                    'width': pix.width,
+                    'height': pix.height,
+                    'rendered': True
+                }]
+
+            doc.close()
+            if page_by_page:
+                return page_list, images_by_page
+            separator = "\n<div class=\"page-break\" style=\"page-break-after:always;\"></div>\n"
+            return separator.join(p[1] for p in page_list), images_by_page
+
         # If user requests external renderer pdf2htmlEX
-        render_mode = os.getenv("PDF_RENDER_MODE", "absolute").lower()  # pdf2htmlex | absolute | xhtml | html | semantic
         if render_mode in ("pdf2htmlex", "pdf2htmlEX"):
             try:
                 return _extract_with_pdf2htmlex(pdf_path, output_dir, page_by_page)
