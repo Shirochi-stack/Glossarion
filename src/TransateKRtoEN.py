@@ -9068,9 +9068,11 @@ def main(log_callback=None, stop_callback=None):
                 else:
                     eta_str = "calculating..."
                 
+                # For logging, strip data URIs so inline images don't explode char counts
+                display_len = len(re.sub(r'data:image/[^;]+;base64,[A-Za-z0-9+/=]+', 'data:image;base64,', chunk_html))
                 if total_chunks > 1:
                     print(f"  🔄 Translating chunk {chunk_idx}/{total_chunks} for #{idx+1} (Overall: {current_chunk_number}/{total_chunks_needed} - {progress_percent:.1f}% - ETA: {eta_str})")
-                    print(f"  ⏳ Chunk size: {len(chunk_html):,} characters (~{chapter_splitter.count_tokens(chunk_html):,} tokens)")
+                    print(f"  ⏳ Chunk size: {display_len:,} characters (~{chapter_splitter.count_tokens(chunk_html):,} tokens)")
                 else:
                     # Determine terminology and file reference
                     is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
@@ -9083,7 +9085,7 @@ def main(log_callback=None, stop_callback=None):
                         file_ref = c.get('original_basename', f'{terminology}_{actual_num}')
                     
                     chunk_tokens = chapter_splitter.count_tokens(chunk_html)
-                    print(f"  📄 {terminology} {actual_num} [{len(chunk_html):,} chars, {chunk_tokens:,} tokens]")
+                    print(f"  📄 {terminology} {actual_num} [{display_len:,} chars, {chunk_tokens:,} tokens]")
                 
                 print(f"  ℹ️ This may take 30-60 seconds. Stop will take effect after completion.")
                 
@@ -9099,7 +9101,7 @@ def main(log_callback=None, stop_callback=None):
                                 f"{terminology} {actual_num}",
                                 overall_current=current_chunk_number,
                                 overall_total=total_chunks_needed,
-                                extra_info=f"{len(chunk_html):,} chars"
+                                extra_info=f"{display_len:,} chars"
                             )
                         else:
                             log_callback.__self__.append_chunk_progress(
