@@ -1257,15 +1257,20 @@ class GlossaryManagerMixin:
         prompt_frame_layout = QVBoxLayout(prompt_frame)
         manual_layout.addWidget(prompt_frame)
         
-        label1 = QLabel("Use {fields} for field list and {language} for target language")
-        # label1.setStyleSheet("color: white; font-size: 9pt;")
+        label1 = QLabel("Placeholders will be replaced with actual values during extraction.")
         prompt_frame_layout.addWidget(label1)
-        
-        label2 = QLabel("Placeholders will be replaced with actual values during extraction")
-        # label2.setStyleSheet("color: gray; font-size: 9pt;")
-        prompt_frame_layout.addWidget(label2)
+
+        # Copyable placeholder helper (matches auto glossary tab style)
+        placeholders_line = QLineEdit("Available placeholders: {fields}, {language}, {entries}")
+        placeholders_line.setReadOnly(True)
+        placeholders_line.setFrame(False)
+        placeholders_line.setStyleSheet("color: #5a9fd4; font-size: 9pt;")
+        placeholders_line.setCursorPosition(0)
+        placeholders_line.setToolTip("{fields} -> columns/entry types list\n{language} -> target language\n{entries} -> enabled custom entry types (comma list with ampersand)")
+        prompt_frame_layout.addWidget(placeholders_line)
         
         self.manual_prompt_text = QTextEdit()
+        self.manual_prompt_text.setContextMenuPolicy(Qt.DefaultContextMenu)  # keep copy/paste
         # Use screen ratio: ~25% of screen height
         prompt_height = int(self._screen.height() * 0.25)
         self.manual_prompt_text.setMinimumHeight(prompt_height)
@@ -2072,9 +2077,10 @@ CRITICAL EXTRACTION RULES:
         if not hasattr(self, 'include_all_characters_checkbox'):
             self.include_all_characters_checkbox = self._create_styled_checkbox("Dynamic Limit Expansion")
             self.include_all_characters_checkbox.setToolTip(
-                "Dynamic Limit Expansion: Adds one sentence per detected character on top of 'Max sentences'. "
-                "After selection, duplicate sentences are removed, so both the bonus and the base cap can shrink "
-                "(e.g., 200+700 requested may dedupe down to ~120 total)."
+                "Dynamic Limit Expansion:\n"
+                "- Adds one sentence per detected character on top of 'Max sentences'.\n"
+                "- After selection, duplicate sentences are removed, so both the bonus and the base cap can shrink.\n"
+                "- Example: requesting 200 + 700 bonus may dedupe down to ~120 total."
             )
             self.include_all_characters_checkbox.setChecked(self.config.get('glossary_include_all_characters', False))
         ms_layout.addWidget(self.include_all_characters_checkbox)
@@ -2288,6 +2294,7 @@ CRITICAL EXTRACTION RULES:
         placeholder_line.setFrame(False)
         placeholder_line.setCursorPosition(0)
         placeholder_line.setStyleSheet("color: #5a9fd4; font-size: 9pt;")
+        placeholder_line.setToolTip("{language} -> target language\n{min_frequency} -> minimum term frequency\n{max_names} -> max character names\n{max_titles} -> max titles\n{marker} -> context window marker count")
         glossary_prompt_frame_layout.addWidget(placeholder_line)
         
         self.auto_prompt_text = QTextEdit()
