@@ -35,6 +35,33 @@ from PySide6.QtCore import QObject, Signal
 class ConnTestBridge(QObject):
     finished = Signal(list)
 
+# Import dependencies for RotatableLabel
+from PySide6.QtCore import Property, QPropertyAnimation, QEasingCurve
+from PySide6.QtGui import QTransform
+
+class RotatableLabel(QLabel):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._rotation = 0
+        self._original_pixmap = None
+    
+    def set_rotation(self, angle):
+        self._rotation = angle
+        if self._original_pixmap:
+            transform = QTransform()
+            transform.rotate(angle)
+            rotated = self._original_pixmap.transformed(transform, Qt.SmoothTransformation)
+            self.setPixmap(rotated)
+    
+    def get_rotation(self):
+        return self._rotation
+    
+    rotation = Property(float, get_rotation, set_rotation)
+    
+    def set_original_pixmap(self, pixmap):
+        self._original_pixmap = pixmap
+        self.setPixmap(pixmap)
+
 # Local imports - these will be available through the TranslatorGUI instance
 # WindowManager and UIHelper removed - not needed in PySide6
 from translator_gui import CONFIG_FILE
@@ -3580,33 +3607,13 @@ def _create_prompt_management_section(self, parent):
     
     # Store reference for button transformation
     self.translate_headers_btn = translate_now_btn
-    
+
     # Create a rotatable label for the icon
     from PySide6.QtCore import Property, QPropertyAnimation, QEasingCurve
     from PySide6.QtGui import QTransform
     
-    class RotatableLabel(QLabel):
-        def __init__(self, parent=None):
-            super().__init__(parent)
-            self._rotation = 0
-            self._original_pixmap = None
-        
-        def set_rotation(self, angle):
-            self._rotation = angle
-            if self._original_pixmap:
-                transform = QTransform()
-                transform.rotate(angle)
-                rotated = self._original_pixmap.transformed(transform, Qt.SmoothTransformation)
-                self.setPixmap(rotated)
-        
-        def get_rotation(self):
-            return self._rotation
-        
-        rotation = Property(float, get_rotation, set_rotation)
-        
-        def set_original_pixmap(self, pixmap):
-            self._original_pixmap = pixmap
-            self.setPixmap(pixmap)
+    # Re-use the global RotatableLabel class
+    # (Removed local definition)
     
     # Create icon with rotation support (HiDPI-aware, smaller than 36x36)
     icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
@@ -6343,7 +6350,8 @@ def test_api_connections(self):
     from PySide6.QtWidgets import QApplication
     screen = QApplication.primaryScreen().geometry()
     width = int(screen.width() * 0.16)  # 16% of screen width
-    height = int(screen.height() * 0.14)  # 14% of screen height
+    # Increase height to accommodate larger icon (was 14%)
+    height = int(screen.height() * 0.20)  # 20% of screen height
     progress_dialog.setFixedSize(width, height)
     
     # Set icon
@@ -6361,22 +6369,52 @@ def test_api_connections(self):
     
     # Add progress message
     layout = QVBoxLayout(progress_dialog)
+    # Add spacing to push icon up
+    layout.addSpacing(10)
 
-    # Add app icon at 72x72 with HiDPI scaling
-    icon_label = QLabel()
+    # Add app icon at 90x90 with HiDPI scaling (Animated)
+    icon_label = RotatableLabel()
+    # Set fixed size slightly larger than diagonal of 90x90 (approx 127px) to prevent layout shifts
+    # Using 140x140 for safety
+    icon_label.setFixedSize(140, 140)
     dpr = QApplication.primaryScreen().devicePixelRatio() if QApplication.primaryScreen() else 1.0
-    pix = QPixmap(icon_path) if os.path.exists(icon_path) else app_icon.pixmap(QSize(72, 72))
+    pix = QPixmap(icon_path) if os.path.exists(icon_path) else app_icon.pixmap(QSize(90, 90))
     if not pix.isNull():
-        scaled = pix.scaled(int(72 * dpr), int(72 * dpr), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        scaled = pix.scaled(int(90 * dpr), int(90 * dpr), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         scaled.setDevicePixelRatio(dpr)
-        icon_label.setPixmap(scaled)
+        icon_label.set_original_pixmap(scaled)
         icon_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(icon_label)
+        layout.addWidget(icon_label, 0, Qt.AlignCenter)
+        
+        # Animate the icon
+        anim = QPropertyAnimation(icon_label, b"rotation", progress_dialog)
+        anim.setDuration(1000)
+        anim.setStartValue(0)
+        anim.setEndValue(360)
+        anim.setLoopCount(-1)
+        anim.start()
+    else:
+        # Fallback if image loading fails
+        layout.addWidget(QLabel("Testing..."))
 
-    progress_label = QLabel("Testing API connections...\nPlease wait...")
+    progress_label = QLabel("Testing API connections\nPlease wait")
     progress_label.setAlignment(Qt.AlignCenter)
     progress_label.setStyleSheet("font-size: 10pt;")
     layout.addWidget(progress_label)
+    
+    # Animate text dots
+    progress_dialog.dot_count = 0
+    def animate_dots():
+        try:
+            progress_dialog.dot_count = (progress_dialog.dot_count + 1) % 4
+            dots = "." * progress_dialog.dot_count
+            progress_label.setText(f"Testing API connections{dots}\nPlease wait{dots}")
+        except RuntimeError:
+            pass  # Dialog deleted
+
+    text_timer = QTimer(progress_dialog)
+    text_timer.timeout.connect(animate_dots)
+    text_timer.start(500)
 
     # Cancel button to stop background work
     cancel_event = threading.Event()
