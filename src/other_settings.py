@@ -30,6 +30,10 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtCore import QObject, Signal
+
+class ConnTestBridge(QObject):
+    finished = Signal(list)
 
 # Local imports - these will be available through the TranslatorGUI instance
 # WindowManager and UIHelper removed - not needed in PySide6
@@ -6383,6 +6387,13 @@ def test_api_connections(self):
     cancel_btn.clicked.connect(_cancel)
     layout.addWidget(cancel_btn)
     
+    # Store cancel function in the dialog so it can be called if dialog is closed via X
+    progress_dialog._cancel_func = _cancel
+    def _on_close(event):
+        _cancel()
+        event.accept()
+    progress_dialog.closeEvent = _on_close
+    
     # Show dialog non-modally so it's visible
     progress_dialog.show()
     progress_dialog.repaint()
@@ -6474,10 +6485,8 @@ def test_api_connections(self):
         QMessageBox.information(None, "Info", "No custom endpoints configured. Using default API endpoints.")
         return
     
-    class _ConnTestBridge(QObject):
-        finished = Signal(list)
-
-    bridge = _ConnTestBridge()
+    # Use module-level Bridge class
+    self.conn_test_bridge = ConnTestBridge()
 
     def run_tests_background():
         results = []
@@ -6558,7 +6567,7 @@ def test_api_connections(self):
                     results.append(f"❌ {name}: {error_msg}")
 
         if not cancel_event.is_set():
-            bridge.finished.emit(results)
+            self.conn_test_bridge.finished.emit(results)
 
     threading.Thread(target=run_tests_background, daemon=True).start()
 
@@ -6582,7 +6591,7 @@ def test_api_connections(self):
         msg_box.setStandardButtons(QMessageBox.Ok)
         msg_box.exec()
 
-    bridge.finished.connect(finish_ui)
+    self.conn_test_bridge.finished.connect(finish_ui)
     
 
 def run_standalone_translate_headers(self):
