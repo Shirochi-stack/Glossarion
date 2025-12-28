@@ -1369,7 +1369,7 @@ CRITICAL EXTRACTION RULES:
         settings_frame_layout.addLayout(settings_grid)
         
         # Compact label+field pair helper for manual Extraction Settings
-        def _m_pair(label_text, field_widget, label_width=120):
+        def _m_pair(label_text, field_widget, label_width=120, tooltip=None):
             cont = QWidget()
             h = QHBoxLayout(cont)
             h.setContentsMargins(0, 0, 0, 0)
@@ -1399,11 +1399,17 @@ CRITICAL EXTRACTION RULES:
         # Row 0: Temperature and Context Limit
         self.manual_temp_entry = QLineEdit(str(self.config.get('manual_glossary_temperature', 0.1)))
         self.manual_temp_entry.setFixedWidth(80)
-        settings_grid.addWidget(_m_pair("Temperature:", self.manual_temp_entry), 0, 0)
-        
+        settings_grid.addWidget(_m_pair(
+            "Temperature:", self.manual_temp_entry,
+            tooltip="AI creativity for manual extraction.\nLower = more deterministic (recommended 0.1–0.3)."
+        ), 0, 0)
+
         self.manual_context_entry = QLineEdit(str(self.config.get('manual_context_limit', 2)))
         self.manual_context_entry.setFixedWidth(80)
-        settings_grid.addWidget(_m_pair("Context Limit:", self.manual_context_entry), 0, 1)
+        settings_grid.addWidget(_m_pair(
+            "Context Limit:", self.manual_context_entry,
+            tooltip="This controls how many chapters to include with contextual translation"
+        ), 0, 1)
         
         # Row 1: Compression Factor and Rolling window checkbox
         self.glossary_compression_factor_entry = QLineEdit(str(self.config.get('glossary_compression_factor', 1.0)))
@@ -1422,11 +1428,17 @@ CRITICAL EXTRACTION RULES:
         comp_layout.addWidget(self.glossary_auto_compression_checkbox)
         comp_layout.addStretch()
         
-        settings_grid.addWidget(_m_pair("Compression Factor:", comp_cont), 1, 0)
+        settings_grid.addWidget(_m_pair(
+            "Compression Factor:", comp_cont,
+            tooltip="How much to compress text before sending to the model.\nAuto adjusts based on token limit; manual overrides fixed value."
+        ), 1, 0)
         
         if not hasattr(self, 'glossary_history_rolling_checkbox'):
             self.glossary_history_rolling_checkbox = self._create_styled_checkbox("Keep recent context instead of reset")
         self.glossary_history_rolling_checkbox.setChecked(self.config.get('glossary_history_rolling', False))
+        self.glossary_history_rolling_checkbox.setToolTip(
+            "Keep recent glossary context between chunks instead of resetting.\nHelps continuity; may increase token use."
+        )
         settings_grid.addWidget(self.glossary_history_rolling_checkbox, 1, 1)
         
         # Row 2: Output Token Limit and Request Merging checkbox
@@ -1448,13 +1460,19 @@ CRITICAL EXTRACTION RULES:
         token_layout.addWidget(self.token_limit_helper)
         token_layout.addStretch()
         
-        settings_grid.addWidget(_m_pair("Output Token Limit:", token_cont), 2, 0)
+        settings_grid.addWidget(_m_pair(
+            "Output Token Limit:", token_cont,
+            tooltip="Max tokens allowed in AI responses for glossary extraction.\n-1 = inherit main translation limit."
+        ), 2, 0)
         # Label tooltip
         token_cont.parentWidget().layout().itemAt(0).widget().setToolTip("Maximum tokens allowed in AI responses. -1 inherits main translation output limit.")
         
         if not hasattr(self, 'glossary_request_merging_checkbox'):
             self.glossary_request_merging_checkbox = self._create_styled_checkbox("Glossary Request Merging")
         self.glossary_request_merging_checkbox.setChecked(self.config.get('glossary_request_merging_enabled', False))
+        self.glossary_request_merging_checkbox.setToolTip(
+            "Merge multiple small glossary requests before sending.\nReduces API calls; controlled by Merge Count below."
+        )
         settings_grid.addWidget(self.glossary_request_merging_checkbox, 2, 1)
 
         # Row 3: Chapter split toggle (output-limit safe chunking)
@@ -1462,6 +1480,9 @@ CRITICAL EXTRACTION RULES:
             self.glossary_enable_chapter_split_checkbox = self._create_styled_checkbox("Enable chapter splitting")
             self.glossary_enable_chapter_split_checkbox.setToolTip("When enabled, large glossary chapters are auto-split using the output token limit and compression factor to avoid oversized requests.")
         self.glossary_enable_chapter_split_checkbox.setChecked(self.config.get('glossary_enable_chapter_split', False))
+        self.glossary_enable_chapter_split_checkbox.setToolTip(
+            "Automatically split large chapters using token/output limits\nso each glossary request stays under size caps."
+        )
         settings_grid.addWidget(self.glossary_enable_chapter_split_checkbox, 3, 0)
 
         # Logic for Auto Compression Factor
@@ -1511,7 +1532,10 @@ CRITICAL EXTRACTION RULES:
         # Row 3: Empty and Merge Count
         self.glossary_request_merge_count_entry = QLineEdit(str(self.config.get('glossary_request_merge_count', 10)))
         self.glossary_request_merge_count_entry.setFixedWidth(80)
-        settings_grid.addWidget(_m_pair("Merge Count:", self.glossary_request_merge_count_entry), 3, 1)
+        settings_grid.addWidget(_m_pair(
+            "Merge Count:", self.glossary_request_merge_count_entry,
+            tooltip="When request merging is on, combine this many chunks\nbefore one glossary API call."
+        ), 3, 1)
 
     def update_glossary_prompts(self):
         """Update glossary prompts from text widgets if they exist"""
@@ -2006,6 +2030,8 @@ CRITICAL EXTRACTION RULES:
             lbl = QLabel(label_text)
             lbl.setFixedWidth(label_width)
             lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            if tooltip:
+                lbl.setToolTip(tooltip)
             h.addWidget(lbl)
             h.addWidget(field_widget)
             h.addStretch()
