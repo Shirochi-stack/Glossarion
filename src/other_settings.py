@@ -3278,6 +3278,26 @@ def _create_prompt_management_section(self, parent):
     title_desc.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(title_desc)
     
+    # Toggle: include book title in glossary header/output
+    glossary_title_cb = self._create_styled_checkbox("Include book title at top of glossary")
+    try:
+        glossary_title_cb.setChecked(bool(self.include_book_title_glossary_var))
+    except Exception:
+        pass
+    glossary_title_cb.setToolTip(
+        "If enabled, glossary outputs add a first entry for the book title using metadata.json or the source filename when missing."
+    )
+    def _on_glossary_title_toggle(checked):
+        try:
+            self.include_book_title_glossary_var = bool(checked)
+            # Persist immediately in config so save_config captures it
+            if hasattr(self, 'config'):
+                self.config['include_book_title_glossary'] = bool(checked)
+        except Exception:
+            pass
+    glossary_title_cb.toggled.connect(_on_glossary_title_toggle)
+    section_v.addWidget(glossary_title_cb)
+    
     # Separator
     sep1 = QFrame()
     sep1.setFrameShape(QFrame.HLine)

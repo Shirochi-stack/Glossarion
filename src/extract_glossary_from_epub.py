@@ -236,6 +236,93 @@ _glossary_json_lock = threading.Lock()
 _glossary_csv_lock = threading.Lock()
 _progress_lock = threading.Lock()
 _history_lock = threading.Lock()  # For thread-safe history access in batch mode
+# Global book title cache (set in main)
+BOOK_TITLE_VALUE = None
+
+
+def _extract_title_from_metadata(meta: Dict) -> str:
+    """Best-effort retrieval of a book title from metadata structures."""
+    if not isinstance(meta, dict):
+        return None
+
+    title_keys = [
+        "title",
+        "book_title",
+        "bookTitle",
+        "title_translated",
+        "translated_title",
+        "title_en",
+    ]
+    for key in title_keys:
+        val = meta.get(key)
+        if val:
+            return str(val).strip()
+
+    # Look into common nested objects
+    for nested_key in ("metadata", "opf", "info", "data"):
+        nested = meta.get(nested_key)
+        if isinstance(nested, dict):
+            nested_title = _extract_title_from_metadata(nested)
+            if nested_title:
+                return nested_title
+    return None
+
+
+def _derive_book_title(epub_path: str, output_path: str) -> str:
+    """
+    Derive book title from metadata.json (preferred) or the source filename.
+    - epub_path: source book path (may be txt/pdf as well)
+    - output_path: glossary output path (metadata.json is expected alongside)
+    """
+    candidates = []
+
+    # 1) metadata.json next to the output
+    meta_dir = os.path.dirname(output_path) or "."
+    meta_path = os.path.join(meta_dir, "metadata.json")
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            meta_title = _extract_title_from_metadata(meta)
+            if meta_title:
+                candidates.append(meta_title)
+        except Exception as e:
+            print(f"[Warning] Could not read metadata.json for book title: {e}")
+
+    # 2) source file name (fallback)
+    base = os.path.splitext(os.path.basename(epub_path or ""))[0]
+    if base:
+        candidates.append(base)
+
+    for cand in candidates:
+        cand = str(cand).strip()
+        if cand:
+            return cand
+    return None
+
+
+def _ensure_book_title_entry(glossary: List[Dict]) -> List[Dict]:
+    """Insert a 'book' entry (raw + translated title) at the top if enabled and not present."""
+    include = os.getenv("GLOSSARY_INCLUDE_BOOK_TITLE", "1").lower() not in ("0", "false", "no")
+    title = BOOK_TITLE_VALUE.strip() if BOOK_TITLE_VALUE else None
+    if not include or not title:
+        return glossary
+
+    norm = title.lower()
+    for entry in glossary:
+        raw = str(entry.get("raw_name", "")).strip().lower()
+        trans = str(entry.get("translated_name", "")).strip().lower()
+        if raw == norm or trans == norm:
+            return glossary  # Already present
+
+    book_entry = {
+        "type": "book",
+        "raw_name": title,
+        "translated_name": title,
+        "gender": ""
+    }
+    glossary.insert(0, book_entry)
+    return glossary
 
 def set_stop_flag(value):
     """Set the global stop flag"""
@@ -436,6 +523,7 @@ def save_glossary_json(glossary: List[Dict], output_path: str):
     # Check if legacy JSON output is enabled (default disabled)
     if os.getenv('GLOSSARY_OUTPUT_LEGACY_JSON', '0') != '1':
         return
+    glossary = _ensure_book_title_entry(glossary)
 
     global _glossary_json_lock
     
@@ -492,10 +580,11 @@ def save_glossary_csv(glossary: List[Dict], output_path: str):
     global _glossary_csv_lock
     import csv
     
+    glossary = _ensure_book_title_entry(glossary)
     with _glossary_csv_lock:
         csv_path = output_path.replace('.json', '.csv')
         custom_types = get_custom_entry_types()
-        type_order = {'character': 0, 'term': 1}
+        type_order = {'book': -1, 'character': 0, 'term': 1}
         other_types = sorted([t for t in custom_types.keys() if t not in ['character', 'term']])
         for i, t in enumerate(other_types):
             type_order[t] = i + 2
@@ -2563,6 +2652,8 @@ def main(log_callback=None, stop_callback=None):
     )
 
     config = load_config(args.config)
+    global BOOK_TITLE_VALUE
+    BOOK_TITLE_VALUE = _derive_book_title(epub_path, args.output)
     
     # Get API key from environment variables (set by GUI) or config file
     api_key = (os.getenv("API_KEY") or 
@@ -2854,7 +2945,7 @@ def main(log_callback=None, stop_callback=None):
                     
                     # Sort glossary
                     custom_types = get_custom_entry_types()
-                    type_order = {'character': 0, 'term': 1}
+                    type_order = {'book': -1, 'character': 0, 'term': 1}
                     other_types = sorted([t for t in custom_types.keys() if t not in ['character', 'term']])
                     for i, t in enumerate(other_types):
                         type_order[t] = i + 2
@@ -3166,7 +3257,7 @@ def main(log_callback=None, stop_callback=None):
                 
                 # Sort glossary by type and name
                 custom_types = get_custom_entry_types()
-                type_order = {'character': 0, 'term': 1}
+                type_order = {'book': -1, 'character': 0, 'term': 1}
                 other_types = sorted([t for t in custom_types.keys() if t not in ['character', 'term']])
                 for i, t in enumerate(other_types):
                     type_order[t] = i + 2
@@ -3202,7 +3293,7 @@ def main(log_callback=None, stop_callback=None):
                     glossary[:] = skip_duplicate_entries(glossary)
                     
                     custom_types = get_custom_entry_types()
-                    type_order = {'character': 0, 'term': 1}
+                    type_order = {'book': -1, 'character': 0, 'term': 1}
                     other_types = sorted([t for t in custom_types.keys() if t not in ['character', 'term']])
                     for i, t in enumerate(other_types):
                         type_order[t] = i + 2
@@ -3238,7 +3329,7 @@ def main(log_callback=None, stop_callback=None):
                         
                         # Sort glossary
                         custom_types = get_custom_entry_types()
-                        type_order = {'character': 0, 'term': 1}
+                        type_order = {'book': -1, 'character': 0, 'term': 1}
                         other_types = sorted([t for t in custom_types.keys() if t not in ['character', 'term']])
                         for i, t in enumerate(other_types):
                             type_order[t] = i + 2

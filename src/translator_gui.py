@@ -2019,6 +2019,7 @@ Recent translations to summarize:
             ('translation_history_rolling_var', 'translation_history_rolling', False),
             ('glossary_history_rolling_var', 'glossary_history_rolling', False),
             ('translate_book_title_var', 'translate_book_title', True),
+            ('include_book_title_glossary_var', 'include_book_title_glossary', True),
             ('enable_auto_glossary_var', 'enable_auto_glossary', True),
             ('append_glossary_var', 'append_glossary', True),
             ('include_gender_context_var', 'include_gender_context', True),
@@ -6445,6 +6446,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GLOSSARY_CHAPTER_SPLIT_THRESHOLD': str(self.glossary_chapter_split_threshold_var),
             'GLOSSARY_FILTER_MODE': self.glossary_filter_mode_var,
             'GLOSSARY_SKIP_FREQUENCY_CHECK': "1" if self.config.get('glossary_skip_frequency_check', False) else "0",
+            'GLOSSARY_INCLUDE_BOOK_TITLE': "1" if getattr(self, 'include_book_title_glossary_var', True) else "0",
             'ENABLE_AUTO_GLOSSARY': "1" if self.enable_auto_glossary_var else "0",
             'AUTO_GLOSSARY_PROMPT': self.unified_auto_glosary_prompt3 if hasattr(self, 'unified_auto_glosary_prompt3') else '',
             'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt if hasattr(self, 'append_glossary_prompt') and self.append_glossary_prompt else '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n',
@@ -10638,6 +10640,7 @@ Important rules:
                 # Book title handling
                 ('TRANSLATE_BOOK_TITLE', '1' if getattr(self, 'translate_book_title_var', True) else '0'),
                 ('BOOK_TITLE_PROMPT', getattr(self, 'book_title_prompt', '')),
+                ('GLOSSARY_INCLUDE_BOOK_TITLE', '1' if getattr(self, 'include_book_title_glossary_var', True) else '0'),
 
                 # Safety/merge toggles
                 ('EMERGENCY_PARAGRAPH_RESTORE', '1' if getattr(self, 'emergency_restore_var', False) else '0'),

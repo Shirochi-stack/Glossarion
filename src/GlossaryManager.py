@@ -9,6 +9,7 @@ import threading
 import tempfile
 import queue
 import time
+import json
 from bs4 import BeautifulSoup
 import PatternManager as PM
 import duplicate_detection_config as ddc
@@ -47,6 +48,109 @@ _api_submission_lock = threading.Lock()
 _last_api_submission_time = 0
 _results_lock = threading.Lock()
 _file_write_lock = threading.Lock()
+BOOK_TITLE_VALUE = None
+
+
+def _extract_title_from_metadata(meta):
+    """Best-effort lookup of a book title inside metadata structures."""
+    if not isinstance(meta, dict):
+        return None
+
+    title_keys = [
+        "title",
+        "book_title",
+        "bookTitle",
+        "title_translated",
+        "translated_title",
+        "title_en",
+    ]
+    for key in title_keys:
+        val = meta.get(key)
+        if val:
+            return str(val).strip()
+
+    for nested_key in ("metadata", "opf", "info", "data"):
+        nested = meta.get(nested_key)
+        if isinstance(nested, dict):
+            nested_title = _extract_title_from_metadata(nested)
+            if nested_title:
+                return nested_title
+    return None
+
+
+def _derive_book_title(output_dir):
+    """Derive book title from metadata.json in output_dir or EPUB_PATH basename."""
+    candidates = []
+    meta_path = os.path.join(output_dir or ".", "metadata.json")
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            meta_title = _extract_title_from_metadata(meta)
+            if meta_title:
+                candidates.append(meta_title)
+        except Exception as e:
+            print(f"[Warning] Could not read metadata.json for book title: {e}")
+
+    epub_path = os.getenv("EPUB_PATH", "")
+    base = os.path.splitext(os.path.basename(epub_path or ""))[0]
+    if base:
+        candidates.append(base)
+
+    for cand in candidates:
+        cand = str(cand).strip()
+        if cand:
+            return cand
+    return None
+
+
+def _ensure_book_title_csv_lines(csv_lines):
+    """
+    Ensure the CSV (header + rows) contains a leading book title entry when enabled.
+    """
+    if not csv_lines:
+        return csv_lines
+    include = os.getenv("GLOSSARY_INCLUDE_BOOK_TITLE", "1").lower() not in ("0", "false", "no")
+    title = BOOK_TITLE_VALUE.strip() if BOOK_TITLE_VALUE else None
+    if not include or not title:
+        return csv_lines
+
+    header = csv_lines[0]
+    norm = title.lower()
+    # Skip if already present
+    for line in csv_lines[1:]:
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) >= 3:
+            if parts[1].lower() == norm or parts[2].lower() == norm:
+                return csv_lines
+
+    fields = [f.strip() for f in header.split(",")]
+    row = []
+    for field in fields:
+        key = field.lower()
+        if key == "type":
+            row.append("book")
+        elif key == "raw_name":
+            row.append(title)
+        elif key == "translated_name":
+            row.append(title)
+        else:
+            row.append("")
+    book_line = ",".join(row)
+    return [header, book_line] + csv_lines[1:]
+
+
+def _csv_sort_key(line: str):
+    """Sort book first, then characters, then others by raw name."""
+    try:
+        parts = line.split(",")
+        entry_type = parts[0].strip().lower()
+        name = parts[1].lower() if len(parts) > 1 else line.lower()
+    except Exception:
+        entry_type = ""
+        name = line.lower()
+    order = {"book": -1, "character": 0, "term": 1}
+    return (order.get(entry_type, 2), name)
 
 # Timing variables
 _extraction_time = 0
@@ -214,6 +318,8 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     
     # Rest of the method continues as before...
     print("📁 Extracting names and terms with configurable options")
+    global BOOK_TITLE_VALUE
+    BOOK_TITLE_VALUE = _derive_book_title(output_dir)
     
     # Check stop flag before processing
     if is_stop_requested():
@@ -535,6 +641,8 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
                 all_csv_lines = filtered
                 print(f"📑 Filter applied: {len(all_csv_lines)-1} character entries with honorifics kept")
             
+            # Ensure book title header is present before dedup/sort
+            all_csv_lines = _ensure_book_title_csv_lines(all_csv_lines)
             # Apply fuzzy deduplication (deferred until after all chunks)
             try:
                 print(f"📑 Applying fuzzy deduplication (threshold: {fuzzy_threshold})...")
@@ -547,7 +655,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
             header = all_csv_lines[0]
             entries = all_csv_lines[1:]
             if entries:
-                entries.sort(key=lambda x: (0 if x.startswith('character,') else 1, x.split(',')[1].lower()))
+                entries.sort(key=_csv_sort_key)
             all_csv_lines = [header] + entries
             
             # Save
@@ -724,6 +832,8 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         # Apply filter mode to final results
         csv_lines = _filter_csv_by_mode(csv_lines, filter_mode)
         
+        # Ensure book title entry before dedup/sort
+        csv_lines = _ensure_book_title_csv_lines(csv_lines)
         # Apply fuzzy deduplication (deferred until after all chunks)
         print(f"📑 Applying fuzzy deduplication (threshold: {fuzzy_threshold})...")
         original_count = len(csv_lines) - 1
@@ -736,7 +846,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         print(f"📑 Sorting glossary by type and name...")
         header = csv_lines[0]
         entries = csv_lines[1:]
-        entries.sort(key=lambda x: (0 if x.startswith('character,') else 1, x.split(',')[1].lower() if ',' in x else x.lower()))
+        entries.sort(key=_csv_sort_key)
         csv_lines = [header] + entries
         
         # Token-efficient format if enabled
@@ -945,7 +1055,7 @@ def _convert_to_token_efficient_format(csv_lines):
     result.append(f"Glossary Columns: {', '.join(columns)}\n")
     
     # Process in order: character first, then term, then others
-    type_order = ['character', 'term'] + [t for t in grouped.keys() if t not in ['character', 'term']]
+    type_order = ['book', 'character', 'term'] + [t for t in grouped.keys() if t not in ['book', 'character', 'term']]
     
     # Precompute column indices for richer rendering
     lower_header = [h.lower() for h in header_parts]
