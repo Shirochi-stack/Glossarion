@@ -1123,7 +1123,7 @@ Text to analyze:
         self.retain_source_extension_var = self.config.get('retain_source_extension', False)
         
         # Initialize extraction settings (from Other Settings)
-        self.force_bs_for_traditional_var = self.config.get('force_bs_for_traditional', False)
+        self.force_bs_for_traditional_var = self.config.get('force_bs_for_traditional', True)
         
         # Initialize HTTP/Network tuning variables (from Other Settings)
         self.enable_http_tuning_var = self.config.get('enable_http_tuning', False)
@@ -9881,7 +9881,7 @@ Important rules:
                 ('file_filtering_level', ['file_filtering_level_var'], 'smart', str),
                 ('enhanced_preserve_structure', ['enhanced_preserve_structure_var'], True, bool),
                 ('enhanced_filtering', ['enhanced_filtering_var'], 'smart', str), # Backwards compatibility
-                ('force_bs_for_traditional', ['force_bs_for_traditional_var'], False, bool),  # Updated by other_settings.py
+                ('force_bs_for_traditional', ['force_bs_for_traditional_var'], True, bool),  # Updated by other_settings.py
                 
                 # HTTP/Network tuning - prioritize entry widgets over vars
                 ('chunk_timeout', ['chunk_timeout_var'], 900, lambda v: safe_int(v, 900)),
