@@ -3951,6 +3951,7 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                 # Always inject the book title BEFORE any deduplication or filtering so it
                 # survives the first run (previously only happened after a second run/merge)
                 csv_lines = _ensure_book_title_csv_lines(csv_lines)
+                print("📚 Book title injected before dedup (single-shot glossary path)")
 
                 # Fuzzy matching deduplication
                 skip_frequency_check = os.getenv("GLOSSARY_SKIP_FREQUENCY_CHECK", "0") == "1"
