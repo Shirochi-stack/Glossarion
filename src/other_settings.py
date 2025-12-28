@@ -6578,7 +6578,13 @@ def test_api_connections(self):
             endpoints_to_test.append(("Gemini (OpenAI-Compatible)", gemini_url, gemini_model))
     
     if not endpoints_to_test:
-        QMessageBox.information(None, "Info", "No custom endpoints configured. Using default API endpoints.")
+        progress_dialog.close()
+        msg_box = QMessageBox()
+        msg_box.setWindowTitle("Info")
+        msg_box.setText("No custom endpoints configured.")
+        msg_box.setIcon(QMessageBox.Information)
+        msg_box.setWindowIcon(app_icon)
+        msg_box.exec()
         return
     
     # Use module-level Bridge class

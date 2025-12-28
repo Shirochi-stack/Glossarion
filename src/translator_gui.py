@@ -34,7 +34,7 @@ try:
                                     QMenuBar, QMenu, QMessageBox, QFileDialog, QDialog,
                                     QScrollArea, QTabWidget, QCheckBox, QComboBox, QSpinBox,
                                     QSizePolicy, QSplitter, QProgressBar, QStyle, QToolButton, QGraphicsOpacityEffect)
-    from PySide6.QtCore import Qt, Signal, Slot, QTimer, QThread, QSize, QEvent, QPropertyAnimation, QEasingCurve, Property, QObject
+    from PySide6.QtCore import Qt, Signal, Slot, QTimer, QThread, QSize, QEvent, QPropertyAnimation, QEasingCurve, Property, QObject, QEventLoop
     from PySide6.QtGui import QFont, QColor, QIcon, QTextCursor, QKeySequence, QAction, QTextCharFormat, QTransform
 except ImportError as e:
     print(f"\n{'='*60}")
@@ -11099,7 +11099,7 @@ if __name__ == "__main__":
                 
                 # Keep splash alive
                 if splash_manager and splash_manager.app:
-                    splash_manager.app.processEvents()
+                    splash_manager.app.processEvents(QEventLoop.ExcludeUserInputEvents)
                 
                 time.sleep(0.01) # Small sleep to prevent CPU hogging
             

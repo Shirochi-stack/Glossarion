@@ -3,7 +3,7 @@ import sys
 import time
 import atexit
 from PySide6.QtWidgets import QApplication, QWidget, QLabel, QProgressBar, QVBoxLayout
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QEventLoop
 from PySide6.QtGui import QFont, QPalette, QColor, QPixmap
 
 class SplashManager:
@@ -160,7 +160,7 @@ class SplashManager:
             self._animate_progress()
             
             # Process events to show immediately
-            self.app.processEvents()
+            self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
             
             # Register cleanup
             atexit.register(self.close_splash)
@@ -272,7 +272,7 @@ class SplashManager:
                 
                 # Process events
                 if self.app:
-                    self.app.processEvents()
+                    self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
         except Exception:
             pass
     
@@ -325,7 +325,7 @@ class SplashManager:
                 
                 # Process events
                 if self.app:
-                    self.app.processEvents()
+                    self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
         except Exception:
             pass
     
@@ -339,7 +339,7 @@ class SplashManager:
         
         # Process events to ensure smooth UI updates
         if self.app:
-            self.app.processEvents()
+            self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
     
     def validate_all_scripts(self, base_dir=None):
         """Validate that all Python scripts in the project compile without syntax errors
@@ -437,7 +437,7 @@ class SplashManager:
             
             # Process events to keep UI responsive
             if self.app:
-                self.app.processEvents()
+                self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
 
         # Simulate missing optional scripts
         for script in missing_optional:
@@ -455,7 +455,7 @@ class SplashManager:
                 self.set_progress(progress_pct)
             
             if self.app:
-                self.app.processEvents()
+                self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
         
         # Report results
         if failed_scripts:
@@ -497,7 +497,7 @@ class SplashManager:
                 self.set_progress(start + i)
                 time.sleep(delay)
                 if self.app:
-                    self.app.processEvents()
+                    self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
         
         self.update_status("✅ All scripts validated")
         
@@ -523,7 +523,7 @@ class SplashManager:
                     
                     # Process events one last time
                     if self.app:
-                        self.app.processEvents()
+                        self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
                     
                     time.sleep(0.1)
                 except RuntimeError:
