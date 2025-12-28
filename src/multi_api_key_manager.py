@@ -1955,6 +1955,15 @@ class MultiAPIKeyDialog(QDialog):
         """Load fallback keys from config"""
         fallback_keys = self.translator_gui.config.get('fallback_keys', [])
         
+        # Save scroll position and selection
+        v_scroll = self.fallback_tree.verticalScrollBar().value()
+        h_scroll = self.fallback_tree.horizontalScrollBar().value()
+        
+        # Save selection (by index)
+        selected_indices = []
+        for item in self.fallback_tree.selectedItems():
+            selected_indices.append(self.fallback_tree.indexOfTopLevelItem(item))
+        
         # Clear tree
         self.fallback_tree.clear()
         
@@ -1993,6 +2002,16 @@ class MultiAPIKeyDialog(QDialog):
                 item.setToolTip(col, tooltip)
             
             self.fallback_tree.addTopLevelItem(item)
+            
+        # Restore selection
+        for index in selected_indices:
+            if index < self.fallback_tree.topLevelItemCount():
+                item = self.fallback_tree.topLevelItem(index)
+                item.setSelected(True)
+        
+        # Restore scroll position
+        self.fallback_tree.verticalScrollBar().setValue(v_scroll)
+        self.fallback_tree.horizontalScrollBar().setValue(h_scroll)
 
     def _add_fallback_key(self):
         """Add a new fallback key with optional Google credentials and Azure endpoint"""
@@ -3179,6 +3198,15 @@ class MultiAPIKeyDialog(QDialog):
 
     def _refresh_key_list(self):
         """Refresh the key list display preserving test results and highlighting key #1"""
+        # Save scroll position and selection
+        v_scroll = self.tree.verticalScrollBar().value()
+        h_scroll = self.tree.horizontalScrollBar().value()
+        
+        # Save selection (by index)
+        selected_indices = []
+        for item in self.tree.selectedItems():
+            selected_indices.append(self.tree.indexOfTopLevelItem(item))
+            
         # Clear tree
         self.tree.clear()
         
@@ -3298,6 +3326,16 @@ class MultiAPIKeyDialog(QDialog):
         total_count = len(keys)
         passed_count = sum(1 for k in keys if k.last_test_result == 'passed')
         self.stats_label.setText(f"Keys: {active_count} active / {total_count} total | {passed_count} passed tests")
+        
+        # Restore selection
+        for index in selected_indices:
+            if index < self.tree.topLevelItemCount():
+                item = self.tree.topLevelItem(index)
+                item.setSelected(True)
+        
+        # Restore scroll position
+        self.tree.verticalScrollBar().setValue(v_scroll)
+        self.tree.horizontalScrollBar().setValue(h_scroll)
 
     def _on_click(self, item, column):
         """Handle click on tree item for inline editing"""
