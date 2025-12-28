@@ -4722,7 +4722,7 @@ class GlossarionWeb:
                                     extraction_prompt = gr.Textbox(
                                         label="Extraction Template (Use placeholders: {language}, {min_frequency}, {max_names}, {max_titles})",
                                         lines=10,
-                                        value=self.get_config_value('manual_glossary_prompt2',
+                                        value=self.get_config_value('manual_glossary_prompt3',
                                             """You are a novel glossary extraction assistant.
 
 You must strictly return ONLY CSV format with these columns and entry types in this exact order provided:

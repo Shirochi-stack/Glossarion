@@ -996,7 +996,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         })
         
         # Glossary prompts
-        self.manual_glossary_prompt = self.config.get('manual_glossary_prompt2', 
+        self.manual_glossary_prompt = self.config.get('manual_glossary_prompt3', 
             """You are a novel glossary extraction assistant.
 
 You must strictly return ONLY CSV format with these columns and entry types in this exact order provided
@@ -1982,7 +1982,7 @@ Recent translations to summarize:
     def _init_variables(self):
         """Initialize all configuration variables"""
         # Load saved prompts
-        self.manual_glossary_prompt = self.config.get('manual_glossary_prompt2', self.default_manual_glossary_prompt)
+        self.manual_glossary_prompt = self.config.get('manual_glossary_prompt3', self.default_manual_glossary_prompt)
         # Note: Ignoring old 'auto_glosary_prompt2' key to force update to new prompt
         # Also treat empty strings as missing to ensure users get the new default
         unified_prompt_temp = self.config.get('unified_auto_glosary_prompt3', self.default_unified_auto_glosary_prompt3)

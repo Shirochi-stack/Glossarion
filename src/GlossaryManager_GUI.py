@@ -1316,7 +1316,7 @@ CRITICAL EXTRACTION RULES:
         # Keep a copy for later (e.g., when saving and the field was cleared)
         self.default_manual_glossary_prompt = default_manual_prompt
 
-        manual_prompt_from_config = self.config.get('manual_glossary_prompt2', default_manual_prompt)
+        manual_prompt_from_config = self.config.get('manual_glossary_prompt3', default_manual_prompt)
         if not manual_prompt_from_config or not manual_prompt_from_config.strip():
             self.manual_glossary_prompt = default_manual_prompt
         else:
@@ -1527,10 +1527,10 @@ CRITICAL EXTRACTION RULES:
                             self.manual_prompt_text.blockSignals(False)
 
                 # Save to config (using new key)
-                self.config['manual_glossary_prompt2'] = self.manual_glossary_prompt
+                self.config['manual_glossary_prompt3'] = self.manual_glossary_prompt
 
                 if debug_enabled:
-                    print(f"🔍 [UPDATE] manual_glossary_prompt2: {len(self.manual_glossary_prompt)} chars")
+                    print(f"🔍 [UPDATE] manual_glossary_prompt3: {len(self.manual_glossary_prompt)} chars")
             
             if hasattr(self, 'auto_prompt_text'):
                 self.unified_auto_glosary_prompt3 = self.auto_prompt_text.toPlainText().strip()
