@@ -1672,6 +1672,10 @@ CRITICAL EXTRACTION RULES:
         if not hasattr(self, 'enable_auto_glossary_checkbox'):
             self.enable_auto_glossary_checkbox = self._create_styled_checkbox("Enable Automatic Glossary Generation")
             self.enable_auto_glossary_checkbox.setChecked(self.config.get('enable_auto_glossary', False))
+        self.enable_auto_glossary_checkbox.setToolTip(
+            "Run glossary extraction during translation.\n"
+            "Finds names/terms per chunk and keeps them consistent."
+        )
         master_toggle_layout.addWidget(self.enable_auto_glossary_checkbox)
         
         label = QLabel("(Automatic extraction and translation of character names/Terms)")
@@ -1688,6 +1692,10 @@ CRITICAL EXTRACTION RULES:
         if not hasattr(self, 'append_glossary_checkbox'):
             self.append_glossary_checkbox = self._create_styled_checkbox("Append Glossary to System Prompt")
             self.append_glossary_checkbox.setChecked(self.config.get('append_glossary', False))
+        self.append_glossary_checkbox.setToolTip(
+            "Send the current glossary to the model with every request.\n"
+            "Improves consistency across chapters."
+        )
         append_layout.addWidget(self.append_glossary_checkbox)
         
         label2 = QLabel("(Applies to ALL glossaries - manual and automatic)")
@@ -1704,6 +1712,10 @@ CRITICAL EXTRACTION RULES:
         if not hasattr(self, 'add_additional_glossary_checkbox'):
             self.add_additional_glossary_checkbox = self._create_styled_checkbox("Add Additional Glossary")
             self.add_additional_glossary_checkbox.setChecked(self.config.get('add_additional_glossary', False))
+        self.add_additional_glossary_checkbox.setToolTip(
+            "Always include an external glossary file (CSV/JSON/TXT/PDF/MD)\n"
+            "alongside the generated glossary when calling the API."
+        )
         additional_glossary_layout.addWidget(self.add_additional_glossary_checkbox)
         
         # Load additional glossary button
@@ -1742,6 +1754,10 @@ CRITICAL EXTRACTION RULES:
         if not hasattr(self, 'compress_glossary_checkbox'):
             self.compress_glossary_checkbox = self._create_styled_checkbox("Compress Glossary Prompt")
             self.compress_glossary_checkbox.setChecked(self.config.get('compress_glossary_prompt', True))
+        self.compress_glossary_checkbox.setToolTip(
+            "Only send glossary entries that appear in the current source text.\n"
+            "Saves tokens and cost; recommended ON."
+        )
         compress_layout.addWidget(self.compress_glossary_checkbox)
         
         label3 = QLabel("(Excludes glossary entries that don't appear in source text before sending to API)")
@@ -1776,6 +1792,10 @@ CRITICAL EXTRACTION RULES:
         if not hasattr(self, 'include_gender_context_checkbox'):
             self.include_gender_context_checkbox = self._create_styled_checkbox("Include Gender Context (More Expensive)")
             self.include_gender_context_checkbox.setChecked(self.config.get('include_gender_context', False))
+        self.include_gender_context_checkbox.setToolTip(
+            "Expand snippets with surrounding sentences to infer gender.\n"
+            "Higher cost; required to enable gender nuance/description options."
+        )
         gender_context_layout.addWidget(self.include_gender_context_checkbox)
         
         label4 = QLabel("(Expands text snippets to include surrounding sentences for better gender detection)")
@@ -1790,6 +1810,10 @@ CRITICAL EXTRACTION RULES:
         if not hasattr(self, 'enable_gender_nuance_checkbox'):
             self.enable_gender_nuance_checkbox = self._create_styled_checkbox("Enable Gender Nuance Analysis")
             self.enable_gender_nuance_checkbox.setChecked(self.config.get('enable_gender_nuance', True))
+        self.enable_gender_nuance_checkbox.setToolTip(
+            "Adds a pronoun/honorific-aware scoring pass to prioritize\n"
+            "sentences that reveal gender. Slightly higher CPU/time cost."
+        )
         gender_nuance_layout.addWidget(self.enable_gender_nuance_checkbox)
 
         gender_nuance_label = QLabel("(Prioritizes pronoun/honorific cues to improve gender assignment; adds a scoring pass)")
@@ -1805,6 +1829,10 @@ CRITICAL EXTRACTION RULES:
         if not hasattr(self, 'include_description_checkbox'):
             self.include_description_checkbox = self._create_styled_checkbox("Include Description Column")
             self.include_description_checkbox.setChecked(self.config.get('include_description', False))
+        self.include_description_checkbox.setToolTip(
+            "Add a description/context field to each glossary entry.\n"
+            "Only available when gender context is enabled."
+        )
         description_layout.addWidget(self.include_description_checkbox)
         
         label5 = QLabel("(Adds a description/context field for each glossary entry)")
@@ -1834,6 +1862,10 @@ CRITICAL EXTRACTION RULES:
             self.disable_smart_filtering_checkbox = self._create_styled_checkbox("Disable Smart Filtering (Send Full Text)")
             # Invert the logic: checkbox is "disable" so checked=True means use_smart_filter=False
             self.disable_smart_filtering_checkbox.setChecked(not self.config.get('glossary_use_smart_filter', True))
+        self.disable_smart_filtering_checkbox.setToolTip(
+            "Bypass all text filtering and send the entire novel to the extractor.\n"
+            "Extremely expensive; use only for debugging edge cases."
+        )
         disable_filtering_layout.addWidget(self.disable_smart_filtering_checkbox)
         
         label6 = QLabel("(Disables all text filtering and sends the entire novel to the API - very expensive!)")
