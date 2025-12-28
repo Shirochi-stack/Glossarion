@@ -187,7 +187,9 @@ This configures the glossary that runs *automatically during* the translation pr
 *   **Append Glossary to System Prompt**: Sends the found terms to the AI to ensure consistency.
 *   **Add Additional Glossary**: Load an external CSV/JSON file to always include in the translation context.
 *   **Compress Glossary Prompt**: **(Recommended)** Only sends terms *actually present* in the current text chunk to save money/tokens.
-*   **Include Gender / Description**: Adds extra context columns to the extracted glossary.
+*   **Include Gender Context**: Expands each hit with nearby sentences so the model can infer gender. Turning it off also disables the next two options.
+*   **Enable Gender Nuance Analysis** *(default: ON)*: Runs an extra pronoun/honorific-aware scoring pass (logged as “analyzing sentences for term coverage and gender nuance…”) to prioritize sentences that reveal gender. Slightly higher CPU/time cost; turn off if you just want the wider context window without the scoring pass.
+*   **Include Description Column**: Adds a description/context field to every glossary entry (only available while Gender Context is on).
 *   **Disable Smart Filtering**: (Advanced) If checked, sends FULL text to the extractor (Expensive!). Default is unchecked (Smart Filter enabled).
 *   **Targeted Extraction Settings** (Sub-tab):
     *   **Min Frequency**: A name must appear this many times to be saved.

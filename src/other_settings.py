@@ -6323,8 +6323,8 @@ def test_api_connections(self):
     """Test all configured API connections (Qt version)"""
     import os
     from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QMessageBox
-    from PySide6.QtCore import Qt
-    from PySide6.QtGui import QIcon
+    from PySide6.QtCore import Qt, QSize
+    from PySide6.QtGui import QIcon, QPixmap
 
     # Resolve app icon once for all dialogs
     icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
@@ -6355,6 +6355,18 @@ def test_api_connections(self):
     
     # Add progress message
     layout = QVBoxLayout(progress_dialog)
+
+    # Add app icon at 72x72 with HiDPI scaling
+    icon_label = QLabel()
+    dpr = QApplication.primaryScreen().devicePixelRatio() if QApplication.primaryScreen() else 1.0
+    pix = QPixmap(icon_path) if os.path.exists(icon_path) else app_icon.pixmap(QSize(72, 72))
+    if not pix.isNull():
+        scaled = pix.scaled(int(72 * dpr), int(72 * dpr), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        scaled.setDevicePixelRatio(dpr)
+        icon_label.setPixmap(scaled)
+        icon_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(icon_label)
+
     progress_label = QLabel("Testing API connections...\nPlease wait...")
     progress_label.setAlignment(Qt.AlignCenter)
     progress_label.setStyleSheet("font-size: 10pt;")
@@ -6363,6 +6375,7 @@ def test_api_connections(self):
     # Show dialog non-modally so it's visible
     progress_dialog.show()
     progress_dialog.repaint()
+    QApplication.processEvents()  # ensure label paints before network calls
     
     try:
         # Ensure we have the openai module
@@ -6487,11 +6500,20 @@ def test_api_connections(self):
             # Regular OpenAI-compatible endpoint
             name, base_url, model = endpoint_info[:3]
             try:
+                # Quick endpoint reachability probe (low timeout)
+                try:
+                    import httpx
+                    probe_timeout = 3.0
+                    probe_url = base_url.rstrip("/")  # tolerate missing path
+                    httpx.get(probe_url, timeout=probe_timeout)
+                except Exception as probe_err:
+                    results.append(f"❌ {name}: Endpoint unreachable ({probe_err})")
+                    continue
                 # Create client for this endpoint
                 test_client = openai.OpenAI(
                     api_key=api_key,
                     base_url=base_url,
-                    timeout=5.0  # Short timeout for testing
+                    timeout=5.0  # Keep model test short to avoid UI freeze
                 )
                 
                 # Try a minimal completion
@@ -6505,7 +6527,9 @@ def test_api_connections(self):
             except Exception as e:
                 error_msg = str(e)
                 # Simplify common error messages
-                if "404" in error_msg:
+                if "timed out" in error_msg.lower():
+                    error_msg = f"Connection timed out. The endpoint is running but the model '{model}' may be too slow to respond."
+                elif "404" in error_msg:
                     error_msg = "404 - Endpoint not found. Check URL and model name."
                 elif "401" in error_msg or "403" in error_msg:
                     error_msg = "Authentication failed. Check API key."
