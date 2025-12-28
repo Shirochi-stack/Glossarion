@@ -1015,7 +1015,7 @@ character,ᫀ뢔사난,Kim Sang-hyu,male,A master swordsman from the
  
 
 CRITICAL EXTRACTION RULES:
-- Extract ONLY: Character names, Location names, Ability/Skill names, Item names, Organization names, Titles/Ranks
+- Extract All {entries}
 - Do NOT extract sentences, dialogue, actions, questions, or statements as glossary entries
 - REJECT entries that contain verbs or end with punctuation (?, !, .)
 - REJECT entries starting with: "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But". (The description column is excluded from this restriction)
@@ -1905,7 +1905,7 @@ character,ᫀ뢔사난,Kim Sang-hyu,male,A master swordsman from the
  
 
 CRITICAL EXTRACTION RULES:
-- Extract ONLY: Character names, Location names, Ability/Skill names, Item names, Organization names, Titles/Ranks
+- Extract All {entries}
 - Do NOT extract sentences, dialogue, actions, questions, or statements as glossary entries
 - REJECT entries that contain verbs or end with punctuation (?, !, .)
 - REJECT entries starting with: "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But". (The description column is excluded from this restriction)
@@ -6997,10 +6997,32 @@ If you see multiple p-b cookies, use the one with the longest value."""
                             for field in custom_fields:
                                 fields_str += f"\n- {field}: custom field"
                         
+                        # Build entries list from custom entry types (manual only)
+                        def _entries_phrase(custom_types: dict) -> str:
+                            items = []
+                            for t_name, cfg in (custom_types or {}).items():
+                                if cfg is not None and not cfg.get('enabled', True):
+                                    continue
+                                label = str(t_name).replace('_', ' ').strip()
+                                if not label:
+                                    continue
+                                label = label[0].upper() + label[1:]
+                                items.append(label)
+                            if not items:
+                                return "entries"
+                            if len(items) == 1:
+                                return f"{items[0]} entries"
+                            if len(items) == 2:
+                                return f"{items[0]} & {items[1]} entries"
+                            return ", ".join(items[:-1]) + f", & {items[-1]} entries"
+
+                        entries_str = _entries_phrase(getattr(self, 'custom_entry_types', {}))
                         # Replace placeholders
                         prompt = prompt.replace('{fields}', fields_str)
-                        prompt = prompt.replace('{chapter_text}', '')
                         prompt = prompt.replace('{{fields}}', fields_str)
+                        prompt = prompt.replace('{entries}', entries_str)
+                        prompt = prompt.replace('{{entries}}', entries_str)
+                        prompt = prompt.replace('{chapter_text}', '')
                         prompt = prompt.replace('{{chapter_text}}', '')
                         prompt = prompt.replace('{text}', '')
                         prompt = prompt.replace('{{text}}', '')

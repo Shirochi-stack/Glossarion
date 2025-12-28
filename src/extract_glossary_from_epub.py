@@ -1198,6 +1198,28 @@ def build_prompt(chapter_text: str) -> tuple:
     target_language = os.getenv('GLOSSARY_TARGET_LANGUAGE', 'English')
     if custom_prompt and '{language}' in custom_prompt:
         custom_prompt = custom_prompt.replace('{language}', target_language)
+
+    # Build entries phrase from enabled custom entry types (manual prompt only)
+    custom_types = get_custom_entry_types()
+    def _entries_phrase(types_dict: dict) -> str:
+        items = []
+        for t_name, cfg in (types_dict or {}).items():
+            if cfg is not None and not cfg.get('enabled', True):
+                continue
+            label = str(t_name).replace('_', ' ').strip()
+            if not label:
+                continue
+            label = label[0].upper() + label[1:]
+            items.append(label)
+        if not items:
+            return "entries"
+        if len(items) == 1:
+            return f"{items[0]} entries"
+        if len(items) == 2:
+            return f"{items[0]} & {items[1]} entries"
+        return ", ".join(items[:-1]) + f", & {items[-1]} entries"
+
+    entries_str = _entries_phrase(custom_types)
     
     if not custom_prompt:
         # If no custom prompt, create a default
@@ -1219,7 +1241,7 @@ character,ᫀ뢔사난,Kim Sang-hyu,male,A master swordsman from the
 term,ᫀ간편헤,Gale Hardest,,A legendary ancient artifact forged by the Wind God said to control the atmospheric currents, currently sought by the Empire's elite guard to quell the rebellion
 
 CRITICAL EXTRACTION RULES:
-- Extract ONLY: Character names, Location names, Ability/Skill names, Item names, Organization names, Titles/Ranks
+- Extract All {entries}
 - Do NOT extract sentences, dialogue, actions, questions, or statements as glossary entries
 - REJECT entries that contain verbs or end with punctuation (?, !, .)
 - REJECT entries starting with: "How", "What", "Why", "I", "He", "She", "They", "That's", "So", "Therefore", "Still", "But". (The description column is excluded from this restriction)
@@ -1228,11 +1250,13 @@ CRITICAL EXTRACTION RULES:
 - The description column must contain detailed context/explanation
 - You must include absolutely all characters found in the provided text in your glossary generation. Do not skip any character."""
 
+    # Replace {entries} placeholder now that we have the enabled custom entry types
+    custom_prompt = custom_prompt.replace('{entries}', entries_str)
+    custom_prompt = custom_prompt.replace('{{entries}}', entries_str)
+
     # Check if the prompt contains {fields} placeholder
     if '{fields}' in custom_prompt:
         # Get enabled types
-        custom_types = get_custom_entry_types()
-        
         enabled_types = [(t, cfg) for t, cfg in custom_types.items() if cfg.get('enabled', True)]
         
         # Get custom fields
