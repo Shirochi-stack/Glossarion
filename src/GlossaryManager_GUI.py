@@ -2270,8 +2270,11 @@ CRITICAL EXTRACTION RULES:
             "• Strip honorifics: Remove suffixes from extracted names (e.g., '김' instead of '김님')",
             "• Fuzzy threshold: How similar terms must be to match (0.9 = 90% match, 1.0 = exact match)"
         ]
+        help_wrap_width = int(self._screen.width() * 0.55)  # keep help text from forcing huge width
         for txt in help_texts:
             label = QLabel(txt)
+            label.setWordWrap(True)
+            label.setMaximumWidth(help_wrap_width)
             label.setStyleSheet("color: gray; font-size: 10pt; margin-left: 20px;")
             help_layout.addWidget(label)
         
