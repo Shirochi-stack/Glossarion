@@ -2207,11 +2207,11 @@ class MultiAPIKeyDialog(QDialog):
                     output_dir=None
                 )
                 
-                # Force 0 retries for testing to speed up failure detection
+                # Force 1 retries for testing to speed up failure detection
                 try:
                     tls = client._get_thread_local_client()
-                    tls.max_retries_override = 0
-                    print(f"[DEBUG] Set max_retries_override=0 for fallback key test")
+                    tls.max_retries_override = 1
+                    print(f"[DEBUG] Set max_retries_override=1 for fallback key test")
                 except Exception:
                     pass
                 
@@ -4094,11 +4094,11 @@ class MultiAPIKeyDialog(QDialog):
                     output_dir=None
                 )
                 
-                # Force 0 retries for testing to speed up failure detection
+                # Force 1 retries for testing to speed up failure detection
                 try:
                     tls = client._get_thread_local_client()
-                    tls.max_retries_override = 0
-                    print(f"[DEBUG] Set max_retries_override=0 for key test")
+                    tls.max_retries_override = 1
+                    print(f"[DEBUG] Set max_retries_override=1 for key test")
                 except Exception:
                     pass
                 
