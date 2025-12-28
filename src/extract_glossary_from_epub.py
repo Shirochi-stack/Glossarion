@@ -240,6 +240,7 @@ _history_lock = threading.Lock()  # For thread-safe history access in batch mode
 BOOK_TITLE_RAW = None
 BOOK_TITLE_TRANSLATED = None
 BOOK_TITLE_PRESENT = False
+BOOK_TITLE_VALUE = None
 
 def _mark_book_title_from_csv(csv_text: str):
     """Detect existing book entry in CSV content and mark presence flag."""
@@ -355,7 +356,7 @@ def _extract_translated_title_from_metadata(output_path: str, epub_path: str) ->
 
 def _ensure_book_title_entry(glossary: List[Dict]) -> List[Dict]:
     """Insert a 'book' entry (raw + translated title) at the top if enabled and not present."""
-    global BOOK_TITLE_PRESENT, BOOK_TITLE_RAW, BOOK_TITLE_TRANSLATED
+    global BOOK_TITLE_PRESENT, BOOK_TITLE_VALUE, BOOK_TITLE_RAW, BOOK_TITLE_TRANSLATED
     
     if BOOK_TITLE_PRESENT:
         return glossary
@@ -386,6 +387,7 @@ def _ensure_book_title_entry(glossary: List[Dict]) -> List[Dict]:
         if (raw == norm_raw or trans == norm_trans or 
             raw == norm_trans or trans == norm_raw):
             BOOK_TITLE_PRESENT = True
+            BOOK_TITLE_VALUE = entry.get("translated_name") or entry.get("raw_name")
             return glossary  # Already present
 
     book_entry = {
@@ -396,6 +398,7 @@ def _ensure_book_title_entry(glossary: List[Dict]) -> List[Dict]:
     }
     glossary.insert(0, book_entry)
     BOOK_TITLE_PRESENT = True
+    BOOK_TITLE_VALUE = trans_title or raw_title
     return glossary
 
 def set_stop_flag(value):
@@ -4187,6 +4190,22 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
     """
     global _progress_lock
     
+    # Ensure book title entry is present in-memory before recording status
+    glossary = _ensure_book_title_entry(glossary)
+
+    # Refresh book-title status from current glossary snapshot
+    def _refresh_book_title_flags():
+        global BOOK_TITLE_PRESENT, BOOK_TITLE_VALUE
+        for entry in glossary or []:
+            if str(entry.get("type", "")).lower() == "book":
+                BOOK_TITLE_PRESENT = True
+                BOOK_TITLE_VALUE = entry.get("translated_name") or entry.get("raw_name")
+                return
+        BOOK_TITLE_PRESENT = False
+        BOOK_TITLE_VALUE = None
+
+    _refresh_book_title_flags()
+
     # Acquire lock to prevent concurrent writes
     with _progress_lock:
         progress_data = {
