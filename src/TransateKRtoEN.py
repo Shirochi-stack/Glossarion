@@ -7508,7 +7508,7 @@ def main(log_callback=None, stop_callback=None):
                         file_type = "CSV"
                     print(f"📑 Glossary ready ({file_type}) with {entry_count} entries")
                     print("📑 Sample glossary lines:")
-                    for ln in lines[1:4]:
+                    for ln in lines[1:6]:
                         print(f"   • {ln}")
                 elif glossary_file.lower().endswith('.json'):
                     with open(glossary_file, 'r', encoding='utf-8') as f:
