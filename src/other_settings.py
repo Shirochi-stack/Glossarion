@@ -6321,9 +6321,14 @@ def toggle_more_endpoints(self):
              
 def test_api_connections(self):
     """Test all configured API connections (Qt version)"""
+    import os
     from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QMessageBox
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QIcon
+
+    # Resolve app icon once for all dialogs
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Halgakos.ico")
+    app_icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon("Halgakos.ico")
     
     # Show immediate feedback
     progress_dialog = QDialog(self.current_dialog if hasattr(self, 'current_dialog') else None)
@@ -6337,7 +6342,7 @@ def test_api_connections(self):
     
     # Set icon
     try:
-        progress_dialog.setWindowIcon(QIcon("halgakos.ico"))
+        progress_dialog.setWindowIcon(app_icon)
     except:
         pass
     
@@ -6518,10 +6523,13 @@ def test_api_connections(self):
     # Determine if all succeeded
     all_success = all("✅" in r for r in results)
     
-    if all_success:
-        QMessageBox.information(None, "Success", result_message)
-    else:
-        QMessageBox.warning(None, "Test Results", result_message)
+    msg_box = QMessageBox(progress_dialog.parent() if progress_dialog.parent() else None)
+    msg_box.setWindowTitle("Success" if all_success else "Test Results")
+    msg_box.setText(result_message)
+    msg_box.setIcon(QMessageBox.Information if all_success else QMessageBox.Warning)
+    msg_box.setWindowIcon(app_icon)
+    msg_box.setStandardButtons(QMessageBox.Ok)
+    msg_box.exec()
     
 
 def run_standalone_translate_headers(self):
