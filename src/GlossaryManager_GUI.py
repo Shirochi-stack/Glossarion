@@ -1377,6 +1377,8 @@ CRITICAL EXTRACTION RULES:
             lbl = QLabel(label_text)
             lbl.setFixedWidth(label_width)
             lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            if tooltip:
+                lbl.setToolTip(tooltip)
             h.addWidget(lbl)
             h.addWidget(field_widget)
             h.addStretch()
@@ -1996,7 +1998,7 @@ CRITICAL EXTRACTION RULES:
         self.glossary_max_sentences_entry.setText(str(self.config.get('glossary_max_sentences', 200)))
         
         # Helper: compact label+field pair in one cell
-        def _pair(label_text, field_widget, label_width=180):
+        def _pair(label_text, field_widget, label_width=180, tooltip=None):
             cont = QWidget()
             h = QHBoxLayout(cont)
             h.setContentsMargins(0, 0, 0, 0)
@@ -2010,15 +2012,30 @@ CRITICAL EXTRACTION RULES:
             return cont
         
         # Row 1 (left/right pairs)
-        extraction_grid.addWidget(_pair("Min frequency:", self.glossary_min_frequency_entry), 0, 0, 1, 2)
-        extraction_grid.addWidget(_pair("Max names:", self.glossary_max_names_entry), 0, 2, 1, 2)
+        extraction_grid.addWidget(_pair(
+            "Min frequency:", self.glossary_min_frequency_entry,
+            tooltip="Times a name must appear before keeping it.\nLower = more terms; affects dynamic sentence limit."
+        ), 0, 0, 1, 2)
+        extraction_grid.addWidget(_pair(
+            "Max names:", self.glossary_max_names_entry,
+            tooltip="Prompt suggestion for how many character names to keep per chunk."
+        ), 0, 2, 1, 2)
         
         # Row 2
-        extraction_grid.addWidget(_pair("Max titles:", self.glossary_max_titles_entry), 1, 0, 1, 2)
-        extraction_grid.addWidget(_pair("Context window size:", self.glossary_context_window_entry), 1, 2, 1, 2)
+        extraction_grid.addWidget(_pair(
+            "Max titles:", self.glossary_max_titles_entry,
+            tooltip="Prompt suggestion for how many titles/terms to keep per chunk."
+        ), 1, 0, 1, 2)
+        extraction_grid.addWidget(_pair(
+            "Context window size:", self.glossary_context_window_entry,
+            tooltip="Sentences before/after a hit used for gender detection (default: 2)."
+        ), 1, 2, 1, 2)
         
         # Row 3 - Max text size and target language
-        extraction_grid.addWidget(_pair("Max text size:", self.glossary_max_text_size_entry), 2, 0, 1, 2)
+        extraction_grid.addWidget(_pair(
+            "Max text size:", self.glossary_max_text_size_entry,
+            tooltip="Characters to analyze (0 = entire text, 50000 = first 50k chars)."
+        ), 2, 0, 1, 2)
         
         # Target language dropdown
         if not hasattr(self, 'glossary_target_language_combo'):
@@ -2116,6 +2133,9 @@ CRITICAL EXTRACTION RULES:
         ms_label = QLabel("Max sentences:")
         ms_label.setFixedWidth(180)
         ms_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        ms_label.setToolTip(
+            "Maximum sentences sent to AI.\nDynamic Limit adds +1 per detected character before dedup."
+        )
         ms_layout.addWidget(ms_label)
         ms_layout.addWidget(self.glossary_max_sentences_entry)
         
@@ -2137,10 +2157,20 @@ CRITICAL EXTRACTION RULES:
         ms_layout.addStretch()
         extraction_grid.addWidget(ms_cont, 3, 0, 1, 2)
         
-        extraction_grid.addWidget(_pair("Chapter split threshold:", self.glossary_chapter_split_threshold_entry), 3, 2, 1, 2)
+        extraction_grid.addWidget(_pair(
+            "Chapter split threshold:", self.glossary_chapter_split_threshold_entry,
+            tooltip="Split large texts into chunks (0 = token-based; 100000 = split at 100k chars)."
+        ), 3, 2, 1, 2)
         
         # Row 5 - Filter mode
-        extraction_grid.addWidget(QLabel("Filter mode:"), 4, 0)
+        filter_label = QLabel("Filter mode:")
+        filter_label.setToolTip(
+            "Choose which names/terms to keep:\n"
+            "- All names & terms\n"
+            "- Names with honorifics only\n"
+            "- Names without honorifics & terms"
+        )
+        extraction_grid.addWidget(filter_label, 4, 0)
         filter_widget = QWidget()
         filter_layout = QHBoxLayout(filter_widget)
         filter_layout.setContentsMargins(0, 0, 0, 0)
@@ -2168,15 +2198,20 @@ CRITICAL EXTRACTION RULES:
         filter_layout.addStretch()
 
         # Row 6 - Strip honorifics
-        extraction_grid.addWidget(QLabel("Strip honorifics:"), 5, 0)
+        strip_label = QLabel("Strip honorifics:")
+        strip_label.setToolTip("Remove suffixes from extracted names (e.g., '-nim', '-san').")
+        extraction_grid.addWidget(strip_label, 5, 0)
         if not hasattr(self, 'strip_honorifics_checkbox'):
             self.strip_honorifics_checkbox = self._create_styled_checkbox("Remove honorifics from extracted names")
+        self.strip_honorifics_checkbox.setToolTip("Remove suffixes from extracted names (e.g., '-nim', '-san').")
         # Always reload from config
         self.strip_honorifics_checkbox.setChecked(self.config.get('strip_honorifics', True))
         extraction_grid.addWidget(self.strip_honorifics_checkbox, 5, 1, 1, 3)
         
         # Row 7 - Fuzzy matching threshold (reuse existing value)
-        extraction_grid.addWidget(QLabel("Fuzzy threshold:"), 6, 0)
+        fuzzy_label = QLabel("Fuzzy threshold:")
+        fuzzy_label.setToolTip("Similarity needed to merge duplicates.\n0.90 = very similar (recommended); 1.0 = exact match.")
+        extraction_grid.addWidget(fuzzy_label, 6, 0)
         
         auto_fuzzy_widget = QWidget()
         auto_fuzzy_layout = QHBoxLayout(auto_fuzzy_widget)
