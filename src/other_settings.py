@@ -6349,9 +6349,8 @@ def test_api_connections(self):
     # Use screen ratios for sizing
     from PySide6.QtWidgets import QApplication
     screen = QApplication.primaryScreen().geometry()
-    width = int(screen.width() * 0.16)  # 16% of screen width
-    # Increase height to accommodate larger icon (was 14%)
-    height = int(screen.height() * 0.20)  # 20% of screen height
+    width = int(screen.width() * 0.13)
+    height = int(screen.height() * 0.17)
     progress_dialog.setFixedSize(width, height)
     
     # Set icon
@@ -6369,14 +6368,12 @@ def test_api_connections(self):
     
     # Add progress message
     layout = QVBoxLayout(progress_dialog)
-    # Add spacing to push icon up
-    layout.addSpacing(10)
+    # layout.addSpacing(10) # Removed spacing to reduce empty space
 
-    # Add app icon at 90x90 with HiDPI scaling (Animated)
+    # Add app icon at 80x80 with HiDPI scaling (Animated)
     icon_label = RotatableLabel()
-    # Set fixed size slightly larger than diagonal of 90x90 (approx 127px) to prevent layout shifts
-    # Using 140x140 for safety
-    icon_label.setFixedSize(140, 140)
+    # Set fixed size to 120x120 for container, icon itself is scaled to 90x90
+    icon_label.setFixedSize(120, 120)
     dpr = QApplication.primaryScreen().devicePixelRatio() if QApplication.primaryScreen() else 1.0
     pix = QPixmap(icon_path) if os.path.exists(icon_path) else app_icon.pixmap(QSize(90, 90))
     if not pix.isNull():
@@ -6388,7 +6385,7 @@ def test_api_connections(self):
         
         # Animate the icon
         anim = QPropertyAnimation(icon_label, b"rotation", progress_dialog)
-        anim.setDuration(1000)
+        anim.setDuration(800)
         anim.setStartValue(0)
         anim.setEndValue(360)
         anim.setLoopCount(-1)
@@ -6622,13 +6619,24 @@ def test_api_connections(self):
         # Determine if all succeeded
         all_success = all("✅" in r for r in results)
         
-        msg_box = QMessageBox(progress_dialog.parent() if progress_dialog.parent() else None)
+        # Try to use other_settings_dialog as parent to ensure correct stacking
+        parent = getattr(self, '_other_settings_dialog', None)
+        if not parent or not parent.isVisible():
+            parent = progress_dialog.parent() if progress_dialog.parent() else None
+            
+        msg_box = QMessageBox(parent)
         msg_box.setWindowTitle("Success" if all_success else "Test Results")
         msg_box.setText(result_message)
         msg_box.setIcon(QMessageBox.Information if all_success else QMessageBox.Warning)
         msg_box.setWindowIcon(app_icon)
         msg_box.setStandardButtons(QMessageBox.Ok)
-        msg_box.exec()
+        
+        # Store in self to prevent garbage collection since we use show() (non-modal)
+        self._connection_result_dialog = msg_box
+        msg_box.setWindowModality(Qt.NonModal)
+        # Ensure it stays on top
+        msg_box.setWindowFlags(msg_box.windowFlags() | Qt.WindowStaysOnTopHint)
+        msg_box.show()
 
     self.conn_test_bridge.finished.connect(finish_ui)
     
