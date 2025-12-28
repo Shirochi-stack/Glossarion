@@ -99,7 +99,32 @@ def _derive_book_title(output_dir):
             except Exception as e:
                 print(f"[Warning] Could not read metadata.json for book title: {e}")
 
-    # Fallback: read untranslated title from EPUB metadata
+    # Fallback: read untranslated title from EPUB metadata (manual parse for robustness)
+    try:
+        if epub_path and os.path.exists(epub_path):
+            print(f"[Metadata] Checking EPUB metadata for title (manual parse): {epub_path}")
+            import zipfile
+            with zipfile.ZipFile(epub_path, 'r') as zf:
+                # Find opf
+                opf_name = next((n for n in zf.namelist() if n.lower().endswith('.opf')), None)
+                if opf_name:
+                    content = zf.read(opf_name).decode('utf-8', errors='ignore')
+                    # Use simple regex to avoid heavy XML parsing deps if possible, or fall back to BS4
+                    # But since BS4 is imported, let's use it
+                    soup = BeautifulSoup(content, 'xml')
+                    # Try dc:title
+                    title_tag = soup.find('dc:title')
+                    if not title_tag:
+                        title_tag = soup.find('title')
+                    
+                    if title_tag:
+                        val = title_tag.get_text(strip=True)
+                        if val:
+                            return val
+    except Exception as e:
+        print(f"[Warning] Manual EPUB title extraction failed: {e}")
+
+    # Fallback: ebooklib
     try:
         if epub_path and os.path.exists(epub_path):
             print(f"[Metadata] Checking EPUB metadata for title: {epub_path}")

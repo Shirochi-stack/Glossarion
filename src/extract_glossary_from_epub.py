@@ -304,9 +304,38 @@ def _derive_book_title(epub_path: str, output_path: str) -> Tuple[str, bool]:
                 print(f"[Warning] Could not read metadata.json for book title: {e}")
 
     # Fallback: read untranslated title from EPUB metadata
+    # Try manual parsing first (more robust)
     try:
         if epub_path and os.path.exists(epub_path):
-            print(f"[Metadata] Checking EPUB metadata for title: {epub_path}")
+            print(f"[Metadata] Checking EPUB metadata for title (manual parse): {epub_path}")
+            with zipfile.ZipFile(epub_path, 'r') as zf:
+                # Find opf
+                opf_name = next((n for n in zf.namelist() if n.lower().endswith('.opf')), None)
+                if opf_name:
+                    content = zf.read(opf_name).decode('utf-8', errors='ignore')
+                    # Use BS4 with xml parser
+                    try:
+                        soup = BeautifulSoup(content, 'xml')
+                    except Exception:
+                        soup = BeautifulSoup(content, 'html.parser')
+                        
+                    # Try dc:title
+                    title_tag = soup.find('dc:title')
+                    if not title_tag:
+                        # Fallback to any title tag
+                        title_tag = soup.find('title')
+                    
+                    if title_tag:
+                        val = title_tag.get_text(strip=True)
+                        if val:
+                            return val, False
+    except Exception as e:
+        print(f"[Warning] Manual EPUB title extraction failed: {e}")
+
+    # Fallback: ebooklib
+    try:
+        if epub_path and os.path.exists(epub_path):
+            print(f"[Metadata] Checking EPUB metadata for title (ebooklib): {epub_path}")
             book = epub.read_epub(epub_path)
             titles = book.get_metadata("DC", "title")
             if titles:
@@ -314,7 +343,7 @@ def _derive_book_title(epub_path: str, output_path: str) -> Tuple[str, bool]:
                 if val:
                     return str(val).strip(), False
     except Exception as e:
-        print(f"[Warning] Could not read EPUB metadata for title: {e}")
+        print(f"[Warning] Could not read EPUB metadata via ebooklib: {e}")
 
     # No metadata.json title found; skip adding book entry
     return None, False
