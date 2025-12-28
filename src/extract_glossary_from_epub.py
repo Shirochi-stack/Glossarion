@@ -286,21 +286,10 @@ def _derive_book_title(epub_path: str, output_path: str) -> str:
     """
     # metadata.json next to the output
     meta_dir = os.path.abspath(os.path.dirname(output_path) or ".")
-    candidates = [
-        os.path.join(meta_dir, "metadata.json"),
-        os.path.join(os.path.dirname(meta_dir), "metadata.json"),  # parent (e.g., when output is in Glossary/)
-    ]
     epub_base = os.path.splitext(os.path.basename(epub_path or ""))[0] if epub_path else None
+    candidates = []
     if epub_base:
-        # Same-name subfolder beside output and its parent
         candidates.append(os.path.join(meta_dir, epub_base, "metadata.json"))
-        candidates.append(os.path.join(os.path.dirname(meta_dir), epub_base, "metadata.json"))
-    # Also check near the input source path (same-name output folders)
-    epub_dir = os.path.abspath(os.path.dirname(epub_path or "")) if epub_path else None
-    if epub_dir:
-        candidates.append(os.path.join(epub_dir, "metadata.json"))
-        if epub_base:
-            candidates.append(os.path.join(epub_dir, epub_base, "metadata.json"))
 
     for meta_path in candidates:
         print(f"[Metadata] Checking for book title at: {meta_path}")

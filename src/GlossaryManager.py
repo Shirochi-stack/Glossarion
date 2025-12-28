@@ -81,20 +81,11 @@ def _extract_title_from_metadata(meta):
 def _derive_book_title(output_dir):
     """Derive book title from translated output metadata.json only; skip if absent."""
     base_dir = os.path.abspath(output_dir or ".")
-    candidates = [
-        os.path.join(base_dir, "metadata.json"),
-        os.path.join(os.path.dirname(base_dir), "metadata.json"),  # parent if glossary saved in subfolder
-    ]
     epub_path = os.getenv("EPUB_PATH", "")
-    epub_dir = os.path.abspath(os.path.dirname(epub_path or "")) if epub_path else None
     epub_base = os.path.splitext(os.path.basename(epub_path or ""))[0] if epub_path else None
+    candidates = []
     if epub_base:
         candidates.append(os.path.join(base_dir, epub_base, "metadata.json"))
-        candidates.append(os.path.join(os.path.dirname(base_dir), epub_base, "metadata.json"))
-    if epub_dir:
-        candidates.append(os.path.join(epub_dir, "metadata.json"))
-        if epub_base:
-            candidates.append(os.path.join(epub_dir, epub_base, "metadata.json"))
 
     for meta_path in candidates:
         print(f"[Metadata] Checking for book title at: {meta_path}")
