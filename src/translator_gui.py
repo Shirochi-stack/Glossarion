@@ -6395,6 +6395,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
         # This ensures user changes via the button are reflected in image translation
         current_max_tokens = self.max_output_tokens
         
+        auto_inject_book_title = bool(getattr(self, 'auto_inject_book_title_var', self.config.get('auto_inject_book_title', False)))
+
         return {
             'EPUB_PATH': epub_path,
             'MODEL': self.model_var,
@@ -6447,6 +6449,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GLOSSARY_FILTER_MODE': self.glossary_filter_mode_var,
             'GLOSSARY_SKIP_FREQUENCY_CHECK': "1" if self.config.get('glossary_skip_frequency_check', False) else "0",
             'GLOSSARY_INCLUDE_BOOK_TITLE': "1" if getattr(self, 'include_book_title_glossary_var', False) else "0",
+            'GLOSSARY_AUTO_INJECT_BOOK_TITLE': "1" if auto_inject_book_title else "0",
             'ENABLE_AUTO_GLOSSARY': "1" if self.enable_auto_glossary_var else "0",
             'AUTO_GLOSSARY_PROMPT': self.unified_auto_glosary_prompt3 if hasattr(self, 'unified_auto_glosary_prompt3') else '',
             'APPEND_GLOSSARY_PROMPT': self.append_glossary_prompt if hasattr(self, 'append_glossary_prompt') and self.append_glossary_prompt else '- Follow this reference glossary for consistent translation (Do not output any raw entries):\n',
@@ -10641,6 +10644,7 @@ Important rules:
                 ('TRANSLATE_BOOK_TITLE', '1' if getattr(self, 'translate_book_title_var', True) else '0'),
                 ('BOOK_TITLE_PROMPT', getattr(self, 'book_title_prompt', '')),
                 ('GLOSSARY_INCLUDE_BOOK_TITLE', '1' if getattr(self, 'include_book_title_glossary_var', True) else '0'),
+                ('GLOSSARY_AUTO_INJECT_BOOK_TITLE', '1' if getattr(self, 'auto_inject_book_title_var', self.config.get('auto_inject_book_title', False)) else '0'),
 
                 # Safety/merge toggles
                 ('EMERGENCY_PARAGRAPH_RESTORE', '1' if getattr(self, 'emergency_restore_var', False) else '0'),

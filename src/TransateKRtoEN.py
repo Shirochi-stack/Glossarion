@@ -7217,7 +7217,9 @@ def main(log_callback=None, stop_callback=None):
             if target_glossary_path and target_glossary_path.endswith('.csv'):
                 try:
                     include_title = os.getenv("GLOSSARY_INCLUDE_BOOK_TITLE", "0") == "1"
-                    if include_title:
+                    auto_inject = os.getenv("GLOSSARY_AUTO_INJECT_BOOK_TITLE", "0") == "1"
+                    # Auto-inject applies only to already loaded existing glossary files (post-dedup context)
+                    if include_title and auto_inject:
                         # Read existing content
                         with open(target_glossary_path, 'r', encoding='utf-8') as f:
                             lines = f.readlines()

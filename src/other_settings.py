@@ -3250,7 +3250,7 @@ def _create_prompt_management_section(self, parent):
         pass
         
     # Toggle: include book title in glossary header/output
-    glossary_title_cb = self._create_styled_checkbox("Include book title at top of glossary")
+    glossary_title_cb = self._create_styled_checkbox("Include book title at top of glossary (during generation)")
     try:
         # Default to False if not present in config
         if not hasattr(self, 'include_book_title_glossary_var'):
@@ -3260,19 +3260,35 @@ def _create_prompt_management_section(self, parent):
         glossary_title_cb.setChecked(False)
         
     glossary_title_cb.setToolTip(
-        "If enabled, glossary outputs add a first entry for the book title, taken from the translated output's metadata.json (skipped if metadata is missing)."
+        "Adds the book title row while generating the glossary (before deduplication). Uses translated metadata if available; skipped if metadata is missing."
+    )
+
+    # Toggle: auto-inject book title before dedup
+    auto_inject_title_cb = self._create_styled_checkbox("Auto-inject book title (loaded glossaries only, bypasses dedup)")
+    try:
+        if not hasattr(self, 'auto_inject_book_title_var'):
+            self.auto_inject_book_title_var = self.config.get('auto_inject_book_title', False)
+        auto_inject_title_cb.setChecked(bool(self.auto_inject_book_title_var))
+    except Exception:
+        auto_inject_title_cb.setChecked(False)
+
+    auto_inject_title_cb.setToolTip(
+        "When loading an existing glossary file, inject the book title row after load (not part of dedup). Use only if your saved glossary lacks the title."
     )
     
     def _update_glossary_title_state(checked):
-        """Update enabled state and styling of glossary title toggle"""
+        """Update enabled state and styling of glossary toggles"""
         try:
             glossary_title_cb.setEnabled(checked)
+            auto_inject_title_cb.setEnabled(checked)
             if checked:
                 # Force white color for enabled state to ensure visibility
                 glossary_title_cb.setStyleSheet("QCheckBox { color: white; }")
+                auto_inject_title_cb.setStyleSheet("QCheckBox { color: white; }")
             else:
                 # Disabled styling (grayed out) - do NOT change checked state
                 glossary_title_cb.setStyleSheet("QCheckBox { color: #666666; }")
+                auto_inject_title_cb.setStyleSheet("QCheckBox { color: #666666; }")
         except Exception:
             pass
 
@@ -3318,6 +3334,16 @@ def _create_prompt_management_section(self, parent):
             pass
     glossary_title_cb.toggled.connect(_on_glossary_title_toggle)
     section_v.addWidget(glossary_title_cb)
+
+    def _on_auto_inject_toggle(checked):
+        try:
+            self.auto_inject_book_title_var = bool(checked)
+            if hasattr(self, 'config'):
+                self.config['auto_inject_book_title'] = bool(checked)
+        except Exception:
+            pass
+    auto_inject_title_cb.toggled.connect(_on_auto_inject_toggle)
+    section_v.addWidget(auto_inject_title_cb)
     
     # Initialize state based on current value
     _update_glossary_title_state(translate_title_cb.isChecked())

@@ -736,8 +736,9 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
                 all_csv_lines = filtered
                 print(f"📑 Filter applied: {len(all_csv_lines)-1} character entries with honorifics kept")
             
-            # Ensure book title header is present before dedup/sort
-            all_csv_lines = _ensure_book_title_csv_lines(all_csv_lines)
+            # Ensure book title header is present before dedup/sort when requested
+            if os.getenv("GLOSSARY_INCLUDE_BOOK_TITLE", "0") == "1":
+                all_csv_lines = _ensure_book_title_csv_lines(all_csv_lines)
             # Apply fuzzy deduplication (deferred until after all chunks)
             try:
                 print(f"📑 Applying fuzzy deduplication (threshold: {fuzzy_threshold})...")
@@ -927,8 +928,9 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         # Apply filter mode to final results
         csv_lines = _filter_csv_by_mode(csv_lines, filter_mode)
         
-        # Ensure book title entry before dedup/sort
-        csv_lines = _ensure_book_title_csv_lines(csv_lines)
+        # Ensure book title entry before dedup/sort when requested
+        if os.getenv("GLOSSARY_INCLUDE_BOOK_TITLE", "0") == "1":
+            csv_lines = _ensure_book_title_csv_lines(csv_lines)
         # Apply fuzzy deduplication (deferred until after all chunks)
         print(f"📑 Applying fuzzy deduplication (threshold: {fuzzy_threshold})...")
         original_count = len(csv_lines) - 1
@@ -3950,8 +3952,9 @@ def _extract_with_custom_prompt(custom_prompt, all_text, language,
                     csv_lines = _merge_csv_entries(csv_lines, existing_glossary, strip_honorifics, language)
                 # Always inject the book title BEFORE any deduplication or filtering so it
                 # survives the first run (previously only happened after a second run/merge)
-                csv_lines = _ensure_book_title_csv_lines(csv_lines)
-                print("📚 Book title injected before dedup (single-shot glossary path)")
+                if os.getenv("GLOSSARY_INCLUDE_BOOK_TITLE", "0") == "1":
+                    csv_lines = _ensure_book_title_csv_lines(csv_lines)
+                    print("📚 Book title injected before dedup (single-shot glossary path)")
 
                 # Fuzzy matching deduplication
                 skip_frequency_check = os.getenv("GLOSSARY_SKIP_FREQUENCY_CHECK", "0") == "1"
