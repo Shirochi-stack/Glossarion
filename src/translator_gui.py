@@ -11002,81 +11002,135 @@ if __name__ == "__main__":
                     splash_manager.splash_window.update()
                     time.sleep(0.09)
             
-            # Actually load modules during splash with real feedback
+            # Actually load modules during splash with real feedback - THREADED for smoothness
             splash_callback("Loading translation modules...")
             
-            # Import and test each module for real
-            translation_main = translation_stop_flag = translation_stop_check = None
-            glossary_main = glossary_stop_flag = glossary_stop_check = None
-            fallback_compile_epub = scan_html_folder = None
+            import threading
+            import queue
             
+            loading_queue = queue.Queue()
+            loading_results = {}
+            
+            def load_modules_thread():
+                try:
+                    # Load TranslateKRtoEN
+                    loading_queue.put("Loading translation engine...")
+                    try:
+                        loading_queue.put("Validating translation engine...")
+                        import TransateKRtoEN
+                        if hasattr(TransateKRtoEN, 'main') and hasattr(TransateKRtoEN, 'set_stop_flag'):
+                            from TransateKRtoEN import main as tm, set_stop_flag as tsf, is_stop_requested as tsc
+                            loading_results['translation'] = (tm, tsf, tsc)
+                            loading_queue.put("✅ translation engine loaded")
+                        else:
+                            loading_queue.put("⚠️ translation engine incomplete")
+                    except Exception as e:
+                        loading_queue.put(f"ERROR: translation engine failed: {e}")
+                        print(f"Warning: Could not import TransateKRtoEN: {e}")
+
+                    # Load extract_glossary_from_epub
+                    loading_queue.put("Loading glossary extractor...")
+                    try:
+                        loading_queue.put("Validating glossary extractor...")
+                        import extract_glossary_from_epub
+                        if hasattr(extract_glossary_from_epub, 'main') and hasattr(extract_glossary_from_epub, 'set_stop_flag'):
+                            from extract_glossary_from_epub import main as gm, set_stop_flag as gsf, is_stop_requested as gsc
+                            loading_results['glossary'] = (gm, gsf, gsc)
+                            loading_queue.put("✅ glossary extractor loaded")
+                        else:
+                            loading_queue.put("⚠️ glossary extractor incomplete")
+                    except Exception as e:
+                        loading_queue.put(f"ERROR: glossary extractor failed: {e}")
+                        print(f"Warning: Could not import extract_glossary_from_epub: {e}")
+
+                    # Load epub_converter
+                    loading_queue.put("Loading EPUB converter...")
+                    try:
+                        import epub_converter
+                        if hasattr(epub_converter, 'fallback_compile_epub'):
+                            from epub_converter import fallback_compile_epub
+                            loading_results['epub'] = fallback_compile_epub
+                            loading_queue.put("✅ EPUB converter loaded")
+                        else:
+                            loading_queue.put("⚠️ EPUB converter incomplete")
+                    except Exception as e:
+                        loading_queue.put(f"ERROR: EPUB converter failed: {e}")
+                        print(f"Warning: Could not import epub_converter: {e}")
+
+                    # Load scan_html_folder
+                    loading_queue.put("Loading QA scanner...")
+                    try:
+                        import scan_html_folder
+                        if hasattr(scan_html_folder, 'scan_html_folder'):
+                            from scan_html_folder import scan_html_folder as shf
+                            loading_results['scan'] = shf
+                            loading_queue.put("✅ QA scanner loaded")
+                        else:
+                            loading_queue.put("⚠️ QA scanner incomplete")
+                    except Exception as e:
+                        loading_queue.put(f"ERROR: QA scanner failed: {e}")
+                        print(f"Warning: Could not import scan_html_folder: {e}")
+                        
+                except Exception as e:
+                    print(f"Critical error in module loader thread: {e}")
+                finally:
+                    loading_queue.put("DONE")
+
+            # Start the thread
+            loader_thread = threading.Thread(target=load_modules_thread, daemon=True)
+            loader_thread.start()
+            
+            # Process events loop
+            import time
+            while loader_thread.is_alive():
+                # Process queue messages
+                try:
+                    while True:
+                        msg = loading_queue.get_nowait()
+                        if msg == "DONE":
+                            break
+                        if msg.startswith("ERROR:"): 
+                             # Don't update status for errors in splash, just log
+                             pass
+                        else:
+                             splash_callback(msg)
+                except queue.Empty:
+                    pass
+                
+                # Keep splash alive
+                if splash_manager and splash_manager.app:
+                    splash_manager.app.processEvents()
+                
+                time.sleep(0.01) # Small sleep to prevent CPU hogging
+            
+            # Process any remaining messages
+            try:
+                while True:
+                    msg = loading_queue.get_nowait()
+                    if msg != "DONE" and not msg.startswith("ERROR:"):
+                        splash_callback(msg)
+            except queue.Empty:
+                pass
+            
+            # Retrieve results
+            translation_main, translation_stop_flag, translation_stop_check = loading_results.get('translation', (None, None, None))
+            glossary_main, glossary_stop_flag, glossary_stop_check = loading_results.get('glossary', (None, None, None))
+            fallback_compile_epub = loading_results.get('epub')
+            scan_html_folder = loading_results.get('scan')
+            
+            # Count modules
             modules_loaded = 0
-            total_modules = 4
-            
-            # Load TranslateKRtoEN
-            splash_callback("Loading translation engine...")
-            try:
-                splash_callback("Validating translation engine...")
-                import TransateKRtoEN
-                if hasattr(TransateKRtoEN, 'main') and hasattr(TransateKRtoEN, 'set_stop_flag'):
-                    from TransateKRtoEN import main as translation_main, set_stop_flag as translation_stop_flag, is_stop_requested as translation_stop_check
-                    modules_loaded += 1
-                    splash_callback("✅ translation engine loaded")
-                else:
-                    splash_callback("⚠️ translation engine incomplete")
-            except Exception as e:
-                splash_callback("❌ translation engine failed")
-                print(f"Warning: Could not import TransateKRtoEN: {e}")
-            
-            # Load extract_glossary_from_epub
-            splash_callback("Loading glossary extractor...")
-            try:
-                splash_callback("Validating glossary extractor...")
-                import extract_glossary_from_epub
-                if hasattr(extract_glossary_from_epub, 'main') and hasattr(extract_glossary_from_epub, 'set_stop_flag'):
-                    from extract_glossary_from_epub import main as glossary_main, set_stop_flag as glossary_stop_flag, is_stop_requested as glossary_stop_check
-                    modules_loaded += 1
-                    splash_callback("✅ glossary extractor loaded")
-                else:
-                    splash_callback("⚠️ glossary extractor incomplete")
-            except Exception as e:
-                splash_callback("❌ glossary extractor failed")
-                print(f"Warning: Could not import extract_glossary_from_epub: {e}")
-            
-            # Load epub_converter
-            splash_callback("Loading EPUB converter...")
-            try:
-                import epub_converter
-                if hasattr(epub_converter, 'fallback_compile_epub'):
-                    from epub_converter import fallback_compile_epub
-                    modules_loaded += 1
-                    splash_callback("✅ EPUB converter loaded")
-                else:
-                    splash_callback("⚠️ EPUB converter incomplete")
-            except Exception as e:
-                splash_callback("❌ EPUB converter failed")
-                print(f"Warning: Could not import epub_converter: {e}")
-            
-            # Load scan_html_folder
-            splash_callback("Loading QA scanner...")
-            try:
-                import scan_html_folder
-                if hasattr(scan_html_folder, 'scan_html_folder'):
-                    from scan_html_folder import scan_html_folder
-                    modules_loaded += 1
-                    splash_callback("✅ QA scanner loaded")
-                else:
-                    splash_callback("⚠️ QA scanner incomplete")
-            except Exception as e:
-                splash_callback("❌ QA scanner failed")
-                print(f"Warning: Could not import scan_html_folder: {e}")
+            if translation_main: modules_loaded += 1
+            if glossary_main: modules_loaded += 1
+            if fallback_compile_epub: modules_loaded += 1
+            if scan_html_folder: modules_loaded += 1
             
             # Final status with pause for visibility
             splash_callback("Finalizing module initialization...")
-            if modules_loaded == total_modules:
+            if modules_loaded == 4:
                 splash_callback("✅ All modules loaded successfully")
             else:
-                splash_callback(f"⚠️ {modules_loaded}/{total_modules} modules loaded")
+                splash_callback(f"⚠️ {modules_loaded}/4 modules loaded")
             
             # Store loaded modules globally for GUI access
             import translator_gui
