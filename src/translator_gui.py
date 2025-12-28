@@ -2025,7 +2025,7 @@ Recent translations to summarize:
             ('include_gender_context_var', 'include_gender_context', True),
             ('enable_gender_nuance_var', 'enable_gender_nuance', True),
             ('include_description_var', 'include_description', True),
-            ('retry_truncated_var', 'retry_truncated', False),
+            ('retry_truncated_var', 'retry_truncated', True),
             ('retry_duplicate_var', 'retry_duplicate_bodies', False),
             ('preserve_original_text_var', 'preserve_original_text_on_failure', False),
             # NEW: QA scanning helpers

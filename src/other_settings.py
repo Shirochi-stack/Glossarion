@@ -1616,22 +1616,14 @@ def _create_response_handling_section(self, parent):
     
     # Retry Truncated
     retry_truncated_cb = self._create_styled_checkbox("Auto-retry Truncated Responses")
-    try:
-        retry_truncated_cb.setChecked(bool(self.retry_truncated_var))
-    except Exception:
-        pass
-    def _on_retry_truncated_toggle(checked):
-        try:
-            self.retry_truncated_var = bool(checked)
-        except Exception:
-            pass
-    retry_truncated_cb.toggled.connect(_on_retry_truncated_toggle)
-    section_v.addWidget(retry_truncated_cb)
     
     retry_frame_w = QWidget()
     retry_frame_h = QHBoxLayout(retry_frame_w)
     retry_frame_h.setContentsMargins(20, 5, 0, 5)
-    retry_frame_h.addWidget(QLabel("Token constraint:"))
+    
+    retry_tokens_label = QLabel("Token constraint:")
+    retry_frame_h.addWidget(retry_tokens_label)
+    
     retry_tokens_edit = QLineEdit()
     retry_tokens_edit.setFixedWidth(80)
     try:
@@ -1646,11 +1638,39 @@ def _create_response_handling_section(self, parent):
     retry_tokens_edit.textChanged.connect(_on_retry_tokens_changed)
     retry_frame_h.addWidget(retry_tokens_edit)
     retry_frame_h.addStretch()
-    section_v.addWidget(retry_frame_w)
     
     retry_desc = QLabel("Retry when truncated. Acts as min/max constraint:\nbelow value = minimum, above value = maximum")
-    retry_desc.setStyleSheet("color: gray; font-size: 10pt;")
     retry_desc.setContentsMargins(20, 0, 0, 10)
+
+    def _on_retry_truncated_toggle(checked):
+        try:
+            self.retry_truncated_var = bool(checked)
+            
+            # Update UI state
+            retry_tokens_edit.setEnabled(checked)
+            retry_tokens_label.setEnabled(checked)
+            retry_desc.setEnabled(checked)
+            
+            # Update styles
+            label_color = "white" if checked else "#808080"
+            retry_tokens_label.setStyleSheet(f"color: {label_color};")
+            
+            desc_color = "gray" if checked else "#606060"
+            retry_desc.setStyleSheet(f"color: {desc_color}; font-size: 10pt;")
+        except Exception:
+            pass
+
+    try:
+        retry_truncated_cb.setChecked(bool(self.retry_truncated_var))
+    except Exception:
+        pass
+    retry_truncated_cb.toggled.connect(_on_retry_truncated_toggle)
+    
+    # Initialize UI state based on current value
+    _on_retry_truncated_toggle(retry_truncated_cb.isChecked())
+    
+    section_v.addWidget(retry_truncated_cb)
+    section_v.addWidget(retry_frame_w)
     section_v.addWidget(retry_desc)
     
     # Separator
