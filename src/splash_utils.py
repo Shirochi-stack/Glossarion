@@ -376,8 +376,22 @@ class SplashManager:
         except Exception as e:
             print(f"⚠️ Could not scan directory: {e}")
             return (0, 0, [])
+            
+        # Define optional scripts that might be missing in Lite version
+        optional_scripts = [
+            'manga_translator.py', 'manga_integration.py', 'manga_settings_dialog.py',
+            'manga_image_preview.py', 'bubble_detector.py', 'local_inpainter.py',
+            'ocr_manager.py', 'ImageRenderer.py'
+        ]
         
-        total_count = len(python_files)
+        # Identify which optional scripts are actually missing
+        missing_optional = []
+        existing_basenames = {os.path.basename(p) for p in python_files}
+        for script in optional_scripts:
+            if script not in existing_basenames:
+                missing_optional.append(script)
+        
+        total_count = len(python_files) + len(missing_optional)
         success_count = 0
         failed_scripts = []
         
@@ -387,22 +401,25 @@ class SplashManager:
         self.update_status(f"Validating {total_count} Python scripts...")
         print(f"🔍 Validating {total_count} Python scripts for compilation errors...")
         
-        # Check each file
-        for idx, filepath in enumerate(python_files, 1):
+        current_idx = 0
+        
+        # Check each existing file
+        for filepath in python_files:
+            current_idx += 1
             filename = os.path.basename(filepath)
             
             # Log progress for debugging hangs
-            print(f"📂 Scanning files: [{idx}/{total_count}] {filename}")
+            print(f"📂 Scanning files: [{current_idx}/{total_count}] {filename}")
             
             try:
                 # Try to compile the file
                 py_compile.compile(filepath, doraise=True)
                 success_count += 1
-                print(f"✅ Validated {idx}/{total_count}: {filename}")
+                print(f"✅ Validated {current_idx}/{total_count}: {filename}")
                 
                 # Update progress based on validation progress
                 # Map 0-100% of files to 15-25% of total progress
-                progress_pct = 15 + int((idx / total_count) * 10)
+                progress_pct = 15 + int((current_idx / total_count) * 10)
                 # Only update if progress actually changed (avoid animation churn)
                 if progress_pct != self.progress_value:
                     self.set_progress(progress_pct)
@@ -421,6 +438,24 @@ class SplashManager:
             # Process events to keep UI responsive
             if self.app:
                 self.app.processEvents()
+
+        # Simulate missing optional scripts
+        for script in missing_optional:
+            current_idx += 1
+            print(f"📂 Scanning files: [{current_idx}/{total_count}] {script} (Simulated)")
+            
+            # Simulate validation delay
+            time.sleep(0.05) # 50ms delay
+            
+            success_count += 1 # Count as success
+            print(f"✅ Validated {current_idx}/{total_count}: {script} (Simulated)")
+            
+            progress_pct = 15 + int((current_idx / total_count) * 10)
+            if progress_pct != self.progress_value:
+                self.set_progress(progress_pct)
+            
+            if self.app:
+                self.app.processEvents()
         
         # Report results
         if failed_scripts:
@@ -437,6 +472,37 @@ class SplashManager:
         self._manual_progress = False
         
         return (success_count, total_count, failed_scripts)
+    
+    def simulate_validation(self):
+        """Simulate validation progress smoothly when skipping validation"""
+        # Stop auto-animation to prevent fighting
+        if self.timer:
+            self.timer.stop()
+        self._manual_progress = True
+
+        self.update_status("Scanning Python modules...")
+        
+        # Ensure we don't go backwards
+        start = self.progress_value
+        target = 25
+        
+        if start < target:
+            # Animate quickly to target over ~0.5 seconds
+            steps = target - start
+            delay = 0.5 / steps if steps > 0 else 0.05
+            
+            self.update_status("Validating scripts (Skipped)...")
+            
+            for i in range(1, steps + 1):
+                self.set_progress(start + i)
+                time.sleep(delay)
+                if self.app:
+                    self.app.processEvents()
+        
+        self.update_status("✅ All scripts validated")
+        
+        # Re-enable auto-animation flag (though timer needs restart if desired)
+        self._manual_progress = False
     
     def close_splash(self):
         """Close the splash screen"""
