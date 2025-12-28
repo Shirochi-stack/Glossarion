@@ -2794,6 +2794,19 @@ def main(log_callback=None, stop_callback=None):
                 if translated and translated != BOOK_TITLE_RAW:
                     print(f"📚 Translated title for glossary: {translated}")
                     BOOK_TITLE_TRANSLATED = translated
+                    
+                    # Save immediately to progress
+                    try:
+                        p_data = {}
+                        if os.path.exists(PROGRESS_FILE):
+                            with open(PROGRESS_FILE, 'r', encoding='utf-8') as f:
+                                p_data = json.load(f)
+                        p_data['book_title'] = translated
+                        
+                        with open(PROGRESS_FILE, 'w', encoding='utf-8') as f:
+                            json.dump(p_data, f, indent=2, ensure_ascii=False)
+                    except Exception as e:
+                        print(f"⚠️ Failed to save book title to progress: {e}")
                 else:
                     # Translation failed or returned same, assume raw is best we have
                     BOOK_TITLE_TRANSLATED = BOOK_TITLE_RAW
@@ -4223,7 +4236,8 @@ def save_progress(completed: List[int], glossary: List[Dict], merged_indices: Li
         progress_data = {
             "completed": completed,
             "book_title_present": bool(BOOK_TITLE_PRESENT),
-            "book_title": BOOK_TITLE_VALUE if BOOK_TITLE_PRESENT else None,
+            # Use value from entry if present, otherwise fallback to global translated title
+            "book_title": BOOK_TITLE_VALUE if BOOK_TITLE_PRESENT else BOOK_TITLE_TRANSLATED,
             # Glossary is saved separately to output files, not in progress
             # This prevents the progress file from overwriting manual edits
         }
