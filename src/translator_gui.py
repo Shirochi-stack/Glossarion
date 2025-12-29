@@ -2066,7 +2066,7 @@ Recent translations to summarize:
             ('enable_gender_nuance_var', 'enable_gender_nuance', True),
             ('include_description_var', 'include_description', True),
             ('retry_truncated_var', 'retry_truncated', True),
-            ('retry_split_failed_var', 'retry_split_failed', False),
+            ('retry_split_failed_var', 'retry_split_failed', True),
             ('retry_duplicate_var', 'retry_duplicate_bodies', False),
             ('preserve_original_text_var', 'preserve_original_text_on_failure', False),
             # NEW: QA scanning helpers
@@ -9971,7 +9971,7 @@ Important rules:
 
                 # Retry settings
                 ('retry_truncated', ['retry_truncated_var'], False, bool),
-                ('retry_split_failed', ['retry_split_failed_var'], False, bool),
+                ('retry_split_failed', ['retry_split_failed_var'], True, bool),
             ('max_retry_tokens', ['max_retry_tokens_var'], -1, lambda v: safe_int(v, -1)),
                 ('truncation_retry_attempts', ['truncation_retry_attempts_var'], 1, lambda v: safe_int(v, 1)),
                 ('split_failed_retry_attempts', ['split_failed_retry_attempts_var'], 1, lambda v: safe_int(v, 1)),
