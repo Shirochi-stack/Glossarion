@@ -1927,19 +1927,24 @@ class RetranslationMixin:
                 print("⚠️ Cannot refresh - widgets have been deleted")
                 return
             
-            # Save current scroll position and selections to restore after refresh
+            # Save current scroll position (and first visible row/offset) to restore after refresh
             saved_scroll = None
             updates_were_enabled = True
             signals_were_blocked = False
-            updates_blocked = False
             self._suspend_yield = True
+            first_visible_row = None
+            first_visible_offset = 0
             if 'listbox' in data and data['listbox']:
                 try:
+                    from PySide6.QtCore import QPoint
                     saved_scroll = data['listbox'].verticalScrollBar().value()
                     updates_were_enabled = data['listbox'].updatesEnabled()
                     signals_were_blocked = data['listbox'].signalsBlocked()
-                    data['listbox'].setStyleSheet(data['listbox'].styleSheet() + " QListWidget { paint-engine: none; }")
-                    updates_blocked = True
+                    idx = data['listbox'].indexAt(QPoint(0, 0))
+                    if idx and idx.isValid():
+                        first_visible_row = idx.row()
+                        rect = data['listbox'].visualItemRect(data['listbox'].item(first_visible_row))
+                        first_visible_offset = -rect.top()
                     data['listbox'].blockSignals(True)
                     data['listbox'].setUpdatesEnabled(False)
                 except Exception:
@@ -2000,20 +2005,17 @@ class RetranslationMixin:
             if 'listbox' in data and data['listbox']:
                 try:
                     sb = data['listbox'].verticalScrollBar()
-                    if saved_scroll is not None:
-                        sb.setValue(min(saved_scroll, sb.maximum()))
+                    if first_visible_row is not None and first_visible_row < data['listbox'].count():
+                        item = data['listbox'].item(first_visible_row)
+                        data['listbox'].scrollToItem(item, data['listbox'].PositionAtTop)
+                        sb.setValue(sb.value() - first_visible_offset)
+                    elif saved_scroll is not None:
+                        target = min(saved_scroll, sb.maximum())
+                        if sb.value() != target:
+                            sb.setValue(target)
                     data['listbox'].setUpdatesEnabled(updates_were_enabled)
                     data['listbox'].blockSignals(signals_were_blocked)
-                    from PySide6.QtCore import QTimer
-                    def _restore_paint():
-                        try:
-                            if updates_blocked:
-                                # Remove the paint-engine suppression by resetting stylesheet
-                                data['listbox'].setStyleSheet(data['listbox'].styleSheet().replace(" QListWidget { paint-engine: none; }",""))
-                            data['listbox'].viewport().update()
-                        except Exception:
-                            pass
-                    QTimer.singleShot(0, _restore_paint)
+                    data['listbox'].viewport().update()
                 except Exception:
                     try:
                         data['listbox'].setUpdatesEnabled(updates_were_enabled)
@@ -2036,6 +2038,19 @@ class RetranslationMixin:
                     data['listbox'].clearSelection()
                     if 'selection_count_label' in data and data['selection_count_label']:
                         data['selection_count_label'].setText("Selected: 0")
+
+                # Re-apply scroll AFTER selections (since selecting can auto-scroll)
+                if saved_scroll is not None and 'listbox' in data and data['listbox']:
+                    from PySide6.QtCore import QTimer
+                    def _restore_scroll_again():
+                        try:
+                            sb = data['listbox'].verticalScrollBar()
+                            target = min(saved_scroll, sb.maximum())
+                            if sb.value() != target:
+                                sb.setValue(target)
+                        except Exception:
+                            pass
+                    QTimer.singleShot(0, _restore_scroll_again)
             except RuntimeError:
                 print("⚠️ Could not restore selection state - widget was deleted during refresh")
             
@@ -2521,18 +2536,16 @@ class RetranslationMixin:
         # Rebuild listbox items with updates/signals disabled to avoid flicker
         listbox.setUpdatesEnabled(False)
         listbox.blockSignals(True)
-        listbox.clear()
 
-        items_to_add = []
-        for idx, info in enumerate(data['chapter_display_info']):
-            if idx % 120 == 0:
-                self._ui_yield()
+        count_existing = listbox.count()
+        count_new = len(data['chapter_display_info'])
+
+        def build_display(info, max_original_len, max_output_len):
             chapter_num = info['num']
             status = info['status']
             output_file = info['output_file']
             icon = status_icons.get(status, '❓')
             status_label = status_labels.get(status, status)
-            
             if 'opf_position' in info:
                 original_file = info.get('original_filename', '')
                 opf_pos = info['opf_position'] + 1
@@ -2550,7 +2563,6 @@ class RetranslationMixin:
                     display = f"Chapter {chapter_num:06.1f} | {icon} {status_label:11s} | {output_file}"
                 else:
                     display = f"Chapter {chapter_num:03d} | {icon} {status_label:11s} | {output_file}"
-            
             if status == 'qa_failed':
                 chapter_info = info.get('info', {})
                 qa_issues = chapter_info.get('qa_issues_found', [])
@@ -2559,21 +2571,17 @@ class RetranslationMixin:
                     if len(qa_issues) > 2:
                         issues_display += f' (+{len(qa_issues)-2} more)'
                     display += f" | {issues_display}"
-            
             if status == 'merged':
                 chapter_info = info.get('info', {})
                 parent_chapter = chapter_info.get('merged_parent_chapter')
                 if parent_chapter:
                     display += f" | → Ch.{parent_chapter}"
-            
             if info.get('duplicate_count', 1) > 1:
                 display += f" | ({info['duplicate_count']} entries)"
-            
-            from PySide6.QtWidgets import QListWidgetItem
+            return display
+
+        def apply_item_visuals(item, status):
             from PySide6.QtGui import QColor
-            from PySide6.QtCore import Qt
-            item = QListWidgetItem(display)
-            
             if status == 'completed':
                 item.setForeground(QColor('green'))
             elif status == 'merged':
@@ -2584,22 +2592,41 @@ class RetranslationMixin:
                 item.setForeground(QColor('#2b6cb0'))
             elif status == 'in_progress':
                 item.setForeground(QColor('orange'))
-            
-            is_special = info.get('is_special', False)
-            item.setData(Qt.UserRole, {'is_special': is_special, 'info': info})
-            items_to_add.append((item, is_special))
 
-        # Add all items without repaint, then apply visibility once
-        for item, is_special in items_to_add:
-            listbox.addItem(item)
-            show_special_files = data.get('show_special_files_state', False)
-            if 'show_special_files_cb' in data and data['show_special_files_cb']:
-                try:
-                    show_special_files = data['show_special_files_cb'].isChecked()
-                except RuntimeError:
-                    pass
-            if is_special and not show_special_files:
-                item.setHidden(True)
+        show_special_files = data.get('show_special_files_state', False)
+        if 'show_special_files_cb' in data and data['show_special_files_cb']:
+            try:
+                show_special_files = data['show_special_files_cb'].isChecked()
+            except RuntimeError:
+                pass
+
+        if count_existing == count_new:
+            # Update in place to keep scroll stable
+            for idx, info in enumerate(data['chapter_display_info']):
+                if idx % 120 == 0:
+                    self._ui_yield()
+                item = listbox.item(idx)
+                if not item:
+                    continue
+                item.setText(build_display(info, max_original_len, max_output_len))
+                apply_item_visuals(item, info['status'])
+                is_special = info.get('is_special', False)
+                item.setData(Qt.UserRole, {'is_special': is_special, 'info': info})
+                item.setHidden(is_special and not show_special_files)
+        else:
+            # Recreate items
+            listbox.clear()
+            from PySide6.QtWidgets import QListWidgetItem
+            from PySide6.QtCore import Qt
+            for idx, info in enumerate(data['chapter_display_info']):
+                if idx % 120 == 0:
+                    self._ui_yield()
+                item = QListWidgetItem(build_display(info, max_original_len, max_output_len))
+                apply_item_visuals(item, info['status'])
+                is_special = info.get('is_special', False)
+                item.setData(Qt.UserRole, {'is_special': is_special, 'info': info})
+                item.setHidden(is_special and not show_special_files)
+                listbox.addItem(item)
 
         listbox.blockSignals(False)
         listbox.setUpdatesEnabled(True)
