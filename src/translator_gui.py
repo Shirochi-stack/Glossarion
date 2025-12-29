@@ -4562,10 +4562,15 @@ If you see multiple p-b cookies, use the one with the longest value."""
     def _stop_pm_spin(self):
         if hasattr(self, 'pm_spinner') and self.pm_spinner:
             self.pm_spinner.stop()
+        if hasattr(self, '_pm_spin_timer') and self._pm_spin_timer:
+            try:
+                self._pm_spin_timer.stop()
+            except Exception:
+                pass
 
     def open_progress_manager(self):
         """User clicked Progress Manager. Show instantly if cached; otherwise show a tiny loader and open lazily."""
-        # Start spin now
+        # Start spin now using its own timer so heavy work can't starve it
         if hasattr(self, 'pm_spinner') and self.pm_spinner and not self.pm_spinner.is_running():
             self.pm_spinner.start()
             try:
@@ -4573,6 +4578,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self._pm_spin_started_at = _t.monotonic()
             except Exception:
                 self._pm_spin_started_at = None
+            # Kick a dedicated timer to tick spinner even if main loop is busy
+            from PySide6.QtCore import QTimer
+            if not hasattr(self, '_pm_spin_timer') or self._pm_spin_timer is None:
+                self._pm_spin_timer = QTimer(self)
+                # Call twice per tick to double effective speed
+                self._pm_spin_timer.timeout.connect(lambda: self.pm_spinner and self.pm_spinner._advance())
+                self._pm_spin_timer.timeout.connect(lambda: self.pm_spinner and self.pm_spinner._advance())
+            self._pm_spin_timer.start(10)  # faster cadence
         # If cached, just show
         if self._show_cached_progress_manager_if_any():
             self._stop_pm_spin()

@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget,
                                 QPushButton, QVBoxLayout, QHBoxLayout, QGridLayout,
                                 QMessageBox, QFileDialog, QTabWidget, QListWidgetItem,
                                 QScrollArea, QSizePolicy)
-from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QEasingCurve, Property
+from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QEasingCurve, Property, QEventLoop
 from PySide6.QtGui import QFont, QColor, QTransform, QIcon, QPixmap
 import xml.etree.ElementTree as ET
 import zipfile
@@ -114,6 +114,14 @@ class AnimatedRefreshButton(QPushButton):
 
 class RetranslationMixin:
     """Mixin class containing retranslation methods for TranslatorGUI"""
+    
+    def _ui_yield(self, ms=5):
+        """Let the Qt event loop process pending events briefly."""
+        try:
+            from PySide6.QtWidgets import QApplication
+            QApplication.processEvents(QEventLoop.AllEvents, ms)
+        except Exception:
+            pass
     
     def _clear_layout(self, layout):
         """Safely clear all items from a layout"""
@@ -496,7 +504,9 @@ class RetranslationMixin:
                     response_file_to_progress[norm_key].append((chapter_key, chapter_info))
         
         # Update spine chapters with translation status
-        for spine_ch in spine_chapters:
+        for idx, spine_ch in enumerate(spine_chapters):
+            if idx % 80 == 0:
+                self._ui_yield()
             filename = spine_ch['filename']
             chapter_num = spine_ch['file_chapter_num']
             is_special = spine_ch.get('is_special', False)
@@ -2465,7 +2475,9 @@ class RetranslationMixin:
         max_output_len = max(max_output_len, 25)
         
         # Rebuild listbox items
-        for info in data['chapter_display_info']:
+        for idx, info in enumerate(data['chapter_display_info']):
+            if idx % 120 == 0:
+                self._ui_yield()
             chapter_num = info['num']
             status = info['status']
             output_file = info['output_file']
