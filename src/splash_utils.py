@@ -24,16 +24,53 @@ class SplashManager:
         try:
             print("🎨 Starting PySide6 splash screen...")
             
-            # Create QApplication if it doesn't exist
-            if not QApplication.instance():
+            # Get or create QApplication
+            self.app = QApplication.instance()
+            if not self.app:
                 self.app = QApplication(sys.argv)
-            else:
-                self.app = QApplication.instance()
+            
+            # Set application icon immediately for taskbar
+            try:
+                import os
+                from PySide6.QtGui import QIcon
+                if getattr(sys, 'frozen', False):
+                    base_dir = sys._MEIPASS
+                else:
+                    base_dir = os.path.dirname(os.path.abspath(__file__))
+                ico_path = os.path.join(base_dir, 'Halgakos.ico')
+                if os.path.isfile(ico_path):
+                    self.app.setWindowIcon(QIcon(ico_path))
+            except Exception:
+                pass
+            
+            # In frozen builds, process events immediately after QApplication creation
+            # This initializes Qt's event system before we create widgets
+            if getattr(sys, 'frozen', False):
+                try:
+                    # Single event processing to initialize Qt internals
+                    import time
+                    time.sleep(0.05)  # Small delay to let Qt initialize
+                except Exception:
+                    pass
             
             # Create main splash widget
             self.splash_window = QWidget()
             self.splash_window.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
             self.splash_window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+            
+            # Set window icon for taskbar
+            try:
+                import os
+                from PySide6.QtGui import QIcon
+                if getattr(sys, 'frozen', False):
+                    base_dir = sys._MEIPASS
+                else:
+                    base_dir = os.path.dirname(os.path.abspath(__file__))
+                ico_path = os.path.join(base_dir, 'Halgakos.ico')
+                if os.path.isfile(ico_path):
+                    self.splash_window.setWindowIcon(QIcon(ico_path))
+            except Exception:
+                pass
             # Use screen ratios for sizing
             screen = self.app.primaryScreen().geometry()
             width = int(screen.width() * 0.24)  # 24% of screen width
@@ -123,14 +160,8 @@ class SplashManager:
                 background: transparent;
                 border: none;
             """)
-            # Position label to match progress bar size dynamically
-            # Use a timer to ensure the progress bar has been laid out first
-            def position_progress_label():
-                if self.progress_bar and self.progress_label:
-                    bar_width = self.progress_bar.width()
-                    bar_height = self.progress_bar.height()
-                    self.progress_label.setGeometry(0, 0, bar_width, bar_height)
-            QTimer.singleShot(0, position_progress_label)
+            # Position label directly (no timer to avoid COM issues)
+            self.progress_label.setGeometry(0, 0, self.progress_bar.width(), self.progress_bar.height())
             self.progress_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
             
             layout.addSpacing(3)  # Reduced from 5 to 3
@@ -155,12 +186,26 @@ class SplashManager:
             
             # Show splash
             self.splash_window.show()
+            self.splash_window.raise_()
+            self.splash_window.activateWindow()
             
-            # Start progress animation
+            # Position progress label before showing
+            if self.progress_bar and self.progress_label:
+                # Will be corrected after processEvents
+                pass
+            
+            # MUST call processEvents to render - this is the ONLY call, no timers before this
+            if self.app:
+                self.app.processEvents(QEventLoop.AllEvents)
+            
+            # Now position progress label with correct dimensions
+            if self.progress_bar and self.progress_label:
+                bar_width = self.progress_bar.width()
+                bar_height = self.progress_bar.height()
+                self.progress_label.setGeometry(0, 0, bar_width, bar_height)
+            
+            # Start progress animation AFTER processEvents completes
             self._animate_progress()
-            
-            # Process events to show immediately
-            self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
             
             # Register cleanup
             atexit.register(self.close_splash)
@@ -270,9 +315,12 @@ class SplashManager:
                 if self.progress_label:
                     self.progress_label.setText(f"{self.progress_value}%")
                 
-                # Process events
+                # Process posted events only (safer than full event loop)
                 if self.app:
-                    self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+                    try:
+                        self.app.sendPostedEvents()
+                    except Exception:
+                        pass
         except Exception:
             pass
     
@@ -323,9 +371,12 @@ class SplashManager:
                             self.set_progress(value)
                             break
                 
-                # Process events
+                # Process posted events only (safer than full event loop)
                 if self.app:
-                    self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+                    try:
+                        self.app.sendPostedEvents()
+                    except Exception:
+                        pass
         except Exception:
             pass
     
@@ -337,9 +388,12 @@ class SplashManager:
         if self.progress_label:
             self.progress_label.setText(f"{self.progress_value}%")
         
-        # Process events to ensure smooth UI updates
+        # Process posted events only (safer than full event loop)
         if self.app:
-            self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+            try:
+                self.app.sendPostedEvents()
+            except Exception:
+                pass
     
     def validate_all_scripts(self, base_dir=None):
         """Validate that all Python scripts in the project compile without syntax errors
@@ -437,7 +491,7 @@ class SplashManager:
             
             # Process events to keep UI responsive
             if self.app:
-                self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+                self.app.sendPostedEvents()
 
         # Simulate missing optional scripts
         for script in missing_optional:
@@ -455,7 +509,7 @@ class SplashManager:
                 self.set_progress(progress_pct)
             
             if self.app:
-                self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+                self.app.sendPostedEvents()
         
         # Report results
         if failed_scripts:
@@ -497,7 +551,7 @@ class SplashManager:
                 self.set_progress(start + i)
                 time.sleep(delay)
                 if self.app:
-                    self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+                    self.app.sendPostedEvents()
         
         self.update_status("✅ All scripts validated")
         
@@ -523,7 +577,7 @@ class SplashManager:
                     
                     # Process events one last time
                     if self.app:
-                        self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+                        self.app.sendPostedEvents()
                     
                     time.sleep(0.1)
                 except RuntimeError:

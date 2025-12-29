@@ -4580,7 +4580,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 btn.setText("Saving…")
                 # Subtle highlight during save
                 btn.setStyleSheet("background-color: #17a2b8; color: white; font-weight: bold;")
-                QApplication.processEvents()
+                QApplication.sendPostedEvents()
             # Log feedback
             try:
                 self.append_log("💾 Saving configuration…")
@@ -10947,7 +10947,35 @@ if __name__ == "__main__":
     
     print("🚀 Starting Glossarion v6.8.1...")
     
-    # Initialize splash screen
+    # Fix Windows taskbar icon not showing - MUST be before QApplication
+    if os.name == 'nt':  # Windows
+        try:
+            import ctypes
+            # Set the app user model ID so Windows shows the correct icon in taskbar
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.TranslatorGUI.6.8.1')
+        except Exception:
+            pass
+    
+    # Create QApplication
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtGui import QIcon
+    qapp = QApplication.instance()
+    if not qapp:
+        # Set icon path as command line argument for Windows taskbar
+        qapp = QApplication(sys.argv)
+    
+    # Set application icon for taskbar immediately
+    try:
+        ico_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Halgakos.ico')
+        if os.path.isfile(ico_path):
+            app_icon = QIcon(ico_path)
+            qapp.setWindowIcon(app_icon)
+            # Also set on QApplication itself
+            QApplication.setWindowIcon(app_icon)
+    except Exception as e:
+        print(f"⚠️ Could not set app icon: {e}")
+    
+    # Initialize splash screen (now reuses the QApplication)
     splash_manager = None
     try:
         from splash_utils import SplashManager
@@ -10999,7 +11027,7 @@ if __name__ == "__main__":
             def splash_callback(message):
                 if splash_manager and splash_manager.splash_window:
                     splash_manager.update_status(message)
-                    splash_manager.splash_window.update()
+                    # Don't call .update() - it can trigger event loop and COM errors in frozen builds
                     time.sleep(0.09)
             
             # Actually load modules during splash with real feedback - THREADED for smoothness
@@ -11097,9 +11125,12 @@ if __name__ == "__main__":
                 except queue.Empty:
                     pass
                 
-                # Keep splash alive
+                # Keep splash alive using sendPostedEvents (safer than processEvents)
                 if splash_manager and splash_manager.app:
-                    splash_manager.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+                    try:
+                        splash_manager.app.sendPostedEvents()
+                    except Exception:
+                        pass
                 
                 time.sleep(0.01) # Small sleep to prevent CPU hogging
             
@@ -11153,13 +11184,7 @@ if __name__ == "__main__":
             splash_manager.close_splash()
         
         # Create main window (modules already loaded)
-        from PySide6.QtWidgets import QApplication
-        import sys
-        
-        # Check if QApplication already exists
-        qapp = QApplication.instance()
-        if not qapp:
-            qapp = QApplication(sys.argv)
+        # QApplication already created before splash
         
         # Initialize the app (modules already available)  
         main_window = TranslatorGUI()
@@ -11205,6 +11230,17 @@ if __name__ == "__main__":
         
         # Start main loop with debugging and proper cleanup
         exit_code = 0
+        
+        # In frozen builds, wrap the event loop to prevent COM errors from killing the app
+        if getattr(sys, 'frozen', False):
+            # Disable any Qt timers that might trigger COM during startup
+            try:
+                # Give the window time to fully initialize before starting event loop
+                import time
+                time.sleep(0.2)
+            except Exception:
+                pass
+        
         try:
             print("[MAIN] Starting Qt event loop...")
             exit_code = qapp.exec()
@@ -11223,7 +11259,7 @@ if __name__ == "__main__":
         try:
             print("[MAIN] Performing final Qt cleanup...")
             main_window.stop_all_operations()
-            qapp.processEvents()  # Process any remaining events
+            qapp.sendPostedEvents()  # Process any remaining events
             print("[MAIN] Qt cleanup completed")
         except Exception as e:
             print(f"[MAIN] Error during Qt cleanup: {e}")
