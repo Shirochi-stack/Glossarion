@@ -9625,12 +9625,25 @@ def main(log_callback=None, stop_callback=None):
                 parent_idx, parent_chapter, parent_actual_num, parent_content_hash = merge_info['group'][0]
                 merged_child_nums = [g[2] for g in merge_info['group'][1:]]  # All except parent
                 
-                # Track whether the underlying API response was truncated so we can
-                # still attempt Split the Merge but mark all chapters as qa_failed.
-                preserved_fr = locals().get("merged_finish_reason", finish_reason)
-                was_truncated = preserved_fr in ["length", "max_tokens"]
-                if was_truncated:
-                    print(f"   ⚠️ Merged response was TRUNCATED (finish_reason: {preserved_fr})")
+            # Track whether the underlying API response was truncated; if so mark qa_failed immediately
+            preserved_fr = locals().get("merged_finish_reason", finish_reason)
+            was_truncated = preserved_fr in ["length", "max_tokens"]
+            if was_truncated:
+                print(f"   ⚠️ Merged response was TRUNCATED (finish_reason: {preserved_fr})")
+                qa_issues = ["TRUNCATED"]
+                parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
+                progress_manager.update(
+                    parent_idx, parent_actual_num, parent_content_hash, parent_fname,
+                    status="qa_failed", chapter_obj=parent_chapter, qa_issues_found=qa_issues
+                )
+                for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group'][1:]:
+                    progress_manager.update(
+                        g_idx, g_actual_num, g_content_hash, None,
+                        status="qa_failed", chapter_obj=g_chapter, qa_issues_found=qa_issues
+                    )
+                progress_manager.save()
+                print(f"   ⚠️ Merged group marked as qa_failed due to truncation")
+                continue
 
                 # We may exit early on QA failure below, but we still want to strip
                 # injected split markers from any saved merged output when Split-the-Merge is enabled.
