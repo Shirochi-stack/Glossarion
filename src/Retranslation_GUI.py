@@ -2017,24 +2017,17 @@ class RetranslationMixin:
     
     def _rematch_spine_chapters(self, data):
         """Re-run the full spine chapter matching logic against updated progress JSON"""
-        # This is essentially lines 443-715 from _force_retranslation_epub_or_text
-        # but adapted to work with existing data structure
-        
         prog = data['prog']
         output_dir = data['output_dir']
-        progress_file = data['progress_file']
         spine_chapters = data['spine_chapters']
-        
+
         # Helper: keep OPF / progress matching rules in sync with _force_retranslation_epub_or_text
         def _normalize_opf_match_name(name: str) -> str:
             if not name:
                 return ""
             base = os.path.basename(name)
-            # Remove response_ prefix
             if base.startswith("response_"):
                 base = base[len("response_"):]
-            # Remove all extensions so that .html, .xhtml, .htm, etc. all match
-            # and double extensions like .html.xhtml collapse to the stem.
             while True:
                 new_base, ext = os.path.splitext(base)
                 if not ext:
@@ -2044,298 +2037,163 @@ class RetranslationMixin:
 
         def _opf_names_equal(a: str, b: str) -> bool:
             return _normalize_opf_match_name(a) == _normalize_opf_match_name(b)
-        
-        # Build maps for matching (same as original code, but normalized)
-        basename_to_progress = {}
-        for chapter_key, chapter_info in prog.get("chapters", {}).items():
-            original_basename = chapter_info.get("original_basename", "")
-            if original_basename:
-                norm_key = _normalize_opf_match_name(original_basename)
-                if norm_key not in basename_to_progress:
-                    basename_to_progress[norm_key] = []
-                basename_to_progress[norm_key].append((chapter_key, chapter_info))
-        
-        response_file_to_progress = {}
-        for chapter_key, chapter_info in prog.get("chapters", {}).items():
-            output_file = chapter_info.get("output_file", "")
-            if output_file:
-                # Exact key
-                if output_file not in response_file_to_progress:
-                    response_file_to_progress[output_file] = []
-                response_file_to_progress[output_file].append((chapter_key, chapter_info))
-                # Normalized key (ignoring response_ prefix)
-                norm_key = _normalize_opf_match_name(output_file)
-                if norm_key != output_file:
-                    if norm_key not in response_file_to_progress:
-                        response_file_to_progress[norm_key] = []
-                    response_file_to_progress[norm_key].append((chapter_key, chapter_info))
 
-        # Re-match each spine chapter (copy of matching logic from lines 462-715)
+        # ---------- Build indexes once (O(n)) ----------
+        basename_to_progress = {}
+        response_to_progress = {}
+        actualnum_to_progress = {}
+        composite_to_progress = {}
+
+        chapters_dict = prog.get("chapters", {})
+        for chapter_key, ch in chapters_dict.items():
+            orig = ch.get("original_basename", "")
+            out = ch.get("output_file", "")
+            actual_num = ch.get("actual_num")
+
+            if orig:
+                basename_to_progress.setdefault(_normalize_opf_match_name(orig), []).append(ch)
+            if out:
+                response_to_progress.setdefault(out, []).append(ch)
+                norm_out = _normalize_opf_match_name(out)
+                if norm_out != out:
+                    response_to_progress.setdefault(norm_out, []).append(ch)
+            if actual_num is not None:
+                actualnum_to_progress.setdefault(actual_num, []).append(ch)
+
+            # composite key: "{actual_num}_{filename_noext}"
+            filename_noext = os.path.splitext(_normalize_opf_match_name(orig or out or ""))[0]
+            if actual_num is not None and filename_noext:
+                composite_to_progress[f"{actual_num}_{filename_noext}"] = ch
+
+        # Cache file existence: single dir list to avoid per-item os.path.exists
+        try:
+            existing_files = {f for f in os.listdir(output_dir) if os.path.isfile(os.path.join(output_dir, f))}
+        except Exception:
+            existing_files = set()
+
+        def file_exists_fast(fname):
+            return fname in existing_files
+
+        # ---------- Fast match per spine (O(1) lookups) ----------
         for spine_ch in spine_chapters:
             filename = spine_ch['filename']
             chapter_num = spine_ch['file_chapter_num']
             is_special = spine_ch.get('is_special', False)
-            
+
             base_name = os.path.splitext(filename)[0]
-            expected_response = None
-            
-            # Mirror expected_response logic from _force_retranslation_epub_or_text
+            retain = os.getenv('RETAIN_SOURCE_EXTENSION', '0') == '1' or self.config.get('retain_source_extension', False)
+
             if is_special:
-                # Check for response_ prefix version
                 response_with_prefix = f"response_{base_name}.html"
-                retain = os.getenv('RETAIN_SOURCE_EXTENSION', '0') == '1' or self.config.get('retain_source_extension', False)
-                
                 if retain:
                     expected_response = filename
-                elif os.path.exists(os.path.join(output_dir, response_with_prefix)):
+                elif file_exists_fast(response_with_prefix):
                     expected_response = response_with_prefix
                 else:
-                    # Fallback to original filename
                     expected_response = filename
             else:
-                # Use OPF filename directly to avoid mismatching
-                retain = os.getenv('RETAIN_SOURCE_EXTENSION', '0') == '1' or self.config.get('retain_source_extension', False)
-                if retain:
-                    expected_response = filename
-                else:
-                    # Handle .htm.html -> .html conversion (kept for parity even though we
-                    # currently use the exact OPF filename for expected_response)
-                    stripped_base_name = base_name
-                    if base_name.endswith('.htm'):
-                        stripped_base_name = base_name[:-4]
-                    expected_response = filename
+                expected_response = filename if retain else filename
 
-            response_path = os.path.join(output_dir, expected_response)
-            
             matched_info = None
-            
-            # Method 1: Check by original basename (ignoring response_ prefix)
             basename_key = _normalize_opf_match_name(filename)
-            if basename_key in basename_to_progress:
-                entries = basename_to_progress[basename_key]
-                if entries:
-                    _, chapter_info = entries[0]
-                    status = chapter_info.get('status', '')
-                    if status in ['in_progress', 'failed', 'qa_failed', 'pending']:
-                        if chapter_info.get('actual_num') == chapter_num:
-                            matched_info = chapter_info
-                    else:
-                        matched_info = chapter_info
 
-            # Method 2: Check by response file map (exact or normalized key)
-            if not matched_info and expected_response in response_file_to_progress:
-                entries = response_file_to_progress[expected_response]
-                if entries:
-                    _, chapter_info = entries[0]
-                    status = chapter_info.get('status', '')
+            # 1) original basename map
+            lst = basename_to_progress.get(basename_key)
+            if lst:
+                for ch in lst:
+                    status = ch.get('status', '')
                     if status in ['in_progress', 'failed', 'qa_failed', 'pending']:
-                        if chapter_info.get('actual_num') == chapter_num:
-                            matched_info = chapter_info
+                        if ch.get('actual_num') == chapter_num:
+                            matched_info = ch
+                            break
                     else:
-                        matched_info = chapter_info
+                        matched_info = ch
+                        break
 
-            # Method 3: Search through all progress entries for matching output file
+            # 2) response map
             if not matched_info:
-                for chapter_key, chapter_info in prog.get("chapters", {}).items():
-                    out_file = chapter_info.get('output_file')
-                    if out_file == expected_response or _opf_names_equal(out_file, expected_response):
-                        status = chapter_info.get('status', '')
+                lst = response_to_progress.get(expected_response) or response_to_progress.get(basename_key)
+                if lst:
+                    for ch in lst:
+                        status = ch.get('status', '')
                         if status in ['in_progress', 'failed', 'qa_failed', 'pending']:
-                            if chapter_info.get('actual_num') == chapter_num:
-                                matched_info = chapter_info
+                            if ch.get('actual_num') == chapter_num:
+                                matched_info = ch
                                 break
                         else:
-                            matched_info = chapter_info
+                            matched_info = ch
                             break
-            
-            # Method 4: Match by chapter number key (includes merged logic)
+
+            # 3) composite key
             if not matched_info:
-                simple_key = str(chapter_num)
-                if simple_key in prog.get("chapters", {}):
-                    chapter_info = prog["chapters"][simple_key]
-                    out_file = chapter_info.get('output_file')
-                    status = chapter_info.get('status', '')
-                    orig_base = chapter_info.get('original_basename', '')
-                    if orig_base:
-                        orig_base = os.path.basename(orig_base)
-                    
-                    # Merged chapters: match by original_basename
+                filename_noext = base_name
+                if filename_noext.startswith("response_"):
+                    filename_noext = filename_noext[len("response_"):]
+                comp_key = f"{chapter_num}_{filename_noext}"
+                matched_info = composite_to_progress.get(comp_key)
+
+            # 4) actual_num map fallback
+            if not matched_info and chapter_num in actualnum_to_progress:
+                for ch in actualnum_to_progress[chapter_num]:
+                    status = ch.get('status', '')
+                    out_file = ch.get('output_file')
+                    orig_base = os.path.basename(ch.get('original_basename', '') or '')
                     if status == 'merged':
-                        parent_num = chapter_info.get('merged_parent_chapter')
-                        filename_noext = os.path.splitext(filename)[0]
-                        if parent_num is not None and (
-                            _opf_names_equal(orig_base, filename)
-                            or _opf_names_equal(orig_base, filename_noext)
-                            or not orig_base
-                        ):
-                            parent_key = str(parent_num)
-                            if parent_key in prog.get("chapters", {}):
-                                matched_info = chapter_info
-                    # Other statuses
-                    elif status in ['in_progress', 'failed', 'pending']:
-                        if chapter_info.get('actual_num') == chapter_num and (
-                            out_file == expected_response or _opf_names_equal(out_file, expected_response)
-                        ):
-                            matched_info = chapter_info
-                    elif status == 'qa_failed':
-                        if chapter_info.get('actual_num') == chapter_num:
-                            matched_info = chapter_info
-                    elif out_file == expected_response or _opf_names_equal(out_file, expected_response):
-                        matched_info = chapter_info
-                
-                # Check composite key (e.g., "1_chapter0001")
-                if not matched_info:
-                    filename_noext = os.path.splitext(filename)[0]
-                    if filename_noext.startswith("response_"):
-                        filename_noext = filename_noext[len("response_"):]
-                    composite_key = f"{chapter_num}_{filename_noext}"
-                    if composite_key in prog.get("chapters", {}):
-                        matched_info = prog["chapters"][composite_key]
-            
-            # Fallback: iterate through all entries
-            if not matched_info:
-                for chapter_key, chapter_info in prog.get("chapters", {}).items():
-                    actual_num = chapter_info.get('actual_num')
-                    if actual_num is not None and actual_num == chapter_num:
-                        orig_base = chapter_info.get('original_basename', '')
-                        if orig_base:
-                            orig_base = os.path.basename(orig_base)
-                        out_file = chapter_info.get('output_file')
-                        status = chapter_info.get('status', '')
-                        
-                        # Merged: match by original_basename
-                        if status == 'merged':
-                            filename_noext = os.path.splitext(filename)[0]
-                            if _opf_names_equal(orig_base, filename) or _opf_names_equal(orig_base, filename_noext) or not orig_base:
-                                matched_info = chapter_info
-                                break
-                        # In-progress/failed: require both actual_num and output_file
-                        elif status in ['in_progress', 'failed', 'pending']:
-                            if actual_num == chapter_num and (
-                                out_file == expected_response or _opf_names_equal(out_file, expected_response)
-                            ):
-                                matched_info = chapter_info
-                                break
-                        # qa_failed: match by chapter number only
-                        elif status == 'qa_failed':
-                            if actual_num == chapter_num:
-                                matched_info = chapter_info
-                                break
-                        # Other: match by original_basename or output_file
-                        elif (
-                            orig_base and _opf_names_equal(orig_base, filename)
-                        ) or (
-                            not orig_base and out_file and (
-                                out_file == expected_response or _opf_names_equal(out_file, expected_response)
-                            )
-                        ):
-                            matched_info = chapter_info
+                        if _opf_names_equal(orig_base, filename) or not orig_base:
+                            matched_info = ch
                             break
-            
-            # File exists check
-            file_exists = os.path.exists(response_path)
-            
-            # Update spine chapter status (mirror _force_retranslation_epub_or_text)
+                    elif status in ['in_progress', 'failed', 'pending']:
+                        if out_file and (_opf_names_equal(out_file, expected_response) or out_file == expected_response):
+                            matched_info = ch
+                            break
+                    elif status == 'qa_failed':
+                        matched_info = ch
+                        break
+                    else:
+                        if (orig_base and _opf_names_equal(orig_base, filename)) or (out_file and (_opf_names_equal(out_file, expected_response) or out_file == expected_response)):
+                            matched_info = ch
+                            break
+
+            # 5) file existence fallback
+            file_exists = file_exists_fast(expected_response)
+
             if matched_info:
                 status = matched_info.get('status', 'unknown')
-                
-                # CRITICAL: For failed/in_progress/qa_failed/pending, ALWAYS use progress status
-                # Never let file existence override these statuses
                 if status in ['failed', 'in_progress', 'qa_failed', 'pending']:
                     spine_ch['status'] = status
                     spine_ch['output_file'] = matched_info.get('output_file') or expected_response
                     spine_ch['progress_entry'] = matched_info
                     continue
-                
-                # For other statuses (completed, merged, etc.)
+
                 spine_ch['status'] = status
-                
-                # For special files, always use the original filename (ignore what's in progress JSON)
-                if is_special:
-                    spine_ch['output_file'] = expected_response
-                else:
-                    spine_ch['output_file'] = matched_info.get('output_file', expected_response)
-                
+                spine_ch['output_file'] = expected_response if is_special else matched_info.get('output_file', expected_response)
                 spine_ch['progress_entry'] = matched_info
-                
-                # Handle null output_file
                 if not spine_ch['output_file']:
                     spine_ch['output_file'] = expected_response
-                
-                # Verify file actually exists for completed status
+
                 if status == 'completed':
-                    output_path = os.path.join(output_dir, spine_ch['output_file'])
-                    if not os.path.exists(output_path):
-                        # If the expected_response file exists, prefer that and
-                        # transparently update the progress entry.
+                    output_file = spine_ch['output_file']
+                    if not file_exists_fast(output_file):
                         if file_exists and expected_response:
-                            fixed_output_path = os.path.join(output_dir, expected_response)
-                            if os.path.exists(fixed_output_path):
-                                spine_ch['output_file'] = expected_response
-
-                                # If this spine chapter is tied to a concrete
-                                # progress entry, keep it consistent.
-                                if 'progress_entry' in spine_ch and spine_ch['progress_entry'] is not None:
-                                    spine_ch['progress_entry']['output_file'] = expected_response
-
-                                    # Also update the master prog dict so the
-                                    # corrected value is written back later.
-                                    for ch_key, ch_info in prog.get('chapters', {}).items():
-                                        if ch_info is spine_ch['progress_entry']:
-                                            prog['chapters'][ch_key]['output_file'] = expected_response
-                                            break
+                            spine_ch['output_file'] = expected_response
+                            matched_info['output_file'] = expected_response
                         else:
-                            # No matching file anywhere – mark as missing.
                             spine_ch['status'] = 'not_translated'
-            
             elif file_exists:
-                # File exists but no progress tracking - mark as completed
                 spine_ch['status'] = 'completed'
                 spine_ch['output_file'] = expected_response
-            
             else:
-                # No file and no progress tracking - LAST RESORT: Try exact filename matching
-                # This handles the case where progress file was deleted but files exist
-                # Match by filename only (ignore response_ prefix and all extensions)
-                
-                def normalize_filename(fname):
-                    """Remove response_ prefix and all extensions for exact comparison"""
-                    base = os.path.basename(fname)
-                    # Remove response_ prefix
-                    if base.startswith('response_'):
-                        base = base[9:]
-                    # Remove all extensions (including double extensions like .html.xhtml)
-                    while True:
-                        new_base, ext = os.path.splitext(base)
-                        if not ext:
-                            break
-                        base = new_base
-                    return base
-                
-                # Normalize the OPF filename
-                normalized_opf = normalize_filename(filename)
-                
-                # Search for exact matching file in output directory
+                # Exact filename match fallback using normalized compare
+                norm_target = _normalize_opf_match_name(filename)
                 matched_file = None
-                if os.path.exists(output_dir):
-                    try:
-                        for existing_file in os.listdir(output_dir):
-                            if os.path.isfile(os.path.join(output_dir, existing_file)):
-                                normalized_existing = normalize_filename(existing_file)
-                                # Exact match only - no fuzzy logic
-                                if normalized_existing == normalized_opf:
-                                    matched_file = existing_file
-                                    break
-                    except Exception as e:
-                        print(f"Warning: Error scanning output directory for match: {e}")
-                
+                for f in existing_files:
+                    if _normalize_opf_match_name(f) == norm_target:
+                        matched_file = f
+                        break
                 if matched_file:
-                    # Found an exact matching file by normalized name - mark as completed
                     spine_ch['status'] = 'completed'
                     spine_ch['output_file'] = matched_file
-                    print(f"📁 Matched (refresh): {filename} -> {matched_file}")
                 else:
-                    # No file and no progress tracking - not translated
                     spine_ch['status'] = 'not_translated'
                     spine_ch['output_file'] = expected_response
         
@@ -2564,63 +2422,87 @@ class RetranslationMixin:
                 info['status'] = 'not_translated'
     
     def _update_listbox_display(self, data):
-        """Update the listbox display with current chapter information"""
+        """Update the listbox display with current chapter information incrementally to avoid UI stalls"""
+        from PySide6.QtCore import Qt
         listbox = data['listbox']
-        
-        # Clear existing items
+
+        # Stop any prior incremental timer to avoid overlapping updates
+        old_timer = data.get('_listbox_timer')
+        if old_timer:
+            try:
+                old_timer.stop()
+            except Exception:
+                pass
+
+        # Save current selection keys for restoration (num + output_file)
+        saved_keys = []
+        try:
+            for item in listbox.selectedItems():
+                meta = item.data(Qt.UserRole) or {}
+                info = meta.get('info', {})
+                saved_keys.append((info.get('num'), info.get('output_file')))
+        except RuntimeError:
+            saved_keys = []
+
+        # Clear existing items immediately (cheap) — incremental add will follow
         listbox.clear()
-        
-        # Status icons and labels
+        if 'selection_count_label' in data and data['selection_count_label']:
+            try:
+                data['selection_count_label'].setText("Selected: 0")
+            except RuntimeError:
+                pass
+
         status_icons = {
             'completed': '✅',
             'merged': '🔗',
             'failed': '❌',
             'qa_failed': '❌',
             'in_progress': '🔄',
+            'pending': '❓',
             'not_translated': '⬜',
             'unknown': '❓'
         }
-        
+
         status_labels = {
             'completed': 'Completed',
             'merged': 'Merged',
             'failed': 'Failed',
             'qa_failed': 'QA Failed',
             'in_progress': 'In Progress',
+            'pending': 'Pending',
             'not_translated': 'Not Translated',
             'unknown': 'Unknown'
         }
-        
-        # Calculate maximum widths for dynamic column sizing
-        max_original_len = 0
-        max_output_len = 0
-        
+
+        # Precompute column widths
+        max_original_len = 20
+        max_output_len = 25
         for info in data['chapter_display_info']:
             if 'opf_position' in info:
                 original_file = info.get('original_filename', '')
                 output_file = info['output_file']
                 max_original_len = max(max_original_len, len(original_file))
                 max_output_len = max(max_output_len, len(output_file))
-        
-        # Set minimum widths to prevent too narrow columns
-        max_original_len = max(max_original_len, 20)
-        max_output_len = max(max_output_len, 25)
-        
-        # Rebuild listbox items
+
+        # Build lightweight descriptors to add in batches
+        items_data = []
+        show_special_files = data.get('show_special_files_state', False)
+        if 'show_special_files_cb' in data and data['show_special_files_cb']:
+            try:
+                show_special_files = data['show_special_files_cb'].isChecked()
+            except RuntimeError:
+                pass
+
         for info in data['chapter_display_info']:
             chapter_num = info['num']
             status = info['status']
             output_file = info['output_file']
             icon = status_icons.get(status, '❓')
             status_label = status_labels.get(status, status)
-            
-            # Format display with OPF info if available
+
             if 'opf_position' in info:
-                # OPF-based display with dynamic widths
                 original_file = info.get('original_filename', '')
-                opf_pos = info['opf_position'] + 1  # 1-based for display
-                
-            # Format: [OPF Position] Chapter Number | Status | Original File -> Response File
+                opf_pos = info['opf_position'] + 1
                 if isinstance(chapter_num, float):
                     if chapter_num.is_integer():
                         display = f"[{opf_pos:03d}] Ch.{int(chapter_num):03d} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_file}"
@@ -2629,70 +2511,94 @@ class RetranslationMixin:
                 else:
                     display = f"[{opf_pos:03d}] Ch.{chapter_num:03d} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_file}"
             else:
-                # Original format
                 if isinstance(chapter_num, float) and chapter_num.is_integer():
                     display = f"Chapter {int(chapter_num):03d} | {icon} {status_label:11s} | {output_file}"
                 elif isinstance(chapter_num, float):
                     display = f"Chapter {chapter_num:06.1f} | {icon} {status_label:11s} | {output_file}"
                 else:
                     display = f"Chapter {chapter_num:03d} | {icon} {status_label:11s} | {output_file}"
-            
-            # Add QA issues if status is qa_failed
+
             if status == 'qa_failed':
                 chapter_info = info.get('info', {})
                 qa_issues = chapter_info.get('qa_issues_found', [])
                 if qa_issues:
-                    # Format issues for display (show first 2)
                     issues_display = ', '.join(qa_issues[:2])
                     if len(qa_issues) > 2:
                         issues_display += f' (+{len(qa_issues)-2} more)'
                     display += f" | {issues_display}"
-            
-            # Add parent chapter info if status is merged
+
             if status == 'merged':
                 chapter_info = info.get('info', {})
                 parent_chapter = chapter_info.get('merged_parent_chapter')
                 if parent_chapter:
                     display += f" | → Ch.{parent_chapter}"
-            
+
             if info.get('duplicate_count', 1) > 1:
                 display += f" | ({info['duplicate_count']} entries)"
-            
-            from PySide6.QtWidgets import QListWidgetItem
-            from PySide6.QtGui import QColor
-            from PySide6.QtCore import Qt
-            item = QListWidgetItem(display)
-            
-            # Color code based on status
-            if status == 'completed':
-                item.setForeground(QColor('green'))
-            elif status == 'merged':
-                item.setForeground(QColor('#17a2b8'))  # Cyan/teal for merged
-            elif status in ['failed', 'qa_failed']:
-                item.setForeground(QColor('red'))
-            elif status == 'not_translated':
-                item.setForeground(QColor('#2b6cb0'))
-            elif status == 'in_progress':
-                item.setForeground(QColor('orange'))
-            
-            # Store metadata in item for filtering
-            is_special = info.get('is_special', False)
-            item.setData(Qt.UserRole, {'is_special': is_special, 'info': info})
-            
-            # Add item to listbox first
-            listbox.addItem(item)
-            
-            # Then hide special files if toggle is off (must be done after adding to listbox)
-            # Get current toggle state from data or checkbox
-            show_special_files = data.get('show_special_files_state', False)
-            if 'show_special_files_cb' in data and data['show_special_files_cb']:
-                try:
-                    show_special_files = data['show_special_files_cb'].isChecked()
-                except RuntimeError:
-                    pass  # Widget was deleted
-            
-            if is_special and not show_special_files:
-                item.setHidden(True)
+
+            items_data.append({
+                'display': display,
+                'status': status,
+                'is_special': info.get('is_special', False),
+                'info': info,
+                'hide': info.get('is_special', False) and not show_special_files
+            })
+
+        # Incrementally add items using a QTimer to keep UI responsive
+        from PySide6.QtCore import QTimer, Qt
+        from PySide6.QtWidgets import QListWidgetItem
+        from PySide6.QtGui import QColor
+
+        chunk_size = 80  # number of rows per tick; tune for smoothness vs speed
+        pending = items_data[:]  # copy
+        timer = QTimer(listbox)
+
+        def add_chunk():
+            nonlocal pending
+            if not pending:
+                timer.stop()
+                data['_listbox_timer'] = None
+                # Restore selections by key
+                if saved_keys:
+                    for i in range(listbox.count()):
+                        try:
+                            meta = listbox.item(i).data(Qt.UserRole) or {}
+                            info = meta.get('info', {})
+                            key = (info.get('num'), info.get('output_file'))
+                            if key in saved_keys:
+                                listbox.item(i).setSelected(True)
+                        except RuntimeError:
+                            break
+                    if 'selection_count_label' in data and data['selection_count_label']:
+                        try:
+                            data['selection_count_label'].setText(f"Selected: {len(listbox.selectedItems())}")
+                        except RuntimeError:
+                            pass
+                return
+
+            for _ in range(min(chunk_size, len(pending))):
+                row = pending.pop(0)
+                item = QListWidgetItem(row['display'])
+                status = row['status']
+                if status == 'completed':
+                    item.setForeground(QColor('green'))
+                elif status == 'merged':
+                    item.setForeground(QColor('#17a2b8'))
+                elif status in ['failed', 'qa_failed']:
+                    item.setForeground(QColor('red'))
+                elif status == 'not_translated':
+                    item.setForeground(QColor('#2b6cb0'))
+                elif status == 'in_progress':
+                    item.setForeground(QColor('orange'))
+
+                item.setData(Qt.UserRole, {'is_special': row['is_special'], 'info': row['info']})
+                listbox.addItem(item)
+                if row['hide']:
+                    item.setHidden(True)
+
+        timer.timeout.connect(add_chunk)
+        timer.start(10)  # 10ms cadence for smoother UI
+        data['_listbox_timer'] = timer
     
     def _update_statistics_display(self, data):
         """Update statistics display for both OPF and non-OPF files"""
