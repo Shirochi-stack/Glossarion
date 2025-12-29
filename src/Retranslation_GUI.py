@@ -2021,7 +2021,6 @@ class RetranslationMixin:
         output_dir = data['output_dir']
         spine_chapters = data['spine_chapters']
 
-        # Helper: keep OPF / progress matching rules in sync with _force_retranslation_epub_or_text
         def _normalize_opf_match_name(name: str) -> str:
             if not name:
                 return ""
@@ -2038,14 +2037,14 @@ class RetranslationMixin:
         def _opf_names_equal(a: str, b: str) -> bool:
             return _normalize_opf_match_name(a) == _normalize_opf_match_name(b)
 
-        # ---------- Build indexes once (O(n)) ----------
+        # Build indexes once (O(n))
         basename_to_progress = {}
         response_to_progress = {}
         actualnum_to_progress = {}
         composite_to_progress = {}
 
         chapters_dict = prog.get("chapters", {})
-        for chapter_key, ch in chapters_dict.items():
+        for ch in chapters_dict.values():
             orig = ch.get("original_basename", "")
             out = ch.get("output_file", "")
             actual_num = ch.get("actual_num")
@@ -2060,21 +2059,20 @@ class RetranslationMixin:
             if actual_num is not None:
                 actualnum_to_progress.setdefault(actual_num, []).append(ch)
 
-            # composite key: "{actual_num}_{filename_noext}"
-            filename_noext = os.path.splitext(_normalize_opf_match_name(orig or out or ""))[0]
-            if actual_num is not None and filename_noext:
+            fname_for_comp = orig or out
+            if fname_for_comp and actual_num is not None:
+                filename_noext = os.path.splitext(_normalize_opf_match_name(fname_for_comp))[0]
                 composite_to_progress[f"{actual_num}_{filename_noext}"] = ch
 
-        # Cache file existence: single dir list to avoid per-item os.path.exists
+        # Cache directory listing to avoid thousands of exists calls
         try:
             existing_files = {f for f in os.listdir(output_dir) if os.path.isfile(os.path.join(output_dir, f))}
         except Exception:
             existing_files = set()
 
-        def file_exists_fast(fname):
+        def file_exists_fast(fname: str) -> bool:
             return fname in existing_files
 
-        # ---------- Fast match per spine (O(1) lookups) ----------
         for spine_ch in spine_chapters:
             filename = spine_ch['filename']
             chapter_num = spine_ch['file_chapter_num']
@@ -2138,6 +2136,7 @@ class RetranslationMixin:
                     status = ch.get('status', '')
                     out_file = ch.get('output_file')
                     orig_base = os.path.basename(ch.get('original_basename', '') or '')
+
                     if status == 'merged':
                         if _opf_names_equal(orig_base, filename) or not orig_base:
                             matched_info = ch
@@ -2154,11 +2153,11 @@ class RetranslationMixin:
                             matched_info = ch
                             break
 
-            # 5) file existence fallback
             file_exists = file_exists_fast(expected_response)
 
             if matched_info:
                 status = matched_info.get('status', 'unknown')
+
                 if status in ['failed', 'in_progress', 'qa_failed', 'pending']:
                     spine_ch['status'] = status
                     spine_ch['output_file'] = matched_info.get('output_file') or expected_response
@@ -2179,11 +2178,12 @@ class RetranslationMixin:
                             matched_info['output_file'] = expected_response
                         else:
                             spine_ch['status'] = 'not_translated'
+
             elif file_exists:
                 spine_ch['status'] = 'completed'
                 spine_ch['output_file'] = expected_response
+
             else:
-                # Exact filename match fallback using normalized compare
                 norm_target = _normalize_opf_match_name(filename)
                 matched_file = None
                 for f in existing_files:
@@ -2422,87 +2422,63 @@ class RetranslationMixin:
                 info['status'] = 'not_translated'
     
     def _update_listbox_display(self, data):
-        """Update the listbox display with current chapter information incrementally to avoid UI stalls"""
-        from PySide6.QtCore import Qt
+        """Update the listbox display with current chapter information"""
         listbox = data['listbox']
-
-        # Stop any prior incremental timer to avoid overlapping updates
-        old_timer = data.get('_listbox_timer')
-        if old_timer:
-            try:
-                old_timer.stop()
-            except Exception:
-                pass
-
-        # Save current selection keys for restoration (num + output_file)
-        saved_keys = []
-        try:
-            for item in listbox.selectedItems():
-                meta = item.data(Qt.UserRole) or {}
-                info = meta.get('info', {})
-                saved_keys.append((info.get('num'), info.get('output_file')))
-        except RuntimeError:
-            saved_keys = []
-
-        # Clear existing items immediately (cheap) — incremental add will follow
+        
+        # Clear existing items
         listbox.clear()
-        if 'selection_count_label' in data and data['selection_count_label']:
-            try:
-                data['selection_count_label'].setText("Selected: 0")
-            except RuntimeError:
-                pass
-
+        
+        # Status icons and labels
         status_icons = {
             'completed': '✅',
             'merged': '🔗',
             'failed': '❌',
             'qa_failed': '❌',
             'in_progress': '🔄',
-            'pending': '❓',
             'not_translated': '⬜',
             'unknown': '❓'
         }
-
+        
         status_labels = {
             'completed': 'Completed',
             'merged': 'Merged',
             'failed': 'Failed',
             'qa_failed': 'QA Failed',
             'in_progress': 'In Progress',
-            'pending': 'Pending',
             'not_translated': 'Not Translated',
             'unknown': 'Unknown'
         }
-
-        # Precompute column widths
-        max_original_len = 20
-        max_output_len = 25
+        
+        # Calculate maximum widths for dynamic column sizing
+        max_original_len = 0
+        max_output_len = 0
+        
         for info in data['chapter_display_info']:
             if 'opf_position' in info:
                 original_file = info.get('original_filename', '')
                 output_file = info['output_file']
                 max_original_len = max(max_original_len, len(original_file))
                 max_output_len = max(max_output_len, len(output_file))
-
-        # Build lightweight descriptors to add in batches
-        items_data = []
-        show_special_files = data.get('show_special_files_state', False)
-        if 'show_special_files_cb' in data and data['show_special_files_cb']:
-            try:
-                show_special_files = data['show_special_files_cb'].isChecked()
-            except RuntimeError:
-                pass
-
+        
+        # Set minimum widths to prevent too narrow columns
+        max_original_len = max(max_original_len, 20)
+        max_output_len = max(max_output_len, 25)
+        
+        # Rebuild listbox items
         for info in data['chapter_display_info']:
             chapter_num = info['num']
             status = info['status']
             output_file = info['output_file']
             icon = status_icons.get(status, '❓')
             status_label = status_labels.get(status, status)
-
+            
+            # Format display with OPF info if available
             if 'opf_position' in info:
+                # OPF-based display with dynamic widths
                 original_file = info.get('original_filename', '')
-                opf_pos = info['opf_position'] + 1
+                opf_pos = info['opf_position'] + 1  # 1-based for display
+                
+            # Format: [OPF Position] Chapter Number | Status | Original File -> Response File
                 if isinstance(chapter_num, float):
                     if chapter_num.is_integer():
                         display = f"[{opf_pos:03d}] Ch.{int(chapter_num):03d} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_file}"
@@ -2511,94 +2487,70 @@ class RetranslationMixin:
                 else:
                     display = f"[{opf_pos:03d}] Ch.{chapter_num:03d} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_file}"
             else:
+                # Original format
                 if isinstance(chapter_num, float) and chapter_num.is_integer():
                     display = f"Chapter {int(chapter_num):03d} | {icon} {status_label:11s} | {output_file}"
                 elif isinstance(chapter_num, float):
                     display = f"Chapter {chapter_num:06.1f} | {icon} {status_label:11s} | {output_file}"
                 else:
                     display = f"Chapter {chapter_num:03d} | {icon} {status_label:11s} | {output_file}"
-
+            
+            # Add QA issues if status is qa_failed
             if status == 'qa_failed':
                 chapter_info = info.get('info', {})
                 qa_issues = chapter_info.get('qa_issues_found', [])
                 if qa_issues:
+                    # Format issues for display (show first 2)
                     issues_display = ', '.join(qa_issues[:2])
                     if len(qa_issues) > 2:
                         issues_display += f' (+{len(qa_issues)-2} more)'
                     display += f" | {issues_display}"
-
+            
+            # Add parent chapter info if status is merged
             if status == 'merged':
                 chapter_info = info.get('info', {})
                 parent_chapter = chapter_info.get('merged_parent_chapter')
                 if parent_chapter:
                     display += f" | → Ch.{parent_chapter}"
-
+            
             if info.get('duplicate_count', 1) > 1:
                 display += f" | ({info['duplicate_count']} entries)"
-
-            items_data.append({
-                'display': display,
-                'status': status,
-                'is_special': info.get('is_special', False),
-                'info': info,
-                'hide': info.get('is_special', False) and not show_special_files
-            })
-
-        # Incrementally add items using a QTimer to keep UI responsive
-        from PySide6.QtCore import QTimer, Qt
-        from PySide6.QtWidgets import QListWidgetItem
-        from PySide6.QtGui import QColor
-
-        chunk_size = 80  # number of rows per tick; tune for smoothness vs speed
-        pending = items_data[:]  # copy
-        timer = QTimer(listbox)
-
-        def add_chunk():
-            nonlocal pending
-            if not pending:
-                timer.stop()
-                data['_listbox_timer'] = None
-                # Restore selections by key
-                if saved_keys:
-                    for i in range(listbox.count()):
-                        try:
-                            meta = listbox.item(i).data(Qt.UserRole) or {}
-                            info = meta.get('info', {})
-                            key = (info.get('num'), info.get('output_file'))
-                            if key in saved_keys:
-                                listbox.item(i).setSelected(True)
-                        except RuntimeError:
-                            break
-                    if 'selection_count_label' in data and data['selection_count_label']:
-                        try:
-                            data['selection_count_label'].setText(f"Selected: {len(listbox.selectedItems())}")
-                        except RuntimeError:
-                            pass
-                return
-
-            for _ in range(min(chunk_size, len(pending))):
-                row = pending.pop(0)
-                item = QListWidgetItem(row['display'])
-                status = row['status']
-                if status == 'completed':
-                    item.setForeground(QColor('green'))
-                elif status == 'merged':
-                    item.setForeground(QColor('#17a2b8'))
-                elif status in ['failed', 'qa_failed']:
-                    item.setForeground(QColor('red'))
-                elif status == 'not_translated':
-                    item.setForeground(QColor('#2b6cb0'))
-                elif status == 'in_progress':
-                    item.setForeground(QColor('orange'))
-
-                item.setData(Qt.UserRole, {'is_special': row['is_special'], 'info': row['info']})
-                listbox.addItem(item)
-                if row['hide']:
-                    item.setHidden(True)
-
-        timer.timeout.connect(add_chunk)
-        timer.start(10)  # 10ms cadence for smoother UI
-        data['_listbox_timer'] = timer
+            
+            from PySide6.QtWidgets import QListWidgetItem
+            from PySide6.QtGui import QColor
+            from PySide6.QtCore import Qt
+            item = QListWidgetItem(display)
+            
+            # Color code based on status
+            if status == 'completed':
+                item.setForeground(QColor('green'))
+            elif status == 'merged':
+                item.setForeground(QColor('#17a2b8'))  # Cyan/teal for merged
+            elif status in ['failed', 'qa_failed']:
+                item.setForeground(QColor('red'))
+            elif status == 'not_translated':
+                item.setForeground(QColor('#2b6cb0'))
+            elif status == 'in_progress':
+                item.setForeground(QColor('orange'))
+            
+            # Store metadata in item for filtering
+            is_special = info.get('is_special', False)
+            item.setData(Qt.UserRole, {'is_special': is_special, 'info': info})
+            
+            # Add item to listbox first
+            listbox.addItem(item)
+            
+            # Then hide special files if toggle is off (must be done after adding to listbox)
+            # Get current toggle state from data or checkbox
+            show_special_files = data.get('show_special_files_state', False)
+            if 'show_special_files_cb' in data and data['show_special_files_cb']:
+                try:
+                    show_special_files = data['show_special_files_cb'].isChecked()
+                except RuntimeError:
+                    pass  # Widget was deleted
+            
+            if is_special and not show_special_files:
+                item.setHidden(True)
     
     def _update_statistics_display(self, data):
         """Update statistics display for both OPF and non-OPF files"""
