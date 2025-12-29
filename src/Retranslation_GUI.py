@@ -2002,6 +2002,22 @@ class RetranslationMixin:
                 QMessageBox.information(data.get('dialog', self), "Output Folder Not Found", 
                                       f"The output folder appears to have been deleted.\n\n"
                                       f"Progress file not found:\n{data['progress_file']}")
+                # Force-restart the Progress Manager for this file
+                try:
+                    file_path = data.get('file_path')
+                    # Remove cached dialog so a fresh one is built
+                    if file_path:
+                        file_key = os.path.abspath(file_path)
+                        if hasattr(self, '_retranslation_dialog_cache') and isinstance(self._retranslation_dialog_cache, dict):
+                            self._retranslation_dialog_cache.pop(file_key, None)
+                    dlg = data.get('dialog')
+                    if dlg:
+                        dlg.close()
+                    # Reopen after event loop returns
+                    from PySide6.QtCore import QTimer
+                    QTimer.singleShot(0, lambda fp=file_path: self._force_retranslation_epub_or_text(fp) if fp else None)
+                except Exception as e:
+                    print(f"⚠️ Could not restart Progress Manager: {e}")
                 return
             
             with open(data['progress_file'], 'r', encoding='utf-8') as f:
