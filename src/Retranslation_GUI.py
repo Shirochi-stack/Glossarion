@@ -10,9 +10,9 @@ import re
 from PySide6.QtWidgets import (QWidget, QDialog, QLabel, QFrame, QListWidget, 
                                 QPushButton, QVBoxLayout, QHBoxLayout, QGridLayout,
                                 QMessageBox, QFileDialog, QTabWidget, QListWidgetItem,
-                                QScrollArea, QSizePolicy)
-from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QEasingCurve, Property, QEventLoop
-from PySide6.QtGui import QFont, QColor, QTransform, QIcon, QPixmap
+                                QScrollArea, QSizePolicy, QMenu)
+from PySide6.QtCore import Qt, Signal, QTimer, QPropertyAnimation, QEasingCurve, Property, QEventLoop, QUrl
+from PySide6.QtGui import QFont, QColor, QTransform, QIcon, QPixmap, QDesktopServices
 import xml.etree.ElementTree as ET
 import zipfile
 import shutil
@@ -1853,6 +1853,44 @@ class RetranslationMixin:
         data['refresh_func'] = animated_refresh
         if data.get('dialog'):
             setattr(data['dialog'], '_refresh_func', animated_refresh)
+
+        # ==== Context menu on listbox ====
+        listbox = data['listbox']
+        listbox.setContextMenuPolicy(Qt.CustomContextMenu)
+
+        def _open_file_for_item(item):
+            info_meta = item.data(Qt.UserRole) or {}
+            meta = info_meta.get('info', info_meta) or {}
+            output_file = meta.get('output_file')
+            if not output_file:
+                self._show_message('error', "File Missing", "No output file recorded for this entry.", parent=data.get('dialog', self))
+                return
+            path = os.path.join(data['output_dir'], output_file)
+            if not os.path.exists(path):
+                self._show_message('error', "File Missing", f"File not found:\n{path}", parent=data.get('dialog', self))
+                return
+            try:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+            except Exception as e:
+                self._show_message('error', "Open Failed", str(e), parent=data.get('dialog', self))
+
+        def show_context_menu(pos):
+            item = listbox.itemAt(pos)
+            if not item:
+                return
+            menu = QMenu(listbox)
+            act_open = menu.addAction("Open File")
+            act_retranslate = menu.addAction("Retranslate Selected")
+            act_remove_qa = menu.addAction("Remove QA Failed Mark")
+            chosen = menu.exec(listbox.mapToGlobal(pos))
+            if chosen == act_open:
+                _open_file_for_item(item)
+            elif chosen == act_retranslate:
+                retranslate_selected()
+            elif chosen == act_remove_qa:
+                remove_qa_failed_mark()
+
+        listbox.customContextMenuRequested.connect(show_context_menu)
         
         btn_cancel = QPushButton("Cancel")
         btn_cancel.setMinimumHeight(32)
