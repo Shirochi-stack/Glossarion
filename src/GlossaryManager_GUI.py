@@ -2420,7 +2420,7 @@ For character entries, determine gender from context, leave empty if context is 
 For non-character entries, leave gender empty.
 The description column is optional and can contain brief context (role, location, significance).
 
-Critical Requirement: The translated name column should be in {language}.
+Critical Requirement: The translated name and description column must be in {language}.
 
 For example:
 character,ᫀ이히리ᄐ 나애,Dihirit Ade,female,The enigmatic guild leader of the Shadow Lotus who operates from the concealed backrooms of the capital, manipulating city politics through commerce and wielding dual daggers with lethal precision
