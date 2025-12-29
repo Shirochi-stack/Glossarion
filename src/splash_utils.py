@@ -18,6 +18,66 @@ class SplashManager:
         self.status_label = None
         self.progress_bar = None
         self.progress_label = None
+    
+    def _set_windows_taskbar_icon(self):
+        """Set Windows taskbar icon early, before any windows are created"""
+        try:
+            import os
+            import ctypes
+            import platform
+            from PySide6.QtGui import QIcon
+            
+            if platform.system() != 'Windows':
+                return
+            
+            # Get icon path
+            if getattr(sys, 'frozen', False):
+                base_dir = sys._MEIPASS
+            else:
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+            
+            ico_path = os.path.join(base_dir, 'Halgakos.ico')
+            
+            if os.path.isfile(ico_path):
+                # Set app user model ID immediately
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.6.8.1')
+                
+                # Set app-level icon
+                if self.app:
+                    icon = QIcon(ico_path)
+                    self.app.setWindowIcon(icon)
+                
+                print("✅ Windows taskbar icon set")
+        except Exception as e:
+            print(f"⚠️ Could not set early taskbar icon: {e}")
+    
+    def _set_win32_icon(self, ico_path):
+        """Set window icon using Win32 API directly - called after window is shown"""
+        try:
+            import ctypes
+            import platform
+            
+            if platform.system() != 'Windows' or not self.splash_window:
+                return
+            
+            # Get window handle
+            hwnd = int(self.splash_window.winId())
+            
+            # Constants for WM_SETICON
+            ICON_SMALL = 0
+            ICON_BIG = 1
+            WM_SETICON = 0x0080
+            
+            # Load icon using Win32 API
+            hicon = ctypes.windll.shell32.ExtractIconW(ctypes.windll.kernel32.GetModuleHandleW(None), ico_path, 0)
+            if hicon and hicon != -1:
+                ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hicon)
+                ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon)
+                print("✅ Win32 taskbar icon set on splash window")
+            else:
+                print("⚠️ Failed to extract icon from file")
+        except Exception as e:
+            print(f"⚠️ Could not set Win32 icon: {e}")
         
     def start_splash(self):
         """Create splash window with PySide6"""
@@ -29,6 +89,9 @@ class SplashManager:
                 self.app = QApplication(sys.argv)
             else:
                 self.app = QApplication.instance()
+            
+            # Set Windows taskbar icon IMMEDIATELY (before creating any windows)
+            self._set_windows_taskbar_icon()
             
             # Create main splash widget
             self.splash_window = QWidget()
@@ -60,6 +123,14 @@ class SplashManager:
             layout = QVBoxLayout()
             layout.setContentsMargins(15, 15, 15, 15)  # Reduced margins from 20 to 15
             layout.setSpacing(8)  # Reduced spacing from 10 to 8
+            
+            # Get icon path early
+            import os
+            if getattr(sys, 'frozen', False):
+                base_dir = sys._MEIPASS
+            else:
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+            self.ico_path = os.path.join(base_dir, 'Halgakos.ico')
             
             # Load and add icon
             self._load_icon(layout)
@@ -156,10 +227,16 @@ class SplashManager:
             # Show splash
             self.splash_window.show()
             
+            # Process events to ensure window is fully created
+            self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
+            
+            # Set Win32 taskbar icon IMMEDIATELY after window is shown
+            self._set_win32_icon(self.ico_path)
+            
             # Start progress animation
             self._animate_progress()
             
-            # Process events to show immediately
+            # Process events again
             self.app.processEvents(QEventLoop.ExcludeUserInputEvents)
             
             # Register cleanup
@@ -191,33 +268,69 @@ class SplashManager:
             ico_path = os.path.join(base_dir, 'Halgakos.ico')
             
             if os.path.isfile(ico_path):
-                # HiDPI-aware, high-quality scaling (same technique as Progress Manager)
+                # Set window icon for taskbar
                 icon = QIcon(ico_path)
+                self.splash_window.setWindowIcon(icon)
+                # Also set as application icon for taskbar on Windows
+                if self.app:
+                    self.app.setWindowIcon(icon)
+                
+                # For Windows: Set taskbar icon via Win32 API (works when running as .py script)
+                try:
+                    import ctypes
+                    import platform
+                    if platform.system() == 'Windows':
+                        # Set app user model ID
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.6.8.1')
+                        
+                        # Load icon from file and set it on the window
+                        hwnd = int(self.splash_window.winId())
+                        # Constants for WM_SETICON
+                        ICON_SMALL = 0
+                        ICON_BIG = 1
+                        WM_SETICON = 0x0080
+                        
+                        # Load icon using Win32 API
+                        hicon = ctypes.windll.shell32.ExtractIconW(ctypes.windll.kernel32.GetModuleHandleW(None), ico_path, 0)
+                        if hicon:
+                            ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hicon)
+                            ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon)
+                except Exception as e:
+                    print(f"⚠️ Could not set Windows taskbar icon: {e}")
+                
+                # HiDPI-aware, high-quality scaling
                 try:
                     dpr = self.splash_window.devicePixelRatioF()
                 except Exception:
                     dpr = 1.0
-                target_logical = 110  # keep same visual size as before
-                target_dev_px = int(target_logical * max(1.0, dpr))
-                pm = icon.pixmap(QSize(target_dev_px, target_dev_px))
-                if pm.isNull():
-                    # Fallback: manual scale with SmoothTransformation
-                    raw = QPixmap(ico_path)
-                    img = raw.toImage().scaled(target_dev_px, target_dev_px, Qt.AspectRatioMode.KeepAspectRatio,
-                                               Qt.TransformationMode.SmoothTransformation)
-                    pm = QPixmap.fromImage(img)
-                # Ensure crisp rendering on HiDPI
-                try:
-                    pm.setDevicePixelRatio(dpr)
-                except Exception:
-                    pass
                 
-                if not pm.isNull():
+                # Logical size (how big it appears on screen)
+                target_logical = 110
+                # Physical pixels (actual pixels in the image for HiDPI)
+                target_dev_px = int(target_logical * dpr)
+                
+                # Load and scale the icon at device pixel resolution
+                raw = QPixmap(ico_path)
+                if not raw.isNull():
+                    # Scale to device pixels with smooth transformation, keeping aspect ratio
+                    scaled = raw.scaled(
+                        target_dev_px, target_dev_px,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation
+                    )
+                    
+                    # Set device pixel ratio so Qt knows this is a HiDPI image
+                    scaled.setDevicePixelRatio(dpr)
+                    
+                    # Create label with logical size
                     icon_label = QLabel()
-                    icon_label.setPixmap(pm)
+                    icon_label.setPixmap(scaled)
                     icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
                     icon_label.setStyleSheet("background: transparent;")
-                    layout.addWidget(icon_label)
+                    # Fixed size in logical pixels (Qt will automatically use HiDPI pixmap)
+                    icon_label.setFixedSize(target_logical, target_logical)
+                    icon_label.setScaledContents(False)
+                    layout.addWidget(icon_label, alignment=Qt.AlignmentFlag.AlignCenter)
                     return
         except Exception as e:
             print(f"⚠️ Could not load icon: {e}")

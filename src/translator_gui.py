@@ -798,11 +798,48 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.auto_loaded_glossary_for_file = None
         self.manual_glossary_manually_loaded = False
         
-        # Load icon
+        # Load icon for window and taskbar
         ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
         if os.path.isfile(ico_path):
             try:
-                self.setWindowIcon(QIcon(ico_path))
+                icon = QIcon(ico_path)
+                self.setWindowIcon(icon)
+                # Also set as application icon for taskbar on Windows
+                app = QApplication.instance()
+                if app:
+                    app.setWindowIcon(icon)
+                
+                # For Windows: Set taskbar icon via Win32 API (works when running as .py script)
+                try:
+                    import ctypes
+                    import platform
+                    if platform.system() == 'Windows':
+                        # Set app user model ID to separate from python.exe in taskbar
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.6.8.1')
+                        
+                        # Load icon from file and set it on the window
+                        # This must be done after the window is created
+                        def set_window_icon():
+                            try:
+                                hwnd = int(self.winId())
+                                # Constants for WM_SETICON
+                                ICON_SMALL = 0
+                                ICON_BIG = 1
+                                WM_SETICON = 0x0080
+                                
+                                # Load icon using Win32 API
+                                hicon = ctypes.windll.shell32.ExtractIconW(ctypes.windll.kernel32.GetModuleHandleW(None), ico_path, 0)
+                                if hicon:
+                                    ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hicon)
+                                    ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon)
+                            except Exception as e:
+                                print(f"⚠️ Could not set Windows taskbar icon: {e}")
+                        
+                        # Defer icon setting until window is fully created
+                        from PySide6.QtCore import QTimer
+                        QTimer.singleShot(100, set_window_icon)
+                except Exception:
+                    pass
             except:
                 pass
         
