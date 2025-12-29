@@ -1333,7 +1333,13 @@ def parse_api_response(response_text: str) -> List[Dict]:
 
                 entries.append(entry)
         except IndexError as e:
-            print(f"[Error] Malformed glossary line (IndexError): {line} -> {e}")
+            # If no extra columns are configured, emit a warning; otherwise stay silent.
+            try:
+                custom_fields = json.loads(os.getenv('GLOSSARY_CUSTOM_FIELDS', '[]'))
+            except Exception:
+                custom_fields = []
+            if not custom_fields:
+                print(f"[Warning] Malformed glossary line (IndexError): {line} -> {e}")
             continue
     
     return entries
