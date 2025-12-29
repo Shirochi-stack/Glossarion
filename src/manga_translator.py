@@ -1608,10 +1608,16 @@ class MangaTranslator:
                 
                 # Retry settings
                 retry_truncated = config.get('retry_truncated', False)
-                max_retry_tokens = config.get('max_retry_tokens', 16384)
+                max_retry_tokens = config.get('max_retry_tokens', -1)
+                try:
+                    max_retry_tokens_int = int(max_retry_tokens)
+                except Exception:
+                    max_retry_tokens_int = -1
+                if max_retry_tokens_int <= 0:
+                    max_retry_tokens_int = int(config.get('max_output_tokens', getattr(self.main_gui, 'max_output_tokens', 65536)))
                 max_retries = config.get('max_retries', 7)
                 os.environ['RETRY_TRUNCATED'] = '1' if retry_truncated else '0'
-                os.environ['MAX_RETRY_TOKENS'] = str(max_retry_tokens)
+                os.environ['MAX_RETRY_TOKENS'] = str(max_retry_tokens_int)
                 os.environ['MAX_RETRIES'] = str(max_retries)
                 
                 # Safety settings

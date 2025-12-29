@@ -2118,7 +2118,7 @@ Recent translations to summarize:
             # -1 means: use the main MAX_OUTPUT_TOKENS value
             ('rolling_summary_max_tokens_var', 'rolling_summary_max_tokens', '-1'),
             ('reinforcement_freq_var', 'reinforcement_frequency', '10'),
-            ('max_retry_tokens_var', 'max_retry_tokens', '65536'),
+            ('max_retry_tokens_var', 'max_retry_tokens', '-1'),
             ('truncation_retry_attempts_var', 'truncation_retry_attempts', '1'),
             ('split_failed_retry_attempts_var', 'split_failed_retry_attempts', '1'),
             ('duplicate_lookback_var', 'duplicate_lookback_chapters', '5'),
@@ -2198,6 +2198,21 @@ Recent translations to summarize:
             self.config['compression_factor'] = factor
         except Exception as e:
             print(f"Error updating auto compression factor: {e}")
+
+    def _resolve_max_retry_tokens(self, current_max_tokens: int) -> int:
+        """
+        Interpret max_retry_tokens_var, treating -1 (or any non-positive value) as
+        'use the main output token limit'.
+        """
+        try:
+            val = int(getattr(self, 'max_retry_tokens_var', current_max_tokens))
+        except Exception:
+            return int(current_max_tokens)
+        if val is None:
+            return int(current_max_tokens)
+        if val <= 0:
+            return int(current_max_tokens)
+        return val
 
     def _setup_gui(self):
         """Initialize all GUI components"""
@@ -6451,6 +6466,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
         # CRITICAL: Use current GUI value for max_output_tokens, not the initial value
         # This ensures user changes via the button are reflected in image translation
         current_max_tokens = self.max_output_tokens
+        resolved_max_retry_tokens = self._resolve_max_retry_tokens(current_max_tokens)
         
         auto_inject_book_title = bool(getattr(self, 'auto_inject_book_title_var', self.config.get('auto_inject_book_title', False)))
 
@@ -6493,7 +6509,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'REINFORCEMENT_FREQUENCY': str(self.reinforcement_freq_var),
             'BREAK_SPLIT_COUNT': str(self.break_split_count_var) if hasattr(self, 'break_split_count_var') and self.break_split_count_var else '',
             'RETRY_TRUNCATED': "1" if self.retry_truncated_var else "0",
-            'MAX_RETRY_TOKENS': str(self.max_retry_tokens_var),
+            'MAX_RETRY_TOKENS': str(resolved_max_retry_tokens),
             'TRUNCATION_RETRY_ATTEMPTS': str(self.truncation_retry_attempts_var),
             'RETRY_SPLIT_FAILED': "1" if getattr(self, 'retry_split_failed_var', False) else "0",
             'SPLIT_FAILED_RETRY_ATTEMPTS': str(self.split_failed_retry_attempts_var),
@@ -9956,7 +9972,7 @@ Important rules:
                 # Retry settings
                 ('retry_truncated', ['retry_truncated_var'], False, bool),
                 ('retry_split_failed', ['retry_split_failed_var'], False, bool),
-                ('max_retry_tokens', ['max_retry_tokens_var'], 65536, lambda v: safe_int(v, 65536)),
+            ('max_retry_tokens', ['max_retry_tokens_var'], -1, lambda v: safe_int(v, -1)),
                 ('truncation_retry_attempts', ['truncation_retry_attempts_var'], 1, lambda v: safe_int(v, 1)),
                 ('split_failed_retry_attempts', ['split_failed_retry_attempts_var'], 1, lambda v: safe_int(v, 1)),
                 ('retry_timeout', ['retry_timeout_var'], False, bool),
@@ -10684,7 +10700,7 @@ Important rules:
 
                 # Retry/network controls
                 ('RETRY_TRUNCATED', '1' if getattr(self, 'retry_truncated_var', False) else '0'),
-                ('MAX_RETRY_TOKENS', str(getattr(self, 'max_retry_tokens_var', '65536'))),
+                ('MAX_RETRY_TOKENS', str(resolved_max_retry_tokens)),
                 ('TRUNCATION_RETRY_ATTEMPTS', str(getattr(self, 'truncation_retry_attempts_var', '1'))),
                 ('RETRY_SPLIT_FAILED', '1' if getattr(self, 'retry_split_failed_var', False) else '0'),
                 ('SPLIT_FAILED_RETRY_ATTEMPTS', str(getattr(self, 'split_failed_retry_attempts_var', '1'))),

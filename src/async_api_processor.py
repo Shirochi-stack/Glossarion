@@ -2920,7 +2920,17 @@ class AsyncProcessingDialog:
         # Retry and error handling settings
         env_vars['EMERGENCY_PARAGRAPH_RESTORE'] = "1" if self.gui.emergency_restore_var.get() else "0"
         env_vars['RETRY_TRUNCATED'] = "1" if self.gui.retry_truncated_var.get() else "0"
-        env_vars['MAX_RETRY_TOKENS'] = self.gui.max_retry_tokens_var.get()
+        try:
+            _raw_retry_tokens = self.gui.max_retry_tokens_var.get()
+            _resolved_retry_tokens = int(_raw_retry_tokens)
+        except Exception:
+            _resolved_retry_tokens = int(getattr(self.gui, 'max_output_tokens', 65536))
+        try:
+            if _resolved_retry_tokens <= 0:
+                _resolved_retry_tokens = int(getattr(self.gui, 'max_output_tokens', 65536))
+        except Exception:
+            _resolved_retry_tokens = int(getattr(self.gui, 'max_output_tokens', 65536))
+        env_vars['MAX_RETRY_TOKENS'] = str(_resolved_retry_tokens)
         env_vars['RETRY_DUPLICATE_BODIES'] = "1" if self.gui.retry_duplicate_var.get() else "0"
         env_vars['RETRY_TIMEOUT'] = "1" if self.gui.retry_timeout_var.get() else "0"
         env_vars['CHUNK_TIMEOUT'] = self.gui.chunk_timeout_var.get()
