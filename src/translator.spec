@@ -775,10 +775,6 @@ system_modules = [
     'ctypes',
     'ctypes.util',
     'ctypes.wintypes',
-    'win32com',
-    'win32com.client',
-    'pythoncom',
-    'pywintypes',
     'aiohttp',
     'aiofiles',
 	'yarl',  # URL handling for aiohttp
@@ -1058,6 +1054,7 @@ excludes = [
     'dask', 'dask.*',
     'cupy', 'sparse',
     'colorama',  # Unless you need colored console output
+    'win32com', 'pythoncom',  # Unless you need Windows COM
     
     # ============================================================================
     # ADDITIONAL HEAVY PACKAGES FROM YOUR ENVIRONMENT
