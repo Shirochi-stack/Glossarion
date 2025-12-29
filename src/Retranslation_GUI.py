@@ -118,6 +118,8 @@ class RetranslationMixin:
     def _ui_yield(self, ms=5):
         """Let the Qt event loop process pending events briefly."""
         try:
+            if getattr(self, '_suspend_yield', False):
+                return
             from PySide6.QtWidgets import QApplication
             QApplication.processEvents(QEventLoop.AllEvents, ms)
         except Exception:
@@ -1928,10 +1930,17 @@ class RetranslationMixin:
             # Save current scroll position and selections to restore after refresh
             saved_scroll = None
             updates_were_enabled = True
+            signals_were_blocked = False
+            updates_blocked = False
+            self._suspend_yield = True
             if 'listbox' in data and data['listbox']:
                 try:
                     saved_scroll = data['listbox'].verticalScrollBar().value()
                     updates_were_enabled = data['listbox'].updatesEnabled()
+                    signals_were_blocked = data['listbox'].signalsBlocked()
+                    data['listbox'].setStyleSheet(data['listbox'].styleSheet() + " QListWidget { paint-engine: none; }")
+                    updates_blocked = True
+                    data['listbox'].blockSignals(True)
                     data['listbox'].setUpdatesEnabled(False)
                 except Exception:
                     saved_scroll = None
@@ -1987,21 +1996,31 @@ class RetranslationMixin:
             # Update statistics if available
             self._update_statistics_display(data)
             
-            # Restore scroll position after layout settles (next event loop tick)
-            if saved_scroll is not None and 'listbox' in data and data['listbox']:
+            # Restore scroll position and repaint immediately after rebuild
+            if 'listbox' in data and data['listbox']:
                 try:
                     sb = data['listbox'].verticalScrollBar()
+                    if saved_scroll is not None:
+                        sb.setValue(min(saved_scroll, sb.maximum()))
+                    data['listbox'].setUpdatesEnabled(updates_were_enabled)
+                    data['listbox'].blockSignals(signals_were_blocked)
                     from PySide6.QtCore import QTimer
-                    QTimer.singleShot(0, lambda: (sb.setValue(min(saved_scroll, sb.maximum())),
-                                                  data['listbox'].setUpdatesEnabled(updates_were_enabled)))
+                    def _restore_paint():
+                        try:
+                            if updates_blocked:
+                                # Remove the paint-engine suppression by resetting stylesheet
+                                data['listbox'].setStyleSheet(data['listbox'].styleSheet().replace(" QListWidget { paint-engine: none; }",""))
+                            data['listbox'].viewport().update()
+                        except Exception:
+                            pass
+                    QTimer.singleShot(0, _restore_paint)
                 except Exception:
-                    pass
-            else:
-                if 'listbox' in data and data['listbox']:
                     try:
                         data['listbox'].setUpdatesEnabled(updates_were_enabled)
+                        data['listbox'].blockSignals(signals_were_blocked)
                     except Exception:
                         pass
+            self._suspend_yield = False
             
             # Restore selections
             try:
@@ -2499,7 +2518,12 @@ class RetranslationMixin:
         max_original_len = max(max_original_len, 20)
         max_output_len = max(max_output_len, 25)
         
-        # Rebuild listbox items
+        # Rebuild listbox items with updates/signals disabled to avoid flicker
+        listbox.setUpdatesEnabled(False)
+        listbox.blockSignals(True)
+        listbox.clear()
+
+        items_to_add = []
         for idx, info in enumerate(data['chapter_display_info']):
             if idx % 120 == 0:
                 self._ui_yield()
@@ -2509,13 +2533,9 @@ class RetranslationMixin:
             icon = status_icons.get(status, '❓')
             status_label = status_labels.get(status, status)
             
-            # Format display with OPF info if available
             if 'opf_position' in info:
-                # OPF-based display with dynamic widths
                 original_file = info.get('original_filename', '')
-                opf_pos = info['opf_position'] + 1  # 1-based for display
-                
-            # Format: [OPF Position] Chapter Number | Status | Original File -> Response File
+                opf_pos = info['opf_position'] + 1
                 if isinstance(chapter_num, float):
                     if chapter_num.is_integer():
                         display = f"[{opf_pos:03d}] Ch.{int(chapter_num):03d} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_file}"
@@ -2524,7 +2544,6 @@ class RetranslationMixin:
                 else:
                     display = f"[{opf_pos:03d}] Ch.{chapter_num:03d} | {icon} {status_label:11s} | {original_file:<{max_original_len}} -> {output_file}"
             else:
-                # Original format
                 if isinstance(chapter_num, float) and chapter_num.is_integer():
                     display = f"Chapter {int(chapter_num):03d} | {icon} {status_label:11s} | {output_file}"
                 elif isinstance(chapter_num, float):
@@ -2532,18 +2551,15 @@ class RetranslationMixin:
                 else:
                     display = f"Chapter {chapter_num:03d} | {icon} {status_label:11s} | {output_file}"
             
-            # Add QA issues if status is qa_failed
             if status == 'qa_failed':
                 chapter_info = info.get('info', {})
                 qa_issues = chapter_info.get('qa_issues_found', [])
                 if qa_issues:
-                    # Format issues for display (show first 2)
                     issues_display = ', '.join(qa_issues[:2])
                     if len(qa_issues) > 2:
                         issues_display += f' (+{len(qa_issues)-2} more)'
                     display += f" | {issues_display}"
             
-            # Add parent chapter info if status is merged
             if status == 'merged':
                 chapter_info = info.get('info', {})
                 parent_chapter = chapter_info.get('merged_parent_chapter')
@@ -2558,11 +2574,10 @@ class RetranslationMixin:
             from PySide6.QtCore import Qt
             item = QListWidgetItem(display)
             
-            # Color code based on status
             if status == 'completed':
                 item.setForeground(QColor('green'))
             elif status == 'merged':
-                item.setForeground(QColor('#17a2b8'))  # Cyan/teal for merged
+                item.setForeground(QColor('#17a2b8'))
             elif status in ['failed', 'qa_failed']:
                 item.setForeground(QColor('red'))
             elif status == 'not_translated':
@@ -2570,24 +2585,24 @@ class RetranslationMixin:
             elif status == 'in_progress':
                 item.setForeground(QColor('orange'))
             
-            # Store metadata in item for filtering
             is_special = info.get('is_special', False)
             item.setData(Qt.UserRole, {'is_special': is_special, 'info': info})
-            
-            # Add item to listbox first
+            items_to_add.append((item, is_special))
+
+        # Add all items without repaint, then apply visibility once
+        for item, is_special in items_to_add:
             listbox.addItem(item)
-            
-            # Then hide special files if toggle is off (must be done after adding to listbox)
-            # Get current toggle state from data or checkbox
             show_special_files = data.get('show_special_files_state', False)
             if 'show_special_files_cb' in data and data['show_special_files_cb']:
                 try:
                     show_special_files = data['show_special_files_cb'].isChecked()
                 except RuntimeError:
-                    pass  # Widget was deleted
-            
+                    pass
             if is_special and not show_special_files:
                 item.setHidden(True)
+
+        listbox.blockSignals(False)
+        listbox.setUpdatesEnabled(True)
     
     def _update_statistics_display(self, data):
         """Update statistics display for both OPF and non-OPF files"""
