@@ -1925,7 +1925,13 @@ class RetranslationMixin:
                 print("⚠️ Cannot refresh - widgets have been deleted")
                 return
             
-            # print("🔄 Refreshing retranslation data...")
+            # Save current scroll position and selections to restore after refresh
+            saved_scroll = None
+            if 'listbox' in data and data['listbox']:
+                try:
+                    saved_scroll = data['listbox'].verticalScrollBar().value()
+                except Exception:
+                    saved_scroll = None
             
             # Save current selections to restore after refresh
             selected_indices = []
@@ -1977,6 +1983,16 @@ class RetranslationMixin:
             
             # Update statistics if available
             self._update_statistics_display(data)
+            
+            # Restore scroll position after layout settles (next event loop tick)
+            if saved_scroll is not None and 'listbox' in data and data['listbox']:
+                try:
+                    sb = data['listbox'].verticalScrollBar()
+                    max_v = sb.maximum()
+                    from PySide6.QtCore import QTimer
+                    QTimer.singleShot(0, lambda: sb.setValue(min(saved_scroll, sb.maximum())))
+                except Exception:
+                    pass
             
             # Restore selections
             try:
