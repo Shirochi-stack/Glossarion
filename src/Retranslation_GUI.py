@@ -1927,9 +1927,12 @@ class RetranslationMixin:
             
             # Save current scroll position and selections to restore after refresh
             saved_scroll = None
+            updates_were_enabled = True
             if 'listbox' in data and data['listbox']:
                 try:
                     saved_scroll = data['listbox'].verticalScrollBar().value()
+                    updates_were_enabled = data['listbox'].updatesEnabled()
+                    data['listbox'].setUpdatesEnabled(False)
                 except Exception:
                     saved_scroll = None
             
@@ -1988,11 +1991,17 @@ class RetranslationMixin:
             if saved_scroll is not None and 'listbox' in data and data['listbox']:
                 try:
                     sb = data['listbox'].verticalScrollBar()
-                    max_v = sb.maximum()
                     from PySide6.QtCore import QTimer
-                    QTimer.singleShot(0, lambda: sb.setValue(min(saved_scroll, sb.maximum())))
+                    QTimer.singleShot(0, lambda: (sb.setValue(min(saved_scroll, sb.maximum())),
+                                                  data['listbox'].setUpdatesEnabled(updates_were_enabled)))
                 except Exception:
                     pass
+            else:
+                if 'listbox' in data and data['listbox']:
+                    try:
+                        data['listbox'].setUpdatesEnabled(updates_were_enabled)
+                    except Exception:
+                        pass
             
             # Restore selections
             try:
