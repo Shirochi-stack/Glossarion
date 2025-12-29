@@ -4594,7 +4594,7 @@ def _create_processing_options_section(self, parent):
 
     # Auto-retry Split Failures
     if not hasattr(self, 'retry_split_failed_var'):
-        self.retry_split_failed_var = self.config.get('retry_split_failed', False)
+        self.retry_split_failed_var = self.config.get('retry_split_failed', True)
     if not hasattr(self, 'split_failed_retry_attempts_var'):
         self.split_failed_retry_attempts_var = str(self.config.get('split_failed_retry_attempts', '1'))
 
@@ -4680,9 +4680,10 @@ def _create_processing_options_section(self, parent):
         # Enable/disable split merge option (but don't change its checked state)
         for widget in split_merge_widgets:
             widget.setEnabled(checked)
+        _update_retry_split_state()
     request_merge_cb.toggled.disconnect(_on_request_merge_toggle)
     request_merge_cb.toggled.connect(_on_request_merge_toggle_with_split)
-    
+    _update_retry_split_state()
     section_v.addWidget(extraction_box)
     
     # === REMAINING OPTIONS ===
