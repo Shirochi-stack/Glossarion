@@ -100,7 +100,7 @@ class SplashManager:
             # Use screen ratios for sizing
             screen = self.app.primaryScreen().geometry()
             width = int(screen.width() * 0.24)  # 24% of screen width
-            height = int(screen.height() * 0.30)  # 30% of screen height (reduced from 36%)
+            height = int(screen.height() * 0.27)  # 30% of screen height (reduced from 36%)
             self.splash_window.setFixedSize(width, height)
             
             # Set dark background with border
