@@ -4325,6 +4325,8 @@ class BatchTranslationProcessor:
                 self.check_stop_fn,
                 context='translation'
             )
+            # Preserve the finish_reason from the merged API call for later status decisions.
+            merged_finish_reason = finish_reason
             
             if self.check_stop_fn():
                 raise Exception("Translation stopped by user")
@@ -4332,8 +4334,8 @@ class BatchTranslationProcessor:
             if not merged_response:
                 raise Exception("Empty response from API for merged request")
             
-            # Check for truncation
-            merged_truncated = finish_reason in ["length", "max_tokens"]
+            # Check for truncation (use preserved finish reason so retries/merges don't lose the flag)
+            merged_truncated = merged_finish_reason in ["length", "max_tokens"]
             if merged_truncated:
                 print(f"   ⚠️ Merged response was TRUNCATED!")
             
@@ -9625,9 +9627,10 @@ def main(log_callback=None, stop_callback=None):
                 
                 # Track whether the underlying API response was truncated so we can
                 # still attempt Split the Merge but mark all chapters as qa_failed.
-                was_truncated = finish_reason in ["length", "max_tokens"]
+                preserved_fr = locals().get("merged_finish_reason", finish_reason)
+                was_truncated = preserved_fr in ["length", "max_tokens"]
                 if was_truncated:
-                    print(f"   ⚠️ Merged response was TRUNCATED (finish_reason: {finish_reason})")
+                    print(f"   ⚠️ Merged response was TRUNCATED (finish_reason: {preserved_fr})")
 
                 # We may exit early on QA failure below, but we still want to strip
                 # injected split markers from any saved merged output when Split-the-Merge is enabled.
