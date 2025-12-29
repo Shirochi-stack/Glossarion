@@ -1658,7 +1658,7 @@ def _create_response_handling_section(self, parent):
     retry_frame_h.addWidget(retry_attempts_edit)
     retry_frame_h.addStretch()
     
-    retry_desc = QLabel("Retry when truncated. Acts as min/max constraint:\nbelow value = minimum, above value = maximum")
+    retry_desc = QLabel("Retry when truncated. Acts as min/max constraint:\nbelow value = minimum, above value = maximum\nSet token constraint to -1 to use the global output token limit")
     retry_desc.setContentsMargins(20, 0, 0, 10)
 
     def _on_retry_truncated_toggle(checked):
@@ -2275,7 +2275,7 @@ def _create_response_handling_section(self, parent):
             dpr = self.devicePixelRatioF()
         except Exception:
             dpr = 1.0
-        logical_px = 90
+        logical_px = 200
         dev_px = int(logical_px * max(1.0, dpr))
         icon = QIcon(icon_path)
         pm = icon.pixmap(QSize(dev_px, dev_px))
