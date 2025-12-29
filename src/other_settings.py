@@ -1615,6 +1615,8 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(sep3)
     
     # Retry Truncated
+    if not hasattr(self, 'truncation_retry_attempts_var'):
+        self.truncation_retry_attempts_var = str(self.config.get('truncation_retry_attempts', '1'))
     retry_truncated_cb = self._create_styled_checkbox("Auto-retry Truncated Responses")
     
     retry_frame_w = QWidget()
@@ -1623,7 +1625,7 @@ def _create_response_handling_section(self, parent):
     
     retry_tokens_label = QLabel("Token constraint:")
     retry_frame_h.addWidget(retry_tokens_label)
-    
+
     retry_tokens_edit = QLineEdit()
     retry_tokens_edit.setFixedWidth(80)
     try:
@@ -1637,6 +1639,23 @@ def _create_response_handling_section(self, parent):
             pass
     retry_tokens_edit.textChanged.connect(_on_retry_tokens_changed)
     retry_frame_h.addWidget(retry_tokens_edit)
+
+    retry_attempts_label = QLabel("Attempts:")
+    retry_frame_h.addWidget(retry_attempts_label)
+
+    retry_attempts_edit = QLineEdit()
+    retry_attempts_edit.setFixedWidth(50)
+    try:
+        retry_attempts_edit.setText(str(self.truncation_retry_attempts_var))
+    except Exception:
+        retry_attempts_edit.setText("1")
+    def _on_retry_attempts_changed(text):
+        try:
+            self.truncation_retry_attempts_var = text
+        except Exception:
+            pass
+    retry_attempts_edit.textChanged.connect(_on_retry_attempts_changed)
+    retry_frame_h.addWidget(retry_attempts_edit)
     retry_frame_h.addStretch()
     
     retry_desc = QLabel("Retry when truncated. Acts as min/max constraint:\nbelow value = minimum, above value = maximum")
@@ -1650,15 +1669,21 @@ def _create_response_handling_section(self, parent):
             retry_tokens_edit.setEnabled(checked)
             retry_tokens_label.setEnabled(checked)
             retry_desc.setEnabled(checked)
-            
+            retry_attempts_edit.setEnabled(checked)
+            retry_attempts_label.setEnabled(checked)
+
             # Update styles
             if checked:
                 retry_tokens_label.setStyleSheet("color: white;")
                 retry_desc.setStyleSheet("color: gray; font-size: 10pt;")
                 retry_tokens_edit.setStyleSheet("")
+                retry_attempts_label.setStyleSheet("color: white;")
+                retry_attempts_edit.setStyleSheet("")
             else:
                 retry_tokens_label.setStyleSheet("color: #606060;")
                 retry_desc.setStyleSheet("color: #606060; font-size: 10pt;")
+                retry_attempts_label.setStyleSheet("color: #606060;")
+                retry_attempts_edit.setStyleSheet("color: #909090;")
         except Exception:
             pass
 
@@ -4566,6 +4591,79 @@ def _create_processing_options_section(self, parent):
     disable_fallback_desc.setContentsMargins(60, 0, 0, 5)
     extraction_v.addWidget(disable_fallback_desc)
     split_merge_widgets.append(disable_fallback_desc)
+
+    # Auto-retry Split Failures
+    if not hasattr(self, 'retry_split_failed_var'):
+        self.retry_split_failed_var = self.config.get('retry_split_failed', False)
+    if not hasattr(self, 'split_failed_retry_attempts_var'):
+        self.split_failed_retry_attempts_var = str(self.config.get('split_failed_retry_attempts', '1'))
+
+    retry_split_cb = self._create_styled_checkbox("Auto-retry Split Failures")
+    try:
+        retry_split_cb.setChecked(bool(self.retry_split_failed_var))
+    except Exception:
+        pass
+    retry_split_cb.setContentsMargins(60, 2, 0, 0)
+    split_merge_widgets.append(retry_split_cb)
+
+    retry_split_row = QWidget()
+    retry_split_h = QHBoxLayout(retry_split_row)
+    retry_split_h.setContentsMargins(80, 5, 0, 0)
+
+    retry_split_label = QLabel("Attempts:")
+    retry_split_h.addWidget(retry_split_label)
+
+    retry_split_edit = QLineEdit()
+    retry_split_edit.setFixedWidth(50)
+    try:
+        retry_split_edit.setText(str(self.split_failed_retry_attempts_var))
+    except Exception:
+        retry_split_edit.setText("1")
+    def _on_retry_split_changed(text):
+        try:
+            self.split_failed_retry_attempts_var = text
+        except Exception:
+            pass
+    retry_split_edit.textChanged.connect(_on_retry_split_changed)
+    retry_split_h.addWidget(retry_split_edit)
+    retry_split_h.addStretch()
+
+    split_merge_widgets.extend([retry_split_row, retry_split_label, retry_split_edit])
+
+    def _update_retry_split_state():
+        try:
+            enabled = retry_split_cb.isChecked() and not disable_fallback_cb.isChecked()
+            retry_split_edit.setEnabled(enabled)
+            retry_split_label.setEnabled(enabled)
+            if enabled:
+                retry_split_label.setStyleSheet("color: white;")
+                retry_split_edit.setStyleSheet("")
+            else:
+                retry_split_label.setStyleSheet("color: #606060;")
+                retry_split_edit.setStyleSheet("color: #909090;")
+        except Exception:
+            pass
+
+    def _on_retry_split_toggle(checked):
+        try:
+            self.retry_split_failed_var = bool(checked)
+            _update_retry_split_state()
+        except Exception:
+            pass
+    retry_split_cb.toggled.connect(_on_retry_split_toggle)
+    extraction_v.addWidget(retry_split_cb)
+    extraction_v.addWidget(retry_split_row)
+
+    # Keep split-retry disabled if fallback is disabled
+    def _on_disable_fallback_toggle_enhanced(checked):
+        _on_disable_fallback_toggle(checked)
+        _update_retry_split_state()
+    try:
+        disable_fallback_cb.toggled.disconnect(_on_disable_fallback_toggle)
+    except Exception:
+        pass
+    disable_fallback_cb.toggled.connect(_on_disable_fallback_toggle_enhanced)
+    _update_retry_split_state()
     
     # NOTE: Split markers are now ALWAYS enabled (hardcoded)
     # They are required for split-the-merge to work, so no toggle is needed

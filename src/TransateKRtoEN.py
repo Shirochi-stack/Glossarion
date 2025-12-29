@@ -382,10 +382,20 @@ class TranslationConfig:
         self.ENABLE_AUTO_GLOSSARY = os.getenv("ENABLE_AUTO_GLOSSARY", "0") == "1"
         self.COMPREHENSIVE_EXTRACTION = os.getenv("COMPREHENSIVE_EXTRACTION", "0") == "1"
         self.MANUAL_GLOSSARY = os.getenv("MANUAL_GLOSSARY")
-        self.RETRY_TRUNCATED = os.getenv("RETRY_TRUNCATED", "0") == "1"
+        self.RETRY_TRUNCATED = os.getenv("RETRY_TRUNCATED", "1") == "1"
+        try:
+            self.TRUNCATION_RETRY_ATTEMPTS = int(os.getenv("TRUNCATION_RETRY_ATTEMPTS", "1"))
+        except Exception:
+            self.TRUNCATION_RETRY_ATTEMPTS = 1
+        self.RETRY_SPLIT_FAILED = os.getenv("RETRY_SPLIT_FAILED", "0") == "1"
+        try:
+            self.SPLIT_FAILED_RETRY_ATTEMPTS = int(os.getenv("SPLIT_FAILED_RETRY_ATTEMPTS", "1"))
+        except Exception:
+            self.SPLIT_FAILED_RETRY_ATTEMPTS = 1
         self.RETRY_DUPLICATE_BODIES = os.getenv("RETRY_DUPLICATE_BODIES", "1") == "1"
         self.RETRY_TIMEOUT = os.getenv("RETRY_TIMEOUT", "0") == "1"
         self.CHUNK_TIMEOUT = int(os.getenv("CHUNK_TIMEOUT", "900"))
+        self.DISABLE_MERGE_FALLBACK = os.getenv("DISABLE_MERGE_FALLBACK", "0") == "1"
         self.MAX_RETRY_TOKENS = int(os.getenv("MAX_RETRY_TOKENS", "16384"))
         self.DUPLICATE_LOOKBACK_CHAPTERS = int(os.getenv("DUPLICATE_LOOKBACK_CHAPTERS", "3"))
         self.USE_ROLLING_SUMMARY = os.getenv("USE_ROLLING_SUMMARY", "0") == "1"
@@ -3129,7 +3139,8 @@ class TranslationProcessor:
             self.client._cancelled = False
     
 
-        retry_count = 0
+        truncation_retry_count = 0
+        split_failed_retry_count = 0
         
         # Get retry attempts from AI Hunter config if available
         ai_config = {}
@@ -3150,6 +3161,19 @@ class TranslationProcessor:
         else:
             max_retries = 3
             max_duplicate_retries = 6
+
+        try:
+            truncation_retry_limit = int(getattr(self.config, 'TRUNCATION_RETRY_ATTEMPTS', 1))
+        except Exception:
+            truncation_retry_limit = 1
+        try:
+            split_failed_retry_limit = int(getattr(self.config, 'SPLIT_FAILED_RETRY_ATTEMPTS', 2))
+        except Exception:
+            split_failed_retry_limit = 2
+
+        disable_merge_fallback_flag = os.getenv("DISABLE_MERGE_FALLBACK", "0") == "1" or getattr(self.config, 'DISABLE_MERGE_FALLBACK', False)
+        truncation_retry_enabled = (os.getenv("RETRY_TRUNCATED", "0") == "1") or bool(getattr(self.config, "RETRY_TRUNCATED", False))
+        split_retry_enabled = ((os.getenv("RETRY_SPLIT_FAILED", "0") == "1") or bool(getattr(self.config, "RETRY_SPLIT_FAILED", False))) and not disable_merge_fallback_flag
         
         duplicate_retry_count = 0
         timeout_retry_count = 0
@@ -3309,32 +3333,29 @@ class TranslationProcessor:
                     
                 retry_needed = False
                 retry_reason = ""
+                retry_limit_for_reason = None
                 is_duplicate_retry = False
                 
-                # ENHANCED: Force re-read environment variable for latest setting
-                retry_truncated_enabled = os.getenv("RETRY_TRUNCATED", "0") == "1"
-                
                 # Debug logging to verify the toggle state
-                #print(f"    DEBUG: finish_reason='{finish_reason}', RETRY_TRUNCATED={retry_truncated_enabled}, config.RETRY_TRUNCATED={self.config.RETRY_TRUNCATED}")
-                #print(f"    DEBUG: Current tokens={self.config.MAX_OUTPUT_TOKENS}, Min retry tokens={self.config.MAX_RETRY_TOKENS}, retry_count={retry_count}")
-                    
-                if finish_reason == "length" and (retry_truncated_enabled or self.config.RETRY_TRUNCATED):
-                    if retry_count < max_retries:
+                #print(f"    DEBUG: finish_reason='{finish_reason}', truncation_enabled={truncation_retry_enabled}, split_retry_enabled={split_retry_enabled}")
+                if finish_reason == "length" and truncation_retry_enabled:
+                    if truncation_retry_count < truncation_retry_limit:
                         # For truncated responses, use the set minimum retry tokens (not double)
                         new_token_limit = self.config.MAX_RETRY_TOKENS
                         
                         if new_token_limit != self.config.MAX_OUTPUT_TOKENS:
                             retry_needed = True
                             retry_reason = "truncated output"
+                            retry_limit_for_reason = truncation_retry_limit
                             old_limit = self.config.MAX_OUTPUT_TOKENS
                             self.config.MAX_OUTPUT_TOKENS = new_token_limit
-                            retry_count += 1
-                            print(f"    🔄 TRUNCATION RETRY: Setting tokens {old_limit} → {new_token_limit} (using configured minimum)")
+                            truncation_retry_count += 1
+                            print(f"    🔄 TRUNCATION RETRY: Attempt {truncation_retry_count}/{truncation_retry_limit} — tokens {old_limit} → {new_token_limit}")
                         else:
                             print(f"    ⚠️ TRUNCATION DETECTED: Token adjustment not needed - already at configured limit {self.config.MAX_OUTPUT_TOKENS}")
                     else:
-                        print(f"    ⚠️ TRUNCATION DETECTED: Max retries ({max_retries}) reached - accepting truncated response")
-                elif finish_reason == "length" and not (retry_truncated_enabled or self.config.RETRY_TRUNCATED):
+                        print(f"    ⚠️ TRUNCATION DETECTED: Max truncation retries ({truncation_retry_limit}) reached - accepting truncated response")
+                elif finish_reason == "length" and not truncation_retry_enabled:
                     print(f"    ⏭️ TRUNCATION DETECTED: Auto-retry is DISABLED - accepting truncated response")
                 elif finish_reason == "length":
                     print(f"    ⚠️ TRUNCATION DETECTED: Unexpected condition - check logic")
@@ -3342,14 +3363,15 @@ class TranslationProcessor:
                 # Treat split failures like truncation for auto-retry
                 split_failed_in_finish = bool(finish_reason and 'split' in str(finish_reason).lower())
                 split_failed_in_body = bool(isinstance(result, str) and 'SPLIT_FAILED' in result)
-                if not retry_needed and (split_failed_in_finish or split_failed_in_body) and (retry_truncated_enabled or self.config.RETRY_TRUNCATED):
-                    if retry_count < max_retries:
+                if not retry_needed and (split_failed_in_finish or split_failed_in_body) and split_retry_enabled:
+                    if split_failed_retry_count < split_failed_retry_limit:
                         retry_needed = True
                         retry_reason = "split failed"
-                        retry_count += 1
-                        print(f"    🔄 SPLIT FAILED RETRY: Attempt {retry_count}/{max_retries}")
+                        retry_limit_for_reason = split_failed_retry_limit
+                        split_failed_retry_count += 1
+                        print(f"    🔄 SPLIT FAILED RETRY: Attempt {split_failed_retry_count}/{split_failed_retry_limit}")
                     else:
-                        print(f"    ⚠️ SPLIT FAILED: Max retries ({max_retries}) reached - accepting response")
+                        print(f"    ⚠️ SPLIT FAILED: Max split-failed retries ({split_failed_retry_limit}) reached - accepting response")
                 
                 if not retry_needed:
                     # Force re-read the environment variable to ensure we have current setting
@@ -3416,7 +3438,9 @@ class TranslationProcessor:
                     if is_duplicate_retry:
                         print(f"    🔄 Duplicate retry {duplicate_retry_count}/{max_duplicate_retries}")
                     else:
-                        print(f"    🔄 Retry {retry_count}/{max_retries}: {retry_reason}")
+                        attempt_num = split_failed_retry_count if retry_reason == "split failed" else truncation_retry_count
+                        limit = retry_limit_for_reason or max_retries
+                        print(f"    🔄 Retry {attempt_num}/{limit}: {retry_reason}")
                     
                     time.sleep(2)
                     continue
@@ -3473,13 +3497,14 @@ class TranslationProcessor:
         self.config.MAX_OUTPUT_TOKENS = original_max_tokens
         self.config.TEMP = original_temp
         
-        if retry_count > 0 or duplicate_retry_count > 0 or timeout_retry_count > 0:
+        total_simple_retries = truncation_retry_count + split_failed_retry_count
+        if total_simple_retries > 0 or duplicate_retry_count > 0 or timeout_retry_count > 0:
             if duplicate_retry_count > 0:
                 print(f"    🔄 Restored original temperature: {self.config.TEMP} (after {duplicate_retry_count} duplicate retries)")
             elif timeout_retry_count > 0:
                 print(f"    🔄 Restored original settings after {timeout_retry_count} timeout retries")
-            elif retry_count > 0:
-                print(f"    🔄 Restored original settings after {retry_count} retries")
+            elif total_simple_retries > 0:
+                print(f"    🔄 Restored original settings after {total_simple_retries} retries")
         
         if duplicate_retry_count >= max_duplicate_retries:
             print(f"    ⚠️ WARNING: Duplicate content issue persists after {max_duplicate_retries} attempts")
@@ -4264,6 +4289,14 @@ class BatchTranslationProcessor:
                 {"role": "user", "content": merged_content}
             ]
 
+            # Prepare split-failed retry controls
+            try:
+                split_retry_limit = int(getattr(self.config, 'SPLIT_FAILED_RETRY_ATTEMPTS', 2))
+            except Exception:
+                split_retry_limit = 2
+            split_retry_enabled = ((os.getenv('RETRY_SPLIT_FAILED', '0') == '1') or bool(getattr(self.config, 'RETRY_SPLIT_FAILED', False))) and not (os.getenv('DISABLE_MERGE_FALLBACK', '0') == '1' or getattr(self.config, 'DISABLE_MERGE_FALLBACK', False))
+            split_retry_attempts = 0
+
             # Log combined prompt token count for merged request (treated as Chunk 1/1).
             try:
                 # Use the same token counter as regular batch splitting.
@@ -4314,74 +4347,75 @@ class BatchTranslationProcessor:
             else:
                 mtoks = self.config.MAX_OUTPUT_TOKENS
             
-            # Call API for merged content
-            print(f"   🌐 Sending merged request to API...")
-            
-            merged_response, finish_reason, raw_obj = send_with_interrupt(
-                msgs,
-                self.client,
-                self.config.TEMP,
-                mtoks,
-                self.check_stop_fn,
-                context='translation'
-            )
-            # Preserve the finish_reason from the merged API call for later status decisions.
-            merged_finish_reason = finish_reason
-            
-            if self.check_stop_fn():
-                raise Exception("Translation stopped by user")
-            
-            if not merged_response:
-                raise Exception("Empty response from API for merged request")
-            
-            # Check for truncation (use preserved finish reason so retries/merges don't lose the flag)
-            merged_truncated = merged_finish_reason in ["length", "max_tokens"]
-            if merged_truncated:
-                print(f"   ⚠️ Merged response was TRUNCATED!")
-            
-            print(f"   ✅ Received merged response ({len(merged_response):,} chars)")
-            
-            # Clean the merged response
-            cleaned = merged_response
-            if self.config.REMOVE_AI_ARTIFACTS:
-                cleaned = ContentProcessor.clean_ai_artifacts(cleaned, True)
-            cleaned = ContentProcessor.clean_memory_artifacts(cleaned)
-            cleaned = re.sub(r"^```(?:html)?\s*\n?", "", cleaned, count=1, flags=re.MULTILINE)
-            cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
-            
-            # Get parent chapter info
-            parent_actual_num, parent_content, parent_idx, parent_chapter, parent_content_hash = chapters_data[0]
-            merged_child_nums = [cn for cn, _, _, _, _ in chapters_data[1:]]
-            
-            # Check if enhanced extraction was used
-            try:
-                enhanced_group = any(bool(ch.get('enhanced_extraction')) for _, _, _, ch, _ in chapters_data)
-            except Exception:
-                enhanced_group = False
-            
-            # Check if Split the Merge is enabled
-            split_the_merge = os.getenv('SPLIT_THE_MERGE', '0') == '1'
-            
-            # If Split the Merge is enabled, SKIP markdown→HTML conversion here
-            # We'll do it AFTER splitting so markers are preserved
-            if not split_the_merge and enhanced_group and isinstance(cleaned, str):
-                print("   🔄 Converting merged enhanced text back to HTML...")
+            while True:
+                # Call API for merged content
+                print(f"   🌐 Sending merged request to API...")
+                
+                merged_response, finish_reason, raw_obj = send_with_interrupt(
+                    msgs,
+                    self.client,
+                    self.config.TEMP,
+                    mtoks,
+                    self.check_stop_fn,
+                    context='translation'
+                )
+                # Preserve the finish_reason from the merged API call for later status decisions.
+                merged_finish_reason = finish_reason
+                
+                if self.check_stop_fn():
+                    raise Exception("Translation stopped by user")
+                
+                if not merged_response:
+                    raise Exception("Empty response from API for merged request")
+                
+                # Check for truncation (use preserved finish reason so retries/merges don't lose the flag)
+                merged_truncated = merged_finish_reason in ["length", "max_tokens"]
+                if merged_truncated:
+                    print(f"   ⚠️ Merged response was TRUNCATED!")
+                
+                print(f"   ✅ Received merged response ({len(merged_response):,} chars)")
+                
+                # Clean the merged response
+                cleaned = merged_response
+                if self.config.REMOVE_AI_ARTIFACTS:
+                    cleaned = ContentProcessor.clean_ai_artifacts(cleaned, True)
+                cleaned = ContentProcessor.clean_memory_artifacts(cleaned)
+                cleaned = re.sub(r"^```(?:html)?\s*\n?", "", cleaned, count=1, flags=re.MULTILINE)
+                cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
+                
+                # Get parent chapter info
+                parent_actual_num, parent_content, parent_idx, parent_chapter, parent_content_hash = chapters_data[0]
+                merged_child_nums = [cn for cn, _, _, _, _ in chapters_data[1:]]
+                
+                # Check if enhanced extraction was used
                 try:
-                    cleaned = convert_enhanced_text_to_html(cleaned, parent_chapter)
-                except Exception as conv_err:
-                    print(f"   ⚠️ Enhanced HTML conversion failed: {conv_err} — saving raw content")
+                    enhanced_group = any(bool(ch.get('enhanced_extraction')) for _, _, _, ch, _ in chapters_data)
+                except Exception:
+                    enhanced_group = False
                 
-                # Emergency Image Restoration (if enabled)
-                if self.config.EMERGENCY_IMAGE_RESTORE:
-                    cleaned = ContentProcessor.emergency_restore_images(cleaned, merged_content)
+                # Check if Split the Merge is enabled
+                split_the_merge = os.getenv('SPLIT_THE_MERGE', '0') == '1'
                 
-                # Optionally restore paragraphs if the output lacks structure
-                if getattr(self.config, 'EMERGENCY_RESTORE', False):
+                # If Split the Merge is enabled, SKIP markdown→HTML conversion here
+                # We'll do it AFTER splitting so markers are preserved
+                if not split_the_merge and enhanced_group and isinstance(cleaned, str):
+                    print("   🔄 Converting merged enhanced text back to HTML...")
                     try:
-                        if cleaned and cleaned.count('<p>') < 3 and len(cleaned) > 300:
-                            cleaned = ContentProcessor.emergency_restore_paragraphs(cleaned)
-                    except Exception:
-                        pass
+                        cleaned = convert_enhanced_text_to_html(cleaned, parent_chapter)
+                    except Exception as conv_err:
+                        print(f"   ⚠️ Enhanced HTML conversion failed: {conv_err} — saving raw content")
+                    
+                    # Emergency Image Restoration (if enabled)
+                    if self.config.EMERGENCY_IMAGE_RESTORE:
+                        cleaned = ContentProcessor.emergency_restore_images(cleaned, merged_content)
+                    
+                    # Optionally restore paragraphs if the output lacks structure
+                    if getattr(self.config, 'EMERGENCY_RESTORE', False):
+                        try:
+                            if cleaned and cleaned.count('<p>') < 3 and len(cleaned) > 300:
+                                cleaned = ContentProcessor.emergency_restore_paragraphs(cleaned)
+                        except Exception:
+                            pass
             
             # Check for truncation / QA failures first
             results = []
@@ -4398,7 +4432,6 @@ class BatchTranslationProcessor:
                 ] or cleaned_stripped.startswith("[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]") or cleaned_stripped.startswith("[CONTENT BLOCKED - ORIGINAL TEXT PRESERVED]")
                 
                 if not is_only_error_marker:
-                    # Save for debugging - contains actual translation attempt that failed QA
                     parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                     try:
                         cleaned_to_save = cleaned
@@ -4413,10 +4446,7 @@ class BatchTranslationProcessor:
                             f.write(cleaned_to_save)
                     except Exception:
                         pass
-
-                # IMPORTANT:
-                # Use each chapter's own expected filename so we overwrite the
-                # existing in_progress entry instead of creating composite keys.
+                # Use each chapter's own expected filename so we overwrite the existing in_progress entry
                 for actual_num, _, idx, chapter, content_hash in chapters_data:
                     chapter_fname = FileUtilities.create_chapter_filename(chapter, actual_num)
                     with self.progress_lock:
@@ -4490,6 +4520,15 @@ class BatchTranslationProcessor:
                         self.save_progress_fn()
                     results.append((False, actual_num, None, None, None))
                 return results
+
+            # If split failed and fallback is allowed, optionally retry merged translation
+            if split_the_merge and (not split_sections or len(split_sections) != len(chapters_data)) and split_retry_enabled:
+                if split_retry_attempts < split_retry_limit:
+                    split_retry_attempts += 1
+                    print(f"   🔄 Split failed retry {split_retry_attempts}/{split_retry_limit} — requesting new merged translation")
+                    time.sleep(1)
+                else:
+                    print(f"   ⚠️ Split failed after {split_retry_attempts} retries, falling back to merged output")
             
             if split_sections and len(split_sections) == len(chapters_data):
                 # Split successful - save each section as individual file
@@ -9671,7 +9710,7 @@ def main(log_callback=None, stop_callback=None):
                         cleaned_to_save = cleaned
                         if split_the_merge:
                             cleaned_to_save = re.sub(
-                                r'<h1[^>]*id="split-\\d+"[^>]*>.*?</h1>\\s*',
+                                r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
                                 '',
                                 cleaned_to_save,
                                 flags=re.IGNORECASE | re.DOTALL,
@@ -9723,13 +9762,12 @@ def main(log_callback=None, stop_callback=None):
                 ] or cleaned_stripped.startswith("[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]") or cleaned_stripped.startswith("[CONTENT BLOCKED - ORIGINAL TEXT PRESERVED]")
                 
                 if not is_only_error_marker:
-                    # Save for debugging - contains actual translation attempt that failed split
                     parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                     try:
                         cleaned_to_save = cleaned
                         if split_the_merge:
                             cleaned_to_save = re.sub(
-                                r'<h1[^>]*id="split-\\d+"[^>]*>.*?</h1>\\s*',
+                                r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
                                 '',
                                 cleaned_to_save,
                                 flags=re.IGNORECASE | re.DOTALL,
@@ -9738,10 +9776,8 @@ def main(log_callback=None, stop_callback=None):
                             f.write(cleaned_to_save)
                     except Exception:
                         pass
-                
-                # Mark ALL chapters in the merge group as qa_failed using
-                # their own expected filenames so we overwrite existing
-                # in_progress entries instead of creating composite keys.
+
+                # Mark ALL chapters in the merge group as qa_failed
                 for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
                     g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
                     progress_manager.update(
@@ -9807,7 +9843,7 @@ def main(log_callback=None, stop_callback=None):
             cleaned_to_save = cleaned
             if split_the_merge and len(merge_info['group']) > 1:
                 cleaned_to_save = re.sub(
-                    r'<h1[^>]*id="split-\\d+"[^>]*>.*?</h1>\\s*',
+                    r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
                     '',
                     cleaned_to_save,
                     flags=re.IGNORECASE | re.DOTALL,

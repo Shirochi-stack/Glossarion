@@ -742,7 +742,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 65536
         self.proc = self.glossary_proc = None
-        __version__ = "6.8.2"
+        __version__ = "6.8.3"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -815,7 +815,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID to separate from python.exe in taskbar
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.6.8.2')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.6.8.3')
                         
                         # Load icon from file and set it on the window
                         # This must be done after the window is created
@@ -2066,6 +2066,7 @@ Recent translations to summarize:
             ('enable_gender_nuance_var', 'enable_gender_nuance', True),
             ('include_description_var', 'include_description', True),
             ('retry_truncated_var', 'retry_truncated', True),
+            ('retry_split_failed_var', 'retry_split_failed', False),
             ('retry_duplicate_var', 'retry_duplicate_bodies', False),
             ('preserve_original_text_var', 'preserve_original_text_on_failure', False),
             # NEW: QA scanning helpers
@@ -2118,6 +2119,8 @@ Recent translations to summarize:
             ('rolling_summary_max_tokens_var', 'rolling_summary_max_tokens', '-1'),
             ('reinforcement_freq_var', 'reinforcement_frequency', '10'),
             ('max_retry_tokens_var', 'max_retry_tokens', '65536'),
+            ('truncation_retry_attempts_var', 'truncation_retry_attempts', '1'),
+            ('split_failed_retry_attempts_var', 'split_failed_retry_attempts', '1'),
             ('duplicate_lookback_var', 'duplicate_lookback_chapters', '5'),
             ('glossary_min_frequency_var', 'glossary_min_frequency', '2'),
             ('glossary_max_names_var', 'glossary_max_names', '50'),
@@ -2257,7 +2260,7 @@ Recent translations to summarize:
             # Set the initial active profile for autosave
             self._active_profile_for_autosave = self.profile_var
         
-        self.append_log("🚀 Glossarion v6.8.2 - Ready to use!")
+        self.append_log("🚀 Glossarion v6.8.3 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -6491,6 +6494,9 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'BREAK_SPLIT_COUNT': str(self.break_split_count_var) if hasattr(self, 'break_split_count_var') and self.break_split_count_var else '',
             'RETRY_TRUNCATED': "1" if self.retry_truncated_var else "0",
             'MAX_RETRY_TOKENS': str(self.max_retry_tokens_var),
+            'TRUNCATION_RETRY_ATTEMPTS': str(self.truncation_retry_attempts_var),
+            'RETRY_SPLIT_FAILED': "1" if getattr(self, 'retry_split_failed_var', False) else "0",
+            'SPLIT_FAILED_RETRY_ATTEMPTS': str(self.split_failed_retry_attempts_var),
             'RETRY_DUPLICATE_BODIES': "1" if self.retry_duplicate_var else "0",
             'PRESERVE_ORIGINAL_TEXT_ON_FAILURE': "1" if self.preserve_original_text_var else "0",
             'DUPLICATE_LOOKBACK_CHAPTERS': str(self.duplicate_lookback_var),
@@ -9949,7 +9955,10 @@ Important rules:
 
                 # Retry settings
                 ('retry_truncated', ['retry_truncated_var'], False, bool),
+                ('retry_split_failed', ['retry_split_failed_var'], False, bool),
                 ('max_retry_tokens', ['max_retry_tokens_var'], 65536, lambda v: safe_int(v, 65536)),
+                ('truncation_retry_attempts', ['truncation_retry_attempts_var'], 1, lambda v: safe_int(v, 1)),
+                ('split_failed_retry_attempts', ['split_failed_retry_attempts_var'], 1, lambda v: safe_int(v, 1)),
                 ('retry_timeout', ['retry_timeout_var'], False, bool),
                 ('preserve_original_text_on_failure', ['preserve_original_text_var'], False, bool),
                 
@@ -10676,6 +10685,9 @@ Important rules:
                 # Retry/network controls
                 ('RETRY_TRUNCATED', '1' if getattr(self, 'retry_truncated_var', False) else '0'),
                 ('MAX_RETRY_TOKENS', str(getattr(self, 'max_retry_tokens_var', '65536'))),
+                ('TRUNCATION_RETRY_ATTEMPTS', str(getattr(self, 'truncation_retry_attempts_var', '1'))),
+                ('RETRY_SPLIT_FAILED', '1' if getattr(self, 'retry_split_failed_var', False) else '0'),
+                ('SPLIT_FAILED_RETRY_ATTEMPTS', str(getattr(self, 'split_failed_retry_attempts_var', '1'))),
                 ('RETRY_DUPLICATE_BODIES', '1' if getattr(self, 'retry_duplicate_var', False) else '0'),
                 ('DUPLICATE_LOOKBACK_CHAPTERS', str(getattr(self, 'duplicate_lookback_var', '5'))),
                 ('RETRY_TIMEOUT', '1' if getattr(self, 'retry_timeout_var', self.config.get('retry_timeout', False)) else '0'),
@@ -10998,7 +11010,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v6.8.2...")
+    print("🚀 Starting Glossarion v6.8.3...")
     
     # Initialize splash screen
     splash_manager = None
