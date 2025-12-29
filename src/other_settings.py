@@ -1676,9 +1676,9 @@ def _create_response_handling_section(self, parent):
             if checked:
                 retry_tokens_label.setStyleSheet("color: white;")
                 retry_desc.setStyleSheet("color: gray; font-size: 10pt;")
-                retry_tokens_edit.setStyleSheet("")
+                retry_tokens_edit.setStyleSheet("color: white;")
                 retry_attempts_label.setStyleSheet("color: white;")
-                retry_attempts_edit.setStyleSheet("")
+                retry_attempts_edit.setStyleSheet("color: white;")
             else:
                 retry_tokens_label.setStyleSheet("color: #606060;")
                 retry_desc.setStyleSheet("color: #606060; font-size: 10pt;")
@@ -4632,12 +4632,12 @@ def _create_processing_options_section(self, parent):
 
     def _update_retry_split_state():
         try:
-            enabled = retry_split_cb.isChecked() and not disable_fallback_cb.isChecked()
+            enabled = retry_split_cb.isChecked()
             retry_split_edit.setEnabled(enabled)
             retry_split_label.setEnabled(enabled)
             if enabled:
                 retry_split_label.setStyleSheet("color: white;")
-                retry_split_edit.setStyleSheet("")
+                retry_split_edit.setStyleSheet("color: white;")
             else:
                 retry_split_label.setStyleSheet("color: #606060;")
                 retry_split_edit.setStyleSheet("color: #909090;")
