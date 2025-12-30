@@ -3065,14 +3065,8 @@ class AsyncProcessingDialog:
                                 content = zf.read(html_file)
                                 soup = BeautifulSoup(content, 'html.parser')
                                 
-                                # Remove all image tags
-                                for img in soup.find_all('img'):
-                                    img.decompose()
-                                
-                                # Remove all link tags that might reference CSS or other files
-                                for link in soup.find_all('link'):
-                                    link.decompose()
-                                    
+                                # Keep full HTML (including images and links) for translation
+                                chapter_html = str(soup)
                                 chapter_text = soup.get_text(separator='\n').strip()
                                 
                                 if len(chapter_text) > 500:  # Minimum chapter length
@@ -3086,7 +3080,7 @@ class AsyncProcessingDialog:
                                             chapter_num = int(match.group(1))
                                             break
                                     
-                                    raw_chapters.append((chapter_num, chapter_text, html_file))
+                                    raw_chapters.append((chapter_num, chapter_html, html_file))
                                     
                             except Exception as e:
                                 print(f"Error reading {html_file}: {e}")
@@ -3734,8 +3728,14 @@ class AsyncProcessingDialog:
                     filename = f"response_{original_basename}.html"
                 file_path = os.path.join(output_dir, filename)
                 
+                # If provider returned plain text, wrap it in minimal HTML to keep EPUB valid
+                content = result.get('content', '')
+                if content and '<' not in content[:200].lower():
+                    # Preserve line breaks
+                    body = ''.join(f"<p>{line}</p>" for line in content.splitlines() if line.strip())
+                    content = f"<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body>{body}</body></html>"
                 with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write(result['content'])
+                    f.write(content)
                 
                 # Add realistic progress entry
                 progress_data["chapters"][content_hash] = {
