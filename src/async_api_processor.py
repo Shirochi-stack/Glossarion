@@ -2805,6 +2805,21 @@ class AsyncProcessingDialog:
 
     def _prepare_environment_variables(self):
         """Prepare environment variables from GUI settings"""
+        def _val(obj, default=None):
+            try:
+                return obj.get()
+            except Exception:
+                return obj if obj is not None else default
+
+        def _text(widget, default=""):
+            if widget is None:
+                return default
+            if hasattr(widget, "text"):
+                return widget.text()
+            if hasattr(widget, "get"):
+                return widget.get()
+            return str(widget) if widget else default
+
         env_vars = {}
         
         # Core settings - handle both PySide6 and tkinter
@@ -2839,15 +2854,8 @@ class AsyncProcessingDialog:
         else:
             env_vars['SYSTEM_PROMPT'] = self.gui.prompt_text.toPlainText().strip()
             
-        if hasattr(self.gui.trans_temp, 'get'):
-            env_vars['TRANSLATION_TEMPERATURE'] = str(self.gui.trans_temp.get())
-        else:
-            env_vars['TRANSLATION_TEMPERATURE'] = str(self.gui.trans_temp)
-            
-        if hasattr(self.gui.trans_history, 'get'):
-            env_vars['TRANSLATION_HISTORY_LIMIT'] = str(self.gui.trans_history.get())
-        else:
-            env_vars['TRANSLATION_HISTORY_LIMIT'] = str(self.gui.trans_history)
+        env_vars['TRANSLATION_TEMPERATURE'] = _text(getattr(self.gui, 'trans_temp', None), '0.3')
+        env_vars['TRANSLATION_HISTORY_LIMIT'] = _text(getattr(self.gui, 'trans_history', None), '8')
         
         # API settings - handle both PySide6 and tkinter
         if hasattr(self.gui.delay_entry, 'get'):
@@ -2856,15 +2864,12 @@ class AsyncProcessingDialog:
             env_vars['SEND_INTERVAL_SECONDS'] = str(self.gui.delay_entry.text() if hasattr(self.gui.delay_entry, 'text') else '2')
             
         if hasattr(self.gui, 'token_limit_entry'):
-            if hasattr(self.gui.token_limit_entry, 'get'):
-                env_vars['TOKEN_LIMIT'] = self.gui.token_limit_entry.get()
-            else:
-                env_vars['TOKEN_LIMIT'] = self.gui.token_limit_entry.text()
+            env_vars['TOKEN_LIMIT'] = _text(self.gui.token_limit_entry, '200000')
         else:
             env_vars['TOKEN_LIMIT'] = '200000'
-        
+
         # Book title translation - replace {target_lang} with output language
-        env_vars['TRANSLATE_BOOK_TITLE'] = "1" if self.gui.translate_book_title_var.get() else "0"
+        env_vars['TRANSLATE_BOOK_TITLE'] = "1" if _val(self.gui.translate_book_title_var, False) else "0"
         output_lang = self.gui.config.get('output_language', 'English')
         book_title_prompt = self.gui.book_title_prompt if hasattr(self.gui, 'book_title_prompt') else ''
         book_title_system_prompt = self.gui.config.get('book_title_system_prompt', 
@@ -2873,53 +2878,53 @@ class AsyncProcessingDialog:
         env_vars['BOOK_TITLE_SYSTEM_PROMPT'] = book_title_system_prompt.replace('{target_lang}', output_lang)
         
         # Processing options
-        env_vars['CHAPTER_RANGE'] = self.gui.chapter_range_entry.get().strip() if hasattr(self.gui, 'chapter_range_entry') else ''
-        env_vars['REMOVE_AI_ARTIFACTS'] = "1" if self.gui.REMOVE_AI_ARTIFACTS_var.get() else "0"
-        env_vars['BATCH_TRANSLATION'] = "1" if self.gui.batch_translation_var.get() else "0"
-        env_vars['BATCH_SIZE'] = self.gui.batch_size_var.get()
-        env_vars['CONSERVATIVE_BATCHING'] = "1" if self.gui.conservative_batching_var.get() else "0"
+        env_vars['CHAPTER_RANGE'] = _text(getattr(self.gui, 'chapter_range_entry', None), '').strip()
+        env_vars['REMOVE_AI_ARTIFACTS'] = "1" if _val(self.gui.REMOVE_AI_ARTIFACTS_var, False) else "0"
+        env_vars['BATCH_TRANSLATION'] = "1" if _val(self.gui.batch_translation_var, False) else "0"
+        env_vars['BATCH_SIZE'] = _val(self.gui.batch_size_var, 1)
+        env_vars['CONSERVATIVE_BATCHING'] = "1" if _val(self.gui.conservative_batching_var, False) else "0"
         
         # Anti-duplicate parameters
-        env_vars['ENABLE_ANTI_DUPLICATE'] = '1' if hasattr(self.gui, 'enable_anti_duplicate_var') and self.gui.enable_anti_duplicate_var.get() else '0'
-        env_vars['TOP_P'] = str(self.gui.top_p_var.get()) if hasattr(self.gui, 'top_p_var') else '1.0'
-        env_vars['TOP_K'] = str(self.gui.top_k_var.get()) if hasattr(self.gui, 'top_k_var') else '0'
-        env_vars['FREQUENCY_PENALTY'] = str(self.gui.frequency_penalty_var.get()) if hasattr(self.gui, 'frequency_penalty_var') else '0.0'
-        env_vars['PRESENCE_PENALTY'] = str(self.gui.presence_penalty_var.get()) if hasattr(self.gui, 'presence_penalty_var') else '0.0'
-        env_vars['REPETITION_PENALTY'] = str(self.gui.repetition_penalty_var.get()) if hasattr(self.gui, 'repetition_penalty_var') else '1.0'
-        env_vars['CANDIDATE_COUNT'] = str(self.gui.candidate_count_var.get()) if hasattr(self.gui, 'candidate_count_var') else '1'
-        env_vars['CUSTOM_STOP_SEQUENCES'] = self.gui.custom_stop_sequences_var.get() if hasattr(self.gui, 'custom_stop_sequences_var') else ''
-        env_vars['LOGIT_BIAS_ENABLED'] = '1' if hasattr(self.gui, 'logit_bias_enabled_var') and self.gui.logit_bias_enabled_var.get() else '0'
-        env_vars['LOGIT_BIAS_STRENGTH'] = str(self.gui.logit_bias_strength_var.get()) if hasattr(self.gui, 'logit_bias_strength_var') else '-0.5'
-        env_vars['BIAS_COMMON_WORDS'] = '1' if hasattr(self.gui, 'bias_common_words_var') and self.gui.bias_common_words_var.get() else '0'
-        env_vars['BIAS_REPETITIVE_PHRASES'] = '1' if hasattr(self.gui, 'bias_repetitive_phrases_var') and self.gui.bias_repetitive_phrases_var.get() else '0'
+        env_vars['ENABLE_ANTI_DUPLICATE'] = '1' if hasattr(self.gui, 'enable_anti_duplicate_var') and _val(self.gui.enable_anti_duplicate_var, False) else '0'
+        env_vars['TOP_P'] = str(_val(self.gui.top_p_var, 1.0)) if hasattr(self.gui, 'top_p_var') else '1.0'
+        env_vars['TOP_K'] = str(_val(self.gui.top_k_var, 0)) if hasattr(self.gui, 'top_k_var') else '0'
+        env_vars['FREQUENCY_PENALTY'] = str(_val(self.gui.frequency_penalty_var, 0.0)) if hasattr(self.gui, 'frequency_penalty_var') else '0.0'
+        env_vars['PRESENCE_PENALTY'] = str(_val(self.gui.presence_penalty_var, 0.0)) if hasattr(self.gui, 'presence_penalty_var') else '0.0'
+        env_vars['REPETITION_PENALTY'] = str(_val(self.gui.repetition_penalty_var, 1.0)) if hasattr(self.gui, 'repetition_penalty_var') else '1.0'
+        env_vars['CANDIDATE_COUNT'] = str(_val(self.gui.candidate_count_var, 1)) if hasattr(self.gui, 'candidate_count_var') else '1'
+        env_vars['CUSTOM_STOP_SEQUENCES'] = _val(self.gui.custom_stop_sequences_var, '') if hasattr(self.gui, 'custom_stop_sequences_var') else ''
+        env_vars['LOGIT_BIAS_ENABLED'] = '1' if hasattr(self.gui, 'logit_bias_enabled_var') and _val(self.gui.logit_bias_enabled_var, False) else '0'
+        env_vars['LOGIT_BIAS_STRENGTH'] = str(_val(self.gui.logit_bias_strength_var, -0.5)) if hasattr(self.gui, 'logit_bias_strength_var') else '-0.5'
+        env_vars['BIAS_COMMON_WORDS'] = '1' if hasattr(self.gui, 'bias_common_words_var') and _val(self.gui.bias_common_words_var, False) else '0'
+        env_vars['BIAS_REPETITIVE_PHRASES'] = '1' if hasattr(self.gui, 'bias_repetitive_phrases_var') and _val(self.gui.bias_repetitive_phrases_var, False) else '0'
         
         # Glossary settings
         env_vars['MANUAL_GLOSSARY'] = self.gui.manual_glossary_path if hasattr(self.gui, 'manual_glossary_path') and self.gui.manual_glossary_path else ''
-        env_vars['DISABLE_AUTO_GLOSSARY'] = "0" if self.gui.enable_auto_glossary_var.get() else "1"
-        env_vars['DISABLE_GLOSSARY_TRANSLATION'] = "0" if self.gui.enable_auto_glossary_var.get() else "1"
-        env_vars['APPEND_GLOSSARY'] = "1" if self.gui.append_glossary_var.get() else "0"
+        env_vars['DISABLE_AUTO_GLOSSARY'] = "0" if _val(self.gui.enable_auto_glossary_var, False) else "1"
+        env_vars['DISABLE_GLOSSARY_TRANSLATION'] = "0" if _val(self.gui.enable_auto_glossary_var, False) else "1"
+        env_vars['APPEND_GLOSSARY'] = "1" if _val(self.gui.append_glossary_var, False) else "0"
         env_vars['APPEND_GLOSSARY_PROMPT'] = self.gui.append_glossary_prompt if hasattr(self.gui, 'append_glossary_prompt') else ''
-        env_vars['GLOSSARY_MIN_FREQUENCY'] = self.gui.glossary_min_frequency_var.get()
-        env_vars['GLOSSARY_MAX_NAMES'] = self.gui.glossary_max_names_var.get()
-        env_vars['GLOSSARY_MAX_TITLES'] = self.gui.glossary_max_titles_var.get()
-        env_vars['GLOSSARY_BATCH_SIZE'] = self.gui.glossary_batch_size_var.get()
+        env_vars['GLOSSARY_MIN_FREQUENCY'] = _val(self.gui.glossary_min_frequency_var, 0)
+        env_vars['GLOSSARY_MAX_NAMES'] = _val(self.gui.glossary_max_names_var, 0)
+        env_vars['GLOSSARY_MAX_TITLES'] = _val(self.gui.glossary_max_titles_var, 0)
+        env_vars['GLOSSARY_BATCH_SIZE'] = _val(getattr(self.gui, 'glossary_batch_size_var', None), 0)
         env_vars['GLOSSARY_DUPLICATE_KEY_MODE'] = self.gui.config.get('glossary_duplicate_key_mode', 'auto')
         env_vars['GLOSSARY_DUPLICATE_CUSTOM_FIELD'] = self.gui.config.get('glossary_duplicate_custom_field', '')
         
         # History and summary settings
-        env_vars['TRANSLATION_HISTORY_ROLLING'] = "1" if self.gui.translation_history_rolling_var.get() else "0"
+        env_vars['TRANSLATION_HISTORY_ROLLING'] = "1" if _val(self.gui.translation_history_rolling_var, False) else "0"
         env_vars['USE_ROLLING_SUMMARY'] = "1" if self.gui.config.get('use_rolling_summary') else "0"
         env_vars['SUMMARY_ROLE'] = self.gui.config.get('summary_role', 'system')
-        env_vars['ROLLING_SUMMARY_EXCHANGES'] = self.gui.rolling_summary_exchanges_var.get()
-        env_vars['ROLLING_SUMMARY_MODE'] = self.gui.rolling_summary_mode_var.get()
+        env_vars['ROLLING_SUMMARY_EXCHANGES'] = _val(self.gui.rolling_summary_exchanges_var, 0)
+        env_vars['ROLLING_SUMMARY_MODE'] = _val(self.gui.rolling_summary_mode_var, '')
         env_vars['ROLLING_SUMMARY_SYSTEM_PROMPT'] = self.gui.rolling_summary_system_prompt if hasattr(self.gui, 'rolling_summary_system_prompt') else ''
         env_vars['ROLLING_SUMMARY_USER_PROMPT'] = self.gui.rolling_summary_user_prompt if hasattr(self.gui, 'rolling_summary_user_prompt') else ''
-        env_vars['ROLLING_SUMMARY_MAX_ENTRIES'] = self.gui.rolling_summary_max_entries_var.get() if hasattr(self.gui, 'rolling_summary_max_entries_var') else '10'
-        env_vars['ROLLING_SUMMARY_MAX_TOKENS'] = self.gui.rolling_summary_max_tokens_var.get() if hasattr(self.gui, 'rolling_summary_max_tokens_var') else '-1'
+        env_vars['ROLLING_SUMMARY_MAX_ENTRIES'] = _val(self.gui.rolling_summary_max_entries_var, '10') if hasattr(self.gui, 'rolling_summary_max_entries_var') else '10'
+        env_vars['ROLLING_SUMMARY_MAX_TOKENS'] = _val(self.gui.rolling_summary_max_tokens_var, '-1') if hasattr(self.gui, 'rolling_summary_max_tokens_var') else '-1'
         
         # Retry and error handling settings
-        env_vars['EMERGENCY_PARAGRAPH_RESTORE'] = "1" if self.gui.emergency_restore_var.get() else "0"
-        env_vars['RETRY_TRUNCATED'] = "1" if self.gui.retry_truncated_var.get() else "0"
+        env_vars['EMERGENCY_PARAGRAPH_RESTORE'] = "1" if _val(self.gui.emergency_restore_var, False) else "0"
+        env_vars['RETRY_TRUNCATED'] = "1" if _val(self.gui.retry_truncated_var, False) else "0"
         try:
             _raw_retry_tokens = self.gui.max_retry_tokens_var.get()
             _resolved_retry_tokens = int(_raw_retry_tokens)
@@ -2931,40 +2936,40 @@ class AsyncProcessingDialog:
         except Exception:
             _resolved_retry_tokens = int(getattr(self.gui, 'max_output_tokens', 65536))
         env_vars['MAX_RETRY_TOKENS'] = str(_resolved_retry_tokens)
-        env_vars['RETRY_DUPLICATE_BODIES'] = "1" if self.gui.retry_duplicate_var.get() else "0"
-        env_vars['RETRY_TIMEOUT'] = "1" if self.gui.retry_timeout_var.get() else "0"
-        env_vars['CHUNK_TIMEOUT'] = self.gui.chunk_timeout_var.get()
+        env_vars['RETRY_DUPLICATE_BODIES'] = "1" if _val(self.gui.retry_duplicate_var, False) else "0"
+        env_vars['RETRY_TIMEOUT'] = "1" if _val(self.gui.retry_timeout_var, False) else "0"
+        env_vars['CHUNK_TIMEOUT'] = _val(self.gui.chunk_timeout_var, '')
         
         # Image processing
-        env_vars['ENABLE_IMAGE_TRANSLATION'] = "1" if self.gui.enable_image_translation_var.get() else "0"
-        env_vars['PROCESS_WEBNOVEL_IMAGES'] = "1" if self.gui.process_webnovel_images_var.get() else "0"
-        env_vars['WEBNOVEL_MIN_HEIGHT'] = self.gui.webnovel_min_height_var.get()
-        env_vars['MAX_IMAGES_PER_CHAPTER'] = self.gui.max_images_per_chapter_var.get()
+        env_vars['ENABLE_IMAGE_TRANSLATION'] = "1" if _val(self.gui.enable_image_translation_var, False) else "0"
+        env_vars['PROCESS_WEBNOVEL_IMAGES'] = "1" if _val(self.gui.process_webnovel_images_var, False) else "0"
+        env_vars['WEBNOVEL_MIN_HEIGHT'] = _val(self.gui.webnovel_min_height_var, 0)
+        env_vars['MAX_IMAGES_PER_CHAPTER'] = _val(self.gui.max_images_per_chapter_var, 0)
         env_vars['IMAGE_API_DELAY'] = '1.0'
         env_vars['SAVE_IMAGE_TRANSLATIONS'] = '1'
-        env_vars['IMAGE_CHUNK_HEIGHT'] = self.gui.image_chunk_height_var.get()
-        env_vars['HIDE_IMAGE_TRANSLATION_LABEL'] = "1" if self.gui.hide_image_translation_label_var.get() else "0"
+        env_vars['IMAGE_CHUNK_HEIGHT'] = _val(self.gui.image_chunk_height_var, 0)
+        env_vars['HIDE_IMAGE_TRANSLATION_LABEL'] = "1" if _val(self.gui.hide_image_translation_label_var, False) else "0"
         
         # Advanced settings
-        env_vars['REINFORCEMENT_FREQUENCY'] = self.gui.reinforcement_freq_var.get()
-        env_vars['RESET_FAILED_CHAPTERS'] = "1" if self.gui.reset_failed_chapters_var.get() else "0"
-        env_vars['DUPLICATE_LOOKBACK_CHAPTERS'] = self.gui.duplicate_lookback_var.get()
-        env_vars['DUPLICATE_DETECTION_MODE'] = self.gui.duplicate_detection_mode_var.get()
-        env_vars['CHAPTER_NUMBER_OFFSET'] = str(self.gui.chapter_number_offset_var.get())
-        env_vars['COMPRESSION_FACTOR'] = self.gui.compression_factor_var.get()
-        extraction_mode = self.gui.extraction_mode_var.get() if hasattr(self.gui, 'extraction_mode_var') else 'smart'
+        env_vars['REINFORCEMENT_FREQUENCY'] = _val(self.gui.reinforcement_freq_var, 0)
+        env_vars['RESET_FAILED_CHAPTERS'] = "1" if _val(getattr(self.gui, 'reset_failed_chapters_var', None), False) else "0"
+        env_vars['DUPLICATE_LOOKBACK_CHAPTERS'] = _val(self.gui.duplicate_lookback_var, 0)
+        env_vars['DUPLICATE_DETECTION_MODE'] = _val(self.gui.duplicate_detection_mode_var, '')
+        env_vars['CHAPTER_NUMBER_OFFSET'] = str(_val(self.gui.chapter_number_offset_var, 0))
+        env_vars['COMPRESSION_FACTOR'] = _val(self.gui.compression_factor_var, 0)
+        extraction_mode = _val(self.gui.extraction_mode_var, 'smart') if hasattr(self.gui, 'extraction_mode_var') else 'smart'
         env_vars['COMPREHENSIVE_EXTRACTION'] = "1" if extraction_mode in ['comprehensive', 'full'] else "0"
         env_vars['EXTRACTION_MODE'] = extraction_mode
-        env_vars['DISABLE_ZERO_DETECTION'] = "1" if self.gui.disable_zero_detection_var.get() else "0"
-        env_vars['USE_HEADER_AS_OUTPUT'] = "1" if self.gui.use_header_as_output_var.get() else "0"
-        env_vars['ENABLE_DECIMAL_CHAPTERS'] = "1" if self.gui.enable_decimal_chapters_var.get() else "0"
-        env_vars['ENABLE_WATERMARK_REMOVAL'] = "1" if self.gui.enable_watermark_removal_var.get() else "0"
-        env_vars['ADVANCED_WATERMARK_REMOVAL'] = "1" if self.gui.advanced_watermark_removal_var.get() else "0"
-        env_vars['SAVE_CLEANED_IMAGES'] = "1" if self.gui.save_cleaned_images_var.get() else "0"
+        env_vars['DISABLE_ZERO_DETECTION'] = "1" if _val(self.gui.disable_zero_detection_var, False) else "0"
+        env_vars['USE_HEADER_AS_OUTPUT'] = "1" if _val(self.gui.use_header_as_output_var, False) else "0"
+        env_vars['ENABLE_DECIMAL_CHAPTERS'] = "1" if _val(self.gui.enable_decimal_chapters_var, False) else "0"
+        env_vars['ENABLE_WATERMARK_REMOVAL'] = "1" if _val(self.gui.enable_watermark_removal_var, False) else "0"
+        env_vars['ADVANCED_WATERMARK_REMOVAL'] = "1" if _val(self.gui.advanced_watermark_removal_var, False) else "0"
+        env_vars['SAVE_CLEANED_IMAGES'] = "1" if _val(self.gui.save_cleaned_images_var, False) else "0"
         
         # EPUB specific settings
-        env_vars['DISABLE_EPUB_GALLERY'] = "1" if self.gui.disable_epub_gallery_var.get() else "0"
-        env_vars['FORCE_NCX_ONLY'] = '1' if self.gui.force_ncx_only_var.get() else '0'
+        env_vars['DISABLE_EPUB_GALLERY'] = "1" if _val(self.gui.disable_epub_gallery_var, False) else "0"
+        env_vars['FORCE_NCX_ONLY'] = '1' if _val(self.gui.force_ncx_only_var, False) else '0'
         
         # Special handling for Gemini safety filters
         env_vars['DISABLE_GEMINI_SAFETY'] = str(self.gui.config.get('disable_gemini_safety', False)).lower()
@@ -3802,6 +3807,24 @@ class AsyncProcessingDialog:
     def _show_warning(self, message):
         """Thread-safe warning display"""
         self._log(f"Warning: {message}", level="warning")
+
+    def _get_api_key_from_gui(self) -> str:
+        """Retrieve API key using same logic as processor"""
+        try:
+            # Prefer the processor's validated helper when available
+            if hasattr(self, "processor") and hasattr(self.processor, "_get_api_key"):
+                return self.processor._get_api_key()
+        except Exception:
+            pass
+
+        # Fallback to direct GUI inspection to avoid failure
+        if hasattr(self.gui, "api_key_entry"):
+            if hasattr(self.gui.api_key_entry, "text"):
+                return self.gui.api_key_entry.text().strip()
+            return self.gui.api_key_entry.get().strip()
+        if hasattr(self.gui, "api_key_var"):
+            return self.gui.api_key_var.get().strip()
+        return os.getenv("API_KEY", "") or os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
 
 
 def show_async_processing_dialog(parent, translator_gui):
