@@ -4366,8 +4366,14 @@ class BatchTranslationProcessor:
                     self.check_stop_fn,
                     context='translation'
                 )
-                # Preserve the finish_reason from the merged API call for later status decisions.
+                # Preserve the finish reason from the merged API call for later status decisions.
                 merged_finish_reason = finish_reason
+                truncation_exhausted = getattr(self.client, "_truncation_retries_exhausted", False)
+                if truncation_exhausted:
+                    try:
+                        self.client._truncation_retries_exhausted = False
+                    except Exception:
+                        pass
                 
                 if self.check_stop_fn():
                     raise Exception("Translation stopped by user")
@@ -4376,7 +4382,7 @@ class BatchTranslationProcessor:
                     raise Exception("Empty response from API for merged request")
                 
                 # Check for truncation (use preserved finish reason so retries/merges don't lose the flag)
-                merged_truncated = merged_finish_reason in ["length", "max_tokens"]
+                merged_truncated = merged_finish_reason in ["length", "max_tokens"] or truncation_exhausted
                 if merged_truncated:
                     print(f"   ⚠️ Merged response was TRUNCATED!")
                 
