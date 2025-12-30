@@ -6581,6 +6581,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
             "TEXT_EXTRACTION_METHOD": extraction_method if hasattr(self, 'text_extraction_method_var') else ('enhanced' if extraction_mode == 'enhanced' else 'standard'),
             "FILE_FILTERING_LEVEL": filtering_level if hasattr(self, 'file_filtering_level_var') else extraction_mode,
             'DISABLE_CHAPTER_MERGING': '1' if self.disable_chapter_merging_var else '0',
+            # Request merging (combine multiple chapters into single API request)
+            'REQUEST_MERGING_ENABLED': "1" if getattr(self, 'request_merging_enabled_var', False) else "0",
+            'REQUEST_MERGE_COUNT': str(getattr(self, 'request_merge_count_var', '3')),
+            'SPLIT_THE_MERGE': "1" if getattr(self, 'split_the_merge_var', False) else "0",
+            'DISABLE_MERGE_FALLBACK': "1" if getattr(self, 'disable_merge_fallback_var', False) else "0",
+            'SYNTHETIC_MERGE_HEADERS': "1" if getattr(self, 'synthetic_merge_headers_var', True) else "0",
             'DISABLE_EPUB_GALLERY': "1" if self.disable_epub_gallery_var else "0",
             'DISABLE_AUTOMATIC_COVER_CREATION': "1" if getattr(self, 'disable_automatic_cover_creation_var', False) else "0",
             'TRANSLATE_COVER_HTML': "1" if getattr(self, 'translate_cover_html_var', False) else "0",
