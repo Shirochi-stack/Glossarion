@@ -3374,11 +3374,14 @@ class AsyncProcessingDialog:
             with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False, encoding='utf-8') as f:
                 for request in batch_data['requests']:
                     # Format for Gemini batch API
+                    gen_cfg = request['generateContentRequest'].get('generationConfig', {}).copy()
+                    # Google Batch API rejects unknown fields; remove 'thinking' (only realtime API supports it)
+                    gen_cfg.pop('thinking', None)
                     batch_line = {
                         "key": request['custom_id'],
                         "request": {
                             "contents": request['generateContentRequest']['contents'],
-                            "generation_config": request['generateContentRequest'].get('generationConfig', {})
+                            "generation_config": gen_cfg
                         }
                     }
                     
@@ -3746,7 +3749,12 @@ class AsyncProcessingDialog:
                     "completed_at": datetime.now().isoformat(),
                     "translation_time": 2.5,  # Fake but realistic
                     "token_count": chapter_info.get('text_length', 5000) // 4,  # Rough estimate
-                    "model": self.gui.model_var.get(),
+                    # model_var can be a Tk variable or plain string depending on context
+                    "model": (
+                        self.gui.model_var.get()
+                        if hasattr(getattr(self.gui, "model_var", None), "get")
+                        else (self.gui.model_var if hasattr(self.gui, "model_var") else getattr(self.gui, "model", ""))
+                    ),
                     "from_async": True
                 }
                 
