@@ -2823,6 +2823,7 @@ class AsyncProcessingDialog:
             # Save job with chapter mapping in metadata
             job.metadata = job.metadata or {}
             job.metadata['chapter_mapping'] = chapter_mapping  # ADDED: Store mapping for later use
+            job.metadata['env'] = env_vars  # preserve env to know extraction mode on save
             
             # Save job
             self.processor.jobs[job.job_id] = job
@@ -3045,6 +3046,20 @@ class AsyncProcessingDialog:
         chapters = []
         original_basename = None
         chapter_mapping = {}  # Map custom_id to chapter info
+
+        # Respect GUI extraction mode/radio
+        extraction_method = env_vars.get('TEXT_EXTRACTION_METHOD', env_vars.get('EXTRACTION_MODE', 'standard')).lower()
+        enhanced_filtering = env_vars.get('ENHANCED_FILTERING', 'smart')
+        preserve_structure = env_vars.get('ENHANCED_PRESERVE_STRUCTURE', True)
+        use_html2text = extraction_method in ['enhanced', 'html2text', 'markdown']
+        extractor = None
+        if use_html2text:
+            try:
+                from enhanced_text_extractor import EnhancedTextExtractor
+                extractor = EnhancedTextExtractor(filtering_mode=enhanced_filtering, preserve_structure=preserve_structure)
+            except Exception as e:
+                print(f"⚠️ Falling back to BeautifulSoup extraction; failed to init EnhancedTextExtractor: {e}")
+                use_html2text = False
         
         try:
             if file_path.lower().endswith('.epub'):
@@ -3064,23 +3079,34 @@ class AsyncProcessingDialog:
                             try:
                                 content = zf.read(html_file)
                                 soup = BeautifulSoup(content, 'html.parser')
-                                
-                                # Keep full HTML (including images and links) for translation
+
+                                # Keep full HTML (including images and links) for translation unless user chose html2text
                                 chapter_html = str(soup)
                                 chapter_text = soup.get_text(separator='\n').strip()
-                                
+
                                 if len(chapter_text) > 500:  # Minimum chapter length
                                     chapter_num = idx + 1
-                                    
+
                                     # Try to extract chapter number from content
                                     for element in soup.find_all(['h1', 'h2', 'h3', 'title']):
                                         text = element.get_text().strip()
-                                        match = re.search(r'chapter\s*(\d+)', text, re.IGNORECASE)
+                                        match = re.search(r'chapter\\s*(\\d+)', text, re.IGNORECASE)
                                         if match:
                                             chapter_num = int(match.group(1))
                                             break
-                                    
-                                    raw_chapters.append((chapter_num, chapter_html, html_file))
+
+                                    # Apply extraction mode
+                                    if use_html2text and extractor:
+                                        try:
+                                            cleaned_text, _, _ = extractor.extract_chapter_content(chapter_html, extraction_mode=extraction_method)
+                                            chapter_payload = cleaned_text
+                                        except Exception as e:
+                                            print(f"⚠️ html2text extraction failed, using HTML: {e}")
+                                            chapter_payload = chapter_html
+                                    else:
+                                        chapter_payload = chapter_html
+
+                                    raw_chapters.append((chapter_num, chapter_payload, html_file))
                                     
                             except Exception as e:
                                 print(f"Error reading {html_file}: {e}")
@@ -3127,7 +3153,8 @@ class AsyncProcessingDialog:
                     'max_tokens': int(env_vars['MAX_OUTPUT_TOKENS']),
                     'needs_chunking': needs_chunking,
                     'token_count': token_count,
-                    'original_basename': original_filename  # Use original_filename instead of undefined original_basename
+                    'original_basename': original_filename,  # Use original_filename instead of undefined original_basename
+                    'extraction_method': extraction_method
                 }
                 
                 chapters.append(chapter_data)
@@ -3135,7 +3162,9 @@ class AsyncProcessingDialog:
                 # Store mapping
                 chapter_mapping[custom_id] = {
                     'original_filename': original_filename,
-                    'chapter_num': chapter_num
+                    'chapter_num': chapter_num,
+                    'extraction_method': extraction_method,
+                    'preserve_structure': preserve_structure
                 }
                 
         except Exception as e:
@@ -3728,10 +3757,33 @@ class AsyncProcessingDialog:
                     filename = f"response_{original_basename}.html"
                 file_path = os.path.join(output_dir, filename)
                 
-                # If provider returned plain text, wrap it in minimal HTML to keep EPUB valid
+                # Determine extraction method for this chapter (per-chapter > env > default)
+                job_obj = self.processor.jobs.get(job_id) if hasattr(self, 'processor') else None
+                job_env = job_obj.metadata.get('env', {}) if job_obj and job_obj.metadata else {}
+                chapter_meta = {}
+                if job_obj and job_obj.metadata and job_obj.metadata.get('chapter_mapping'):
+                    chapter_meta = job_obj.metadata['chapter_mapping'].get(result['custom_id'], {})
+                extraction_method = str(
+                    chapter_meta.get('extraction_method')
+                    or job_env.get('TEXT_EXTRACTION_METHOD')
+                    or job_env.get('EXTRACTION_MODE')
+                    or 'standard'
+                ).lower()
+
+                # Convert plain/markdown back to HTML when html2text/enhanced was used
                 content = result.get('content', '')
-                if content and '<' not in content[:200].lower():
-                    # Preserve line breaks
+                if extraction_method in ['enhanced', 'html2text', 'markdown']:
+                    try:
+                        from TransateKRtoEN import convert_enhanced_text_to_html
+                        preserve_structure = chapter_meta.get('preserve_structure', True)
+                        content = convert_enhanced_text_to_html(content, {'preserve_structure': preserve_structure})
+                    except Exception as e:
+                        print(f"⚠️ Could not convert enhanced text to HTML: {e}")
+                        if content and '<' not in content[:200].lower():
+                            body = ''.join(f"<p>{line}</p>" for line in content.splitlines() if line.strip())
+                            content = f"<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body>{body}</body></html>"
+                elif content and '<' not in content[:200].lower():
+                    # Provider returned plain text in standard mode; wrap minimally
                     body = ''.join(f"<p>{line}</p>" for line in content.splitlines() if line.strip())
                     content = f"<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body>{body}</body></html>"
                 with open(file_path, 'w', encoding='utf-8') as f:
