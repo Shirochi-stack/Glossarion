@@ -6607,6 +6607,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'SINGLE_API_IMAGE_CHUNKS': "1" if self.single_api_image_chunks_var else "0",
             'ENABLE_GEMINI_THINKING': "1" if self.enable_gemini_thinking_var else "0",
             'THINKING_BUDGET': self.thinking_budget_var if self.enable_gemini_thinking_var else '0',
+            'GEMINI_THINKING_LEVEL': getattr(self, 'thinking_level_var', 'high'),
             # GPT/OpenRouter reasoning
             'ENABLE_GPT_THINKING': "1" if self.enable_gpt_thinking_var else "0",
             'GPT_REASONING_TOKENS': self.gpt_reasoning_tokens_var if self.enable_gpt_thinking_var else '',
