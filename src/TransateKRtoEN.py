@@ -9677,254 +9677,254 @@ def main(log_callback=None, stop_callback=None):
                 parent_idx, parent_chapter, parent_actual_num, parent_content_hash = merge_info['group'][0]
                 merged_child_nums = [g[2] for g in merge_info['group'][1:]]  # All except parent
                 
-            # Track whether the underlying API response was truncated; if so mark qa_failed immediately
-            preserved_fr = locals().get("merged_finish_reason", finish_reason)
-            was_truncated = preserved_fr in ["length", "max_tokens"]
-            if was_truncated:
-                print(f"   ⚠️ Merged response was TRUNCATED (finish_reason: {preserved_fr})")
-                qa_issues = ["TRUNCATED"]
-                parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
-                progress_manager.update(
-                    parent_idx, parent_actual_num, parent_content_hash, parent_fname,
-                    status="qa_failed", chapter_obj=parent_chapter, qa_issues_found=qa_issues
-                )
-                for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group'][1:]:
-                    progress_manager.update(
-                        g_idx, g_actual_num, g_content_hash, None,
-                        status="qa_failed", chapter_obj=g_chapter, qa_issues_found=qa_issues
-                    )
-                progress_manager.save()
-                print(f"   ⚠️ Merged group marked as qa_failed due to truncation")
-                continue
-
-            # We may exit early on QA failure below, but we still want to strip
-            # injected split markers from any saved merged output when Split-the-Merge is enabled.
-            split_the_merge = os.getenv('SPLIT_THE_MERGE', '0') == '1'
-            
-            # Check for QA failures first (independent of truncation)
-            if is_qa_failed_response(cleaned):
-                print(f"   ⚠️ Merged response marked as qa_failed for parent + children")
-                
-                # Only save file for debugging if it contains meaningful content beyond error markers
-                cleaned_stripped = cleaned.strip()
-                is_only_error_marker = cleaned_stripped in [
-                    "[TRANSLATION FAILED]",
-                    "[Content Blocked]",
-                    "[IMAGE TRANSLATION FAILED]",
-                    "[EXTRACTION FAILED]",
-                    "[RATE LIMITED]",
-                    "[]"
-                ] or cleaned_stripped.startswith("[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]") or cleaned_stripped.startswith("[CONTENT BLOCKED - ORIGINAL TEXT PRESERVED]")
-                
-                if not is_only_error_marker:
-                    # Save for debugging - contains actual translation attempt that failed QA
+                # Track whether the underlying API response was truncated; if so mark qa_failed immediately
+                preserved_fr = locals().get("merged_finish_reason", finish_reason)
+                was_truncated = preserved_fr in ["length", "max_tokens"]
+                if was_truncated:
+                    print(f"   ⚠️ Merged response was TRUNCATED (finish_reason: {preserved_fr})")
+                    qa_issues = ["TRUNCATED"]
                     parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
-                    try:
-                        cleaned_to_save = cleaned
-                        if split_the_merge:
-                            cleaned_to_save = re.sub(
-                                r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
-                                '',
-                                cleaned_to_save,
-                                flags=re.IGNORECASE | re.DOTALL,
-                            )
-                        with open(os.path.join(out, parent_fname), 'w', encoding='utf-8') as f:
-                            f.write(cleaned_to_save)
-                    except Exception:
-                        pass
-                
-                # Mark ALL chapters in the merge group as qa_failed using
-                # their own expected filenames so we overwrite existing
-                # in_progress entries instead of creating composite keys.
-                for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
-                    g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
                     progress_manager.update(
-                        g_idx,
-                        g_actual_num,
-                        g_content_hash,
-                        g_fname,
-                        status="qa_failed",
-                        chapter_obj=g_chapter,
+                        parent_idx, parent_actual_num, parent_content_hash, parent_fname,
+                        status="qa_failed", chapter_obj=parent_chapter, qa_issues_found=qa_issues
                     )
-                progress_manager.save()
-                print(f"   ⚠️ Merged group marked as qa_failed")
-                continue
-            
-            # Check if Split the Merge is enabled
-            split_the_merge = os.getenv('SPLIT_THE_MERGE', '0') == '1'
-            disable_fallback = os.getenv('DISABLE_MERGE_FALLBACK', '0') == '1'
-            split_sections = None
-            
-            if split_the_merge and len(merge_info['group']) > 1:
-                # Try to split by invisible markers
-                split_sections = RequestMerger.split_by_markers(cleaned, len(merge_info['group']))
-            
-            # If disable fallback is enabled and split failed, mark as qa_failed
-            if split_the_merge and disable_fallback and (not split_sections or len(split_sections) != len(merge_info['group'])):
-                print(f"   ⚠️ Split failed and fallback disabled - marking merged group as qa_failed")
-                
-                # Only save file for debugging if it contains meaningful content beyond error markers
-                cleaned_stripped = cleaned.strip()
-                is_only_error_marker = cleaned_stripped in [
-                    "[TRANSLATION FAILED]",
-                    "[Content Blocked]",
-                    "[IMAGE TRANSLATION FAILED]",
-                    "[EXTRACTION FAILED]",
-                    "[RATE LIMITED]",
-                    "[]"
-                ] or cleaned_stripped.startswith("[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]") or cleaned_stripped.startswith("[CONTENT BLOCKED - ORIGINAL TEXT PRESERVED]")
-                
-                if not is_only_error_marker:
-                    parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
-                    try:
-                        cleaned_to_save = cleaned
-                        if split_the_merge:
-                            cleaned_to_save = re.sub(
-                                r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
-                                '',
-                                cleaned_to_save,
-                                flags=re.IGNORECASE | re.DOTALL,
-                            )
-                        with open(os.path.join(out, parent_fname), 'w', encoding='utf-8') as f:
-                            f.write(cleaned_to_save)
-                    except Exception:
-                        pass
+                    for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group'][1:]:
+                        progress_manager.update(
+                            g_idx, g_actual_num, g_content_hash, None,
+                            status="qa_failed", chapter_obj=g_chapter, qa_issues_found=qa_issues
+                        )
+                    progress_manager.save()
+                    print(f"   ⚠️ Merged group marked as qa_failed due to truncation")
+                    continue
 
-                # Mark ALL chapters in the merge group as qa_failed
-                for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
-                    g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
-                    progress_manager.update(
-                        g_idx,
-                        g_actual_num,
-                        g_content_hash,
-                        g_fname,
-                        status="qa_failed",
-                        chapter_obj=g_chapter,
-                        qa_issues_found=["SPLIT_FAILED"],
+                # We may exit early on QA failure below, but we still want to strip
+                # injected split markers from any saved merged output when Split-the-Merge is enabled.
+                split_the_merge = os.getenv('SPLIT_THE_MERGE', '0') == '1'
+                
+                # Check for QA failures first (independent of truncation)
+                if is_qa_failed_response(cleaned):
+                    print(f"   ⚠️ Merged response marked as qa_failed for parent + children")
+                    
+                    # Only save file for debugging if it contains meaningful content beyond error markers
+                    cleaned_stripped = cleaned.strip()
+                    is_only_error_marker = cleaned_stripped in [
+                        "[TRANSLATION FAILED]",
+                        "[Content Blocked]",
+                        "[IMAGE TRANSLATION FAILED]",
+                        "[EXTRACTION FAILED]",
+                        "[RATE LIMITED]",
+                        "[]"
+                    ] or cleaned_stripped.startswith("[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]") or cleaned_stripped.startswith("[CONTENT BLOCKED - ORIGINAL TEXT PRESERVED]")
+                    
+                    if not is_only_error_marker:
+                        # Save for debugging - contains actual translation attempt that failed QA
+                        parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
+                        try:
+                            cleaned_to_save = cleaned
+                            if split_the_merge:
+                                cleaned_to_save = re.sub(
+                                    r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
+                                    '',
+                                    cleaned_to_save,
+                                    flags=re.IGNORECASE | re.DOTALL,
+                                )
+                            with open(os.path.join(out, parent_fname), 'w', encoding='utf-8') as f:
+                                f.write(cleaned_to_save)
+                        except Exception:
+                            pass
+                    
+                    # Mark ALL chapters in the merge group as qa_failed using
+                    # their own expected filenames so we overwrite existing
+                    # in_progress entries instead of creating composite keys.
+                    for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
+                        g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
+                        progress_manager.update(
+                            g_idx,
+                            g_actual_num,
+                            g_content_hash,
+                            g_fname,
+                            status="qa_failed",
+                            chapter_obj=g_chapter,
+                        )
+                    progress_manager.save()
+                    print(f"   ⚠️ Merged group marked as qa_failed")
+                    continue
+                
+                # Check if Split the Merge is enabled
+                split_the_merge = os.getenv('SPLIT_THE_MERGE', '0') == '1'
+                disable_fallback = os.getenv('DISABLE_MERGE_FALLBACK', '0') == '1'
+                split_sections = None
+                
+                if split_the_merge and len(merge_info['group']) > 1:
+                    # Try to split by invisible markers
+                    split_sections = RequestMerger.split_by_markers(cleaned, len(merge_info['group']))
+                
+                # If disable fallback is enabled and split failed, mark as qa_failed
+                if split_the_merge and disable_fallback and (not split_sections or len(split_sections) != len(merge_info['group'])):
+                    print(f"   ⚠️ Split failed and fallback disabled - marking merged group as qa_failed")
+                    
+                    # Only save file for debugging if it contains meaningful content beyond error markers
+                    cleaned_stripped = cleaned.strip()
+                    is_only_error_marker = cleaned_stripped in [
+                        "[TRANSLATION FAILED]",
+                        "[Content Blocked]",
+                        "[IMAGE TRANSLATION FAILED]",
+                        "[EXTRACTION FAILED]",
+                        "[RATE LIMITED]",
+                        "[]"
+                    ] or cleaned_stripped.startswith("[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]") or cleaned_stripped.startswith("[CONTENT BLOCKED - ORIGINAL TEXT PRESERVED]")
+                    
+                    if not is_only_error_marker:
+                        parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
+                        try:
+                            cleaned_to_save = cleaned
+                            if split_the_merge:
+                                cleaned_to_save = re.sub(
+                                    r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
+                                    '',
+                                    cleaned_to_save,
+                                    flags=re.IGNORECASE | re.DOTALL,
+                                )
+                            with open(os.path.join(out, parent_fname), 'w', encoding='utf-8') as f:
+                                f.write(cleaned_to_save)
+                        except Exception:
+                            pass
+
+                    # Mark ALL chapters in the merge group as qa_failed
+                    for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
+                        g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
+                        progress_manager.update(
+                            g_idx,
+                            g_actual_num,
+                            g_content_hash,
+                            g_fname,
+                            status="qa_failed",
+                            chapter_obj=g_chapter,
+                            qa_issues_found=["SPLIT_FAILED"],
+                        )
+                    progress_manager.save()
+                    print(f"   ⚠️ Merged group ({len(merge_info['group'])} chapters) marked as qa_failed with SPLIT_FAILED")
+                    continue
+                
+                if split_sections and len(split_sections) == len(merge_info['group']):
+                    # Split successful - save each section as individual file
+                    print(f"   ✂️ Splitting merged content into {len(split_sections)} individual files")
+                    
+                    saved_files = []
+                    for i, (g_idx, g_chapter, g_actual_num, g_content_hash) in enumerate(merge_info['group']):
+                        section_content = split_sections[i]
+                        
+                        # Generate filename for this chapter using content.opf naming
+                        split_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
+                        
+                        # Handle text file mode
+                        if is_text_file:
+                            split_fname = split_fname.replace('.html', '.txt')
+                            from bs4 import BeautifulSoup
+                            soup = BeautifulSoup(section_content, 'html.parser')
+                            section_content = soup.get_text(strip=True)
+                        
+                        # Save the section
+                        split_output_path = os.path.join(out, split_fname)
+                        with open(split_output_path, 'w', encoding='utf-8') as f:
+                            f.write(section_content)
+                        
+                        # Verify file was written successfully
+                        if os.path.exists(split_output_path):
+                            saved_files.append((g_idx, g_chapter, g_actual_num, g_content_hash, split_fname))
+                            print(f"      💾 Saved Chapter {g_actual_num}: {split_fname} ({len(section_content)} chars)")
+                        else:
+                            print(f"      ⚠️ ERROR: Failed to write file {split_fname} - file does not exist after write")
+                    
+                    # Mark all chapters as completed or qa_failed (for truncated)
+                    for g_idx, g_chapter, g_actual_num, g_content_hash, split_fname in saved_files:
+                        chapter_status = "qa_failed" if was_truncated else "completed"
+                        qa_issues = ["TRUNCATED"] if was_truncated else None
+                        progress_manager.update(
+                            g_idx, g_actual_num, g_content_hash, split_fname,
+                            status=chapter_status, chapter_obj=g_chapter, qa_issues_found=qa_issues
+                        )
+                        chapters_completed += 1
+                    
+                    # Save once after all updates
+                    progress_manager.save()
+                    print(f"   ✅ Split the Merge complete: {len(saved_files)} files created")
+                    continue
+                
+                # Normal merged behavior (split not enabled or header count mismatch)
+                # Save entire merged response to parent chapter's file
+                cleaned_to_save = cleaned
+                if split_the_merge and len(merge_info['group']) > 1:
+                    cleaned_to_save = re.sub(
+                        r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
+                        '',
+                        cleaned_to_save,
+                        flags=re.IGNORECASE | re.DOTALL,
                     )
-                progress_manager.save()
-                print(f"   ⚠️ Merged group ({len(merge_info['group'])} chapters) marked as qa_failed with SPLIT_FAILED")
-                continue
-            
-            if split_sections and len(split_sections) == len(merge_info['group']):
-                # Split successful - save each section as individual file
-                print(f"   ✂️ Splitting merged content into {len(split_sections)} individual files")
+
+                if is_text_file and not is_pdf_file:
+                    parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num).replace('.html', '.txt')
+                    from bs4 import BeautifulSoup
+                    soup = BeautifulSoup(cleaned_to_save, 'html.parser')
+                    text_content = soup.get_text(strip=True)
+                    
+                    parent_output_path = os.path.join(out, parent_fname)
+                    with open(parent_output_path, 'w', encoding='utf-8') as f:
+                        f.write(text_content)
+                else:
+                    parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
+                    parent_output_path = os.path.join(out, parent_fname)
+                    with open(parent_output_path, 'w', encoding='utf-8') as f:
+                        f.write(cleaned_to_save)
                 
-                saved_files = []
-                for i, (g_idx, g_chapter, g_actual_num, g_content_hash) in enumerate(merge_info['group']):
-                    section_content = split_sections[i]
-                    
-                    # Generate filename for this chapter using content.opf naming
-                    split_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
-                    
-                    # Handle text file mode
-                    if is_text_file:
-                        split_fname = split_fname.replace('.html', '.txt')
-                        from bs4 import BeautifulSoup
-                        soup = BeautifulSoup(section_content, 'html.parser')
-                        section_content = soup.get_text(strip=True)
-                    
-                    # Save the section
-                    split_output_path = os.path.join(out, split_fname)
-                    with open(split_output_path, 'w', encoding='utf-8') as f:
-                        f.write(section_content)
-                    
-                    # Verify file was written successfully
-                    if os.path.exists(split_output_path):
-                        saved_files.append((g_idx, g_chapter, g_actual_num, g_content_hash, split_fname))
-                        print(f"      💾 Saved Chapter {g_actual_num}: {split_fname} ({len(section_content)} chars)")
-                    else:
-                        print(f"      ⚠️ ERROR: Failed to write file {split_fname} - file does not exist after write")
+                # Verify file was actually written before marking as completed
+                if not os.path.exists(parent_output_path):
+                    print(f"   ⚠️ ERROR: Failed to write merged file {parent_fname} - file does not exist after write")
+                    # Mark all chapters in the group as failed since parent file wasn't written
+                    for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
+                        progress_manager.update(g_idx, g_actual_num, g_content_hash, None, status="failed", chapter_obj=g_chapter)
+                    progress_manager.save()
+                    continue
                 
-                # Mark all chapters as completed or qa_failed (for truncated)
-                for g_idx, g_chapter, g_actual_num, g_content_hash, split_fname in saved_files:
-                    chapter_status = "qa_failed" if was_truncated else "completed"
-                    qa_issues = ["TRUNCATED"] if was_truncated else None
+                print(f"   💾 Saved merged content to Chapter {parent_actual_num}: {parent_fname} ({len(cleaned_to_save)} chars)")
+                
+                if was_truncated:
+                    # For truncated merged responses, mark ALL chapters as qa_failed
+                    qa_issues = ["TRUNCATED"]
                     progress_manager.update(
-                        g_idx, g_actual_num, g_content_hash, split_fname,
-                        status=chapter_status, chapter_obj=g_chapter, qa_issues_found=qa_issues
+                        parent_idx, parent_actual_num, parent_content_hash, parent_fname,
+                        status="qa_failed", chapter_obj=parent_chapter, qa_issues_found=qa_issues
+                    )
+                    for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group'][1:]:
+                        progress_manager.update(
+                            g_idx, g_actual_num, g_content_hash, None,
+                            status="qa_failed", chapter_obj=g_chapter, qa_issues_found=qa_issues
+                        )
+                    chapters_completed += len(merge_info['group'])
+
+                    # Save once after all updates
+                    progress_manager.save()
+                    print(f"   ⚠️ Merged group marked as qa_failed due to truncation")
+                else:
+                    # Normal success path: parent completed, children marked as merged
+                    progress_manager.update(
+                        parent_idx, parent_actual_num, parent_content_hash, parent_fname,
+                        status="completed", chapter_obj=parent_chapter,
+                        merged_chapters=merged_child_nums
                     )
                     chapters_completed += 1
+                    
+                    # Mark child chapters as merged (point to parent's output file) - atomically after parent
+                    for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group'][1:]:
+                        progress_manager.mark_as_merged(g_idx, g_actual_num, g_content_hash, parent_actual_num, g_chapter, parent_output_file=parent_fname)
+                        chapters_completed += 1
+                    
+                    # Save once after all updates
+                    progress_manager.save()
+                    print(f"   📊 Saved merged content for {len(merge_info['group'])} chapters")
                 
-                # Save once after all updates
-                progress_manager.save()
-                print(f"   ✅ Split the Merge complete: {len(saved_files)} files created")
+                # Skip normal save since we handled it above
                 continue
-            
-            # Normal merged behavior (split not enabled or header count mismatch)
-            # Save entire merged response to parent chapter's file
-            cleaned_to_save = cleaned
-            if split_the_merge and len(merge_info['group']) > 1:
-                cleaned_to_save = re.sub(
-                    r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
-                    '',
-                    cleaned_to_save,
-                    flags=re.IGNORECASE | re.DOTALL,
-                )
-
-            if is_text_file and not is_pdf_file:
-                parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num).replace('.html', '.txt')
-                from bs4 import BeautifulSoup
-                soup = BeautifulSoup(cleaned_to_save, 'html.parser')
-                text_content = soup.get_text(strip=True)
-                
-                parent_output_path = os.path.join(out, parent_fname)
-                with open(parent_output_path, 'w', encoding='utf-8') as f:
-                    f.write(text_content)
-            else:
-                parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
-                parent_output_path = os.path.join(out, parent_fname)
-                with open(parent_output_path, 'w', encoding='utf-8') as f:
-                    f.write(cleaned_to_save)
-            
-            # Verify file was actually written before marking as completed
-            if not os.path.exists(parent_output_path):
-                print(f"   ⚠️ ERROR: Failed to write merged file {parent_fname} - file does not exist after write")
-                # Mark all chapters in the group as failed since parent file wasn't written
-                for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
-                    progress_manager.update(g_idx, g_actual_num, g_content_hash, None, status="failed", chapter_obj=g_chapter)
-                progress_manager.save()
-                continue
-            
-            print(f"   💾 Saved merged content to Chapter {parent_actual_num}: {parent_fname} ({len(cleaned_to_save)} chars)")
-            
-            if was_truncated:
-                # For truncated merged responses, mark ALL chapters as qa_failed
-                qa_issues = ["TRUNCATED"]
-                progress_manager.update(
-                    parent_idx, parent_actual_num, parent_content_hash, parent_fname,
-                    status="qa_failed", chapter_obj=parent_chapter, qa_issues_found=qa_issues
-                )
-                for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group'][1:]:
-                    progress_manager.update(
-                        g_idx, g_actual_num, g_content_hash, None,
-                        status="qa_failed", chapter_obj=g_chapter, qa_issues_found=qa_issues
-                    )
-                chapters_completed += len(merge_info['group'])
-
-                # Save once after all updates
-                progress_manager.save()
-                print(f"   ⚠️ Merged group marked as qa_failed due to truncation")
-            else:
-                # Normal success path: parent completed, children marked as merged
-                progress_manager.update(
-                    parent_idx, parent_actual_num, parent_content_hash, parent_fname,
-                    status="completed", chapter_obj=parent_chapter,
-                    merged_chapters=merged_child_nums
-                )
-                chapters_completed += 1
-                
-                # Mark child chapters as merged (point to parent's output file) - atomically after parent
-                for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group'][1:]:
-                    progress_manager.mark_as_merged(g_idx, g_actual_num, g_content_hash, parent_actual_num, g_chapter, parent_output_file=parent_fname)
-                    chapters_completed += 1
-                
-                # Save once after all updates
-                progress_manager.save()
-                print(f"   📊 Saved merged content for {len(merge_info['group'])} chapters")
-            
-            # Skip normal save since we handled it above
-            continue
 
             if is_text_file and not is_pdf_file:
                 # For text files (but NOT PDFs), save as plain text instead of HTML
