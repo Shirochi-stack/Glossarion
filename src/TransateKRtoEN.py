@@ -3949,7 +3949,14 @@ class BatchTranslationProcessor:
                 
                 print(f"📥 Received Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks} response, finish_reason: {finish_reason}")
                 
-                if finish_reason in ["length", "max_tokens"]:
+                # Treat truncation retries exhaustion as truncation even if finish_reason changed
+                truncation_exhausted = getattr(self.client, "_truncation_retries_exhausted", False)
+                if truncation_exhausted:
+                    try:
+                        self.client._truncation_retries_exhausted = False
+                    except Exception:
+                        pass
+                if finish_reason in ["length", "max_tokens"] or truncation_exhausted:
                     print(f"    ⚠️ Chunk {chunk_idx}/{total_chunks} response was TRUNCATED!")
                     # Track truncation status
                     is_truncated = True

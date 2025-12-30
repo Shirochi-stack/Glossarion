@@ -1196,6 +1196,8 @@ class UnifiedClient:
         # Instance variables
         self.output_dir = output_dir
         self._cancelled = False
+        # Reset truncation exhaustion flag for this request
+        self._truncation_retries_exhausted = False
         self._in_cleanup = False
         self.conversation_message_count = 0
         self.context = None
@@ -4124,6 +4126,7 @@ class UnifiedClient:
                                     except Exception as retry_error:
                                         print(f"  ❌ Truncation retry #{attempt_idx+1} failed: {retry_error}")
                                 print(f"  ⚠️ All truncation retries ({allowed_attempts}) exhausted at higher token limit; returning original response")
+                                self._truncation_retries_exhausted = True
                             elif current_max_tokens == max_retry_tokens and not already_tried_truncation:
                                 # Retry at same limit, honoring configured attempts
                                 print(f"  📊 At configured max_retry_tokens ({max_retry_tokens}) - retrying up to {allowed_attempts} time(s) at same limit")
@@ -4138,6 +4141,7 @@ class UnifiedClient:
                                     except Exception as retry_error:
                                         print(f"  ❌ Equal-limit truncation retry #{attempt_idx+1} failed: {retry_error}")
                                 print(f"  ⚠️ All equal-limit truncation retries ({allowed_attempts}) exhausted; returning original response")
+                                self._truncation_retries_exhausted = True
                             else:
                                 print(f"  📊 Already at max retry tokens ({current_max_tokens}) and retry already attempted, not retrying")
                     else:
