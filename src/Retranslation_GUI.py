@@ -1879,9 +1879,9 @@ class RetranslationMixin:
             if not item:
                 return
             menu = QMenu(listbox)
-            act_open = menu.addAction("Open File")
-            act_retranslate = menu.addAction("Retranslate Selected")
-            act_remove_qa = menu.addAction("Remove QA Failed Mark")
+            act_open = menu.addAction("📂 Open File")
+            act_retranslate = menu.addAction("🔁 Retranslate Selected")
+            act_remove_qa = menu.addAction("🧹 Remove QA Failed Mark")
             chosen = menu.exec(listbox.mapToGlobal(pos))
             if chosen == act_open:
                 _open_file_for_item(item)
