@@ -9139,10 +9139,23 @@ class UnifiedClient:
         # Get thinking budget from environment
         thinking_budget = int(os.getenv("THINKING_BUDGET", "-1"))
         
-        # Get thinking level for Gemini 3 (low/medium/high)
+        # Get thinking level for Gemini 3 (minimal/low/medium/high)
         thinking_level = os.getenv("GEMINI_THINKING_LEVEL", "high").lower()
-        # gemini-3-pro (non-flash) does not support medium; fall back to high to avoid API error
         model_lower = self.model.lower() if self.model else ""
+
+        # If user tries to disable thinking via budget=0, map to the lowest supported level per model
+        if self._is_gemini_3_model() and thinking_budget == 0:
+            if "flash" in model_lower:
+                thinking_level = "minimal"
+                if not self._is_stop_requested():
+                    print("   ⚠️ Gemini 3 Flash does not support disabled thinking; using minimal instead of 0")
+            else:
+                thinking_level = "low"
+                if not self._is_stop_requested():
+                    print("   ⚠️ Gemini 3 Pro does not support disabled thinking; using low instead of 0")
+            thinking_budget = -1  # avoid sending 0 budget for Gemini 3
+
+        # gemini-3-pro (non-flash) does not support medium/minimal; fall back appropriately
         if "gemini-3-pro" in model_lower and "flash" not in model_lower:
             if thinking_level == "medium":
                 thinking_level = "high"
