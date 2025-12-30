@@ -1356,9 +1356,9 @@ def _create_response_handling_section(self, parent):
     gemini_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
     section_v.addWidget(gemini_title)
     
-    thinking_row = QWidget()
-    thinking_h = QHBoxLayout(thinking_row)
-    thinking_h.setContentsMargins(20, 5, 0, 0)
+    thinking_row_top = QWidget()
+    thinking_h_top = QHBoxLayout(thinking_row_top)
+    thinking_h_top.setContentsMargins(20, 5, 0, 0)
     
     gemini_thinking_cb = self._create_styled_checkbox("Enable Gemini Thinking")
     try:
@@ -1372,11 +1372,11 @@ def _create_response_handling_section(self, parent):
         except Exception:
             pass
     gemini_thinking_cb.toggled.connect(_on_gemini_thinking_toggle)
-    thinking_h.addWidget(gemini_thinking_cb)
+    thinking_h_top.addWidget(gemini_thinking_cb)
     
-    thinking_h.addSpacing(20)
+    thinking_h_top.addSpacing(20)
     self.thinking_budget_label = QLabel("Budget:")
-    thinking_h.addWidget(self.thinking_budget_label)
+    thinking_h_top.addWidget(self.thinking_budget_label)
     self.thinking_budget_entry = QLineEdit()
     self.thinking_budget_entry.setFixedWidth(70)
     try:
@@ -1389,16 +1389,22 @@ def _create_response_handling_section(self, parent):
         except Exception:
             pass
     self.thinking_budget_entry.textChanged.connect(_on_budget_changed)
-    thinking_h.addWidget(self.thinking_budget_entry)
+    thinking_h_top.addWidget(self.thinking_budget_entry)
     self.thinking_tokens_label = QLabel("tokens")
-    thinking_h.addWidget(self.thinking_tokens_label)
-    
-    thinking_h.addSpacing(20)
+    thinking_h_top.addWidget(self.thinking_tokens_label)
+    thinking_h_top.addStretch()
+    section_v.addWidget(thinking_row_top)
+
+    # Second row for Gemini 3 thinking level
+    thinking_row_level = QWidget()
+    thinking_h_level = QHBoxLayout(thinking_row_level)
+    thinking_h_level.setContentsMargins(40, 2, 0, 0)
+
     self.thinking_level_label = QLabel("Level (Gemini 3):")
-    thinking_h.addWidget(self.thinking_level_label)
+    thinking_h_level.addWidget(self.thinking_level_label)
     self.thinking_level_combo = QComboBox()
     self.thinking_level_combo.addItems(["low", "medium", "high"])
-    self.thinking_level_combo.setFixedWidth(80)
+    self.thinking_level_combo.setFixedWidth(110)
     self.thinking_level_combo.setStyleSheet("""
         QComboBox::down-arrow {
             image: none;
@@ -1423,13 +1429,12 @@ def _create_response_handling_section(self, parent):
         except Exception:
             pass
     self.thinking_level_combo.currentTextChanged.connect(_on_level_changed)
-    thinking_h.addWidget(self.thinking_level_combo)
-    
-    thinking_h.addStretch()
-    section_v.addWidget(thinking_row)
+    thinking_h_level.addWidget(self.thinking_level_combo)
+    thinking_h_level.addStretch()
+    section_v.addWidget(thinking_row_level)
     
     # Store reference to description label for enable/disable
-    self.gemini_desc_label = QLabel("Control Gemini's thinking process. 0 = disabled,\n512-24576 = limited thinking, -1 = dynamic (auto)")
+    self.gemini_desc_label = QLabel("Control Gemini thinking: budget (Gemini 2.5 and earlier) or level (Gemini 3). \nBudget: 0 = disabled, 512-24576 = limited, -1 = dynamic.\nLevel: low/medium/high.")
     self.gemini_desc_label.setStyleSheet("color: gray; font-size: 10pt;")
     self.gemini_desc_label.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(self.gemini_desc_label)
