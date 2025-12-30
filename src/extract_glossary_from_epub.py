@@ -2740,6 +2740,34 @@ def main(log_callback=None, stop_callback=None):
     )
 
     config = load_config(args.config)
+
+    # Use Gemini thinking settings exactly as saved in Other Settings / config
+    enable_thinking = bool(config.get("enable_gemini_thinking", False))
+    model_name = (os.getenv("MODEL") or config.get("model", "") or "").lower()
+    is_gemini_flash = "gemini-3" in model_name and "flash" in model_name
+    is_gemini_pro = "gemini-3" in model_name and "pro" in model_name
+
+    if enable_thinking:
+        os.environ["ENABLE_GEMINI_THINKING"] = "1"
+        thinking_level = config.get("thinking_level")
+        if thinking_level is not None:
+            os.environ["GEMINI_THINKING_LEVEL"] = str(thinking_level)
+        if "thinking_budget_tokens" in config or "thinking_budget" in config:
+            budget_val = config.get("thinking_budget_tokens", config.get("thinking_budget"))
+            try:
+                os.environ["THINKING_BUDGET"] = str(int(budget_val))
+            except Exception:
+                pass
+    else:
+        # Explicitly disable and set fallback level per TransateKRtoEN behavior
+        os.environ["ENABLE_GEMINI_THINKING"] = "0"
+        if is_gemini_flash:
+            os.environ["GEMINI_THINKING_LEVEL"] = "minimal"
+        elif is_gemini_pro:
+            os.environ["GEMINI_THINKING_LEVEL"] = "low"
+        else:
+            os.environ.pop("GEMINI_THINKING_LEVEL", None)
+        os.environ.pop("THINKING_BUDGET", None)
     
     # Retrieve book titles (raw from input, translated from metadata/output)
     global BOOK_TITLE_RAW, BOOK_TITLE_TRANSLATED, BOOK_TITLE_PRESENT, BOOK_TITLE_VALUE

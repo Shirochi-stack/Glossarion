@@ -204,7 +204,9 @@ def generate_glossary_async(output_dir, chapters, instructions, extraction_worke
         'GLOSSARY_PARALLEL_ENABLED', 'GLOSSARY_FILTER_MODE', 'GLOSSARY_SKIP_FREQUENCY_CHECK',
         'GLOSSARY_SKIP_ALL_VALIDATION', 'MODEL', 'API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY',
         'MAX_OUTPUT_TOKENS', 'GLOSSARY_TEMPERATURE', 'MANUAL_GLOSSARY', 'ENABLE_AUTO_GLOSSARY',
-        'GLOSSARY_INCLUDE_BOOK_TITLE', 'EPUB_PATH'
+        'GLOSSARY_INCLUDE_BOOK_TITLE', 'EPUB_PATH',
+        # Thinking parameters for Gemini 3/2.5
+        'GEMINI_THINKING_LEVEL', 'THINKING_BUDGET'
     ]
     
     for var in important_vars:

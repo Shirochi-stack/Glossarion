@@ -675,15 +675,24 @@ class AsyncAPIProcessor:
             }
             
             # Optional Gemini thinking config (Gemini 3 supports level and/or budgetTokens)
-            thinking_cfg = {}
-            thinking_level = chapter.get('thinking_level')
-            if thinking_level:
-                thinking_cfg["level"] = str(thinking_level)
-            thinking_budget = chapter.get('thinking_budget_tokens')
-            if thinking_budget is not None:
-                thinking_cfg["budgetTokens"] = int(thinking_budget)
-            if thinking_cfg:
-                request["generateContentRequest"]["generationConfig"]["thinking"] = thinking_cfg
+            thinking_enabled = os.getenv("ENABLE_GEMINI_THINKING", "1").lower() not in ("0", "false")
+            if thinking_enabled:
+                thinking_cfg = {}
+                thinking_level = chapter.get('thinking_level') or os.getenv("GEMINI_THINKING_LEVEL")
+                if thinking_level:
+                    thinking_cfg["level"] = str(thinking_level)
+                thinking_budget = chapter.get('thinking_budget_tokens')
+                if thinking_budget is None:
+                    env_budget = os.getenv("THINKING_BUDGET")
+                    if env_budget is not None:
+                        try:
+                            thinking_budget = int(env_budget)
+                        except Exception:
+                            thinking_budget = None
+                if thinking_budget is not None:
+                    thinking_cfg["budgetTokens"] = int(thinking_budget)
+                if thinking_cfg:
+                    request["generateContentRequest"]["generationConfig"]["thinking"] = thinking_cfg
 
             # Add safety settings if disabled
             if os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true":
