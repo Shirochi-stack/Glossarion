@@ -9338,8 +9338,11 @@ class UnifiedClient:
                             if thinking_tokens > 0:
                                 print(f"   💭 Thinking tokens used: {thinking_tokens}")
                                 thinking_tokens_displayed = True
+                            elif is_gemini_3 and thinking_level:
+                                print(f"   💭 Thinking level '{thinking_level}' requested")
+                                thinking_tokens_displayed = True
                             elif thinking_budget == 0:
-                                print(f"   ✅ Thinking successfully disabled (0 thinking tokens)")
+                                print(f"   ✅ Thinking disabled")
                                 thinking_tokens_displayed = True
                             elif thinking_budget == -1:
                                 # Dynamic thinking - might not be reported
@@ -9698,7 +9701,10 @@ class UnifiedClient:
                             if usage.thoughts_token_count and usage.thoughts_token_count > 0:
                                 print(f"   💭 Thinking tokens used: {usage.thoughts_token_count}")
                             else:
-                                print(f"   ✅ Thinking successfully disabled (0 thinking tokens)")
+                                if is_gemini_3 and thinking_level:
+                                    print(f"   💭 Thinking level '{thinking_level}' requested")
+                                else:
+                                    print(f"   ✅ Thinking disabled")
                     
                         # Extract text from the Gemini response - FIXED LOGIC HERE
                     text_content = ""

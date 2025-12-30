@@ -1397,7 +1397,7 @@ def _create_response_handling_section(self, parent):
     self.thinking_level_label = QLabel("Level (Gemini 3):")
     thinking_h.addWidget(self.thinking_level_label)
     self.thinking_level_combo = QComboBox()
-    self.thinking_level_combo.addItems(["low", "high"])
+    self.thinking_level_combo.addItems(["low", "medium", "high"])
     self.thinking_level_combo.setFixedWidth(80)
     self.thinking_level_combo.setStyleSheet("""
         QComboBox::down-arrow {
