@@ -250,6 +250,20 @@ class AsyncAPIProcessor:
         # Prices are (input_price, output_price) per 1M tokens
         token_prices = {
             'openai': {
+                # GPT-5 Series (Standard pricing per 1M tokens)
+                'gpt-5.2-pro': (21.0, 168.0),
+                'gpt-5-pro': (15.0, 120.0),
+                'gpt-5.2': (1.75, 14.0),
+                'gpt-5.1': (1.25, 10.0),
+                'gpt-5': (1.25, 10.0),
+                'gpt-5-mini': (0.25, 2.0),
+                'gpt-5-nano': (0.05, 0.40),
+                'gpt-5.2-chat-latest': (1.75, 14.0),
+                'gpt-5.1-chat-latest': (1.25, 10.0),
+                'gpt-5-chat-latest': (1.25, 10.0),
+                'gpt-5.1-codex-max': (1.25, 10.0),
+                'gpt-5.1-codex': (1.25, 10.0),
+                'gpt-5-codex': (1.25, 10.0),
                 # GPT-4.1 Series (Latest - June 2024 knowledge)
                 'gpt-4.1': (2.0, 8.0),
                 'gpt-4.1-mini': (0.4, 1.6),
@@ -308,30 +322,31 @@ class AsyncAPIProcessor:
                 'default': (2.5, 10.0)
             },
             'anthropic': {
-                # Claude 4 Series (Latest)
-                'claude-4-opus': (3.0, 15.0),
-                'claude-opus-4': (3.0, 15.0),
-                'claude-4-sonnet': (3.0, 15.0),
+                # Claude 4.5 series
+                'claude-opus-4.5': (5.0, 25.0),
+                'claude-opus-4.1': (15.0, 75.0),
+                'claude-opus-4': (15.0, 75.0),
+                # Claude Sonnet 4.x
+                'claude-sonnet-4.5': (3.0, 15.0),
                 'claude-sonnet-4': (3.0, 15.0),
-                
-                # Claude 3.5 Series
-                'claude-3.5-sonnet': (3.0, 15.0),
-                'claude-3.5-opus': (15.0, 75.0),
-                'claude-3.5-haiku': (0.25, 1.25),
-                
-                # Claude 3 Series
-                'claude-3-opus': (15.0, 75.0),
-                'claude-3-sonnet': (3.0, 15.0),
-                'claude-3-haiku': (0.25, 1.25),
-                
-                # Legacy
+                'claude-sonnet-3.7': (3.0, 15.0),
+                # Claude Haiku 4.x / 3.x
+                'claude-haiku-4.5': (1.0, 5.0),
+                'claude-haiku-3.5': (0.80, 4.0),
+                'claude-haiku-3': (0.25, 1.25),
+                # Deprecated / legacy
+                'claude-opus-3': (15.0, 75.0),
                 'claude-2.1': (8.0, 24.0),
                 'claude-2': (8.0, 24.0),
                 'claude-instant': (0.8, 2.4),
-                
                 'default': (3.0, 15.0)
             },
             'gemini': {
+                # Gemini 3 Series (Preview pricing from Google AI Studio)
+                'gemini-3-pro-preview': (2.0, 12.0),       # ≤200k tokens tier
+                'gemini-3-pro': (2.0, 12.0),
+                'gemini-3-flash-preview': (0.5, 3.0),      # text/image/video tier
+                'gemini-3-flash': (0.5, 3.0),
                 # Gemini 2.5 Series (Latest)
                 'gemini-2.5-pro': (1.25, 10.0),      # ≤200k tokens
                 'gemini-2.5-flash': (0.3, 2.5),
@@ -380,8 +395,21 @@ class AsyncAPIProcessor:
                 'default': (0.4, 2.0)
             },
             'groq': {
-                'llama-4-scout': (0.11, 0.34),      # Official pricing
-                'llama-4-maverick': (0.5, 0.77),    # Official pricing
+                # Grok 4.1 and 4 fast
+                'grok-4-1-fast-reasoning': (0.20, 0.50),
+                'grok-4-1-fast-non-reasoning': (0.20, 0.50),
+                'grok-code-fast-1': (0.20, 1.50),
+                'grok-4-fast-reasoning': (0.20, 0.50),
+                'grok-4-fast-non-reasoning': (0.20, 0.50),
+                'grok-4-0709': (3.00, 15.00),
+                # Grok 3 series
+                'grok-3-mini': (0.30, 0.50),
+                'grok-3': (3.00, 15.00),
+                # Grok 2 series
+                'grok-2-vision-1212': (2.00, 10.00),
+                # Legacy/default fallback
+                'llama-4-scout': (0.11, 0.34),
+                'llama-4-maverick': (0.5, 0.77),
                 'llama-3.1-405b': (2.5, 2.5),
                 'llama-3.1-70b': (0.59, 0.79),
                 'llama-3.1-8b': (0.05, 0.1),
@@ -2777,8 +2805,8 @@ class AsyncProcessingDialog:
             self.processor.jobs[job.job_id] = job
             self.processor._save_jobs()
             
-            # Update UI using Qt timer
-            QTimer.singleShot(0, self._refresh_jobs_list)
+            # Update UI on the GUI thread using dialog affinity
+            QTimer.singleShot(0, self.dialog, self._refresh_jobs_list)
             
             self._log(f"✅ Batch submitted successfully! Job ID: {job.job_id}")
             
