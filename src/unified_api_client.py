@@ -9139,13 +9139,18 @@ class UnifiedClient:
         # Get thinking budget from environment
         thinking_budget = int(os.getenv("THINKING_BUDGET", "-1"))
         
-        # Get thinking level for Gemini 3 (low/high)
+        # Get thinking level for Gemini 3 (low/medium/high)
         thinking_level = os.getenv("GEMINI_THINKING_LEVEL", "high").lower()
+        # gemini-3-pro (non-flash) does not support medium; fall back to high to avoid API error
+        model_lower = self.model.lower() if self.model else ""
+        if "gemini-3-pro" in model_lower and "flash" not in model_lower and thinking_level == "medium":
+            thinking_level = "high"
+            if not self._is_stop_requested():
+                print("   ⚠️ Gemini 3 Pro does not support thinking_level=medium; falling back to high")
         
         # Check if image output mode is enabled
         enable_image_output = os.getenv("ENABLE_IMAGE_OUTPUT_MODE", "0") == "1"
         # Force enable for gemini-3-pro-image model (with or without -preview suffix)
-        model_lower = self.model.lower() if self.model else ""
         if "gemini-3-pro-image" in model_lower:
             enable_image_output = True
             if not self._is_stop_requested():
