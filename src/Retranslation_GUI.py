@@ -2054,6 +2054,25 @@ class RetranslationMixin:
             
             # Update statistics if available
             self._update_statistics_display(data)
+
+            # Ensure the special-files toggle is applied after every refresh.
+            try:
+                show_special = data.get('show_special_files_state', False)
+                cb = data.get('show_special_files_cb')
+                if cb:
+                    show_special = cb.isChecked()
+                listbox = data.get('listbox')
+                if listbox:
+                    for i in range(listbox.count()):
+                        item = listbox.item(i)
+                        if not item:
+                            continue
+                        meta = item.data(Qt.UserRole) or {}
+                        is_special = meta.get('is_special', False)
+                        item.setHidden(is_special and not show_special)
+                data['show_special_files_state'] = show_special
+            except Exception:
+                pass
             
             # Restore scroll position and repaint immediately after rebuild
             if 'listbox' in data and data['listbox']:
