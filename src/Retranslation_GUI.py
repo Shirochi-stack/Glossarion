@@ -1881,9 +1881,24 @@ class RetranslationMixin:
             menu = QMenu(listbox)
             # Remove extra left gutter reserved for icons to avoid empty space
             menu.setStyleSheet(
+                "QMenu {"
+                "  padding: 4px;"
+                "  background-color: #2b2b2b;"
+                "  color: white;"
+                "  border: 1px solid #5a9fd4;"
+                "} "
                 "QMenu::icon { width: 0px; } "
-                "QMenu::item { padding: 6px 12px; } "
-                "QMenu { padding: 4px; }"
+                "QMenu::item {"
+                "  padding: 6px 12px;"
+                "  background-color: transparent;"
+                "} "
+                "QMenu::item:selected {"
+                "  background-color: #17a2b8;"
+                "  color: white;"
+                "} "
+                "QMenu::item:pressed {"
+                "  background-color: #138496;"
+                "}"
             )
             act_open = menu.addAction("📂 Open File")
             act_retranslate = menu.addAction("🔁 Retranslate Selected")
