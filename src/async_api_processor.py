@@ -605,6 +605,13 @@ class AsyncAPIProcessor:
                     "max_tokens": int(chapter.get('max_tokens', 8192))
                 }
             }
+
+            # Optional Gemini thinking budget (expects tokens count in chapter['thinking_budget_tokens'])
+            thinking_budget = chapter.get('thinking_budget_tokens')
+            if thinking_budget is not None:
+                request["generateContentRequest"]["generationConfig"]["thinking"] = {
+                    "budgetTokens": int(thinking_budget)
+                }
             # LOG THE FIRST REQUEST COMPLETELY
             if len(requests) == 0:
                 print(f"=== FIRST REQUEST ===")
@@ -667,6 +674,17 @@ class AsyncAPIProcessor:
                 }
             }
             
+            # Optional Gemini thinking config (Gemini 3 supports level and/or budgetTokens)
+            thinking_cfg = {}
+            thinking_level = chapter.get('thinking_level')
+            if thinking_level:
+                thinking_cfg["level"] = str(thinking_level)
+            thinking_budget = chapter.get('thinking_budget_tokens')
+            if thinking_budget is not None:
+                thinking_cfg["budgetTokens"] = int(thinking_budget)
+            if thinking_cfg:
+                request["generateContentRequest"]["generationConfig"]["thinking"] = thinking_cfg
+
             # Add safety settings if disabled
             if os.getenv("DISABLE_GEMINI_SAFETY", "false").lower() == "true":
                 request["generateContentRequest"]["safetySettings"] = [
@@ -2000,23 +2018,19 @@ class AsyncProcessingDialog:
                 cost
             ])
             
-            # Set color based on status
-            if job.status == AsyncAPIStatus.PENDING:
-                item.setForeground(0, QBrush(QColor("#FFA500")))  # Orange
-                for col in range(7):
-                    item.setForeground(col, QBrush(QColor("#FFA500")))
-            elif job.status == AsyncAPIStatus.PROCESSING:
-                for col in range(7):
-                    item.setForeground(col, QBrush(QColor("#007BFF")))  # Blue
-            elif job.status == AsyncAPIStatus.COMPLETED:
-                for col in range(7):
-                    item.setForeground(col, QBrush(QColor("#28A745")))  # Green
-            elif job.status == AsyncAPIStatus.FAILED:
-                for col in range(7):
-                    item.setForeground(col, QBrush(QColor("#DC3545")))  # Red
-            elif job.status == AsyncAPIStatus.CANCELLED:
-                for col in range(7):
-                    item.setForeground(col, QBrush(QColor("#6C757D")))  # Gray
+            # Set color based on status (foreground + subtle background)
+            fg_bg_map = {
+                AsyncAPIStatus.PENDING: ("#e0a800", "#2a2412"),
+                AsyncAPIStatus.PROCESSING: ("#4aa3ff", "#1b2938"),
+                AsyncAPIStatus.COMPLETED: ("#5cb85c", "#1c2a1c"),
+                AsyncAPIStatus.FAILED: ("#ff6b6b", "#2a1618"),
+                AsyncAPIStatus.CANCELLED: ("#9ea3a8", "#242628"),
+                AsyncAPIStatus.EXPIRED: ("#e0a800", "#2a2412")
+            }
+            fg, bg = fg_bg_map.get(job.status, ("#cfd3d8", "#1e1e1e"))
+            for col in range(7):
+                item.setForeground(col, QBrush(QColor(fg)))
+                item.setBackground(col, QBrush(QColor(bg)))
             
             # Store job_id in item data for retrieval
             item.setData(0, Qt.UserRole, job_id)
