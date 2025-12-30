@@ -2765,7 +2765,7 @@ class MultiAPIKeyDialog(QDialog):
         self.tree.dropEvent = self._on_tree_drop
         
         # Connect signals
-        self.tree.itemClicked.connect(self._on_click)
+        self.tree.itemDoubleClicked.connect(self._on_click)
         self.tree.itemSelectionChanged.connect(self._on_selection_change)
         
         # Track editing state
