@@ -1403,7 +1403,7 @@ def _create_response_handling_section(self, parent):
     self.thinking_level_label = QLabel("Level (Gemini 3):")
     thinking_h_level.addWidget(self.thinking_level_label)
     self.thinking_level_combo = QComboBox()
-    self.thinking_level_combo.addItems(["low", "medium", "high"])
+    self.thinking_level_combo.addItems(["minimal", "low", "medium", "high"])
     self.thinking_level_combo.setFixedWidth(110)
     self.thinking_level_combo.setStyleSheet("""
         QComboBox::down-arrow {
@@ -1434,7 +1434,7 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(thinking_row_level)
     
     # Store reference to description label for enable/disable
-    self.gemini_desc_label = QLabel("Control Gemini thinking: budget (Gemini 2.5 and earlier) or level (Gemini 3). \nBudget: 0 = disabled, 512-24576 = limited, -1 = dynamic.\nLevel: low/medium/high.")
+    self.gemini_desc_label = QLabel("Control Gemini thinking: budget (Gemini 2.5 and earlier) or level (Gemini 3).\nBudget: 0 = disabled, 512-24576 = limited, -1 = dynamic.\nLevel: minimal/low/medium/high — only Gemini 3 Flash supports minimal and medium.")
     self.gemini_desc_label.setStyleSheet("color: gray; font-size: 10pt;")
     self.gemini_desc_label.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(self.gemini_desc_label)
