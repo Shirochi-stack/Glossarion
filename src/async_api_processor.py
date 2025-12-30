@@ -3614,7 +3614,7 @@ class AsyncProcessingDialog:
                 for res_type in ['css', 'fonts', 'images']:
                     os.makedirs(os.path.join(output_dir, res_type), exist_ok=True)
                 
-                # Extract all resources
+                # Extract all resources, flatten images into images/
                 for file_path in zf.namelist():
                     if file_path.endswith('/'):
                         continue
@@ -3626,13 +3626,15 @@ class AsyncProcessingDialog:
                     if not file_name:
                         continue
                     
-                    # Determine resource type and extract
                     if file_lower.endswith('.css'):
                         zf.extract(file_path, os.path.join(output_dir, 'css'))
                     elif file_lower.endswith(('.ttf', '.otf', '.woff', '.woff2')):
                         zf.extract(file_path, os.path.join(output_dir, 'fonts'))
                     elif file_lower.endswith(('.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp')):
-                        zf.extract(file_path, os.path.join(output_dir, 'images'))
+                        # Flatten: copy image into output_dir/images with basename only
+                        dest = os.path.join(output_dir, 'images', file_name)
+                        with open(dest, 'wb') as img_out:
+                            img_out.write(zf.read(file_path))
             
             # Extract chapter info and metadata from source EPUB
             self._log("📋 Extracting metadata from source EPUB...")
@@ -3737,7 +3739,8 @@ class AsyncProcessingDialog:
                 content_hash = chapter_info.get('content_hash', hashlib.sha256(f"chapter_{chapter_num}".encode()).hexdigest())
                 
                 # Save file with correct name (only once!)
-                retain_ext = should_retain_source_extension()
+                # Async: always retain original source extension to keep filenames consistent
+                retain_ext = True
                 # Preserve compound extensions like .htm.xhtml when retaining
                 orig_name = chapter_info.get('original_filename') or chapter_info.get('original_basename')
                 if retain_ext and orig_name:
