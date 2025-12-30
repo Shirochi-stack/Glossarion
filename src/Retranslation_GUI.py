@@ -1879,6 +1879,12 @@ class RetranslationMixin:
             if not item:
                 return
             menu = QMenu(listbox)
+            # Remove extra left gutter reserved for icons to avoid empty space
+            menu.setStyleSheet(
+                "QMenu::icon { width: 0px; } "
+                "QMenu::item { padding: 6px 12px; } "
+                "QMenu { padding: 4px; }"
+            )
             act_open = menu.addAction("📂 Open File")
             act_retranslate = menu.addAction("🔁 Retranslate Selected")
             act_remove_qa = menu.addAction("🧹 Remove QA Failed Mark")
