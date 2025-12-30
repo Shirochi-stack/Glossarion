@@ -3950,12 +3950,29 @@ class BatchTranslationProcessor:
                 print(f"📥 Received Chapter {actual_num}, Chunk {chunk_idx}/{total_chunks} response, finish_reason: {finish_reason}")
                 
                 # Treat truncation retries exhaustion as truncation even if finish_reason changed
-                truncation_exhausted = getattr(self.client, "_truncation_retries_exhausted", False)
-                if truncation_exhausted:
-                    try:
+                # In batch mode each worker has its own thread-local client; check that flag too
+                try:
+                    tls_client = self.client._get_thread_local_client()
+                except Exception:
+                    tls_client = None
+
+                truncation_exhausted = False
+                if tls_client is not None:
+                    truncation_exhausted = getattr(tls_client, "_truncation_retries_exhausted", False)
+                if not truncation_exhausted:
+                    truncation_exhausted = getattr(self.client, "_truncation_retries_exhausted", False)
+
+                # Clear the flag on whichever client had it so it doesn't bleed into later calls
+                try:
+                    if tls_client is not None and getattr(tls_client, "_truncation_retries_exhausted", False):
+                        tls_client._truncation_retries_exhausted = False
+                except Exception:
+                    pass
+                try:
+                    if getattr(self.client, "_truncation_retries_exhausted", False):
                         self.client._truncation_retries_exhausted = False
-                    except Exception:
-                        pass
+                except Exception:
+                    pass
                 if finish_reason in ["length", "max_tokens"] or truncation_exhausted:
                     print(f"    ⚠️ Chunk {chunk_idx}/{total_chunks} response was TRUNCATED!")
                     # Track truncation status
