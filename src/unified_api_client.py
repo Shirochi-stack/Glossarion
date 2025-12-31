@@ -648,6 +648,13 @@ class UnifiedClient:
             # Sanitize HTML from message before printing
             sanitized_message = self._sanitize_html_for_log(message)
             print(sanitized_message)
+            # Optional mirror to raw CMD stderr to bypass GUI filters
+            if os.getenv('VERBOSE_CMD_LOGS', '0') == '1':
+                try:
+                    import sys as _sys
+                    _builtins.print(sanitized_message, file=_sys.stderr)
+                except Exception:
+                    pass
         except Exception:
             # Best-effort logging; swallow any print failures
             try:
@@ -7538,6 +7545,11 @@ class UnifiedClient:
         debug_max_tokens = os.getenv("SHOW_DEBUG_BUTTONS", "0") == "1"
         
         for attempt in range(max_retries):
+            # Always log attempt number so backoff is visible
+            try:
+                print(f"{provider} HTTP attempt {attempt + 1}/{max_retries}")
+            except Exception:
+                pass
             if self._cancelled:
                 raise UnifiedClientError("Operation cancelled")
             
@@ -7572,8 +7584,25 @@ class UnifiedClient:
                     if debug_max_tokens:
                         current_max = json.get('max_tokens') or json.get('max_completion_tokens') if json else None
                         print(f"    [DEBUG] Sending HTTP request with max_tokens={current_max}...")
-                    
-                    resp = session.request(method, url, headers=headers, json=json, timeout=timeout)
+                    try:
+                        import time as _t
+                        start_ts = _t.time()
+                        print(f"{provider} HTTP send -> {method} {url}")
+                        try:
+                            import sys as _sys
+                            _builtins.print(f"{provider} HTTP send -> {method} {url}", file=_sys.stderr)
+                        except Exception:
+                            pass
+                        resp = session.request(method, url, headers=headers, json=json, timeout=timeout)
+                        dur = _t.time() - start_ts
+                        print(f"{provider} HTTP recv <- status {resp.status_code} in {dur:.1f}s")
+                        try:
+                            import sys as _sys
+                            _builtins.print(f"{provider} HTTP recv <- status {resp.status_code} in {dur:.1f}s", file=_sys.stderr)
+                        except Exception:
+                            pass
+                    except Exception:
+                        resp = session.request(method, url, headers=headers, json=json, timeout=timeout)
                     
                     # Debug: log when response received
                     if debug_max_tokens:
@@ -7583,7 +7612,20 @@ class UnifiedClient:
                         current_max = json.get('max_tokens') or json.get('max_completion_tokens') if json else None
                         print(f"    [DEBUG] Sending HTTP request with max_tokens={current_max}...")
                     
-                    resp = requests.request(method, url, headers=headers, json=json, timeout=self.request_timeout)
+                    try:
+                        import time as _t
+                        start_ts = _t.time()
+                        print(f"{provider} HTTP send -> {method} {url}")
+                        resp = requests.request(method, url, headers=headers, json=json, timeout=self.request_timeout)
+                        dur = _t.time() - start_ts
+                        print(f"{provider} HTTP recv <- status {resp.status_code} in {dur:.1f}s")
+                        try:
+                            import sys as _sys
+                            _builtins.print(f"{provider} HTTP recv <- status {resp.status_code} in {dur:.1f}s", file=_sys.stderr)
+                        except Exception:
+                            pass
+                    except Exception:
+                        resp = requests.request(method, url, headers=headers, json=json, timeout=self.request_timeout)
                     
                     if debug_max_tokens:
                         print(f"    [DEBUG] Received HTTP response: status={resp.status_code}")
@@ -10771,9 +10813,22 @@ class UnifiedClient:
                         call_kwargs["extra_body"] = extra_body
                     
                     try:
+                        import time as _t
+                        start_ts = _t.time()
                         print(f"🛰️ [{provider}] SDK call start (model={effective_model}, base_url={base_url})")
+                        try:
+                            import sys as _sys
+                            _builtins.print(f"🛰️ [{provider}] SDK call start (model={effective_model}, base_url={base_url})", file=_sys.stderr)
+                        except Exception:
+                            pass
                         resp = client.chat.completions.create(**call_kwargs)
-                        print(f"🛰️ [{provider}] SDK call finished, got choices={len(getattr(resp,'choices',[]) or [])}")
+                        dur = _t.time() - start_ts
+                        print(f"🛰️ [{provider}] SDK call finished in {dur:.1f}s, got choices={len(getattr(resp,'choices',[]) or [])}")
+                        try:
+                            import sys as _sys
+                            _builtins.print(f"🛰️ [{provider}] SDK call finished in {dur:.1f}s, got choices={len(getattr(resp,'choices',[]) or [])}", file=_sys.stderr)
+                        except Exception:
+                            pass
                     except Exception as sdk_err:
                         import traceback
                         tb = traceback.format_exc()
