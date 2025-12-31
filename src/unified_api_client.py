@@ -4642,10 +4642,11 @@ class UnifiedClient:
             elif not use_fallback_keys:
                 print("[MAIN KEY RETRY] Fallback keys toggle is OFF — will try main GUI key only")
             
-            print(f"[MAIN KEY RETRY] Total keys to try: {len(fallback_keys)}")
+            print(f"[MAIN KEY RETRY] Total keys to try (including main GUI key): {len(fallback_keys)}")
             
             # Try each fallback key in the list (all of them, no arbitrary limit)
             max_attempts = len(fallback_keys)
+            fallback_count = max(max_attempts - 1, 0)  # exclude main GUI key from count display
             for idx, fallback_data in enumerate(fallback_keys):
                 label = fallback_data.get('label', 'Fallback')
                 fallback_key = fallback_data.get('api_key')
@@ -4655,8 +4656,17 @@ class UnifiedClient:
                 fallback_google_region = fallback_data.get('google_region')
                 fallback_azure_api_version = fallback_data.get('azure_api_version')
                 use_individual_endpoint = fallback_data.get('use_individual_endpoint', False)
-                
-                print(f"[{label} {idx+1}/{max_attempts}] Trying {fallback_model}")
+
+                # Consistent log prefix
+                if label == 'MAIN GUI KEY':
+                    log_prefix = "[MAIN GUI KEY]"
+                else:
+                    fb_idx = idx  # main GUI key is index 0
+                    display_idx = fb_idx if fb_idx > 0 else 1
+                    display_total = fallback_count if fallback_count > 0 else 1
+                    log_prefix = f"[{label} {display_idx}/{display_total}]"
+
+                print(f"{log_prefix} Trying {fallback_model}")
                 
                 try:
                     # Create a new temporary UnifiedClient instance with the fallback key
@@ -4674,16 +4684,23 @@ class UnifiedClient:
                     # Also disable underlying SDK retries if present
                     if hasattr(temp_client, '_client') and temp_client._client:
                         temp_client._client.max_retries = 0
+                    # Force single-attempt behavior inside _send_internal
+                    temp_client._disable_internal_retry = True
+                    try:
+                        tls_fb = temp_client._get_thread_local_client()
+                        tls_fb.max_retries_override = 1
+                    except Exception:
+                        pass
                     
                     # Set key-specific credentials for the temp client
                     if fallback_google_creds:
                         temp_client.current_key_google_creds = fallback_google_creds
                         temp_client.google_creds_path = fallback_google_creds
-                        print(f"[{label} {idx+1}] Using fallback Google credentials: {os.path.basename(fallback_google_creds)}")
+                        print(f"{log_prefix} Using fallback Google credentials: {os.path.basename(fallback_google_creds)}")
                     
                     if fallback_google_region:
                         temp_client.current_key_google_region = fallback_google_region
-                        print(f"[{label} {idx+1}] Using fallback Google region: {fallback_google_region}")
+                        print(f"{log_prefix} Using fallback Google region: {fallback_google_region}")
                     
                     # Only apply individual endpoint if the toggle is enabled
                     if use_individual_endpoint and fallback_azure_endpoint:
@@ -4694,8 +4711,8 @@ class UnifiedClient:
                         temp_client.is_azure = True
                         temp_client.azure_endpoint = fallback_azure_endpoint
                         temp_client.azure_api_version = temp_client.current_key_azure_api_version
-                        print(f"[{label} {idx+1}] Using fallback Azure endpoint: {fallback_azure_endpoint}")
-                        print(f"[{label} {idx+1}] Azure API version: {temp_client.azure_api_version}")
+                        print(f"{log_prefix} Using fallback Azure endpoint: {fallback_azure_endpoint}")
+                        print(f"{log_prefix} Azure API version: {temp_client.azure_api_version}")
 
                     # Don't override with main client's base_url if we have fallback Azure endpoint
                     if hasattr(self, 'base_url') and self.base_url and not fallback_azure_endpoint:
@@ -4733,14 +4750,14 @@ class UnifiedClient:
                     temp_client.conversation_message_count = self.conversation_message_count
                     temp_client.request_timeout = self.request_timeout
                     
-                    print(f"[{label} {idx+1}] Created temp client with model: {temp_client.model}")
-                    print(f"[{label} {idx+1}] Multi-key mode: {temp_client._multi_key_mode}")
+                    print(f"{log_prefix} Created temp client with model: {temp_client.model}")
+                    print(f"{log_prefix} Multi-key mode: {temp_client._multi_key_mode}")
                     
                     # Get file names for response tracking
                     payload_name, response_name = self._get_file_names(messages, context=context)
                     
                     request_type = "image " if image_data else ""
-                    print(f"[{label} {idx+1}] Sending {request_type}request...")
+                    print(f"{log_prefix} Sending {request_type}request...")
                     
                     # Use unified internal method to avoid nested retry loops
                     result = temp_client._send_internal(
