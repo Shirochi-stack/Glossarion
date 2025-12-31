@@ -4698,7 +4698,7 @@ class UnifiedClient:
                         temp_client.google_creds_path = fallback_google_creds
                         print(f"{log_prefix} Using fallback Google credentials: {os.path.basename(fallback_google_creds)}")
                     
-                    if fallback_google_region:
+                    if fallback_google_region and any(p in (fallback_model or "").lower() for p in ["gemini", "vertex", "google"]):
                         temp_client.current_key_google_region = fallback_google_region
                         print(f"{log_prefix} Using fallback Google region: {fallback_google_region}")
                     
@@ -4758,6 +4758,7 @@ class UnifiedClient:
                     
                     request_type = "image " if image_data else ""
                     print(f"{log_prefix} Sending {request_type}request...")
+                    print(f"{log_prefix} Dispatching _send_internal (model={fallback_model}, image={bool(image_data)})")
                     
                     # Use unified internal method to avoid nested retry loops
                     result = temp_client._send_internal(
@@ -4770,6 +4771,7 @@ class UnifiedClient:
                         request_id=request_id,
                         image_data=image_data
                     )
+                    print(f"{log_prefix} _send_internal returned result type {type(result).__name__}")
                     
                     # Check the result
                     if result and isinstance(result, tuple):
@@ -4814,7 +4816,7 @@ class UnifiedClient:
                         
                         # Check if content is valid - accept any non-empty content (symbols, single chars, etc. are valid)
                         if content and self._safe_len(content, "main_key_retry_content") > 0:
-                            print(f"[{label} {idx+1}] ✅ SUCCESS! Got content of length: {len(content)}")
+                            print(f"{log_prefix} ✅ SUCCESS! Got content of length: {len(content)}, finish_reason={finish_reason}")
                             self._save_response(content, response_name)
                             return content, finish_reason
                         else:
