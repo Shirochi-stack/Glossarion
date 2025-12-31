@@ -3251,6 +3251,15 @@ class UnifiedClient:
                 
     def _setup_client(self):
         """Setup the appropriate client based on model type"""
+        # If this instance already applied an individual (per-key) endpoint, do NOT let
+        # prefix-based detection override the client_type or base URL. This prevents
+        # per-key Azure/custom endpoints from being reset when _setup_client is called
+        # again during retries/rotations.
+        if getattr(self, "_individual_endpoint_applied", False) and getattr(self, "current_key_use_individual_endpoint", False):
+            # Preserve whichever client_type was set by _apply_individual_key_endpoint_if_needed
+            # (azure for Azure endpoints, openai for generic custom endpoints).
+            self.client_type = getattr(self, "client_type", "openai")
+            return
         model_lower = self.model.lower()
         tls = self._get_thread_local_client()
         
@@ -11512,8 +11521,28 @@ class UnifiedClient:
 
     def _send_openai_provider_router(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Generic router for many OpenAI-compatible providers to reduce wrapper duplication."""
+        # Re-apply per-key individual endpoint (if any) before routing, so routing can't override it.
+        try:
+            self._apply_individual_key_endpoint_if_needed()
+        except Exception:
+            pass
+
         provider = self._get_actual_provider()
-        
+        # If a per-key individual endpoint was already applied (non-Azure), always use it
+        # instead of the prefix-based provider URL map to avoid being overridden.
+        if getattr(self, "_individual_endpoint_applied", False) and getattr(self, "openai_client", None):
+            try:
+                base_url = str(getattr(self.openai_client, "base_url", "")).rstrip("/") or "https://api.openai.com/v1"
+            except Exception:
+                base_url = "https://api.openai.com/v1"
+            return self._send_openai_compatible(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                base_url=base_url,
+                response_name=response_name,
+                provider="openai"  # treat as generic OpenAI-compatible when using custom per-key endpoint
+            )
         # Provider URL mapping dictionary
         provider_urls = {
             'yi': lambda: os.getenv("YI_API_BASE_URL", "https://api.01.ai/v1"),
