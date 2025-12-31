@@ -2901,10 +2901,20 @@ class AsyncProcessingDialog:
             
         env_vars['MAX_OUTPUT_TOKENS'] = str(self.gui.max_output_tokens)
         
+        # Resolve target language for prompt substitution
+        target_lang = self.gui.config.get('output_language') or ''
+        if not target_lang and hasattr(self.gui, 'lang_var'):
+            try:
+                target_lang = self.gui.lang_var.get()
+            except Exception:
+                target_lang = str(self.gui.lang_var) if self.gui.lang_var else ''
+        target_lang = target_lang or 'English'
+
         if hasattr(self.gui.prompt_text, 'get'):
-            env_vars['SYSTEM_PROMPT'] = self.gui.prompt_text.get("1.0", "end").strip()
+            system_prompt = self.gui.prompt_text.get("1.0", "end").strip()
         else:
-            env_vars['SYSTEM_PROMPT'] = self.gui.prompt_text.toPlainText().strip()
+            system_prompt = self.gui.prompt_text.toPlainText().strip()
+        env_vars['SYSTEM_PROMPT'] = system_prompt.replace('{target_lang}', target_lang)
             
         env_vars['TRANSLATION_TEMPERATURE'] = _text(getattr(self.gui, 'trans_temp', None), '0.3')
         env_vars['TRANSLATION_HISTORY_LIMIT'] = _text(getattr(self.gui, 'trans_history', None), '8')
