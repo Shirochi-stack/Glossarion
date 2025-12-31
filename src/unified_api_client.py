@@ -4611,13 +4611,15 @@ class UnifiedClient:
         try:
             fallback_keys = []
             
-            # FIRST: Always add the MAIN GUI KEY as the first fallback
-            fallback_keys.append({
-                'api_key': self.original_api_key,
-                'model': self.original_model,
-                'label': 'MAIN GUI KEY'
-            })
-            print(f"[MAIN KEY RETRY] Using main GUI key with model: {self.original_model}")
+            # Avoid re-trying the same main GUI key if we're already on it (prohibited content loop)
+            already_on_main = (self.model == self.original_model)
+            if not already_on_main:
+                fallback_keys.append({
+                    'api_key': self.original_api_key,
+                    'model': self.original_model,
+                    'label': 'MAIN GUI KEY'
+                })
+                print(f"[MAIN KEY RETRY] Using main GUI key with model: {self.original_model}")
             
             # Add configured fallback keys only if toggle is enabled
             fallback_keys_json = os.getenv('FALLBACK_KEYS', '[]')
@@ -4827,20 +4829,27 @@ class UnifiedClient:
                         continue
                         
                 except UnifiedClientError as e:
+                    import traceback
+                    tb = traceback.format_exc()
                     if e.error_type == "cancelled":
-                        print(f"[{label} {idx+1}] Operation was cancelled during retry")
+                        print(f"{log_prefix} Operation was cancelled during retry")
                         return None
                     
                     error_str = str(e).lower()
                     if ("azure" in error_str and "content" in error_str) or e.error_type == "prohibited_content":
-                        print(f"[{label} {idx+1}] ❌ Content filter error: {str(e)[:100]}")
+                        print(f"{log_prefix} ❌ Content filter error: {str(e)[:200]}")
+                        print(f"{log_prefix} Traceback:\n{tb}")
                         continue
                     
-                    print(f"[{label} {idx+1}] ❌ UnifiedClientError: {str(e)[:200]}")
+                    print(f"{log_prefix} ❌ UnifiedClientError: {str(e)[:200]}")
+                    print(f"{log_prefix} Traceback:\n{tb}")
                     continue
                     
                 except Exception as e:
-                    print(f"[{label} {idx+1}] ❌ Exception: {str(e)[:200]}")
+                    import traceback
+                    tb = traceback.format_exc()
+                    print(f"{log_prefix} ❌ Exception: {str(e)[:200]}")
+                    print(f"{log_prefix} Traceback:\n{tb}")
                     continue
             
             print(f"[MAIN KEY RETRY] ❌ All {max_attempts} fallback keys failed")
