@@ -1379,6 +1379,56 @@ class AsyncAPIProcessor:
 
 class AsyncProcessingDialog:
     """GUI dialog for async processing"""
+
+    def _get_opf_spine_map(self, epub_path: str):
+        """Return mapping of href/basename/slug -> spine position from content.opf"""
+        try:
+            import zipfile
+            import xml.etree.ElementTree as ET
+
+            spine_map = {}
+            with zipfile.ZipFile(epub_path, "r") as zf:
+                opf_name = None
+                for name in zf.namelist():
+                    if name.lower().endswith(".opf"):
+                        opf_name = name
+                        break
+                if not opf_name:
+                    return spine_map
+
+                opf_content = zf.read(opf_name).decode("utf-8", errors="ignore")
+
+            root = ET.fromstring(opf_content)
+            ns = {"opf": "http://www.idpf.org/2007/opf"}
+            if root.tag.startswith("{"):
+                ns = {"opf": root.tag[1 : root.tag.index("}")]}
+
+            manifest = {}
+            for item in root.findall(".//opf:manifest/opf:item", ns):
+                item_id = item.get("id")
+                href = item.get("href")
+                if item_id and href:
+                    manifest[item_id] = href
+
+            spine = []
+            spine_elem = root.find(".//opf:spine", ns)
+            if spine_elem is not None:
+                for itemref in spine_elem.findall("opf:itemref", ns):
+                    idref = itemref.get("idref")
+                    if idref and idref in manifest:
+                        spine.append(manifest[idref])
+
+            for idx, href in enumerate(spine):
+                base = os.path.basename(href)
+                slug = os.path.splitext(base)[0]
+                spine_map[href] = idx
+                spine_map[base] = idx
+                spine_map[slug] = idx
+
+            return spine_map
+        except Exception as e:
+            print(f"⚠️ Failed to parse OPF spine: {e}")
+            return {}
     
     def _create_styled_checkbox(self, text):
         """Create a checkbox with proper checkmark using text overlay - from manga integration"""
@@ -3076,6 +3126,7 @@ class AsyncProcessingDialog:
                 # Use direct ZIP reading to avoid ebooklib's manifest validation
                 import zipfile
                 from bs4 import BeautifulSoup
+                opf_spine_map = self._get_opf_spine_map(file_path)
                 
                 raw_chapters = []
                 
@@ -3096,6 +3147,13 @@ class AsyncProcessingDialog:
 
                                 if len(chapter_text) > 500:  # Minimum chapter length
                                     chapter_num = idx + 1
+                                    spine_pos = None
+                                    if opf_spine_map:
+                                        spine_pos = (
+                                            opf_spine_map.get(html_file)
+                                            or opf_spine_map.get(os.path.basename(html_file))
+                                            or opf_spine_map.get(os.path.splitext(os.path.basename(html_file))[0])
+                                        )
 
                                     # Try to extract chapter number from content
                                     for element in soup.find_all(['h1', 'h2', 'h3', 'title']):
@@ -3115,7 +3173,7 @@ class AsyncProcessingDialog:
                                             chapter_payload = chapter_html
                                     else:
                                         chapter_payload = chapter_html
-
+                                    raw_chapters.append((chapter_num, chapter_payload, html_file, spine_pos))
                                     raw_chapters.append((chapter_num, chapter_payload, html_file))
                                     
                             except Exception as e:
@@ -3139,11 +3197,22 @@ class AsyncProcessingDialog:
             
             if not raw_chapters:
                 raise ValueError("No valid chapters found in file")
+            # Reorder chapters using OPF spine if available
+            if file_path.lower().endswith('.epub') and 'opf_spine_map' in locals() and opf_spine_map:
+                raw_chapters.sort(
+                    key=lambda ch: (
+                        ch[3] if ch[3] is not None else float("inf"),
+                        ch[0]
+                    )
+                )
+            else:
+                raw_chapters.sort(key=lambda ch: ch[0])
                 
             # Process each chapter to prepare for API
-            for idx, (chapter_num, content, original_filename) in enumerate(raw_chapters):
+            for idx, (chapter_num, content, original_filename, spine_pos) in enumerate(raw_chapters):
                 # Count tokens
                 token_count = self.count_tokens(content, env_vars['MODEL'])
+                ordered_num = (spine_pos + 1) if spine_pos is not None else chapter_num
                 
                 # Check if needs chunking
                 token_limit = int(env_vars.get('TOKEN_LIMIT', '200000'))
@@ -3151,12 +3220,13 @@ class AsyncProcessingDialog:
                 
                 # Prepare messages format
                 messages = self._prepare_chapter_messages(content, env_vars)
-                
+                custom_id = f"chapter_{ordered_num}"
                 custom_id = f"chapter_{chapter_num}"
                 
                 chapter_data = {
                     'id': custom_id,
-                    'number': chapter_num,
+                    'number': ordered_num,
+                    'detected_number': chapter_num,
                     'content': content,
                     'messages': messages,
                     'temperature': float(env_vars.get('TRANSLATION_TEMPERATURE', '0.3')),
@@ -3164,7 +3234,8 @@ class AsyncProcessingDialog:
                     'needs_chunking': needs_chunking,
                     'token_count': token_count,
                     'original_basename': original_filename,  # Use original_filename instead of undefined original_basename
-                    'extraction_method': extraction_method
+                    'extraction_method': extraction_method,
+                    'opf_spine_position': spine_pos
                 }
                 
                 chapters.append(chapter_data)
@@ -3172,9 +3243,11 @@ class AsyncProcessingDialog:
                 # Store mapping
                 chapter_mapping[custom_id] = {
                     'original_filename': original_filename,
-                    'chapter_num': chapter_num,
+                    'chapter_num': ordered_num,
                     'extraction_method': extraction_method,
-                    'preserve_structure': preserve_structure
+                    'preserve_structure': preserve_structure,
+                    'opf_spine_position': spine_pos,
+                    'detected_chapter_num': chapter_num
                 }
                 
         except Exception as e:
@@ -3416,6 +3489,8 @@ class AsyncProcessingDialog:
                             "contents": request['generateContentRequest']['contents'],
                             "generation_config": gen_cfg
                         }
+                        if spine_pos is not None:
+                            chapter_map_by_spine[spine_pos] = chapter_map[order_num]
                     }
                     
                     # Add safety settings if present
@@ -3653,6 +3728,7 @@ class AsyncProcessingDialog:
             from ebooklib import epub
             from bs4 import BeautifulSoup
             from TransateKRtoEN import get_content_hash, should_retain_source_extension
+            spine_map = self._get_opf_spine_map(self.gui.file_path)
             
             # Extract metadata
             metadata = {}
@@ -3673,6 +3749,7 @@ class AsyncProcessingDialog:
             
             # Map chapter numbers to original info
             chapter_map = {}
+            chapter_map_by_spine = {}
             chapters_info = []
             actual_chapter_num = 0
             
@@ -3698,23 +3775,35 @@ class AsyncProcessingDialog:
                         
                         # Calculate real content hash
                         content_hash = get_content_hash(text)
+                        spine_pos = None
+                        if spine_map:
+                            spine_pos = (
+                                spine_map.get(original_name)
+                                or spine_map.get(original_basename)
+                                or spine_map.get(os.path.splitext(original_basename)[0])
+                            )
+                        order_num = (spine_pos + 1) if spine_pos is not None else chapter_num
                         
-                        chapter_map[chapter_num] = {
+                        chapter_map[order_num] = {
                             'original_basename': original_basename,
                             'original_extension': os.path.splitext(original_name)[1],
                             'content_hash': content_hash,
                             'text_length': len(text),
-                            'has_images': bool(soup.find_all('img'))
+                            'has_images': bool(soup.find_all('img')),
+                            'opf_spine_position': spine_pos,
+                            'detected_chapter_num': chapter_num
                         }
                         
                         chapters_info.append({
-                            'num': chapter_num,
+                            'num': order_num,
                             'title': element_text if 'element_text' in locals() else f"Chapter {chapter_num}",
                             'original_filename': original_name,
                             'original_basename': original_basename,
                             'has_images': bool(soup.find_all('img')),
                             'text_length': len(text),
-                            'content_hash': content_hash
+                            'content_hash': content_hash,
+                            'opf_spine_position': spine_pos,
+                            'detected_chapter_num': chapter_num
                         })
             
             # Save chapters_info.json
@@ -3736,15 +3825,39 @@ class AsyncProcessingDialog:
                 "async_translated": True
             }
             
-            # Sort results and save with proper filenames
-            sorted_results = sorted(results, key=lambda x: self._extract_chapter_number(x['custom_id']))
+            chapter_mapping = {}
+            if hasattr(self, 'processor'):
+                job = self.processor.jobs.get(job_id)
+                if job and job.metadata:
+                    chapter_mapping = job.metadata.get('chapter_mapping', {})
+
+            def _result_sort_key(res):
+                meta = chapter_mapping.get(res.get('custom_id'), {}) if chapter_mapping else {}
+                spine_pos = meta.get('opf_spine_position')
+                if spine_pos is None:
+                    chapter_num = self._extract_chapter_number(res.get('custom_id', ''))
+                    spine_pos = chapter_map.get(chapter_num, {}).get('opf_spine_position')
+                if spine_pos is None:
+                    spine_pos = float('inf')
+                return (spine_pos, self._extract_chapter_number(res.get('custom_id', '')))
+
+            # Sort results and save with proper filenames (OPF spine aware)
+            sorted_results = sorted(results, key=_result_sort_key)
             
             self._log("💾 Saving translated chapters...")
             for result in sorted_results:
                 chapter_num = self._extract_chapter_number(result['custom_id'])
+                chapter_meta = chapter_mapping.get(result['custom_id'], {}) if chapter_mapping else {}
+                spine_pos = chapter_meta.get('opf_spine_position')
+                if spine_pos is not None:
+                    chapter_num = spine_pos + 1
                 
                 # Get chapter info
-                chapter_info = chapter_map.get(chapter_num, {})
+                chapter_info = {}
+                if spine_pos is not None and spine_pos in chapter_map_by_spine:
+                    chapter_info = chapter_map_by_spine.get(spine_pos, {})
+                elif chapter_num in chapter_map:
+                    chapter_info = chapter_map.get(chapter_num, {})
                 original_basename = chapter_info.get('original_basename', f"{chapter_num:04d}")
                 content_hash = chapter_info.get('content_hash', hashlib.sha256(f"chapter_{chapter_num}".encode()).hexdigest())
                 
