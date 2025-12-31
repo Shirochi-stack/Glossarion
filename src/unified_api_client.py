@@ -4657,7 +4657,6 @@ class UnifiedClient:
                 use_individual_endpoint = fallback_data.get('use_individual_endpoint', False)
                 
                 print(f"[{label} {idx+1}/{max_attempts}] Trying {fallback_model}")
-                print(f"[{label} {idx+1}] Failed multi-key model was: {self.model}")
                 
                 try:
                     # Create a new temporary UnifiedClient instance with the fallback key
@@ -4666,6 +4665,15 @@ class UnifiedClient:
                         model=fallback_model,   
                         output_dir=self.output_dir
                     )
+
+                    # Mark this client as a retry client to prevent recursive fallbacks
+                    temp_client._is_retry_client = True
+                    # Disable internal retries for fallback attempts to avoid getting stuck
+                    temp_client._max_retries = 0
+                    temp_client.max_retries = 0
+                    # Also disable underlying SDK retries if present
+                    if hasattr(temp_client, '_client') and temp_client._client:
+                        temp_client._client.max_retries = 0
                     
                     # Set key-specific credentials for the temp client
                     if fallback_google_creds:
@@ -4710,18 +4718,6 @@ class UnifiedClient:
                     temp_client._multi_key_mode = False
                     temp_client.use_multi_keys = False
                     temp_client.key_identifier = f"{label} ({fallback_model})"
-                    
-                    # CRITICAL: Mark as retry client to prevent recursive fallback attempts
-                    # When this temp client fails, it will re-raise the exception (not return)
-                    # allowing the parent loop to try the next key in the fallback list
-                    temp_client._is_retry_client = True
-                    
-                    # CRITICAL: Disable retries for fallback keys - they should only try once
-                    temp_client._max_retries = 0
-                    temp_client.max_retries = 0
-                    # Also disable underlying OpenAI client retries if it exists
-                    if hasattr(temp_client, '_client') and temp_client._client:
-                        temp_client._client.max_retries = 0
                     
                     # The client should already be set up from __init__, but verify
                     if not hasattr(temp_client, 'client_type') or temp_client.client_type is None:
