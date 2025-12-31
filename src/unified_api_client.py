@@ -9792,8 +9792,9 @@ class UnifiedClient:
                         except Exception as e:
                             print(f"   ⚠️ Could not access response.text: {e}")
                     
-                    # If that didn't work or returned empty, try extracting from candidates
-                    if not text_content or True: # Always check candidates to get raw_content_obj and images
+                    # If we still lack text, or we need an image but don't have one yet, walk candidates.
+                    need_image = enable_image_output and image_data is None
+                    if (not text_content) or need_image:
                         # CRITICAL FIX: Check if candidates exists AND is not None before iterating
                         if hasattr(response, 'candidates') and response.candidates is not None:
                             print(f"   🔍 Extracting from candidates...")
