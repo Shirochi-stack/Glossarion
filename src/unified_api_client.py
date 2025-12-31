@@ -4839,6 +4839,11 @@ class UnifiedClient:
                         
                 except UnifiedClientError as e:
                     import traceback
+                    http_status = getattr(e, "http_status", None)
+                    # For transient 5xx errors that will be retried or already retried, avoid noisy tracebacks.
+                    if http_status in (500, 502, 503, 504):
+                        print(f"{log_prefix} ❌ Transient server error {http_status}: {str(e)[:200]}")
+                        continue
                     tb = traceback.format_exc()
                     if e.error_type == "cancelled":
                         print(f"{log_prefix} Operation was cancelled during retry")
@@ -7601,6 +7606,12 @@ class UnifiedClient:
             status = resp.status_code
             if status in expected_status:
                 return resp
+            # Verbose retry notice so retries are never silent
+            if attempt < max_retries - 1:
+                try:
+                    print(f"{provider} HTTP retry {attempt + 2}/{max_retries} after status {status}")
+                except Exception:
+                    pass
 
             # Rate limit handling (429)
             if status == 429:
