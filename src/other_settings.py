@@ -5076,7 +5076,7 @@ def _create_processing_options_section(self, parent):
     if not hasattr(self, 'openrouter_http_only_var'):
         self.openrouter_http_only_var = self.config.get('openrouter_use_http_only', False)
     
-    http_only_cb = self._create_styled_checkbox("Use HTTP-only for OpenRouter (bypass SDK)")
+    http_only_cb = self._create_styled_checkbox("Use HTTP-only for OpenRouter/NVIDIA (bypass SDK)")
     try:
         http_only_cb.setChecked(bool(self.openrouter_http_only_var))
     except Exception:

@@ -8197,6 +8197,9 @@ class UnifiedClient:
             # Always use Gemini handler for Gemini models, regardless of transport
             logger.debug(f"Routing to Gemini handler (actual provider: {actual_provider}, client_type: {self.client_type})")
             return self._send_gemini(messages, temperature, max_tokens, response_name)
+        elif actual_provider == 'nvidia' and os.getenv('USE_NVIDIA_HTTP', '0') == '1':
+            # Optional direct HTTP path for NVIDIA NIM if SDK path stalls
+            return self._send_nvidia_http(messages, temperature, max_tokens, response_name)
         elif actual_provider == 'openai' or self.client_type == 'openai':
             # For OpenAI, pass the max_completion_tokens parameter
             return handler(messages, temperature, max_tokens, max_completion_tokens, response_name)
@@ -10746,7 +10749,16 @@ class UnifiedClient:
                     if extra_body:
                         call_kwargs["extra_body"] = extra_body
                     
-                    resp = client.chat.completions.create(**call_kwargs)
+                    try:
+                        print(f"🛰️ [{provider}] SDK call start (model={effective_model}, base_url={base_url})")
+                        resp = client.chat.completions.create(**call_kwargs)
+                        print(f"🛰️ [{provider}] SDK call finished, got choices={len(getattr(resp,'choices',[]) or [])}")
+                    except Exception as sdk_err:
+                        import traceback
+                        tb = traceback.format_exc()
+                        print(f"🛑 [{provider}] SDK call failed: {sdk_err}")
+                        print(f"[TRACEBACK {provider}] {tb}")
+                        raise
                     
                     # Enhanced extraction for Gemini endpoints
                     content = None
@@ -11662,6 +11674,50 @@ class UnifiedClient:
         except Exception as e:
             print(f"Aleph Alpha error: {e}")
             raise UnifiedClientError(f"Aleph Alpha error: {e}")
+
+    def _send_nvidia_http(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
+        """
+        Direct HTTP path for NVIDIA NIM (OpenAI-compatible) used when USE_NVIDIA_HTTP=1.
+        """
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature
+        }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+
+        resp = self._http_request_with_retries(
+            method="POST",
+            url=f"{os.getenv('NVIDIA_API_URL', 'https://integrate.api.nvidia.com/v1')}/chat/completions",
+            headers=headers,
+            json=payload,
+            expected_status=(200,),
+            max_retries=self._get_max_retries(),
+            provider_name="nvidia_http",
+            use_session=True
+        )
+        data = resp.json()
+        choices = data.get("choices", [])
+        content = ""
+        finish_reason = "stop"
+        if choices:
+            choice = choices[0]
+            finish_reason = choice.get("finish_reason", "stop") or "stop"
+            message = choice.get("message", {})
+            content = message.get("content", "") if isinstance(message, dict) else ""
+
+        return UnifiedResponse(
+            content=content,
+            finish_reason=finish_reason,
+            raw_response=data,
+            usage=data.get("usage")
+        )
       
     def _send_huggingface(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
         """Send request to HuggingFace Inference API"""

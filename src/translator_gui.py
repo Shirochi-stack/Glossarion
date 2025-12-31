@@ -10251,6 +10251,7 @@ Important rules:
                 self.append_log("🔍 [SAVE_CONFIG] Verifying environment variables after config save...")
                 critical_vars_to_check = [
                     ('OPENROUTER_USE_HTTP_ONLY', '1' if self.config.get('openrouter_use_http_only') else '0'),
+                    ('USE_NVIDIA_HTTP', '1' if self.config.get('openrouter_use_http_only') else '0'),
                     ('OPENROUTER_ACCEPT_IDENTITY', '1' if self.config.get('openrouter_accept_identity') else '0'),
                     ('OPENROUTER_PREFERRED_PROVIDER', (str(self.config.get('openrouter_preferred_provider', 'Auto') or '').strip() or 'Auto')),
                     ('EXTRACTION_WORKERS', str(self.config.get('extraction_workers')) if self.config.get('enable_parallel_extraction') else '1'),
@@ -10318,8 +10319,9 @@ Important rules:
             'GLOSSARY_USE_LEGACY_CSV': 'Legacy CSV format flag',
             'GLOSSARY_MAX_SENTENCES': 'Maximum sentences for glossary processing',
             
-            # OpenRouter settings
-            'OPENROUTER_USE_HTTP_ONLY': 'OpenRouter HTTP-only transport',
+            # OpenRouter/NVIDIA settings
+            'OPENROUTER_USE_HTTP_ONLY': 'OpenRouter/NVIDIA HTTP-only transport',
+            'USE_NVIDIA_HTTP': 'NVIDIA HTTP-only transport',
             'OPENROUTER_ACCEPT_IDENTITY': 'OpenRouter identity encoding',
             'OPENROUTER_PREFERRED_PROVIDER': 'OpenRouter preferred provider',
             
