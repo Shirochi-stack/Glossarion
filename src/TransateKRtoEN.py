@@ -1361,10 +1361,17 @@ class FileUtilities:
         
         # Get filename for extraction
         filename = chapter.get('original_basename') or chapter.get('filename', '')
+
+        # Prefer OPF spine position when available (ensures range selection follows content.opf)
+        opf_spine_position = chapter.get('spine_order')
+        opf_spine_data = chapter.get('opf_spine_data')
         
         # Use our improved extraction function
-        # Note: We don't have opf_spine_position here, so pass None
-        actual_num, method = extract_chapter_number_from_filename(filename, opf_spine_position=None)
+        actual_num, method = extract_chapter_number_from_filename(
+            filename,
+            opf_spine_position=opf_spine_position,
+            opf_spine_data=opf_spine_data
+        )
         
         # If extraction succeeded, return the result
         if actual_num is not None:
