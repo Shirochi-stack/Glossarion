@@ -3483,15 +3483,17 @@ class AsyncProcessingDialog:
                     gen_cfg = request['generateContentRequest'].get('generationConfig', {}).copy()
                     # Google Batch API rejects unknown fields; remove 'thinking' (only realtime API supports it)
                     gen_cfg.pop('thinking', None)
+
                     batch_line = {
                         "key": request['custom_id'],
                         "request": {
                             "contents": request['generateContentRequest']['contents'],
                             "generation_config": gen_cfg
                         }
-                        if spine_pos is not None:
-                            chapter_map_by_spine[spine_pos] = chapter_map[order_num]
                     }
+                    # Maintain spine mapping if available
+                    if spine_pos is not None:
+                        chapter_map_by_spine[spine_pos] = chapter_map[order_num]
                     
                     # Add safety settings if present
                     if 'safetySettings' in request['generateContentRequest']:
