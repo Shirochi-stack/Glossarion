@@ -7786,11 +7786,6 @@ def main(log_callback=None, stop_callback=None):
     # Check if special files translation is disabled
     translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
 
-    # Reader-order helper: prefer spine positions, otherwise use actual number
-    def _display_reader_num(chapter, fallback_actual):
-        spine = chapter.get('spine_order') or chapter.get('opf_spine_position') or chapter.get('_range_key')
-        return spine if spine is not None else fallback_actual
-
     # When setting actual chapter numbers (in the main function)
     for idx, c in enumerate(chapters):
         chap_num = c["num"]
@@ -8790,14 +8785,7 @@ def main(log_callback=None, stop_callback=None):
             else:
                 file_ref = c.get('original_basename', f'{terminology}_{actual_num}')
 
-            # Optional: show reading order (spine) in logs when enabled
-            log_reader_order = os.getenv("LOG_READING_ORDER", "1") == "1"
-            reader_num = _display_reader_num(c, actual_num)
-
-            if log_reader_order:
-                print(f"\n🔄 Processing #{idx+1}/{total_chapters} (Reader: {reader_num} | Actual: {terminology} {actual_num}) ({chapter_position} to translate): {c['title']} [File: {file_ref}]")
-            else:
-                print(f"\n🔄 Processing #{idx+1}/{total_chapters} (Actual: {terminology} {actual_num}) ({chapter_position} to translate): {c['title']} [File: {file_ref}]")
+            print(f"\n🔄 Processing #{idx+1}/{total_chapters} (Actual: {terminology} {actual_num}) ({chapter_position} to translate): {c['title']} [File: {file_ref}]")
 
             chunk_context_manager.start_chapter(chap_num, c['title'])
             
@@ -9238,15 +9226,8 @@ def main(log_callback=None, stop_callback=None):
                     else:
                         file_ref = c.get('original_basename', f'{terminology}_{actual_num}')
                     
-                    # Optional reader-order display
-                    log_reader_order = os.getenv("LOG_READING_ORDER", "1") == "1"
-                    reader_num = _display_reader_num(c, actual_num)
-
                     chunk_tokens = chapter_splitter.count_tokens(chunk_html)
-                    if log_reader_order:
-                        print(f"  📄 {terminology} {reader_num} (reader) | Actual {actual_num} [{display_len:,} chars, {chunk_tokens:,} tokens]")
-                    else:
-                        print(f"  📄 {terminology} {actual_num} [{display_len:,} chars, {chunk_tokens:,} tokens]")
+                    print(f"  📄 {terminology} {actual_num} [{display_len:,} chars, {chunk_tokens:,} tokens]")
                 
                 print(f"  ℹ️ This may take 30-60 seconds. Stop will take effect after completion.")
                 
@@ -9256,13 +9237,10 @@ def main(log_callback=None, stop_callback=None):
                             # Determine terminology based on source type
                             is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
                             terminology = "Section" if is_text_source else "Chapter"
-                            log_reader_order = os.getenv("LOG_READING_ORDER", "1") == "1"
-                            reader_num = _display_reader_num(c, actual_num)
-                            display_label = f"{terminology} {reader_num}" if log_reader_order else f"{terminology} {actual_num}"
 
                             log_callback.__self__.append_chunk_progress(
                                 1, 1, "text", 
-                                display_label,
+                                f"{terminology} {actual_num}",
                                 overall_current=current_chunk_number,
                                 overall_total=total_chunks_needed,
                                 extra_info=f"{display_len:,} chars"
