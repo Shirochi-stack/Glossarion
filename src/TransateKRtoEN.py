@@ -1362,15 +1362,11 @@ class FileUtilities:
         # Get filename for extraction
         filename = chapter.get('original_basename') or chapter.get('filename', '')
 
-        # Prefer OPF spine position when available (ensures range selection follows content.opf)
-        opf_spine_position = chapter.get('spine_order')
-        opf_spine_data = chapter.get('opf_spine_data')
-        
         # Use our improved extraction function
+        # Note: We don't have opf_spine_position here, so pass None
         actual_num, method = extract_chapter_number_from_filename(
             filename,
-            opf_spine_position=opf_spine_position,
-            opf_spine_data=opf_spine_data
+            opf_spine_position=None
         )
         
         # If extraction succeeded, return the result
@@ -7759,11 +7755,20 @@ def main(log_callback=None, stop_callback=None):
 
 
     rng = os.getenv("CHAPTER_RANGE", "")
-    start = None
-    end = None
+    start = end = None
+    range_uses_spine = False
     if rng and re.match(r"^\d+\s*-\s*\d+$", rng):
-            start, end = map(int, rng.split("-", 1))
-            
+        start, end = map(int, rng.split("-", 1))
+
+        # Prefer OPF spine positions for range selection if present on any chapter
+        range_uses_spine = any(
+            (c.get("spine_order") is not None) or (c.get("opf_spine_position") is not None)
+            for c in chapters
+        )
+
+        if range_uses_spine:
+            print(f"📚 Applying chapter range {start}-{end} using OPF spine order (content.opf)")
+        else:
             if config.DISABLE_ZERO_DETECTION:
                 print(f"📊 0-based detection disabled - using range as specified: {start}-{end}")
             elif uses_zero_based:
@@ -7829,12 +7834,20 @@ def main(log_callback=None, stop_callback=None):
                 chunks_per_chapter[idx] = 0
                 continue
 
+        # Compute and store the range key once so all later passes (incl. progress manager checks)
+        # use the same value. This keeps range filtering in sync with spine-aware ordering.
+        spine_pos = c.get('spine_order')
+        if spine_pos is None:
+            spine_pos = c.get('opf_spine_position')
+        range_key = spine_pos if (range_uses_spine and spine_pos is not None) else c['actual_chapter_num']
+        c['_range_key'] = range_key
+
         if start is not None:
-            if not (start <= c['actual_chapter_num'] <= end):
+            if not (start <= range_key <= end):
                 # Track skipped chapters for summary (don't print individually)
                 if not hasattr(config, '_range_skipped_chapters'):
                     config._range_skipped_chapters = []
-                config._range_skipped_chapters.append(c['actual_chapter_num'])
+                config._range_skipped_chapters.append(range_key)
                 continue
                 
         # IMPORTANT: pass chapter_obj so ProgressManager can resolve composite keys
@@ -8732,7 +8745,9 @@ def main(log_callback=None, stop_callback=None):
                 if not has_digits_in_name:
                     continue
             
-            if start is not None and not (start <= actual_num <= end):
+            # Range filtering should use the same key computed in the first pass
+            range_num = c.get('_range_key', actual_num)
+            if start is not None and not (start <= range_num <= end):
                 # Skip silently (already summarized in earlier pass)
                 continue
             
