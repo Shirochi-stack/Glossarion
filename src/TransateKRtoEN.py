@@ -5025,10 +5025,9 @@ def extract_chapter_number_from_filename(filename, opf_spine_position=None, opf_
     """Extract chapter number from filename.
 
     Preference order:
-    1) Explicit split suffix (e.g., _split_3)
-    2) Rightmost digits in the filename (0 if all zeros)
-    3) Special keywords with no digits -> 0
-    4) Legacy fallback patterns
+    1) Rightmost digits in the filename (0 if all zeros)
+    2) Special keywords with no digits -> 0
+    3) Legacy fallback patterns
     """
     # Normalize: strip directory, extension, and response_ prefix for parsing
     basename = os.path.basename(filename)
@@ -5037,25 +5036,19 @@ def extract_chapter_number_from_filename(filename, opf_spine_position=None, opf_
         base_no_ext = base_no_ext[len('response_'):]
     base_no_ext_lower = base_no_ext.lower()
 
-    # Priority 1: explicit split suffix (e.g., chapter_split_5)
-    split_suffix = re.search(r'(?:^|_)split_?(\d+)$', base_no_ext, re.IGNORECASE)
-    if split_suffix:
-        return int(split_suffix.group(1)), 'split_suffix'
-
-    # Priority 2: digits in filename (use rightmost match to mirror GUI column)
+    # Priority 1: digits in filename (use rightmost match to mirror GUI column)
     numbers = re.findall(r'[0-9]+', base_no_ext)
     if numbers:
         last_num = int(numbers[-1])
         if last_num == 0:
             return 0, 'filename_zero'
         return last_num, 'filename_digits'
-
+    # Priority 2: special keyword files with no digits -> chapter 0
     # Priority 3: special keyword files with no digits -> chapter 0
     special_keywords = ['title', 'toc', 'cover', 'index', 'copyright', 'preface', 'nav', 'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'glossary', 'bibliography']
     if any(name in base_no_ext_lower for name in special_keywords):
         return 0, 'special_file'
-    # Priority 4: legacy fallback patterns
-    # Priority 5: legacy fallback patterns
+    # Priority 3: legacy fallback patterns
     name_without_ext = base_no_ext
     fallback_patterns = [
         (r'^response_(\d+)[_\.]', 'response_prefix'),
