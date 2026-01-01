@@ -2285,6 +2285,9 @@ class RetranslationMixin:
                         lst = response_to_progress[k]
                         break
                 if lst:
+                    has_qa = any(ch.get('status') == 'qa_failed' for ch in lst)
+                    if has_qa:
+                        lst = [ch for ch in lst if ch.get('status') != 'pending']
                     severity = {'qa_failed': 4, 'failed': 3, 'pending': 2, 'in_progress': 1, 'completed': 0}
                     best = None
                     best_score = -1

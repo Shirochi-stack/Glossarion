@@ -1660,6 +1660,16 @@ class ProgressManager:
                 base = base[len('response_'):]
             # Strip extension only for comparison so .html vs .xhtml don't diverge
             return os.path.splitext(base)[0]
+        def _make_spine_key(num, spine_pos):
+            if spine_pos is None:
+                return None
+            return f"{num}@{spine_pos}"
+
+        spine_pos = None
+        if chapter_obj:
+            spine_pos = chapter_obj.get('spine_order')
+            if spine_pos is None:
+                spine_pos = chapter_obj.get('opf_spine_position')
         # CHUNK FIX: For decimal chapter numbers (e.g., 1.0, 1.1), use the full decimal in the key
         # This prevents collisions when multiple chunks share the same integer part
         if isinstance(actual_num, float) and actual_num != int(actual_num):
@@ -1689,6 +1699,14 @@ class ProgressManager:
             if existing_hash == content_hash and not existing_file:
                 return chapter_key
         
+        # If a spine key already exists, prefer it
+        spine_key = _make_spine_key(actual_num, spine_pos)
+        if spine_key and spine_key in self.prog["chapters"]:
+            existing_info = self.prog["chapters"][spine_key]
+            existing_file = existing_info.get("output_file")
+            if existing_file == filename or _normalize_fname(existing_file) == _normalize_fname(filename):
+                return spine_key
+
         # Check if simple key exists and matches this file
         if chapter_key in self.prog["chapters"]:
             existing_info = self.prog["chapters"][chapter_key]
@@ -1711,7 +1729,9 @@ class ProgressManager:
             if existing_status == "merged":
                 return chapter_key
             
-            # Different file with same chapter number - use composite key
+            # Different file with same chapter number - prefer spine-based composite, else filename-based
+            if spine_key:
+                return spine_key
             file_basename = os.path.splitext(os.path.basename(filename))[0]
             file_basename = file_basename.replace("response_", "")
             composite_key = f"{actual_num}_{file_basename}"
@@ -1721,12 +1741,15 @@ class ProgressManager:
         file_basename = os.path.splitext(os.path.basename(filename))[0]
         file_basename = file_basename.replace("response_", "")
         composite_key = f"{actual_num}_{file_basename}"
+        spine_composite = spine_key
         
+        if spine_composite and spine_composite in self.prog["chapters"]:
+            return spine_composite
         if composite_key in self.prog["chapters"]:
             return composite_key
         
         # No existing entry - use simple key for new entries
-        return chapter_key
+        return spine_key or chapter_key
     
     def save(self):
         """Save progress to file"""
