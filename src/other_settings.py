@@ -2207,6 +2207,8 @@ def _create_response_handling_section(self, parent):
     def _on_streaming_toggle(checked):
         try:
             self.enable_streaming_var = bool(checked)
+            # Keep environment in sync immediately
+            os.environ['ENABLE_STREAMING'] = '1' if checked else '0'
         except Exception:
             pass
     self.enable_streaming_checkbox.toggled.connect(_on_streaming_toggle)

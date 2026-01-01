@@ -5222,6 +5222,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # Check stop after verification
             if self.stop_requested:
                 return False
+            # Sync streaming toggle to env for all backends
+            try:
+                stream_on = bool(self.config.get('enable_streaming', False))
+                os.environ['ENABLE_STREAMING'] = '1' if stream_on else '0'
+                self.append_log(f"🛰️ Streaming {'enabled' if stream_on else 'disabled'} (exported ENABLE_STREAMING)")
+            except Exception:
+                pass
 
             # SET GLOSSARY IN ENVIRONMENT
             if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path:

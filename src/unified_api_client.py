@@ -9354,7 +9354,25 @@ class UnifiedClient:
         # Save configuration to file with thread isolation
         self._save_gemini_safety_config(config_data, response_name)
         # Global streaming toggle
-        use_streaming = os.getenv("ENABLE_STREAMING", "0") not in ("0", "false", "False", "FALSE")
+        env_stream = os.getenv("ENABLE_STREAMING", "0")
+        cfg_stream = False
+        try:
+            cfg_stream = bool(getattr(self, 'config', {}).get('enable_streaming', False))
+        except Exception:
+            pass
+        var_stream = bool(getattr(self, 'enable_streaming_var', False))
+        ui_stream = False
+        try:
+            cb = getattr(self, 'enable_streaming_checkbox', None)
+            if cb is not None and hasattr(cb, 'isChecked'):
+                ui_stream = bool(cb.isChecked())
+        except Exception:
+            pass
+        use_streaming = (env_stream not in ("0", "false", "False", "FALSE")) or cfg_stream or var_stream or ui_stream
+        # Note: suppress duplicate provider logs; native path logs once here
+        if not self._is_stop_requested():
+            state = "ON" if use_streaming else "OFF"
+            print(f"🛰️ [gemini-native] Streaming {state} (env={env_stream}, cfg={cfg_stream}, var={var_stream}, ui={ui_stream})")
         
         # Main attempt loop - SAME FOR BOTH ENDPOINTS
         while attempt < attempts:
@@ -9712,6 +9730,8 @@ class UnifiedClient:
                             raise UnifiedClientError("Gemini client not initialized - operation may have been cancelled", error_type="cancelled")
 
                         if use_streaming:
+                            if not self._is_stop_requested():
+                                print(f"🛰️ [gemini-native] Stream start (model={self.model})")
                             stream = self.gemini_client.models.generate_content_stream(
                                 model=self.model,
                                 contents=contents,
@@ -9734,6 +9754,8 @@ class UnifiedClient:
                                         if hasattr(part, 'text') and part.text:
                                             text_parts.append(part.text)
                             text_content = "".join(text_parts)
+                            if not self._is_stop_requested():
+                                print(f"🛰️ [gemini-native] Stream finished, tokens≈{len(text_content)//4}")
                         else:
                             response = self.gemini_client.models.generate_content(
                                 model=self.model,
@@ -10805,8 +10827,15 @@ class UnifiedClient:
                     }
                     if extra_body:
                         call_kwargs["extra_body"] = extra_body
-                    # Optional streaming toggle (text-only aggregation)
-                    use_streaming = os.getenv("ENABLE_STREAMING", "0") not in ("0", "false", "False", "FALSE")
+                    # Optional streaming toggle (text-only aggregation) - honor env, config, or runtime var
+                    env_stream = os.getenv("ENABLE_STREAMING", "0")
+                    cfg_stream = False
+                    try:
+                        cfg_stream = bool(getattr(self, 'config', {}).get('enable_streaming', False))
+                    except Exception:
+                        pass
+                    var_stream = bool(getattr(self, 'enable_streaming_var', False))
+                    use_streaming = (env_stream not in ("0", "false", "False", "FALSE")) or cfg_stream or var_stream
                     if use_streaming:
                         call_kwargs["stream"] = True
                     
