@@ -9357,9 +9357,8 @@ class UnifiedClient:
         env_stream = os.getenv("ENABLE_STREAMING", "0")
         use_streaming = env_stream not in ("0", "false", "False", "FALSE")
         # Note: suppress duplicate provider logs; native path logs once here
-        if not self._is_stop_requested():
-            state = "ON" if use_streaming else "OFF"
-            print(f"🛰️ [gemini-native] Streaming {state} (env={env_stream})")
+        if use_streaming and not self._is_stop_requested():
+            print(f"🛰️ [gemini-native] Streaming ON (env={env_stream})")
         
         # Main attempt loop - SAME FOR BOTH ENDPOINTS
         while attempt < attempts:
@@ -10825,11 +10824,11 @@ class UnifiedClient:
                     use_streaming = (env_stream not in ("0", "false", "False", "FALSE")) or cfg_stream or var_stream
                     if use_streaming:
                         call_kwargs["stream"] = True
-                    
                     try:
                         import time as _t
                         start_ts = _t.time()
-                        print(f"🛰️ [{provider}] SDK call start (model={effective_model}, base_url={base_url})")
+                        if use_streaming:
+                            print(f"🛰️ [{provider}] SDK stream start (model={effective_model}, base_url={base_url})")
                         resp = client.chat.completions.create(**call_kwargs)
                         dur = _t.time() - start_ts
                         if use_streaming:
