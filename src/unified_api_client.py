@@ -9353,6 +9353,8 @@ class UnifiedClient:
 
         # Save configuration to file with thread isolation
         self._save_gemini_safety_config(config_data, response_name)
+        # Global streaming toggle
+        use_streaming = os.getenv("ENABLE_STREAMING", "0") not in ("0", "false", "False", "FALSE")
         
         # Main attempt loop - SAME FOR BOTH ENDPOINTS
         while attempt < attempts:
@@ -9367,6 +9369,7 @@ class UnifiedClient:
                 generation_config_params = {
                     "temperature": temperature,
                     "max_output_tokens": max_tokens,
+                    "stream": use_streaming,
                     **anti_dupe_params  # Add user's custom parameters
                 }
                 
@@ -9702,35 +9705,42 @@ class UnifiedClient:
                     if safety_settings:
                         generation_config.safety_settings = safety_settings
 
-                    # Make the native API call
-                    # Make the native API call with proper error handling
+                    # Make the native API call with optional streaming
                     try:
                         # Check if gemini_client exists and is not None
                         if not hasattr(self, 'gemini_client') or self.gemini_client is None:
                             print("⚠️ Gemini client is None. This typically happens when stop was requested.")
                             raise UnifiedClientError("Gemini client not initialized - operation may have been cancelled", error_type="cancelled")
-                        
-                        # DEBUG: Log what we're actually sending (commented out)
-                        # print(f"   📤 Sending {len(contents)} content objects to Gemini API")
-                        # for i, content in enumerate(contents):
-                        #     if isinstance(content, dict):
-                        #         print(f"      Content {i}: dict with role={content.get('role')}, parts={len(content.get('parts', []))} parts")
-                        #     elif hasattr(content, 'role'):
-                        #         num_parts = len(content.parts) if hasattr(content, 'parts') else 0
-                        #         print(f"      Content {i}: {type(content).__name__} with role={content.role}, parts={num_parts}")
-                        #         # Check if any parts have thought_signature
-                        #         if hasattr(content, 'parts'):
-                        #             for j, part in enumerate(content.parts):
-                        #                 if hasattr(part, 'thought_signature') and part.thought_signature:
-                        #                     print(f"         ✅ Part {j} HAS thought_signature ({len(part.thought_signature)} bytes)")
-                        #     else:
-                        #         print(f"      Content {i}: {type(content)}")
-                        
-                        response = self.gemini_client.models.generate_content(
-                            model=self.model,
-                            contents=contents,
-                            config=generation_config
-                        )
+
+                        if use_streaming:
+                            stream = self.gemini_client.models.generate_content_stream(
+                                model=self.model,
+                                contents=contents,
+                                config=generation_config
+                            )
+                            text_parts = []
+                            finish_reason = 'stop'
+                            response = None
+                            for evt in stream:
+                                response = evt  # keep last event for debugging
+                                cands = getattr(evt, 'candidates', None)
+                                if not cands:
+                                    continue
+                                cand = cands[0]
+                                if hasattr(cand, 'finish_reason') and cand.finish_reason:
+                                    finish_reason = str(cand.finish_reason)
+                                content_obj = getattr(cand, 'content', None)
+                                if content_obj and hasattr(content_obj, 'parts'):
+                                    for part in content_obj.parts:
+                                        if hasattr(part, 'text') and part.text:
+                                            text_parts.append(part.text)
+                            text_content = "".join(text_parts)
+                        else:
+                            response = self.gemini_client.models.generate_content(
+                                model=self.model,
+                                contents=contents,
+                                config=generation_config
+                            )
                     except AttributeError as e:
                         if "'NoneType' object has no attribute 'models'" in str(e):
                             print("⚠️ Gemini client is None or invalid. This typically happens when stop was requested.")
@@ -9804,7 +9814,7 @@ class UnifiedClient:
                                     print(f"   ✅ Thinking disabled")
                     
                         # Extract text from the Gemini response - FIXED LOGIC HERE
-                    text_content = ""
+                    text_content = "" if not use_streaming else text_content
                     raw_content_obj = None
                     image_data = None  # Store extracted image data
                     
