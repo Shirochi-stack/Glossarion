@@ -2271,19 +2271,33 @@ class RetranslationMixin:
                         matched_info = ch
                         break
 
-            # 2) response map
+            # 2) response map (choose highest severity, prefer matching chapter_num)
             if not matched_info:
-                lst = response_to_progress.get(expected_response) or response_to_progress.get(basename_key)
+                lookup_keys = [
+                    expected_response,
+                    _normalize_opf_match_name(expected_response),
+                    f"response_{expected_response}" if not expected_response.startswith("response_") else expected_response,
+                    basename_key
+                ]
+                lst = None
+                for k in lookup_keys:
+                    if k in response_to_progress:
+                        lst = response_to_progress[k]
+                        break
                 if lst:
+                    severity = {'qa_failed': 4, 'failed': 3, 'pending': 2, 'in_progress': 1, 'completed': 0}
+                    best = None
+                    best_score = -1
                     for ch in lst:
                         status = ch.get('status', '')
-                        if status in ['in_progress', 'failed', 'qa_failed', 'pending']:
-                            if ch.get('actual_num') == chapter_num:
-                                matched_info = ch
-                                break
-                        else:
-                            matched_info = ch
-                            break
+                        score = severity.get(status, -1)
+                        matches_num = ch.get('actual_num') == chapter_num
+                        if score > best_score or (score == best_score and matches_num):
+                            best = ch
+                            best_score = score
+                            # If exact chapter match and highest severity, keep going in case of even higher severity
+                    if best:
+                        matched_info = best
 
             # 3) composite key
             if not matched_info:
