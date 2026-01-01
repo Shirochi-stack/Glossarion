@@ -4998,85 +4998,41 @@ def set_output_redirect(log_callback=None):
 # =====================================================
 # EPUB AND FILE PROCESSING
 # =====================================================
-_spine_positive_base = None  # module-level tracker for first positive-digit spine position
 
 def extract_chapter_number_from_filename(filename, opf_spine_position=None, opf_spine_data=None):
-    """Extract chapter number from filename, prioritizing OPF spine order"""
+    """Extract chapter number from filename.
+
+    Preference order:
+    1) Explicit split suffix (e.g., _split_3)
+    2) Rightmost digits in the filename (0 if all zeros)
+    3) Special keywords with no digits -> 0
+    4) Legacy fallback patterns
+    """
     # Normalize: strip directory, extension, and response_ prefix for parsing
     basename = os.path.basename(filename)
     base_no_ext = os.path.splitext(basename)[0]
     if base_no_ext.lower().startswith('response_'):
         base_no_ext = base_no_ext[len('response_'):]
     base_no_ext_lower = base_no_ext.lower()
-    # Priority 1: Use OPF spine position if available
-    if opf_spine_position is not None:
-        # If filename has a trailing split_X, prefer that numeric suffix over spine position
-        split_suffix = re.search(r'(?:^|_)split_?(\\d+)$', base_no_ext, re.IGNORECASE)
-        if split_suffix:
-            return int(split_suffix.group(1)), 'split_suffix'
-        # Handle special non-chapter files (always chapter 0)
-        filename_lower = base_no_ext_lower
-        name_without_ext = base_no_ext_lower
-        
-        # CRITICAL: Any file with numbers is a regular chapter, regardless of keywords!
-        has_numbers = bool(re.search(r'\d', name_without_ext))
-        
-        if has_numbers:
-            # This is a numbered chapter (e.g., "Notice01") - use spine position
-            return opf_spine_position, 'opf_spine_order'
-        
-        # Only check special keywords for files WITHOUT numbers
-        special_keywords = ['title', 'toc', 'cover', 'index', 'copyright', 'preface', 'nav', 'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'glossary', 'bibliography']
-        has_special_keyword = any(name in filename_lower for name in special_keywords)
-        
-        if has_special_keyword:
-            return 0, 'opf_special_file'
-        
-        # Use spine position for regular chapters (0, 1, 2, 3...)
-        return opf_spine_position, 'opf_spine_order'
-    
-    # Priority 2: Check if this looks like a special file (even without OPF)
-    name_without_ext = base_no_ext_lower
-    
-    # CRITICAL: Any file with numbers is a regular chapter, regardless of keywords!
-    has_numbers = bool(re.search(r'\d', name_without_ext))
-    
-    if has_numbers:
-        # This is a numbered chapter - continue to number extraction
-        pass  # Fall through to extraction logic below
-    else:
-        # Only check special keywords for files WITHOUT numbers
-        special_keywords = ['title', 'toc', 'cover', 'index', 'copyright', 'preface', 'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'glossary', 'bibliography']
-        has_special_keyword = any(name in name_without_ext for name in special_keywords)
-        
-        if has_special_keyword:
-            return 0, 'special_file'
-    
-    # Priority 3: Numeric extraction with preference for higher suffix when multiple numbers exist
-    # Handle splitter suffixes like "index_split_000_split5"
+
+    # Priority 1: explicit split suffix (e.g., chapter_split_5)
     split_suffix = re.search(r'(?:^|_)split_?(\\d+)$', base_no_ext, re.IGNORECASE)
     if split_suffix:
         return int(split_suffix.group(1)), 'split_suffix'
 
-    name_without_ext = base_no_ext
-    numbers = re.findall(r'\\d+', name_without_ext)
+    # Priority 2: digits in filename (use rightmost match to mirror GUI column)
+    numbers = re.findall(r'\\d+', base_no_ext)
     if numbers:
-        nums = list(map(int, numbers))
-        positives = [n for n in nums if n > 0]
-        if positives:
-            # If spine info is available, renormalize numbering to start at first positive spine
-            global _spine_positive_base
-            if opf_spine_position is not None:
-                if _spine_positive_base is None:
-                    _spine_positive_base = opf_spine_position
-                return int(opf_spine_position - _spine_positive_base + 1), 'spine_renormalized'
-            return max(positives), 'suffix_number'
-        else:
-            return 0, 'all_zero_numbers'
-    
-    # Priority 4: Fall back to existing filename parsing patterns
-    
-    # Priority 4: Fall back to existing filename parsing patterns
+        last_num = int(numbers[-1])
+        return last_num, 'filename_digits'
+
+    # Priority 3: special keyword files with no digits -> chapter 0
+    special_keywords = ['title', 'toc', 'cover', 'index', 'copyright', 'preface', 'nav', 'message', 'info', 'notice', 'colophon', 'dedication', 'epigraph', 'foreword', 'acknowledgment', 'author', 'appendix', 'glossary', 'bibliography']
+    if any(name in base_no_ext_lower for name in special_keywords):
+        return 0, 'special_file'
+    # Priority 4: legacy fallback patterns
+    # Priority 5: legacy fallback patterns
+    name_without_ext = base_no_ext
     fallback_patterns = [
         (r'^response_(\d+)[_\.]', 'response_prefix'),
         (r'[Cc]hapter[_\s]*(\d+)', 'chapter_word'),
@@ -5093,10 +5049,6 @@ def extract_chapter_number_from_filename(filename, opf_spine_position=None, opf_
         match = re.search(pattern, name_without_ext, re.IGNORECASE)
         if match:
             return int(match.group(1)), method
-    
-    # If still nothing and spine provided, return 0 for specials
-    if opf_spine_position is not None:
-        return 0, 'spine_special'
     return None, None
 
 def process_chapter_images(chapter_html: str, actual_num: int, image_translator: ImageTranslator, 
@@ -7934,10 +7886,6 @@ def main(log_callback=None, stop_callback=None):
     # Check if special files translation is disabled
     translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
 
-    # Reset spine positive base before numbering
-    global _spine_positive_base
-    _spine_positive_base = None
-
     # Helper: sequential numbering with zero-phase.
     # Start at 0; only start incrementing once a digit >0 is seen in the filename.
     def _assign_chapter_num(name_noext, seq_counter, zero_phase):
@@ -8172,7 +8120,6 @@ def main(log_callback=None, stop_callback=None):
         # FIX: First pass to set actual chapter numbers for ALL chapters
         # This ensures batch mode has the same chapter numbering as non-batch mode
         print("📊 Setting chapter numbers...")
-        _spine_positive_base = None
         seq_counter = 0
         zero_phase = True
         for idx, c in enumerate(chapters):
