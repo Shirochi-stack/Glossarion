@@ -1582,6 +1582,7 @@ class ProgressManager:
         self.payloads_dir = payloads_dir
         self.PROGRESS_FILE = os.path.join(payloads_dir, "translation_progress.json")
         self.prog = self._init_or_load()
+        self._dedup_by_output()
         
     def _init_or_load(self):
         """Initialize or load progress tracking with improved structure"""
@@ -1645,6 +1646,55 @@ class ProgressManager:
             }
         
         return prog
+
+    def _dedup_by_output(self):
+        """Keep a single entry per normalized output filename; priority: qa_failed > pending > failed > in_progress > completed."""
+        def _norm_out(fname: str):
+            if not fname:
+                return None
+            base = os.path.basename(fname)
+            if base.startswith("response_"):
+                base = base[len("response_"):]
+            return os.path.splitext(base)[0]
+        def _infer_num(fname: str):
+            if not fname:
+                return None
+            nums = re.findall(r"\d+", fname)
+            if not nums:
+                return None
+            nums = list(map(int, nums))
+            if nums[0] == 0 and nums[-1] > 0:
+                return nums[-1]
+            return nums[0]
+        severity = {'qa_failed': 5, 'pending': 4, 'failed': 3, 'in_progress': 2, 'completed': 1, 'merged': 1, 'unknown': 0}
+        dedup = {}
+        for key, info in list(self.prog.get("chapters", {}).items()):
+            out = info.get("output_file")
+            norm = _norm_out(out) or key
+            if (info.get("actual_num") in (None, 0)) and out:
+                hint = _infer_num(out)
+                if hint is not None:
+                    info["actual_num"] = hint
+            current = dedup.get(norm)
+            if current:
+                cur_rank = severity.get(current.get("status", "unknown"), 0)
+                new_rank = severity.get(info.get("status", "unknown"), 0)
+                if (new_rank > cur_rank) or (new_rank == cur_rank and info.get("last_updated", 0) > current.get("last_updated", 0)):
+                    dedup[norm] = info
+            else:
+                dedup[norm] = info
+        new_chapters = {}
+        for norm, info in dedup.items():
+            new_key = str(info["actual_num"]) if info.get("actual_num") is not None else norm
+            if new_key in new_chapters:
+                cur_rank = severity.get(new_chapters[new_key].get("status", "unknown"), 0)
+                new_rank = severity.get(info.get("status", "unknown"), 0)
+                if (new_rank > cur_rank) or (new_rank == cur_rank and info.get("last_updated", 0) > new_chapters[new_key].get("last_updated", 0)):
+                    new_chapters[new_key] = info
+            else:
+                new_chapters[new_key] = info
+        self.prog["chapters"] = new_chapters
+        self.save()
     
     def _get_chapter_key(self, actual_num, output_file=None, chapter_obj=None, content_hash=None):
         """Generate consistent chapter key, handling collisions with composite keys.
@@ -2030,7 +2080,8 @@ class ProgressManager:
                 return nums[-1]
             return nums[0]
 
-        severity_rank = {'qa_failed': 5, 'failed': 4, 'pending': 3, 'in_progress': 2, 'completed': 1, 'merged': 1, 'unknown': 0}
+        # Priority: qa_failed > pending > failed > in_progress > completed
+        severity_rank = {'qa_failed': 5, 'pending': 4, 'failed': 3, 'in_progress': 2, 'completed': 1, 'merged': 1, 'unknown': 0}
 
         # First, deduplicate by normalized output filename choosing highest severity then latest timestamp
         dedup = {}
