@@ -2011,38 +2011,80 @@ class ProgressManager:
     def migrate_to_content_hash(self, chapters):
         """Change keys to match actual_num values for proper mapping and sort by chapter number"""
         
+        def _normalize_out(fname: str):
+            if not fname:
+                return None
+            base = os.path.basename(fname)
+            if base.startswith('response_'):
+                base = base[len('response_'):]
+            return os.path.splitext(base)[0]
+
+        def _infer_num_from_filename(fname: str):
+            if not fname:
+                return None
+            nums = re.findall(r'\\d+', fname)
+            if not nums:
+                return None
+            nums = list(map(int, nums))
+            if nums[0] == 0 and nums[-1] > 0:
+                return nums[-1]
+            return nums[0]
+
+        severity_rank = {'qa_failed': 5, 'failed': 4, 'pending': 3, 'in_progress': 2, 'completed': 1, 'merged': 1, 'unknown': 0}
+
+        # First, deduplicate by normalized output filename choosing highest severity then latest timestamp
+        dedup = {}
+        for old_key, chapter_info in self.prog["chapters"].items():
+            out = chapter_info.get("output_file")
+            norm = _normalize_out(out)
+            if not norm:
+                norm = old_key  # fallback to key to avoid losing entry
+
+            # Fix actual_num if missing or zero using filename hint
+            actual_num = chapter_info.get("actual_num")
+            if (actual_num in (None, 0)) and out:
+                hint = _infer_num_from_filename(out)
+                if hint is not None:
+                    chapter_info["actual_num"] = hint
+                    actual_num = hint
+
+            current_best = dedup.get(norm)
+            if current_best:
+                best_sev = severity_rank.get(current_best.get("status", "unknown"), 0)
+                cur_sev = severity_rank.get(chapter_info.get("status", "unknown"), 0)
+                if (cur_sev > best_sev) or (cur_sev == best_sev and chapter_info.get("last_updated", 0) > current_best.get("last_updated", 0)):
+                    dedup[norm] = chapter_info
+            else:
+                dedup[norm] = chapter_info
+
         new_chapters = {}
         migrated_count = 0
         
-        for old_key, chapter_info in self.prog["chapters"].items():
+        for norm, chapter_info in dedup.items():
             actual_num = chapter_info.get("actual_num")
-            # If key is non-numeric (composite/spine), keep as-is to avoid collisions
-            if not str(old_key).isdigit():
-                new_chapters[old_key] = chapter_info
-                continue
-
+            key_candidate = None
+            # Prefer numeric key when available
             if actual_num is not None:
-                new_key = str(actual_num)
-                
-                # If key needs to change
-                if old_key != new_key:
-                    print(f"  Migrating: key '{old_key}' → '{new_key}' (actual_num: {actual_num})")
-                    migrated_count += 1
-                    
-                    # Check for collision
-                    if new_key in new_chapters:
-                        print(f"    ⚠️ Warning: Key '{new_key}' already exists, keeping newer entry")
-                        if chapter_info.get("last_updated", 0) > new_chapters[new_key].get("last_updated", 0):
-                            new_chapters[new_key] = chapter_info
-                    else:
-                        new_chapters[new_key] = chapter_info
-                else:
-                    # Key already matches actual_num
-                    new_chapters[old_key] = chapter_info
+                key_candidate = str(actual_num)
             else:
-                # No actual_num, keep as-is
-                print(f"  ⚠️ Warning: No actual_num for key '{old_key}', keeping as-is")
-                new_chapters[old_key] = chapter_info
+                key_candidate = norm
+
+            # If non-numeric key, keep as-is
+            if not key_candidate.isdigit():
+                new_key = key_candidate
+            else:
+                new_key = key_candidate
+
+            # Handle collisions by severity and timestamp
+            if new_key in new_chapters:
+                existing = new_chapters[new_key]
+                best_sev = severity_rank.get(existing.get("status", "unknown"), 0)
+                cur_sev = severity_rank.get(chapter_info.get("status", "unknown"), 0)
+                if (cur_sev > best_sev) or (cur_sev == best_sev and chapter_info.get("last_updated", 0) > existing.get("last_updated", 0)):
+                    new_chapters[new_key] = chapter_info
+            else:
+                new_chapters[new_key] = chapter_info
+            migrated_count += 1
         
         # Sort chapters by actual_num field, then by key as fallback
         def sort_key(item):
