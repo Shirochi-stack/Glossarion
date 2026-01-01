@@ -1363,7 +1363,10 @@ class FileUtilities:
         filename = chapter.get('original_basename') or chapter.get('filename', '')
         
         # Note: We don't have opf_spine_position here, so pass None
-        actual_num, method = extract_chapter_number_from_filename(filename, opf_spine_position=None)
+        opf_spine_position = chapter.get('spine_order')
+        if opf_spine_position is None:
+            opf_spine_position = chapter.get('opf_spine_position')
+        actual_num, method = extract_chapter_number_from_filename(filename, opf_spine_position=opf_spine_position)
 
        # Prefer OPF spine position when available (ensures range selection follows content.opf)
        # opf_spine_position = chapter.get('spine_order')
@@ -1934,7 +1937,15 @@ class ProgressManager:
         
     def check_chapter_status(self, chapter_idx, actual_num, content_hash, output_dir, chapter_obj=None):
         """Check if a chapter needs translation"""
-        
+        # If caller passed 0/None, recompute from filename/spine to avoid collapsing to chapter 0
+        if (actual_num is None or actual_num <= 0) and chapter_obj:
+            try:
+                from TransateKRtoEN import FileUtilities
+                recomputed = FileUtilities.extract_actual_chapter_number(chapter_obj, patterns=None, config=None)
+                if recomputed is not None:
+                    actual_num = recomputed
+            except Exception:
+                pass
         # Use helper method to get consistent key
         chapter_key = self._get_chapter_key(actual_num, output_file=None, chapter_obj=chapter_obj, content_hash=content_hash)
         
@@ -5075,6 +5086,9 @@ def extract_chapter_number_from_filename(filename, opf_spine_position=None, opf_
         if match:
             return int(match.group(1)), method
     
+    # Fallback to spine order if provided
+    if opf_spine_position is not None:
+        return int(opf_spine_position), 'opf_spine_fallback'
     return None, None
 
 def process_chapter_images(chapter_html: str, actual_num: int, image_translator: ImageTranslator, 
@@ -7912,12 +7926,31 @@ def main(log_callback=None, stop_callback=None):
     # Check if special files translation is disabled
     translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
 
+    # Helper: sequential numbering with zero-phase.
+    # Start at 0; only start incrementing once a digit >0 is seen in the filename.
+    def _assign_chapter_num(name_noext, seq_counter, zero_phase):
+        nums = re.findall(r'\d+', name_noext) if name_noext else []
+        has_gt_zero = any(int(n) > 0 for n in nums)
+        if zero_phase:
+            if has_gt_zero:
+                # first positive digit: begin incrementing
+                if seq_counter == 0:
+                    seq_counter = 1
+                num = seq_counter
+                seq_counter += 1
+                zero_phase = False
+            else:
+                # still zero phase
+                num = 0
+        else:
+            # already incrementing
+            num = seq_counter
+            seq_counter += 1
+        return num, seq_counter, zero_phase
+
     # When setting actual chapter numbers (in the main function)
-    running_current_num = None  # tracks last numeric chapter to let non-numeric spine items inherit
-    zero_used = False           # allow only one numeric chapter 0
-    next_seq_after_zero = 1
-    seq_counter = 1             # sequential numbering for numeric files (starts at 1)
-    zero_slots_remaining = 1    # allow one extra chapter 0 if filename has no digit >0
+    seq_counter = 0
+    zero_phase = True
     for idx, c in enumerate(chapters):
         chap_num = c["num"]
         content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
@@ -7932,38 +7965,24 @@ def main(log_callback=None, stop_callback=None):
         if spine_pos is None:
             spine_pos = idx  # ultimate fallback to list order
 
-        # Determine if filename has any digits
+        # Determine if filename has any digits (strip response_ and extensions)
         name = c.get('original_basename') or os.path.basename(c.get('filename', '')) or ''
-        name_noext = os.path.splitext(name)[0]
-        has_digits_in_name = bool(re.search(r'\d', name_noext))
+        base = os.path.splitext(name)[0]
+        while True:
+            b, ext = os.path.splitext(base)
+            if not ext:
+                break
+            base = b
+        if base.lower().startswith('response_'):
+            base = base[len('response_'):]
+        name_noext = base
 
-        # Normalize chapter number sequentially by numeric files, ignoring non-numeric for counting
-        if has_digits_in_name:
-            # check if any digit > 0 exists in filename
-            digits = re.findall(r'\d', name_noext)
-            has_gt_zero = any(d != '0' for d in digits)
-            if not has_gt_zero and zero_slots_remaining > 0:
-                normalized_num = 0
-                zero_slots_remaining -= 1
-            else:
-                normalized_num = seq_counter
-                seq_counter += 1
-                running_current_num = normalized_num
-        else:
-            # specials/non-numeric stay at 0 and do not increment
-            normalized_num = 0
+        # Normalize chapter number sequentially with zero phase logic
+        normalized_num, seq_counter, zero_phase = _assign_chapter_num(name_noext, seq_counter, zero_phase)
 
-        # Enforce single numeric chapter 0: if we've already used 0, bump non-positive to sequential 1,2,3...
-        if normalized_num <= 0:
-            if zero_used:
-                normalized_num = next_seq_after_zero
-                next_seq_after_zero += 1
-            else:
-                zero_used = True
         # Apply the offset after normalization
         offset = config.CHAPTER_NUMBER_OFFSET if hasattr(config, 'CHAPTER_NUMBER_OFFSET') else 0
         raw_num = normalized_num + offset
-        raw_num += offset
         
         # When toggle is disabled, use raw numbers without any 0-based adjustment
         if config.DISABLE_ZERO_DETECTION:
@@ -8155,6 +8174,8 @@ def main(log_callback=None, stop_callback=None):
         # FIX: First pass to set actual chapter numbers for ALL chapters
         # This ensures batch mode has the same chapter numbering as non-batch mode
         print("📊 Setting chapter numbers...")
+        seq_counter = 0
+        zero_phase = True
         for idx, c in enumerate(chapters):
             # PDF/TEXT CHUNK FIX: Skip extract_actual_chapter_number for chunks - preserve decimal from c['num']
             if is_text_file and c.get('is_chunk', False):
@@ -8164,8 +8185,19 @@ def main(log_callback=None, stop_callback=None):
                 c['zero_adjusted'] = False
                 continue
             
-            raw_num = FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config)
-            
+            # Determine if filename has any digits and assign number consistently (strip response_ and extensions)
+            name = c.get('original_basename') or os.path.basename(c.get('filename', '')) or ''
+            base = os.path.splitext(name)[0]
+            while True:
+                b, ext = os.path.splitext(base)
+                if not ext:
+                    break
+                base = b
+            if base.lower().startswith('response_'):
+                base = base[len('response_'):]
+            name_noext = base
+            raw_num, seq_counter, zero_phase = _assign_chapter_num(name_noext, seq_counter, zero_phase)
+
             # Apply offset if configured
             offset = config.CHAPTER_NUMBER_OFFSET if hasattr(config, 'CHAPTER_NUMBER_OFFSET') else 0
             raw_num += offset
