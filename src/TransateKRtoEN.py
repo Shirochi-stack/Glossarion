@@ -1359,6 +1359,9 @@ class FileUtilities:
             # For text file chunks only, preserve the decimal number
             return chapter['num']  # This will be 1.1, 1.2, etc.
         
+        # Get filename for extraction
+        filename = chapter.get('original_basename') or chapter.get('filename', '')
+
         # Note: We don't have opf_spine_position here, so pass None
         actual_num, method = extract_chapter_number_from_filename(filename, opf_spine_position=None)
         
