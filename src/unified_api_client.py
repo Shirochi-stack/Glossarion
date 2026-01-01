@@ -7586,6 +7586,7 @@ class UnifiedClient:
                         print(f"    [DEBUG] Sending HTTP request with max_tokens={current_max}...")
                     try:
                         import time as _t
+                        import traceback as _tb
                         start_ts = _t.time()
                         print(f"{provider} HTTP send -> {method} {url}")
                         resp = session.request(method, url, headers=headers, json=json, timeout=timeout)
@@ -10801,6 +10802,11 @@ class UnifiedClient:
                         import time as _t
                         start_ts = _t.time()
                         print(f"🛰️ [{provider}] SDK call start (model={effective_model}, base_url={base_url})")
+                        try:
+                            stack_snippet = "".join(_tb.format_stack(limit=12))
+                            print(f"[TRACEBACK {provider} start]\n{stack_snippet}")
+                        except Exception:
+                            pass
                         resp = client.chat.completions.create(**call_kwargs)
                         dur = _t.time() - start_ts
                         print(f"🛰️ [{provider}] SDK call finished in {dur:.1f}s, got choices={len(getattr(resp,'choices',[]) or [])}")
