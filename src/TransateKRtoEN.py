@@ -4868,12 +4868,17 @@ def set_output_redirect(log_callback=None):
 # =====================================================
 def extract_chapter_number_from_filename(filename, opf_spine_position=None, opf_spine_data=None):
     """Extract chapter number from filename, prioritizing OPF spine order"""
-    
+    # Normalize: strip directory, extension, and response_ prefix for parsing
+    basename = os.path.basename(filename)
+    base_no_ext = os.path.splitext(basename)[0]
+    if base_no_ext.lower().startswith('response_'):
+        base_no_ext = base_no_ext[len('response_'):]
+    base_no_ext_lower = base_no_ext.lower()
     # Priority 1: Use OPF spine position if available
     if opf_spine_position is not None:
         # Handle special non-chapter files (always chapter 0)
-        filename_lower = filename.lower()
-        name_without_ext = os.path.splitext(filename)[0].lower()
+        filename_lower = base_no_ext_lower
+        name_without_ext = base_no_ext_lower
         
         # CRITICAL: Any file with numbers is a regular chapter, regardless of keywords!
         has_numbers = bool(re.search(r'\d', name_without_ext))
@@ -4893,7 +4898,7 @@ def extract_chapter_number_from_filename(filename, opf_spine_position=None, opf_
         return opf_spine_position, 'opf_spine_order'
     
     # Priority 2: Check if this looks like a special file (even without OPF)
-    name_without_ext = os.path.splitext(filename)[0].lower()
+    name_without_ext = base_no_ext_lower
     
     # CRITICAL: Any file with numbers is a regular chapter, regardless of keywords!
     has_numbers = bool(re.search(r'\d', name_without_ext))
@@ -4909,8 +4914,13 @@ def extract_chapter_number_from_filename(filename, opf_spine_position=None, opf_
         if has_special_keyword:
             return 0, 'special_file'
     
-    # Priority 3: Try to extract sequential numbers (000, 001, 002...)
-    name_without_ext = os.path.splitext(filename)[0]
+    # Priority 3a: Handle splitter suffixes like "index_split_000_split5" -> use trailing split number
+    split_suffix = re.search(r'(?:^|_)split_?(\\d+)$', base_no_ext, re.IGNORECASE)
+    if split_suffix:
+        return int(split_suffix.group(1)), 'split_suffix'
+
+    # Priority 3b: Try to extract sequential numbers (000, 001, 002...)
+    name_without_ext = base_no_ext
     
     # Look for simple sequential patterns first
     # Priority 3: Try to extract sequential numbers and decimals
