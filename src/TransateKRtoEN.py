@@ -4905,6 +4905,10 @@ def extract_chapter_number_from_filename(filename, opf_spine_position=None, opf_
     base_no_ext_lower = base_no_ext.lower()
     # Priority 1: Use OPF spine position if available
     if opf_spine_position is not None:
+        # If filename has a trailing split_X, prefer that numeric suffix over spine position
+        split_suffix = re.search(r'(?:^|_)split_?(\\d+)$', base_no_ext, re.IGNORECASE)
+        if split_suffix:
+            return int(split_suffix.group(1)), 'split_suffix'
         # Handle special non-chapter files (always chapter 0)
         filename_lower = base_no_ext_lower
         name_without_ext = base_no_ext_lower
@@ -4943,30 +4947,22 @@ def extract_chapter_number_from_filename(filename, opf_spine_position=None, opf_
         if has_special_keyword:
             return 0, 'special_file'
     
-    # Priority 3a: Handle splitter suffixes like "index_split_000_split5" -> use trailing split number
+    # Priority 3: Numeric extraction with preference for higher suffix when multiple numbers exist
+    # Handle splitter suffixes like "index_split_000_split5"
     split_suffix = re.search(r'(?:^|_)split_?(\\d+)$', base_no_ext, re.IGNORECASE)
     if split_suffix:
         return int(split_suffix.group(1)), 'split_suffix'
 
-    # Priority 3b: Try to extract sequential numbers (000, 001, 002...)
     name_without_ext = base_no_ext
+    numbers = re.findall(r'\\d+', name_without_ext)
+    if numbers:
+        nums = list(map(int, numbers))
+        if nums[0] == 0 and nums[-1] > 0:
+            return nums[-1], 'suffix_number'
+        else:
+            return nums[0], 'leading_number'
     
-    # Look for simple sequential patterns first
-    # Priority 3: Try to extract sequential numbers and decimals
-    sequential_patterns = [
-        (r'^(\d+)\.(\d+)$', 'decimal_number'),      # 1.5, 2.3 (NEW!)
-        (r'^(\d{3,4})$', 'sequential_number'),      # 000, 001, 0001
-        (r'^(\d+)$', 'direct_number'),              # 0, 1, 2
-    ]
-
-    for pattern, method in sequential_patterns:
-        match = re.search(pattern, name_without_ext)
-        if match:
-            if method == 'decimal_number':
-                # Return as float for decimal chapters
-                return float(f"{match.group(1)}.{match.group(2)}"), method
-            else:
-                return int(match.group(1)), method
+    # Priority 4: Fall back to existing filename parsing patterns
     
     # Priority 4: Fall back to existing filename parsing patterns
     fallback_patterns = [
@@ -7825,6 +7821,8 @@ def main(log_callback=None, stop_callback=None):
 
     # When setting actual chapter numbers (in the main function)
     running_current_num = None  # tracks last numeric chapter to let non-numeric spine items inherit
+    zero_used = False           # allow only one numeric chapter 0
+    next_seq_after_zero = 1
     for idx, c in enumerate(chapters):
         chap_num = c["num"]
         content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
@@ -7859,6 +7857,13 @@ def main(log_callback=None, stop_callback=None):
         else:
             running_current_num = normalized_num
 
+        # Enforce single numeric chapter 0: if we've already used 0, bump non-positive to sequential 1,2,3...
+        if normalized_num <= 0:
+            if zero_used:
+                normalized_num = next_seq_after_zero
+                next_seq_after_zero += 1
+            else:
+                zero_used = True
         # Apply the offset after normalization
         offset = config.CHAPTER_NUMBER_OFFSET if hasattr(config, 'CHAPTER_NUMBER_OFFSET') else 0
         raw_num = normalized_num + offset
