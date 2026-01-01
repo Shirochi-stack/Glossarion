@@ -9369,7 +9369,6 @@ class UnifiedClient:
                 generation_config_params = {
                     "temperature": temperature,
                     "max_output_tokens": max_tokens,
-                    "stream": use_streaming,
                     **anti_dupe_params  # Add user's custom parameters
                 }
                 
