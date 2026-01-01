@@ -1534,6 +1534,18 @@ class RetranslationMixin:
             if not selected_items:
                 QMessageBox.warning(data.get('dialog', self), "No Selection", "Please select at least one chapter.")
                 return
+
+            # Dedup before processing to avoid duplicate output-file entries blocking updates
+            try:
+                import os, json
+                from TransateKRtoEN import ProgressManager
+                payloads_dir = data.get('payloads_dir') or os.path.dirname(data.get('progress_file', ''))
+                pm = ProgressManager(payloads_dir)
+                pm._dedup_by_output()
+                with open(data['progress_file'], 'r', encoding='utf-8') as f:
+                    data['prog'] = json.load(f)
+            except Exception as e:
+                print(f"⚠️ Dedup before remove QA failed mark: {e}")
             
             selected_indices = [data['listbox'].row(item) for item in selected_items]
             selected_chapters = [data['chapter_display_info'][i] for i in selected_indices]
@@ -1602,6 +1614,19 @@ class RetranslationMixin:
             if not selected_items:
                 QMessageBox.warning(data.get('dialog', self), "No Selection", "Please select at least one chapter.")
                 return
+
+            # Dedup progress before mutating to ensure only highest-priority entry per output file
+            try:
+                import os, json
+                from TransateKRtoEN import ProgressManager
+                payloads_dir = data.get('payloads_dir') or os.path.dirname(data.get('progress_file', ''))
+                pm = ProgressManager(payloads_dir)
+                pm._dedup_by_output()
+                # Reload deduped progress into GUI state
+                with open(data['progress_file'], 'r', encoding='utf-8') as f:
+                    data['prog'] = json.load(f)
+            except Exception as e:
+                print(f"⚠️ Dedup before retranslate failed: {e}")
             
             selected_indices = [data['listbox'].row(item) for item in selected_items]
             selected_chapters = [data['chapter_display_info'][i] for i in selected_indices]
