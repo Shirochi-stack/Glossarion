@@ -2016,7 +2016,11 @@ class ProgressManager:
         
         for old_key, chapter_info in self.prog["chapters"].items():
             actual_num = chapter_info.get("actual_num")
-            
+            # If key is non-numeric (composite/spine), keep as-is to avoid collisions
+            if not str(old_key).isdigit():
+                new_chapters[old_key] = chapter_info
+                continue
+
             if actual_num is not None:
                 new_key = str(actual_num)
                 
@@ -2061,7 +2065,9 @@ class ProgressManager:
             if "chapter_chunks" in self.prog:
                 new_chunks = {}
                 for old_key, chunk_data in self.prog["chapter_chunks"].items():
-                    if old_key in self.prog["chapters"] and "actual_num" in self.prog["chapters"][old_key]:
+                    if not str(old_key).isdigit():
+                        new_chunks[old_key] = chunk_data
+                    elif old_key in self.prog["chapters"] and "actual_num" in self.prog["chapters"][old_key]:
                         new_key = str(self.prog["chapters"][old_key]["actual_num"])
                         new_chunks[new_key] = chunk_data
                     else:
@@ -7818,6 +7824,7 @@ def main(log_callback=None, stop_callback=None):
     translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
 
     # When setting actual chapter numbers (in the main function)
+    running_current_num = None  # tracks last numeric chapter to let non-numeric spine items inherit
     for idx, c in enumerate(chapters):
         chap_num = c["num"]
         content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
@@ -7825,10 +7832,36 @@ def main(log_callback=None, stop_callback=None):
         # Extract the raw chapter number from the file
         raw_num = FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config)
         #print(f"[DEBUG] Extracted raw_num={raw_num} from {c.get('original_basename', 'unknown')}")
+        # Spine position (reading order) fallback
+        spine_pos = c.get('spine_order')
+        if spine_pos is None:
+            spine_pos = c.get('opf_spine_position')
+        if spine_pos is None:
+            spine_pos = idx  # ultimate fallback to list order
 
-        
-        # Apply the offset
+        # Determine if filename has any digits
+        name = c.get('original_basename') or os.path.basename(c.get('filename', '')) or ''
+        name_noext = os.path.splitext(name)[0]
+        has_digits_in_name = bool(re.search(r'\d', name_noext))
+
+        # Normalize chapter number:
+        # - Use extracted number when present and non-zero
+        # - If extraction returned 0/None, fall back to spine order
+        # - Non-numeric spine items inherit the previous numeric chapter number (or 0 if none yet)
+        normalized_num = raw_num
+        if normalized_num in (None, 0):
+            normalized_num = spine_pos
+        if not has_digits_in_name:
+            if running_current_num is not None:
+                normalized_num = running_current_num
+            else:
+                normalized_num = 0
+        else:
+            running_current_num = normalized_num
+
+        # Apply the offset after normalization
         offset = config.CHAPTER_NUMBER_OFFSET if hasattr(config, 'CHAPTER_NUMBER_OFFSET') else 0
+        raw_num = normalized_num + offset
         raw_num += offset
         
         # When toggle is disabled, use raw numbers without any 0-based adjustment
