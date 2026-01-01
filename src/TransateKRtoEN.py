@@ -1362,8 +1362,16 @@ class FileUtilities:
         # Get filename for extraction
         filename = chapter.get('original_basename') or chapter.get('filename', '')
 
-        # Note: We don't have opf_spine_position here, so pass None
-        actual_num, method = extract_chapter_number_from_filename(filename, opf_spine_position=None)
+        # Prefer OPF spine position when available (ensures range selection follows content.opf)
+        opf_spine_position = chapter.get('spine_order')
+        opf_spine_data = chapter.get('opf_spine_data')
+        
+        # Use our improved extraction function
+        actual_num, method = extract_chapter_number_from_filename(
+            filename,
+            opf_spine_position=opf_spine_position,
+            opf_spine_data=opf_spine_data
+        )
         
         # If extraction succeeded, return the result
         if actual_num is not None:
@@ -9714,8 +9722,11 @@ def main(log_callback=None, stop_callback=None):
                         status="qa_failed", chapter_obj=parent_chapter, qa_issues_found=qa_issues
                     )
                     for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group'][1:]:
+                        child_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
+                        if getattr(self, 'is_text_file', False):
+                            child_fname = child_fname.replace('.html', '.txt')
                         progress_manager.update(
-                            g_idx, g_actual_num, g_content_hash, None,
+                            g_idx, g_actual_num, g_content_hash, child_fname,
                             status="qa_failed", chapter_obj=g_chapter, qa_issues_found=qa_issues
                         )
                     progress_manager.save()
@@ -9921,8 +9932,11 @@ def main(log_callback=None, stop_callback=None):
                         status="qa_failed", chapter_obj=parent_chapter, qa_issues_found=qa_issues
                     )
                     for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group'][1:]:
+                        child_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
+                        if is_text_file:
+                            child_fname = child_fname.replace('.html', '.txt')
                         progress_manager.update(
-                            g_idx, g_actual_num, g_content_hash, None,
+                            g_idx, g_actual_num, g_content_hash, child_fname,
                             status="qa_failed", chapter_obj=g_chapter, qa_issues_found=qa_issues
                         )
                     chapters_completed += len(merge_info['group'])
