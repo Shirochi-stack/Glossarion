@@ -1378,13 +1378,13 @@ class FileUtilities:
             opf_spine_position = chapter.get('opf_spine_position')
         actual_num, method = extract_chapter_number_from_filename(filename, opf_spine_position=opf_spine_position)
 
-        # If extraction failed or yielded 0, fall back to spine/file data
-        if (actual_num is None or actual_num == 0) and opf_spine_position is not None:
+        # If extraction failed (no digits and no special), fall back to spine/file data
+        if actual_num is None and opf_spine_position is not None:
             actual_num = opf_spine_position
             method = 'opf_spine_fallback'
 
-        # If still missing/zero, use precomputed file_chapter_num when present
-        if (actual_num is None or actual_num == 0) and chapter.get('file_chapter_num') is not None:
+        # Only fall back to file_chapter_num when we still have no number
+        if actual_num is None and chapter.get('file_chapter_num') is not None:
             actual_num = chapter['file_chapter_num']
             method = 'file_chapter_num_fallback'
 
@@ -5038,14 +5038,16 @@ def extract_chapter_number_from_filename(filename, opf_spine_position=None, opf_
     base_no_ext_lower = base_no_ext.lower()
 
     # Priority 1: explicit split suffix (e.g., chapter_split_5)
-    split_suffix = re.search(r'(?:^|_)split_?(\\d+)$', base_no_ext, re.IGNORECASE)
+    split_suffix = re.search(r'(?:^|_)split_?(\d+)$', base_no_ext, re.IGNORECASE)
     if split_suffix:
         return int(split_suffix.group(1)), 'split_suffix'
 
     # Priority 2: digits in filename (use rightmost match to mirror GUI column)
-    numbers = re.findall(r'\\d+', base_no_ext)
+    numbers = re.findall(r'[0-9]+', base_no_ext)
     if numbers:
         last_num = int(numbers[-1])
+        if last_num == 0:
+            return 0, 'filename_zero'
         return last_num, 'filename_digits'
 
     # Priority 3: special keyword files with no digits -> chapter 0
