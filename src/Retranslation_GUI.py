@@ -857,7 +857,7 @@ class RetranslationMixin:
                     print(f"✅ Auto-discovered and tracked: {filename} -> {output_file}")
         
         # Save progress file if we added new entries
-        if progress_updated and progress_file:
+        if progress_updated:
             try:
                 with open(progress_file, 'w', encoding='utf-8') as f:
                     json.dump(prog, f, ensure_ascii=False, indent=2)
@@ -2183,7 +2183,6 @@ class RetranslationMixin:
         prog = data['prog']
         output_dir = data['output_dir']
         spine_chapters = data['spine_chapters']
-        progress_file = data.get('progress_file')
 
         def _normalize_opf_match_name(name: str) -> str:
             if not name:
@@ -2205,8 +2204,7 @@ class RetranslationMixin:
         basename_to_progress = {}
         response_to_progress = {}
         actualnum_to_progress = {}
-        from collections import defaultdict
-        composite_to_progress = defaultdict(list)
+        composite_to_progress = {}
 
         chapters_dict = prog.get("chapters", {})
         for ch in chapters_dict.values():
@@ -2227,7 +2225,7 @@ class RetranslationMixin:
             fname_for_comp = orig or out
             if fname_for_comp and actual_num is not None:
                 filename_noext = os.path.splitext(_normalize_opf_match_name(fname_for_comp))[0]
-                composite_to_progress[f"{actual_num}_{filename_noext}"].append(ch)
+                composite_to_progress[f"{actual_num}_{filename_noext}"] = ch
 
         # Cache directory listing to avoid thousands of exists calls
         try:
@@ -2293,17 +2291,7 @@ class RetranslationMixin:
                 if filename_noext.startswith("response_"):
                     filename_noext = filename_noext[len("response_"):]
                 comp_key = f"{chapter_num}_{filename_noext}"
-                candidates = composite_to_progress.get(comp_key, [])
-                if candidates:
-                    # Prefer entries whose original_basename or output_file matches this filename
-                    for ch in candidates:
-                        orig_base = os.path.basename(ch.get("original_basename", "") or "")
-                        out_file = ch.get("output_file", "")
-                        if _opf_names_equal(orig_base, filename) or _opf_names_equal(out_file, expected_response):
-                            matched_info = ch
-                            break
-                    if not matched_info:
-                        matched_info = candidates[0]
+                matched_info = composite_to_progress.get(comp_key)
 
             # 4) actual_num map fallback
             if not matched_info and chapter_num in actualnum_to_progress:
@@ -2409,8 +2397,6 @@ class RetranslationMixin:
                 print(f"💾 Saved {sum(1 for ch in spine_chapters if ch['status'] == 'completed' and 'progress_entry' not in ch)} auto-discovered files to progress file (refresh)")
             except Exception as e:
                 print(f"⚠️ Warning: Failed to save progress file during refresh: {e}")
-        elif progress_updated:
-            print("⚠️ Warning: progress_file path missing; skipping auto-discovered progress save")
         
         # Rebuild chapter_display_info from updated spine_chapters
         chapter_display_info = []
