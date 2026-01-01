@@ -1359,13 +1359,34 @@ class FileUtilities:
             # For text file chunks only, preserve the decimal number
             return chapter['num']  # This will be 1.1, 1.2, etc.
         
-        # Get filename for extraction
-        filename = chapter.get('original_basename') or chapter.get('filename', '')
+        # Get filename for extraction (broadened to match GUI/spine data)
+        filename = (
+            chapter.get('original_basename')
+            or chapter.get('original_filename')
+            or chapter.get('filename')
+            or chapter.get('source_filename')
+            or chapter.get('href')
+            or chapter.get('idref')
+            or chapter.get('id')
+            or chapter.get('name')
+            or chapter.get('key')
+            or ''
+        )
         
         opf_spine_position = chapter.get('spine_order')
         if opf_spine_position is None:
             opf_spine_position = chapter.get('opf_spine_position')
         actual_num, method = extract_chapter_number_from_filename(filename, opf_spine_position=opf_spine_position)
+
+        # If extraction failed or yielded 0, fall back to spine/file data
+        if (actual_num is None or actual_num == 0) and opf_spine_position is not None:
+            actual_num = opf_spine_position
+            method = 'opf_spine_fallback'
+
+        # If still missing/zero, use precomputed file_chapter_num when present
+        if (actual_num is None or actual_num == 0) and chapter.get('file_chapter_num') is not None:
+            actual_num = chapter['file_chapter_num']
+            method = 'file_chapter_num_fallback'
 
        # Prefer OPF spine position when available (ensures range selection follows content.opf)
        # opf_spine_position = chapter.get('spine_order')
