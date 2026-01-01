@@ -7586,7 +7586,6 @@ class UnifiedClient:
                         print(f"    [DEBUG] Sending HTTP request with max_tokens={current_max}...")
                     try:
                         import time as _t
-                        import traceback as _tb
                         start_ts = _t.time()
                         print(f"{provider} HTTP send -> {method} {url}")
                         resp = session.request(method, url, headers=headers, json=json, timeout=timeout)
@@ -10797,19 +10796,21 @@ class UnifiedClient:
                     }
                     if extra_body:
                         call_kwargs["extra_body"] = extra_body
+                    # Optional streaming toggle (text-only aggregation)
+                    use_streaming = os.getenv("ENABLE_STREAMING", "0") not in ("0", "false", "False", "FALSE")
+                    if use_streaming:
+                        call_kwargs["stream"] = True
                     
                     try:
                         import time as _t
                         start_ts = _t.time()
                         print(f"🛰️ [{provider}] SDK call start (model={effective_model}, base_url={base_url})")
-                        try:
-                            stack_snippet = "".join(_tb.format_stack(limit=12))
-                            print(f"[TRACEBACK {provider} start]\n{stack_snippet}")
-                        except Exception:
-                            pass
                         resp = client.chat.completions.create(**call_kwargs)
                         dur = _t.time() - start_ts
-                        print(f"🛰️ [{provider}] SDK call finished in {dur:.1f}s, got choices={len(getattr(resp,'choices',[]) or [])}")
+                        if use_streaming:
+                            print(f"🛰️ [{provider}] SDK stream opened in {dur:.1f}s")
+                        else:
+                            print(f"🛰️ [{provider}] SDK call finished in {dur:.1f}s, got choices={len(getattr(resp,'choices',[]) or [])}")
                     except Exception as sdk_err:
                         import traceback
                         tb = traceback.format_exc()
@@ -10822,7 +10823,38 @@ class UnifiedClient:
                     finish_reason = 'stop'
                     image_data = None  # Store extracted image data
                     
-                    # Extract content with Gemini awareness
+                    # Extract content with Gemini awareness (includes streaming aggregation)
+                    if use_streaming:
+                        text_parts = []
+                        finish_reason = 'stop'
+                        for event in resp:
+                            try:
+                                ch = (getattr(event, "choices", None) or [None])[0]
+                                if not ch:
+                                    continue
+                                delta = getattr(ch, "delta", None) or getattr(ch, "message", None)
+                                if delta is None:
+                                    continue
+                                delta_content = getattr(delta, "content", None)
+                                if isinstance(delta_content, list):
+                                    for part in delta_content:
+                                        if isinstance(part, dict) and part.get("type") == "text":
+                                            text_parts.append(part.get("text", ""))
+                                        elif hasattr(part, "type") and getattr(part, "type") == "text":
+                                            text_parts.append(getattr(part, "text", ""))
+                                elif delta_content:
+                                    text_parts.append(str(delta_content))
+                                if getattr(ch, "finish_reason", None):
+                                    finish_reason = ch.finish_reason
+                            except Exception:
+                                continue
+                        content = "".join(text_parts)
+                        return UnifiedResponse(
+                            content=content,
+                            finish_reason=finish_reason,
+                            raw_response=None
+                        )
+                    # Non-streaming extraction with Gemini awareness
                     if hasattr(resp, 'choices') and resp.choices:
                         choice = resp.choices[0]
                         

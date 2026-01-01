@@ -2097,6 +2097,7 @@ Recent translations to summarize:
             ('disable_gemini_safety_var', 'disable_gemini_safety', True),
             ('single_api_image_chunks_var', 'single_api_image_chunks', False),
             ('enable_image_output_mode_var', 'enable_image_output_mode', False),
+            ('enable_streaming_var', 'enable_streaming', False),
 
         ]
         
@@ -9973,13 +9974,14 @@ Important rules:
                 ('http_pool_connections', ['http_pool_connections_entry', 'http_pool_connections_var'], 20, lambda v: safe_int(v, 20)),
                 ('http_pool_maxsize', ['http_pool_maxsize_entry', 'http_pool_maxsize_var'], 50, lambda v: safe_int(v, 50)),
                 ('ignore_retry_after', ['ignore_retry_after_checkbox', 'ignore_retry_after_var'], False, bool),
+                ('enable_streaming', ['enable_streaming_checkbox', 'enable_streaming_var'], False, bool),
                 ('max_retries', ['max_retries_var'], 3, lambda v: safe_int(v, 3)),
                 ('indefinite_rate_limit_retry', ['indefinite_rate_limit_retry_var'], False, bool),
 
                 # Retry settings
                 ('retry_truncated', ['retry_truncated_var'], False, bool),
                 ('retry_split_failed', ['retry_split_failed_var'], True, bool),
-            ('max_retry_tokens', ['max_retry_tokens_var'], -1, lambda v: safe_int(v, -1)),
+                ('max_retry_tokens', ['max_retry_tokens_var'], -1, lambda v: safe_int(v, -1)),
                 ('truncation_retry_attempts', ['truncation_retry_attempts_var'], 1, lambda v: safe_int(v, 1)),
                 ('split_failed_retry_attempts', ['split_failed_retry_attempts_var'], 1, lambda v: safe_int(v, 1)),
                 ('retry_timeout', ['retry_timeout_var'], False, bool),
@@ -10585,6 +10587,7 @@ Important rules:
 
                 # Thinking toggles
                 ('ENABLE_DEEPSEEK_THINKING', '1' if self.config.get('enable_deepseek_thinking', True) else '0'),
+                ('ENABLE_STREAMING', '1' if self.config.get('enable_streaming', False) else '0'),
                 
                 # General settings
                 ('EXTRACTION_WORKERS', str(self.config.get('extraction_workers', 1)) if self.config.get('enable_parallel_extraction', False) else '1'),
