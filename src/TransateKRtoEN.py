@@ -7916,6 +7916,8 @@ def main(log_callback=None, stop_callback=None):
     running_current_num = None  # tracks last numeric chapter to let non-numeric spine items inherit
     zero_used = False           # allow only one numeric chapter 0
     next_seq_after_zero = 1
+    seq_counter = 1             # sequential numbering for numeric files (starts at 1)
+    zero_slots_remaining = 1    # allow one extra chapter 0 if filename has no digit >0
     for idx, c in enumerate(chapters):
         chap_num = c["num"]
         content_hash = c.get("content_hash") or ContentProcessor.get_content_hash(c["body"])
@@ -7935,20 +7937,21 @@ def main(log_callback=None, stop_callback=None):
         name_noext = os.path.splitext(name)[0]
         has_digits_in_name = bool(re.search(r'\d', name_noext))
 
-        # Normalize chapter number:
-        # - Use extracted number when present and non-zero
-        # - If extraction returned 0/None, fall back to spine order
-        # - Non-numeric spine items inherit the previous numeric chapter number (or 0 if none yet)
-        normalized_num = raw_num
-        if normalized_num in (None, 0):
-            normalized_num = spine_pos
-        if not has_digits_in_name:
-            if running_current_num is not None:
-                normalized_num = running_current_num
-            else:
+        # Normalize chapter number sequentially by numeric files, ignoring non-numeric for counting
+        if has_digits_in_name:
+            # check if any digit > 0 exists in filename
+            digits = re.findall(r'\d', name_noext)
+            has_gt_zero = any(d != '0' for d in digits)
+            if not has_gt_zero and zero_slots_remaining > 0:
                 normalized_num = 0
+                zero_slots_remaining -= 1
+            else:
+                normalized_num = seq_counter
+                seq_counter += 1
+                running_current_num = normalized_num
         else:
-            running_current_num = normalized_num
+            # specials/non-numeric stay at 0 and do not increment
+            normalized_num = 0
 
         # Enforce single numeric chapter 0: if we've already used 0, bump non-positive to sequential 1,2,3...
         if normalized_num <= 0:
