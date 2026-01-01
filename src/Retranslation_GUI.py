@@ -2293,24 +2293,30 @@ class RetranslationMixin:
                 comp_key = f"{chapter_num}_{filename_noext}"
                 matched_info = composite_to_progress.get(comp_key)
 
-            # 4) actual_num map fallback
+            # 4) actual_num map fallback (avoid mis-matching special files)
             if not matched_info and chapter_num in actualnum_to_progress:
                 for ch in actualnum_to_progress[chapter_num]:
                     status = ch.get('status', '')
                     out_file = ch.get('output_file')
                     orig_base = os.path.basename(ch.get('original_basename', '') or '')
 
+                    # If this spine entry is a special file (no digits), require filename match to avoid hijacking by other chapter 0 entries
+                    if is_special:
+                        fname_matches = (
+                            (orig_base and _opf_names_equal(orig_base, filename)) or
+                            (out_file and (_opf_names_equal(out_file, expected_response) or out_file == expected_response))
+                        )
+                        if not fname_matches:
+                            continue
+
                     if status == 'merged':
                         if _opf_names_equal(orig_base, filename) or not orig_base:
                             matched_info = ch
                             break
-                    elif status in ['in_progress', 'failed', 'pending']:
+                    elif status in ['in_progress', 'failed', 'pending', 'qa_failed']:
                         if out_file and (_opf_names_equal(out_file, expected_response) or out_file == expected_response):
                             matched_info = ch
                             break
-                    elif status == 'qa_failed':
-                        matched_info = ch
-                        break
                     else:
                         if (orig_base and _opf_names_equal(orig_base, filename)) or (out_file and (_opf_names_equal(out_file, expected_response) or out_file == expected_response)):
                             matched_info = ch
@@ -2548,10 +2554,20 @@ class RetranslationMixin:
             
             # PRIORITY 2: Fall back to output_file matching if no actual_num match
             if not matched_info:
+                severity = {'qa_failed': 4, 'failed': 3, 'pending': 2, 'in_progress': 1, 'completed': 0}
+                best = None
+                best_score = -1
                 for chapter_key, chapter_info in data['prog'].get("chapters", {}).items():
                     if chapter_info.get('output_file') == output_file:
-                        matched_info = chapter_info
-                        break
+                        status = chapter_info.get('status', 'unknown')
+                        score = severity.get(status, -1)
+                        # Prefer higher severity; tie-breaker: matching actual_num if present
+                        matches_num = (chapter_info.get('actual_num') or chapter_info.get('chapter_num')) == info['num']
+                        if score > best_score or (score == best_score and matches_num):
+                            best_score = score
+                            best = chapter_info
+                if best:
+                    matched_info = best
             
             # Update status based on current state from progress file
             if matched_info:
