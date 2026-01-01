@@ -7588,19 +7588,9 @@ class UnifiedClient:
                         import time as _t
                         start_ts = _t.time()
                         print(f"{provider} HTTP send -> {method} {url}")
-                        try:
-                            import sys as _sys
-                            _builtins.print(f"{provider} HTTP send -> {method} {url}", file=_sys.stderr)
-                        except Exception:
-                            pass
                         resp = session.request(method, url, headers=headers, json=json, timeout=timeout)
                         dur = _t.time() - start_ts
                         print(f"{provider} HTTP recv <- status {resp.status_code} in {dur:.1f}s")
-                        try:
-                            import sys as _sys
-                            _builtins.print(f"{provider} HTTP recv <- status {resp.status_code} in {dur:.1f}s", file=_sys.stderr)
-                        except Exception:
-                            pass
                     except Exception:
                         resp = session.request(method, url, headers=headers, json=json, timeout=timeout)
                     
@@ -7619,11 +7609,6 @@ class UnifiedClient:
                         resp = requests.request(method, url, headers=headers, json=json, timeout=self.request_timeout)
                         dur = _t.time() - start_ts
                         print(f"{provider} HTTP recv <- status {resp.status_code} in {dur:.1f}s")
-                        try:
-                            import sys as _sys
-                            _builtins.print(f"{provider} HTTP recv <- status {resp.status_code} in {dur:.1f}s", file=_sys.stderr)
-                        except Exception:
-                            pass
                     except Exception:
                         resp = requests.request(method, url, headers=headers, json=json, timeout=self.request_timeout)
                     
@@ -10816,19 +10801,9 @@ class UnifiedClient:
                         import time as _t
                         start_ts = _t.time()
                         print(f"🛰️ [{provider}] SDK call start (model={effective_model}, base_url={base_url})")
-                        try:
-                            import sys as _sys
-                            _builtins.print(f"🛰️ [{provider}] SDK call start (model={effective_model}, base_url={base_url})", file=_sys.stderr)
-                        except Exception:
-                            pass
                         resp = client.chat.completions.create(**call_kwargs)
                         dur = _t.time() - start_ts
                         print(f"🛰️ [{provider}] SDK call finished in {dur:.1f}s, got choices={len(getattr(resp,'choices',[]) or [])}")
-                        try:
-                            import sys as _sys
-                            _builtins.print(f"🛰️ [{provider}] SDK call finished in {dur:.1f}s, got choices={len(getattr(resp,'choices',[]) or [])}", file=_sys.stderr)
-                        except Exception:
-                            pass
                     except Exception as sdk_err:
                         import traceback
                         tb = traceback.format_exc()
