@@ -2008,6 +2008,26 @@ class ProgressManager:
             from TransateKRtoEN import FileUtilities
             output_filename = FileUtilities.create_chapter_filename(chapter_obj, actual_num)
             output_path = os.path.join(output_dir, output_filename)
+
+            # If a differently-keyed entry already tracks this file, reuse it instead of auto-discovering
+            def _norm(fname: str):
+                if not fname:
+                    return ""
+                base = os.path.basename(fname)
+                if base.startswith("response_"):
+                    base = base[len("response_"):]
+                return os.path.splitext(base)[0]
+
+            expected_norm = _norm(output_filename)
+            for k, info in self.prog.get("chapters", {}).items():
+                if _norm(info.get("output_file")) == expected_norm:
+                    status = info.get("status")
+                    if status in ["completed", "completed_empty", "completed_image_only"]:
+                        if info.get("output_file"):
+                            if os.path.exists(os.path.join(output_dir, info["output_file"])):
+                                return False, f"Chapter {info.get('actual_num', actual_num)} already translated: {info['output_file']}", info["output_file"]
+                    # If tracked with other status, treat as tracked (will retranslate if non-completed)
+                    return True, None, info.get("output_file")
             
             # Check if file exists for auto-discovery
             if os.path.exists(output_path):
