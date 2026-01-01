@@ -4648,7 +4648,7 @@ class BatchTranslationProcessor:
                         "[]"
                     ] or cleaned_stripped.startswith("[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]") or cleaned_stripped.startswith("[CONTENT BLOCKED - ORIGINAL TEXT PRESERVED]")
                     
-                    if not is_only_error_marker:
+                    if not is_only_error_marker and cleaned_stripped:
                         parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                         try:
                             cleaned_to_save = cleaned
@@ -4702,7 +4702,7 @@ class BatchTranslationProcessor:
                         "[]"
                     ] or cleaned_stripped.startswith("[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]") or cleaned_stripped.startswith("[CONTENT BLOCKED - ORIGINAL TEXT PRESERVED]")
                     
-                    if not is_only_error_marker:
+                    if not is_only_error_marker and cleaned_stripped:
                         # Save for debugging - contains actual translation attempt that failed split
                         parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
                         try:
@@ -9837,6 +9837,29 @@ def main(log_callback=None, stop_callback=None):
             cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
 
             cleaned = ContentProcessor.clean_ai_artifacts(cleaned, remove_artifacts=config.REMOVE_AI_ARTIFACTS)
+
+            # If the cleaned translation is empty/whitespace, treat as failure and skip file write
+            if not cleaned or not str(cleaned).strip():
+                print(f"❌ Translation empty for chapter {actual_num} — skipping file write")
+                chapter_key = progress_manager._get_chapter_key(actual_num, FileUtilities.create_chapter_filename(c, actual_num), c, content_hash)
+                existing = progress_manager.prog.get("chapters", {}).get(chapter_key, {})
+                # If already qa_failed (e.g., prohibited content), keep that; otherwise mark qa_failed with EMPTY_OUTPUT
+                new_status = existing.get("status") if existing.get("status") == "qa_failed" else "qa_failed"
+                qa_issues = existing.get("qa_issues_found") or []
+                if "EMPTY_OUTPUT" not in qa_issues:
+                    qa_issues = qa_issues + ["EMPTY_OUTPUT"]
+                progress_manager.update(
+                    idx,
+                    actual_num,
+                    content_hash,
+                    FileUtilities.create_chapter_filename(c, actual_num),
+                    status=new_status,
+                    qa_issues_found=qa_issues,
+                    chapter_obj=c,
+                )
+                progress_manager.save()
+                # Move to next chapter without writing a file
+                continue
             
             if is_mixed_content and image_translations:
                 print(f"🔀 Merging {len(image_translations)} image translations with text...")
