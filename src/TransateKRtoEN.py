@@ -1362,7 +1362,6 @@ class FileUtilities:
         # Get filename for extraction
         filename = chapter.get('original_basename') or chapter.get('filename', '')
         
-        # Note: We don't have opf_spine_position here, so pass None
         opf_spine_position = chapter.get('spine_order')
         if opf_spine_position is None:
             opf_spine_position = chapter.get('opf_spine_position')
@@ -4999,6 +4998,8 @@ def set_output_redirect(log_callback=None):
 # =====================================================
 # EPUB AND FILE PROCESSING
 # =====================================================
+_spine_positive_base = None  # module-level tracker for first positive-digit spine position
+
 def extract_chapter_number_from_filename(filename, opf_spine_position=None, opf_spine_data=None):
     """Extract chapter number from filename, prioritizing OPF spine order"""
     # Normalize: strip directory, extension, and response_ prefix for parsing
@@ -5061,10 +5062,17 @@ def extract_chapter_number_from_filename(filename, opf_spine_position=None, opf_
     numbers = re.findall(r'\\d+', name_without_ext)
     if numbers:
         nums = list(map(int, numbers))
-        if nums[0] == 0 and nums[-1] > 0:
-            return nums[-1], 'suffix_number'
+        positives = [n for n in nums if n > 0]
+        if positives:
+            # If spine info is available, renormalize numbering to start at first positive spine
+            global _spine_positive_base
+            if opf_spine_position is not None:
+                if _spine_positive_base is None:
+                    _spine_positive_base = opf_spine_position
+                return int(opf_spine_position - _spine_positive_base + 1), 'spine_renormalized'
+            return max(positives), 'suffix_number'
         else:
-            return nums[0], 'leading_number'
+            return 0, 'all_zero_numbers'
     
     # Priority 4: Fall back to existing filename parsing patterns
     
@@ -5086,9 +5094,9 @@ def extract_chapter_number_from_filename(filename, opf_spine_position=None, opf_
         if match:
             return int(match.group(1)), method
     
-    # Fallback to spine order if provided
+    # If still nothing and spine provided, return 0 for specials
     if opf_spine_position is not None:
-        return int(opf_spine_position), 'opf_spine_fallback'
+        return 0, 'spine_special'
     return None, None
 
 def process_chapter_images(chapter_html: str, actual_num: int, image_translator: ImageTranslator, 
@@ -7926,6 +7934,10 @@ def main(log_callback=None, stop_callback=None):
     # Check if special files translation is disabled
     translate_special = os.getenv('TRANSLATE_SPECIAL_FILES', '0') == '1'
 
+    # Reset spine positive base before numbering
+    global _spine_positive_base
+    _spine_positive_base = None
+
     # Helper: sequential numbering with zero-phase.
     # Start at 0; only start incrementing once a digit >0 is seen in the filename.
     def _assign_chapter_num(name_noext, seq_counter, zero_phase):
@@ -7965,22 +7977,8 @@ def main(log_callback=None, stop_callback=None):
         if spine_pos is None:
             spine_pos = idx  # ultimate fallback to list order
 
-        # Determine if filename has any digits (strip response_ and extensions)
-        name = c.get('original_basename') or os.path.basename(c.get('filename', '')) or ''
-        base = os.path.splitext(name)[0]
-        while True:
-            b, ext = os.path.splitext(base)
-            if not ext:
-                break
-            base = b
-        if base.lower().startswith('response_'):
-            base = base[len('response_'):]
-        name_noext = base
-
-        # Normalize chapter number sequentially with zero phase logic
-        normalized_num, seq_counter, zero_phase = _assign_chapter_num(name_noext, seq_counter, zero_phase)
-
-        # Apply the offset after normalization
+        # Normalize chapter number using extracted number (spine/file aware)
+        normalized_num = raw_num if raw_num is not None else 0
         offset = config.CHAPTER_NUMBER_OFFSET if hasattr(config, 'CHAPTER_NUMBER_OFFSET') else 0
         raw_num = normalized_num + offset
         
@@ -8174,6 +8172,7 @@ def main(log_callback=None, stop_callback=None):
         # FIX: First pass to set actual chapter numbers for ALL chapters
         # This ensures batch mode has the same chapter numbering as non-batch mode
         print("📊 Setting chapter numbers...")
+        _spine_positive_base = None
         seq_counter = 0
         zero_phase = True
         for idx, c in enumerate(chapters):
@@ -8185,18 +8184,8 @@ def main(log_callback=None, stop_callback=None):
                 c['zero_adjusted'] = False
                 continue
             
-            # Determine if filename has any digits and assign number consistently (strip response_ and extensions)
-            name = c.get('original_basename') or os.path.basename(c.get('filename', '')) or ''
-            base = os.path.splitext(name)[0]
-            while True:
-                b, ext = os.path.splitext(base)
-                if not ext:
-                    break
-                base = b
-            if base.lower().startswith('response_'):
-                base = base[len('response_'):]
-            name_noext = base
-            raw_num, seq_counter, zero_phase = _assign_chapter_num(name_noext, seq_counter, zero_phase)
+            raw_num = FileUtilities.extract_actual_chapter_number(c, patterns=None, config=config)
+            raw_num = raw_num if raw_num is not None else 0
 
             # Apply offset if configured
             offset = config.CHAPTER_NUMBER_OFFSET if hasattr(config, 'CHAPTER_NUMBER_OFFSET') else 0
