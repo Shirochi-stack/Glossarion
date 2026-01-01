@@ -9355,24 +9355,11 @@ class UnifiedClient:
         self._save_gemini_safety_config(config_data, response_name)
         # Global streaming toggle
         env_stream = os.getenv("ENABLE_STREAMING", "0")
-        cfg_stream = False
-        try:
-            cfg_stream = bool(getattr(self, 'config', {}).get('enable_streaming', False))
-        except Exception:
-            pass
-        var_stream = bool(getattr(self, 'enable_streaming_var', False))
-        ui_stream = False
-        try:
-            cb = getattr(self, 'enable_streaming_checkbox', None)
-            if cb is not None and hasattr(cb, 'isChecked'):
-                ui_stream = bool(cb.isChecked())
-        except Exception:
-            pass
-        use_streaming = (env_stream not in ("0", "false", "False", "FALSE")) or cfg_stream or var_stream or ui_stream
+        use_streaming = env_stream not in ("0", "false", "False", "FALSE")
         # Note: suppress duplicate provider logs; native path logs once here
         if not self._is_stop_requested():
             state = "ON" if use_streaming else "OFF"
-            print(f"🛰️ [gemini-native] Streaming {state} (env={env_stream}, cfg={cfg_stream}, var={var_stream}, ui={ui_stream})")
+            print(f"🛰️ [gemini-native] Streaming {state} (env={env_stream})")
         
         # Main attempt loop - SAME FOR BOTH ENDPOINTS
         while attempt < attempts:
