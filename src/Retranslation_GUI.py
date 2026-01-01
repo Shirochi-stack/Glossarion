@@ -2596,7 +2596,8 @@ class RetranslationMixin:
             
             # PRIORITY 2: Fall back to output_file matching if no actual_num match
             if not matched_info:
-                severity = {'qa_failed': 4, 'failed': 3, 'pending': 2, 'in_progress': 1, 'completed': 0}
+                # Prefer completed over failed/pending/in_progress; keep qa_failed highest
+                severity = {'qa_failed': 5, 'completed': 4, 'failed': 3, 'pending': 2, 'in_progress': 1}
                 best = None
                 best_score = -1
                 for chapter_key, chapter_info in data['prog'].get("chapters", {}).items():

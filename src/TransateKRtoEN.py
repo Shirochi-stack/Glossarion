@@ -1668,7 +1668,8 @@ class ProgressManager:
             if nums[0] == 0 and nums[-1] > 0:
                 return nums[-1]
             return nums[0]
-        severity = {'qa_failed': 5, 'pending': 4, 'failed': 3, 'in_progress': 2, 'completed': 1, 'merged': 1, 'unknown': 0}
+        # Prefer completed over failed/pending/in_progress, but keep qa_failed highest
+        severity = {'qa_failed': 6, 'completed': 5, 'merged': 5, 'pending': 4, 'failed': 3, 'in_progress': 2, 'unknown': 0}
         dedup = {}
         for key, info in list(self.prog.get("chapters", {}).items()):
             out = info.get("output_file")
@@ -2091,7 +2092,7 @@ class ProgressManager:
             return nums[0]
 
         # Priority: qa_failed > pending > failed > in_progress > completed
-        severity_rank = {'qa_failed': 5, 'pending': 4, 'failed': 3, 'in_progress': 2, 'completed': 1, 'merged': 1, 'unknown': 0}
+        severity_rank = {'qa_failed': 6, 'completed': 5, 'merged': 5, 'pending': 4, 'failed': 3, 'in_progress': 2, 'unknown': 0}
 
         # First, deduplicate by normalized output filename choosing highest severity then latest timestamp
         dedup = {}
