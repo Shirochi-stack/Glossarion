@@ -1362,12 +1362,8 @@ class FileUtilities:
         # Get filename for extraction
         filename = chapter.get('original_basename') or chapter.get('filename', '')
 
-        # Use our improved extraction function
         # Note: We don't have opf_spine_position here, so pass None
-        actual_num, method = extract_chapter_number_from_filename(
-            filename,
-            opf_spine_position=None
-        )
+        actual_num, method = extract_chapter_number_from_filename(filename, opf_spine_position=None)
         
         # If extraction succeeded, return the result
         if actual_num is not None:
@@ -7755,20 +7751,11 @@ def main(log_callback=None, stop_callback=None):
 
 
     rng = os.getenv("CHAPTER_RANGE", "")
-    start = end = None
-    range_uses_spine = False
+    start = None
+    end = None
     if rng and re.match(r"^\d+\s*-\s*\d+$", rng):
-        start, end = map(int, rng.split("-", 1))
-
-        # Prefer OPF spine positions for range selection if present on any chapter
-        range_uses_spine = any(
-            (c.get("spine_order") is not None) or (c.get("opf_spine_position") is not None)
-            for c in chapters
-        )
-
-        if range_uses_spine:
-            print(f"📚 Applying chapter range {start}-{end} using OPF spine order (content.opf)")
-        else:
+            start, end = map(int, rng.split("-", 1))
+            
             if config.DISABLE_ZERO_DETECTION:
                 print(f"📊 0-based detection disabled - using range as specified: {start}-{end}")
             elif uses_zero_based:
@@ -7834,20 +7821,12 @@ def main(log_callback=None, stop_callback=None):
                 chunks_per_chapter[idx] = 0
                 continue
 
-        # Compute and store the range key once so all later passes (incl. progress manager checks)
-        # use the same value. This keeps range filtering in sync with spine-aware ordering.
-        spine_pos = c.get('spine_order')
-        if spine_pos is None:
-            spine_pos = c.get('opf_spine_position')
-        range_key = spine_pos if (range_uses_spine and spine_pos is not None) else c['actual_chapter_num']
-        c['_range_key'] = range_key
-
         if start is not None:
-            if not (start <= range_key <= end):
+            if not (start <= c['actual_chapter_num'] <= end):
                 # Track skipped chapters for summary (don't print individually)
                 if not hasattr(config, '_range_skipped_chapters'):
                     config._range_skipped_chapters = []
-                config._range_skipped_chapters.append(range_key)
+                config._range_skipped_chapters.append(c['actual_chapter_num'])
                 continue
                 
         # IMPORTANT: pass chapter_obj so ProgressManager can resolve composite keys
@@ -8745,9 +8724,7 @@ def main(log_callback=None, stop_callback=None):
                 if not has_digits_in_name:
                     continue
             
-            # Range filtering should use the same key computed in the first pass
-            range_num = c.get('_range_key', actual_num)
-            if start is not None and not (start <= range_num <= end):
+            if start is not None and not (start <= actual_num <= end):
                 # Skip silently (already summarized in earlier pass)
                 continue
             
@@ -9974,75 +9951,80 @@ def main(log_callback=None, stop_callback=None):
                 # Skip normal save since we handled it above and exit this translation run
                 continue
 
-            # Determine status BEFORE writing to disk to avoid creating empty/blocked files
-            qa_issues = None
-            if finish_reason == "content_filter":
-                chapter_status = "qa_failed"
-                qa_issues = ["CONTENT_FILTER"]
-                print(f"⚠️ Chapter {actual_num} marked as qa_failed: content_filter finish_reason")
-            elif not cleaned.strip():
-                chapter_status = "qa_failed"
-                qa_issues = ["EMPTY_RESPONSE"]
-                print(f"⚠️ Chapter {actual_num} marked as qa_failed: Empty content")
-            elif is_qa_failed_response(cleaned):
-                chapter_status = "qa_failed"
-                failure_reason = get_failure_reason(cleaned)
-                qa_issues = [failure_reason] if failure_reason else None
-                print(f"⚠️ Chapter {actual_num} marked as qa_failed: {failure_reason}")
-            elif finish_reason in ["length", "max_tokens"]:
-                chapter_status = "qa_failed"
-                qa_issues = ["TRUNCATED"]
-                print(f"⚠️ Chapter {actual_num} marked as qa_failed: truncated (finish_reason: {finish_reason})")
-            else:
-                chapter_status = "completed"
-
             if is_text_file and not is_pdf_file:
+                # For text files (but NOT PDFs), save as plain text instead of HTML
                 fname_txt = fname.replace('.html', '.txt')  # Change extension to .txt
-
-                # Only write file when we have real content and not content-filter/empty failures
-                if chapter_status == "completed" or (chapter_status == "qa_failed" and cleaned.strip()):
-                    from bs4 import BeautifulSoup
-                    soup = BeautifulSoup(cleaned, 'html.parser')
-                    text_content = soup.get_text(strip=True)
-
-                    output_path = os.path.join(out, fname_txt)
-                    with open(output_path, 'w', encoding='utf-8') as f:
-                        f.write(text_content)
-
-                    if not os.path.exists(output_path):
-                        print(f"⚠️ ERROR: Failed to write file {fname_txt} - file does not exist after write")
-                        progress_manager.save()
-                        continue
-
-                    print(f"💾 Saved text file: {fname_txt} (Chapter {actual_num})")
-                    if os.getenv('DEBUG_CHAPTER_SAVES', '0') == '1':
-                        final_title = c['title'] or make_safe_filename(c['title'], actual_num)
-                        print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {actual_num}: {final_title}")
-                    recorded_output = fname_txt
+                
+                # Extract text from HTML
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(cleaned, 'html.parser')
+                text_content = soup.get_text(strip=True)
+                
+                # Write plain text file
+                output_path = os.path.join(out, fname_txt)
+                with open(output_path, 'w', encoding='utf-8') as f:
+                    f.write(text_content)
+                
+                # Verify file was actually written before marking as completed
+                if not os.path.exists(output_path):
+                    print(f"⚠️ ERROR: Failed to write file {fname_txt} - file does not exist after write")
+                    # Keep status as in_progress or mark as failed
+                    progress_manager.save()  # Save current in_progress state
+                    continue
+                
+                print(f"💾 Saved text file: {fname_txt} (Chapter {actual_num})")
+                
+                final_title = c['title'] or make_safe_filename(c['title'], actual_num)
+                # Don't print individual "Processed" messages - these are redundant with the main progress display
+                if os.getenv('DEBUG_CHAPTER_SAVES', '0') == '1':
+                    print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {actual_num}: {final_title}")
+                
+                # Determine status based on comprehensive failure detection
+                qa_issues = None
+                if is_qa_failed_response(cleaned):
+                    chapter_status = "qa_failed"
+                    failure_reason = get_failure_reason(cleaned)
+                    print(f"⚠️ Chapter {actual_num} marked as qa_failed: {failure_reason}")
+                elif finish_reason in ["length", "max_tokens"]:
+                    chapter_status = "qa_failed"
+                    qa_issues = ["TRUNCATED"]
+                    print(f"⚠️ Chapter {actual_num} marked as qa_failed: truncated (finish_reason: {finish_reason})")
                 else:
-                    recorded_output = None  # don't point to a non-existent/blocked file
+                    chapter_status = "completed"
 
-                progress_manager.update(idx, actual_num, content_hash, recorded_output, status=chapter_status, chapter_obj=c, qa_issues_found=qa_issues)
+                progress_manager.update(idx, actual_num, content_hash, fname_txt, status=chapter_status, chapter_obj=c, qa_issues_found=qa_issues)
             else:
-                # EPUB / HTML branch
-                if chapter_status == "completed" or (chapter_status == "qa_failed" and cleaned.strip()):
-                    output_path = os.path.join(out, fname)
-                    with open(output_path, 'w', encoding='utf-8') as f:
-                        f.write(cleaned)
-
-                    if not os.path.exists(output_path):
-                        print(f"⚠️ ERROR: Failed to write file {fname} - file does not exist after write")
-                        progress_manager.save()
-                        continue
-
-                    if os.getenv('DEBUG_CHAPTER_SAVES', '0') == '1':
-                        final_title = c['title'] or make_safe_filename(c['title'], actual_num)
-                        print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {actual_num}: {final_title}")
-                    recorded_output = fname
+                # For EPUB files, keep original HTML behavior
+                output_path = os.path.join(out, fname)
+                with open(output_path, 'w', encoding='utf-8') as f:
+                    f.write(cleaned)
+                
+                # Verify file was actually written before marking as completed
+                if not os.path.exists(output_path):
+                    print(f"⚠️ ERROR: Failed to write file {fname} - file does not exist after write")
+                    # Keep status as in_progress or mark as failed
+                    progress_manager.save()  # Save current in_progress state
+                    continue
+                
+                final_title = c['title'] or make_safe_filename(c['title'], actual_num)
+                # Don't print individual "Processed" messages - these are redundant with the main progress display
+                if os.getenv('DEBUG_CHAPTER_SAVES', '0') == '1':
+                    print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {actual_num}: {final_title}")
+                
+                # Determine status based on comprehensive failure detection
+                qa_issues = None
+                if is_qa_failed_response(cleaned):
+                    chapter_status = "qa_failed"
+                    failure_reason = get_failure_reason(cleaned)
+                    print(f"⚠️ Chapter {actual_num} marked as qa_failed: {failure_reason}")
+                elif finish_reason in ["length", "max_tokens"]:
+                    chapter_status = "qa_failed"
+                    qa_issues = ["TRUNCATED"]
+                    print(f"⚠️ Chapter {actual_num} marked as qa_failed: truncated (finish_reason: {finish_reason})")
                 else:
-                    recorded_output = None
+                    chapter_status = "completed"
 
-                progress_manager.update(idx, actual_num, content_hash, recorded_output, status=chapter_status, chapter_obj=c, qa_issues_found=qa_issues)
+                progress_manager.update(idx, actual_num, content_hash, fname, status=chapter_status, chapter_obj=c, qa_issues_found=qa_issues)
             progress_manager.save()
             
             # After completing this chapter, produce a rolling summary and store it for the NEXT chapter
