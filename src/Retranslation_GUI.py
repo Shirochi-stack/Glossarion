@@ -321,6 +321,11 @@ class RetranslationMixin:
         else:
             with open(progress_file, 'r', encoding='utf-8') as f:
                 prog = json.load(f)
+
+        # Remember whether we already have tracking; auto-discovery should only run
+        # when there was no progress data to begin with.
+        initial_has_progress = bool(prog.get("chapters"))
+        allow_auto_discover = not initial_has_progress
         
         # Clean up missing files and merged children when opening the GUI
         # This handles the case where parent files were manually deleted
@@ -692,10 +697,12 @@ class RetranslationMixin:
                                 ):
                                     matched_info = chapter_info
                                     break
-                            # qa_failed chapters: match by chapter number only so they are always visible,
-                            # even when filenames don't line up perfectly.
+                            # qa_failed chapters: require both chapter number AND filename match (normalized)
                             elif status == 'qa_failed':
-                                if actual_num == chapter_num:
+                                if actual_num == chapter_num and (
+                                    _opf_names_equal(orig_base, filename)
+                                    or (out_file and (_opf_names_equal(out_file, expected_response) or out_file == expected_response))
+                                ):
                                     matched_info = chapter_info
                                     break
                             
@@ -775,9 +782,13 @@ class RetranslationMixin:
                             spine_ch['status'] = 'not_translated'
             
             elif file_exists:
-                # File exists but no progress tracking - mark as completed
-                spine_ch['status'] = 'completed'
-                spine_ch['output_file'] = expected_response
+                # File exists but no progress tracking
+                if allow_auto_discover:
+                    spine_ch['status'] = 'completed'
+                    spine_ch['output_file'] = expected_response
+                else:
+                    spine_ch['status'] = 'not_translated'
+                    spine_ch['output_file'] = expected_response
             
             else:
                 # No file and no progress tracking - LAST RESORT: Try exact filename matching
@@ -815,13 +826,13 @@ class RetranslationMixin:
                     except Exception as e:
                         print(f"Warning: Error scanning output directory for match: {e}")
                 
-                if matched_file:
+                if matched_file and allow_auto_discover:
                     # Found an exact matching file by normalized name - mark as completed
                     spine_ch['status'] = 'completed'
                     spine_ch['output_file'] = matched_file
                     print(f"📁 Matched: {filename} -> {matched_file}")
                 else:
-                    # No file and no progress tracking - not translated
+                    # No auto-discovery when progress already exists
                     spine_ch['status'] = 'not_translated'
                     spine_ch['output_file'] = expected_response
         
@@ -831,39 +842,40 @@ class RetranslationMixin:
         
         # Check if we discovered any new completed files (exact matched by normalized filename)
         # and add them to the progress file
-        progress_updated = False
-        for spine_ch in spine_chapters:
-            # Only add entries that were marked as completed but have no progress entry
-            if spine_ch['status'] == 'completed' and 'progress_entry' not in spine_ch:
-                chapter_num = spine_ch['file_chapter_num']
-                output_file = spine_ch['output_file']
-                filename = spine_ch['filename']
-                
-                # Create a progress entry for this auto-discovered file
-                chapter_key = str(chapter_num)
-                
-                # Check if key already exists (avoid duplicates)
-                if chapter_key not in prog.get("chapters", {}):
-                    prog.setdefault("chapters", {})[chapter_key] = {
-                        "actual_num": chapter_num,
-                        "content_hash": "",  # Unknown since we don't have the source
-                        "output_file": output_file,
-                        "status": "completed",
-                        "last_updated": os.path.getmtime(os.path.join(output_dir, output_file)),
-                        "auto_discovered": True,
-                        "original_basename": filename
-                    }
-                    progress_updated = True
-                    print(f"✅ Auto-discovered and tracked: {filename} -> {output_file}")
-        
-        # Save progress file if we added new entries
-        if progress_updated:
-            try:
-                with open(progress_file, 'w', encoding='utf-8') as f:
-                    json.dump(prog, f, ensure_ascii=False, indent=2)
-                print(f"💾 Saved {sum(1 for ch in spine_chapters if ch['status'] == 'completed' and 'progress_entry' not in ch)} auto-discovered files to progress file")
-            except Exception as e:
-                print(f"⚠️ Warning: Failed to save progress file: {e}")
+        if allow_auto_discover:
+            progress_updated = False
+            for spine_ch in spine_chapters:
+                # Only add entries that were marked as completed but have no progress entry
+                if spine_ch['status'] == 'completed' and 'progress_entry' not in spine_ch:
+                    chapter_num = spine_ch['file_chapter_num']
+                    output_file = spine_ch['output_file']
+                    filename = spine_ch['filename']
+                    
+                    # Create a progress entry for this auto-discovered file
+                    chapter_key = str(chapter_num)
+                    
+                    # Check if key already exists (avoid duplicates)
+                    if chapter_key not in prog.get("chapters", {}):
+                        prog.setdefault("chapters", {})[chapter_key] = {
+                            "actual_num": chapter_num,
+                            "content_hash": "",  # Unknown since we don't have the source
+                            "output_file": output_file,
+                            "status": "completed",
+                            "last_updated": os.path.getmtime(os.path.join(output_dir, output_file)),
+                            "auto_discovered": True,
+                            "original_basename": filename
+                        }
+                        progress_updated = True
+                        print(f"✅ Auto-discovered and tracked: {filename} -> {output_file}")
+
+            # Save progress file if we added new entries
+            if progress_updated:
+                try:
+                    with open(progress_file, 'w', encoding='utf-8') as f:
+                        json.dump(prog, f, ensure_ascii=False, indent=2)
+                    print(f"💾 Saved {sum(1 for ch in spine_chapters if ch['status'] == 'completed' and 'progress_entry' not in ch)} auto-discovered files to progress file")
+                except Exception as e:
+                    print(f"⚠️ Warning: Failed to save progress file: {e}")
         
         # =====================================================
         # BUILD DISPLAY INFO
@@ -1462,7 +1474,9 @@ class RetranslationMixin:
             'dialog': dialog,
             'container': container,
             'show_special_files_state': show_special_files[0],  # Store current toggle state
-            'show_special_files_cb': show_special_files_cb  # Store checkbox reference
+            'show_special_files_cb': show_special_files_cb,  # Store checkbox reference
+            'allow_auto_discover': allow_auto_discover,
+            'initial_has_progress': initial_has_progress
         }
         
         # If standalone (no parent), add buttons and show dialog
@@ -2180,6 +2194,7 @@ class RetranslationMixin:
     
     def _rematch_spine_chapters(self, data):
         """Re-run the full spine chapter matching logic against updated progress JSON"""
+        allow_auto_discover = data.get('allow_auto_discover', False)
         prog = data['prog']
         output_dir = data['output_dir']
         spine_chapters = data['spine_chapters']
@@ -2309,8 +2324,13 @@ class RetranslationMixin:
                             matched_info = ch
                             break
                     elif status == 'qa_failed':
-                        matched_info = ch
-                        break
+                        # For QA failed, require chapter number match AND filename match (normalized, ignoring response_ and extensions)
+                        if ch.get('actual_num') == chapter_num and (
+                            _opf_names_equal(orig_base, filename)
+                            or (out_file and (_opf_names_equal(out_file, expected_response) or out_file == expected_response))
+                        ):
+                            matched_info = ch
+                            break
                     else:
                         if (orig_base and _opf_names_equal(orig_base, filename)) or (out_file and (_opf_names_equal(out_file, expected_response) or out_file == expected_response)):
                             matched_info = ch
@@ -2343,8 +2363,12 @@ class RetranslationMixin:
                             spine_ch['status'] = 'not_translated'
 
             elif file_exists:
-                spine_ch['status'] = 'completed'
-                spine_ch['output_file'] = expected_response
+                if allow_auto_discover:
+                    spine_ch['status'] = 'completed'
+                    spine_ch['output_file'] = expected_response
+                else:
+                    spine_ch['status'] = 'not_translated'
+                    spine_ch['output_file'] = expected_response
 
             else:
                 norm_target = _normalize_opf_match_name(filename)
@@ -2353,7 +2377,7 @@ class RetranslationMixin:
                     if _normalize_opf_match_name(f) == norm_target:
                         matched_file = f
                         break
-                if matched_file:
+                if matched_file and allow_auto_discover:
                     spine_ch['status'] = 'completed'
                     spine_ch['output_file'] = matched_file
                 else:
@@ -2364,39 +2388,40 @@ class RetranslationMixin:
         # SAVE AUTO-DISCOVERED FILES TO PROGRESS (refresh path)
         # =====================================================
         
-        progress_updated = False
-        for spine_ch in spine_chapters:
-            # Only add entries that were marked as completed but have no progress entry
-            if spine_ch['status'] == 'completed' and 'progress_entry' not in spine_ch:
-                chapter_num = spine_ch['file_chapter_num']
-                output_file = spine_ch['output_file']
-                filename = spine_ch['filename']
-                
-                # Create a progress entry for this auto-discovered file
-                chapter_key = str(chapter_num)
-                
-                # Check if key already exists (avoid duplicates)
-                if chapter_key not in prog.get("chapters", {}):
-                    prog.setdefault("chapters", {})[chapter_key] = {
-                        "actual_num": chapter_num,
-                        "content_hash": "",  # Unknown since we don't have the source
-                        "output_file": output_file,
-                        "status": "completed",
-                        "last_updated": os.path.getmtime(os.path.join(output_dir, output_file)),
-                        "auto_discovered": True,
-                        "original_basename": filename
-                    }
-                    progress_updated = True
-                    print(f"✅ Auto-discovered and tracked (refresh): {filename} -> {output_file}")
+        if allow_auto_discover:
+            progress_updated = False
+            for spine_ch in spine_chapters:
+                # Only add entries that were marked as completed but have no progress entry
+                if spine_ch['status'] == 'completed' and 'progress_entry' not in spine_ch:
+                    chapter_num = spine_ch['file_chapter_num']
+                    output_file = spine_ch['output_file']
+                    filename = spine_ch['filename']
+                    
+                    # Create a progress entry for this auto-discovered file
+                    chapter_key = str(chapter_num)
+                    
+                    # Check if key already exists (avoid duplicates)
+                    if chapter_key not in prog.get("chapters", {}):
+                        prog.setdefault("chapters", {})[chapter_key] = {
+                            "actual_num": chapter_num,
+                            "content_hash": "",  # Unknown since we don't have the source
+                            "output_file": output_file,
+                            "status": "completed",
+                            "last_updated": os.path.getmtime(os.path.join(output_dir, output_file)),
+                            "auto_discovered": True,
+                            "original_basename": filename
+                        }
+                        progress_updated = True
+                        print(f"✅ Auto-discovered and tracked (refresh): {filename} -> {output_file}")
         
-        # Save progress file if we added new entries
-        if progress_updated:
-            try:
-                with open(progress_file, 'w', encoding='utf-8') as f:
-                    json.dump(prog, f, ensure_ascii=False, indent=2)
-                print(f"💾 Saved {sum(1 for ch in spine_chapters if ch['status'] == 'completed' and 'progress_entry' not in ch)} auto-discovered files to progress file (refresh)")
-            except Exception as e:
-                print(f"⚠️ Warning: Failed to save progress file during refresh: {e}")
+            # Save progress file if we added new entries
+            if progress_updated:
+                try:
+                    with open(progress_file, 'w', encoding='utf-8') as f:
+                        json.dump(prog, f, ensure_ascii=False, indent=2)
+                    print(f"💾 Saved {sum(1 for ch in spine_chapters if ch['status'] == 'completed' and 'progress_entry' not in ch)} auto-discovered files to progress file (refresh)")
+                except Exception as e:
+                    print(f"⚠️ Warning: Failed to save progress file during refresh: {e}")
         
         # Rebuild chapter_display_info from updated spine_chapters
         chapter_display_info = []
