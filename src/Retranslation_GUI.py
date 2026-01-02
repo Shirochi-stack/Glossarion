@@ -720,6 +720,7 @@ class RetranslationMixin:
             if matched_info:
                 # We found progress tracking info - use its status
                 status = matched_info.get('status', 'unknown')
+                spine_ch['progress_key'] = matched_info.get('_key')
                 
                 # CRITICAL: For failed/in_progress/qa_failed/pending, ALWAYS use progress status
                 # Never let file existence override these statuses
@@ -1558,17 +1559,7 @@ class RetranslationMixin:
                 QMessageBox.warning(data.get('dialog', self), "No Selection", "Please select at least one chapter.")
                 return
 
-            # Dedup before processing to avoid duplicate output-file entries blocking updates
-            try:
-                import os, json
-                from TransateKRtoEN import ProgressManager
-                payloads_dir = data.get('payloads_dir') or os.path.dirname(data.get('progress_file', ''))
-                pm = ProgressManager(payloads_dir)
-                pm._dedup_by_output()
-                with open(data['progress_file'], 'r', encoding='utf-8') as f:
-                    data['prog'] = json.load(f)
-            except Exception as e:
-                print(f"⚠️ Dedup before remove QA failed mark: {e}")
+            # Skip dedup here to avoid merging distinct chapters that share filenames
             
 
             selected_indices = [data['listbox'].row(item) for item in selected_items]
@@ -1622,18 +1613,7 @@ class RetranslationMixin:
                 QMessageBox.warning(data.get('dialog', self), "No Selection", "Please select at least one chapter.")
                 return
 
-            # Dedup progress before mutating to ensure only highest-priority entry per output file
-            try:
-                import os, json
-                from TransateKRtoEN import ProgressManager
-                payloads_dir = data.get('payloads_dir') or os.path.dirname(data.get('progress_file', ''))
-                pm = ProgressManager(payloads_dir)
-                pm._dedup_by_output()
-                # Reload deduped progress into GUI state
-                with open(data['progress_file'], 'r', encoding='utf-8') as f:
-                    data['prog'] = json.load(f)
-            except Exception as e:
-                print(f"⚠️ Dedup before retranslate failed: {e}")
+            # Do NOT dedup here; it can collapse distinct chapters sharing filenames
             
             selected_indices = [data['listbox'].row(item) for item in selected_items]
             selected_chapters = [data['chapter_display_info'][i] for i in selected_indices]
@@ -1674,10 +1654,15 @@ class RetranslationMixin:
             for ch_info in selected_chapters:
                 output_file = ch_info['output_file']
                 actual_num = ch_info['num']
+                progress_key = ch_info.get('progress_key')
                 
                 if ch_info['status'] != 'not_translated':
                     # Reset status to pending for ALL non-not_translated chapters, but only if we can match the exact progress entry
-                    match = _find_progress_entry(ch_info, data['prog'])
+                    match = None
+                    if progress_key and progress_key in data['prog']["chapters"]:
+                        match = (progress_key, data['prog']["chapters"][progress_key])
+                    else:
+                        match = _find_progress_entry(ch_info, data['prog'])
                     old_status = ch_info['status']
                     
                     if match:
@@ -2445,7 +2430,8 @@ class RetranslationMixin:
                 'entries': [],
                 'opf_position': spine_ch['position'],
                 'original_filename': spine_ch['filename'],
-                'is_special': spine_ch.get('is_special', False)
+                'is_special': spine_ch.get('is_special', False),
+                'progress_key': spine_ch.get('progress_key')
             }
             chapter_display_info.append(display_info)
         
@@ -2550,7 +2536,8 @@ class RetranslationMixin:
                 'status': status,
                 'duplicate_count': len(entries),
                 'entries': entries,
-                'is_special': is_special
+                'is_special': is_special,
+                'progress_key': chapter_key
             })
         
         # Sort by chapter number
@@ -2755,7 +2742,7 @@ class RetranslationMixin:
                 item.setText(build_display(info, max_original_len, max_output_len))
                 apply_item_visuals(item, info['status'])
                 is_special = info.get('is_special', False)
-                item.setData(Qt.UserRole, {'is_special': is_special, 'info': info})
+                item.setData(Qt.UserRole, {'is_special': is_special, 'info': info, 'progress_key': info.get('progress_key')})
                 item.setHidden(is_special and not show_special_files)
         else:
             # Recreate items
@@ -2768,7 +2755,7 @@ class RetranslationMixin:
                 item = QListWidgetItem(build_display(info, max_original_len, max_output_len))
                 apply_item_visuals(item, info['status'])
                 is_special = info.get('is_special', False)
-                item.setData(Qt.UserRole, {'is_special': is_special, 'info': info})
+                item.setData(Qt.UserRole, {'is_special': is_special, 'info': info, 'progress_key': info.get('progress_key')})
                 item.setHidden(is_special and not show_special_files)
                 listbox.addItem(item)
 
