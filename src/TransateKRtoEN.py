@@ -1998,7 +1998,21 @@ class ProgressManager:
                     output_path = os.path.join(output_dir, output_file)
                     if os.path.exists(output_path):
                         return False, f"Chapter {actual_num} already translated: {output_file}", output_file
-                
+
+                    # Fallback: look for any file with same base name (ignore extensions)
+                    expected_norm = _norm(output_file)
+                    try:
+                        for f in os.listdir(output_dir):
+                            if _norm(f) == expected_norm:
+                                alt_path = os.path.join(output_dir, f)
+                                if os.path.exists(alt_path):
+                                    # Update stored filename to the discovered one
+                                    self.prog["chapters"][chapter_key]["output_file"] = f
+                                    self.save()
+                                    return False, f"Chapter {actual_num} already translated: {f}", f
+                    except Exception:
+                        pass
+
                 # File missing - retranslate
                 del self.prog["chapters"][chapter_key]
                 if chapter_key in self.prog.get("chapter_chunks", {}):
@@ -2018,12 +2032,23 @@ class ProgressManager:
 
             # If a differently-keyed entry already tracks this file, reuse it instead of auto-discovering
             def _norm(fname: str):
+                """
+                Normalize a filename for comparison:
+                - drop leading response_ prefix
+                - strip *all* extensions (handle .html.xhtml, .md.html, etc.)
+                - lowercase for case-insensitive matching on Windows
+                """
                 if not fname:
                     return ""
                 base = os.path.basename(fname)
                 if base.startswith("response_"):
                     base = base[len("response_"):]
-                return os.path.splitext(base)[0]
+                # Strip all extensions, not just the last one
+                while True:
+                    base, ext = os.path.splitext(base)
+                    if not ext:
+                        break
+                return base.lower()
 
             expected_norm = _norm(output_filename)
             for k, info in self.prog.get("chapters", {}).items():
