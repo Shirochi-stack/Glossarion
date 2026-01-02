@@ -1546,6 +1546,21 @@ class AsyncProcessingDialog:
                 background-color: #1e1e1e;
             }
         """)
+
+        # Override close behavior: minimize instead of closing if parent GUI is still active
+        def _on_close(event):
+            try:
+                parent_alive = True
+                if hasattr(self.gui, "isVisible"):
+                    parent_alive = bool(self.gui.isVisible())
+                if parent_alive:
+                    event.ignore()
+                    self.dialog.showMinimized()
+                    return
+            except Exception:
+                pass
+            event.accept()
+        self.dialog.closeEvent = _on_close
         
         # Set icon if available
         try:
