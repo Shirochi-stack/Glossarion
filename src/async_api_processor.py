@@ -603,7 +603,7 @@ class AsyncAPIProcessor:
                     "model": actual_model,
                     "messages": valid_messages,
                     "temperature": float(chapter.get('temperature', 0.3)),
-                    "max_tokens": int(chapter.get('max_tokens', 8192))
+                    "max_tokens": int(chapter.get('max_tokens', 65536))
                 }
             }
 
@@ -643,7 +643,7 @@ class AsyncAPIProcessor:
                 "params": {
                     "model": model,
                     "messages": messages,
-                    "max_tokens": chapter.get('max_tokens', 8192),
+                    "max_tokens": chapter.get('max_tokens', 65536),
                     "temperature": chapter.get('temperature', 0.3)
                 }
             }
@@ -670,7 +670,7 @@ class AsyncAPIProcessor:
                     "contents": [{"parts": [{"text": prompt}]}],
                     "generationConfig": {
                         "temperature": chapter.get('temperature', 0.3),
-                        "maxOutputTokens": chapter.get('max_tokens', 8192)
+                        "maxOutputTokens": chapter.get('max_tokens', 65536)
                     }
                 }
             }
@@ -718,7 +718,7 @@ class AsyncAPIProcessor:
                 "model": model,
                 "messages": chapter['messages'],
                 "temperature": chapter.get('temperature', 0.3),
-                "max_tokens": chapter.get('max_tokens', 8192)
+                "max_tokens": chapter.get('max_tokens', 65536)
             }
             requests.append(request)
             
