@@ -1547,16 +1547,12 @@ class AsyncProcessingDialog:
             }
         """)
 
-        # Override close behavior: minimize instead of closing if parent GUI is still active
+        # Override close behavior: hide instead of closing to preserve state
         def _on_close(event):
             try:
-                parent_alive = True
-                if hasattr(self.gui, "isVisible"):
-                    parent_alive = bool(self.gui.isVisible())
-                if parent_alive:
-                    event.ignore()
-                    self.dialog.showMinimized()
-                    return
+                event.ignore()
+                self.dialog.hide()
+                return
             except Exception:
                 pass
             event.accept()
@@ -4108,9 +4104,17 @@ def show_async_processing_dialog(parent, translator_gui):
         parent: Parent window (tkinter window - will be ignored for PySide6)
         translator_gui: Reference to main TranslatorGUI instance
     """
-    dialog = AsyncProcessingDialog(parent, translator_gui)
-    dialog.dialog.exec_()  # Show as modal dialog
-    return dialog.dialog
+    # Reuse existing dialog if present to preserve state
+    if hasattr(translator_gui, "async_dialog") and getattr(translator_gui, "async_dialog"):
+        dlg_obj = translator_gui.async_dialog
+        dlg_obj.dialog.showNormal()
+        dlg_obj.dialog.raise_()
+        dlg_obj.dialog.activateWindow()
+        return dlg_obj.dialog
+    dlg_obj = AsyncProcessingDialog(parent, translator_gui)
+    translator_gui.async_dialog = dlg_obj
+    dlg_obj.dialog.show()  # non-modal to allow hiding/restoring
+    return dlg_obj.dialog
 
 
 # Integration function for translator_gui.py
