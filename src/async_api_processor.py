@@ -1588,13 +1588,15 @@ class AsyncProcessingDialog:
         # Load active jobs
         self._refresh_jobs_list()
         
-        # Size and position dialog - more compact
+        # Size and position dialog - give wider default
         app = QApplication.instance()
         if app:
             screen = app.primaryScreen().availableGeometry()
-            dialog_width = min(1000, int(screen.width() * 0.7))
-            dialog_height = int(screen.height() * 0.75)
+            dialog_width = int(screen.width() * 0.6)
+            dialog_height = int(screen.height() * 0.6)
             self.dialog.resize(dialog_width, dialog_height)
+            # Ensure it doesn't shrink too small for new columns
+            self.dialog.setMinimumWidth(max(900, int(screen.width() * 0.6)))
             
             # Center the dialog
             dialog_x = screen.x() + (screen.width() - dialog_width) // 2
@@ -1779,8 +1781,8 @@ class AsyncProcessingDialog:
         
         # Jobs tree widget
         self.jobs_tree = QTreeWidget()
-        self.jobs_tree.setColumnCount(7)
-        self.jobs_tree.setHeaderLabels(["Job ID", "Provider", "Model", "Status", "Progress", "Created", "Cost"])
+        self.jobs_tree.setColumnCount(8)
+        self.jobs_tree.setHeaderLabels(["Job ID", "Provider", "Model", "Status", "Progress", "Created", "Source File", "Cost"])
         self.jobs_tree.setStyleSheet("""
             QTreeWidget {
                 font-size: 10pt;
@@ -1818,7 +1820,8 @@ class AsyncProcessingDialog:
         self.jobs_tree.setColumnWidth(3, 100)  # Status
         self.jobs_tree.setColumnWidth(4, 150)  # Progress
         self.jobs_tree.setColumnWidth(5, 150)  # Created
-        self.jobs_tree.setColumnWidth(6, 100)  # Cost
+        self.jobs_tree.setColumnWidth(6, 220)  # Source File
+        self.jobs_tree.setColumnWidth(7, 100)  # Cost
         
         jobs_layout.addWidget(self.jobs_tree)
         
@@ -2066,6 +2069,14 @@ class AsyncProcessingDialog:
             # Shorten job ID for display
             display_id = job_id[:20] + "..." if len(job_id) > 20 else job_id
             
+            source_file = ""
+            try:
+                src_path = job.metadata.get('source_file') if job.metadata else ""
+                if src_path:
+                    source_file = os.path.basename(src_path)
+            except Exception:
+                source_file = ""
+
             # Create tree widget item
             item = QTreeWidgetItem([
                 display_id,
@@ -2074,6 +2085,7 @@ class AsyncProcessingDialog:
                 status_text,
                 progress_text,  # Now shows percentage and counts
                 created,
+                source_file,
                 cost
             ])
             
@@ -2087,7 +2099,7 @@ class AsyncProcessingDialog:
                 AsyncAPIStatus.EXPIRED: ("#e0a800", "#2a2412")
             }
             fg, bg = fg_bg_map.get(job.status, ("#cfd3d8", "#1e1e1e"))
-            for col in range(7):
+            for col in range(8):
                 item.setForeground(col, QBrush(QColor(fg)))
                 item.setBackground(col, QBrush(QColor(bg)))
             
@@ -3220,8 +3232,8 @@ class AsyncProcessingDialog:
                 
                 # Prepare messages format
                 messages = self._prepare_chapter_messages(content, env_vars)
+                # Use ordered number (spine-aware) for the custom id to keep IDs unique and aligned with spine order
                 custom_id = f"chapter_{ordered_num}"
-                custom_id = f"chapter_{chapter_num}"
                 
                 chapter_data = {
                     'id': custom_id,
@@ -3648,6 +3660,7 @@ class AsyncProcessingDialog:
     def _handle_completed_job(self, job_id):
         """Handle a completed job - retrieve results and save"""
         try:
+            job = self.processor.jobs.get(job_id)
             # Retrieve results
             results = self.processor.retrieve_results(job_id)
             
@@ -3655,14 +3668,23 @@ class AsyncProcessingDialog:
                 self._log("❌ No results retrieved from completed job")
                 return
                 
-            # Get output directory - same name as input file, in exe location
+            # Determine source file strictly from job metadata to avoid using current GUI selection
+            source_path = ""
+            if job and job.metadata:
+                source_path = job.metadata.get('source_file') or ""
+            if not source_path:
+                raise ValueError("Source file path missing from job metadata. Please resubmit the job.")
+            if not os.path.isfile(source_path):
+                raise ValueError(f"Source file not found: {source_path}")
+
+            # Get output directory - same name as source file, in exe location
             if getattr(sys, 'frozen', False):
                 # Running as compiled exe - use exe directory
                 app_dir = os.path.dirname(sys.executable)
             else:
                 # Running as script - use script directory
                 app_dir = os.path.dirname(os.path.abspath(__file__))
-
+            base_name = os.path.splitext(os.path.basename(source_path))[0]
             base_name = os.path.splitext(os.path.basename(self.gui.file_path))[0]
             output_dir = os.path.join(app_dir, base_name)
             
@@ -3692,7 +3714,7 @@ class AsyncProcessingDialog:
             self._log("📦 Extracting EPUB resources...")
             import zipfile
             
-            with zipfile.ZipFile(self.gui.file_path, 'r') as zf:
+            with zipfile.ZipFile(source_path, 'r') as zf:
                 # Create resource directories
                 for res_type in ['css', 'fonts', 'images']:
                     os.makedirs(os.path.join(output_dir, res_type), exist_ok=True)
@@ -3726,11 +3748,11 @@ class AsyncProcessingDialog:
             from ebooklib import epub
             from bs4 import BeautifulSoup
             from TransateKRtoEN import get_content_hash, should_retain_source_extension
-            spine_map = self._get_opf_spine_map(self.gui.file_path)
+            spine_map = self._get_opf_spine_map(source_path)
             
             # Extract metadata
             metadata = {}
-            book = epub.read_epub(self.gui.file_path)
+            book = epub.read_epub(source_path)
             
             # Get book metadata
             if book.get_metadata('DC', 'title'):
