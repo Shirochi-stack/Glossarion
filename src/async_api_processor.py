@@ -2569,7 +2569,34 @@ class AsyncProcessingDialog:
                     # Count tokens for each chapter (sample more for better accuracy)
                     sample_size = min(20, num_chapters)  # Sample up to 20 chapters for better accuracy
                     sampled_content_tokens = 0
-                    
+
+                    # Resolve token limit for chunking (honor disable flag)
+                    token_limit_disabled = bool(getattr(self.gui, 'token_limit_disabled', False)) or bool(self.gui.config.get('token_limit_disabled', False))
+                    if token_limit_disabled:
+                        token_limit = 0  # unlimited
+                    else:
+                        try:
+                            raw_limit = self.gui.token_limit_entry.text() if hasattr(self.gui.token_limit_entry, 'text') else self.gui.token_limit_entry.get()
+                        except Exception:
+                            raw_limit = ''
+                        raw_limit = (raw_limit or '').strip()
+                        if raw_limit:
+                            try:
+                                token_limit = int(raw_limit)
+                            except Exception:
+                                token_limit = 65536
+                        else:
+                            try:
+                                token_limit = int(env_vars.get('MAX_OUTPUT_TOKENS', 65536))
+                            except Exception:
+                                token_limit = 65536
+                            try:
+                                cfg_limit = self.gui.config.get('token_limit')
+                                if cfg_limit:
+                                    token_limit = int(cfg_limit)
+                            except Exception:
+                                pass
+
                     for i, chapter_text in enumerate(chapters[:sample_size]):
                         # Count just the content tokens
                         content_tokens = self.count_tokens(chapter_text, model)
@@ -2577,12 +2604,11 @@ class AsyncProcessingDialog:
                         
                         # Check if needs chunking (including overhead)
                         total_chapter_tokens = content_tokens + overhead_tokens
-                        # Get token limit - handle both tkinter and PySide6
-                        if hasattr(self.gui.token_limit_entry, 'text'):
-                            token_limit = int(self.gui.token_limit_entry.text() or 200000)
+                        if token_limit == 0:
+                            needs_chunking = False
                         else:
-                            token_limit = int(self.gui.token_limit_entry.get() or 200000)
-                        if total_chapter_tokens > token_limit * 0.8:
+                            needs_chunking = total_chapter_tokens > token_limit * 0.8
+                        if needs_chunking:
                             chapters_needing_chunking += 1
                         
                         # Update progress
@@ -2617,7 +2643,34 @@ class AsyncProcessingDialog:
                     # Count tokens
                     sample_size = min(20, num_chapters)  # Sample up to 20 chapters
                     sampled_content_tokens = 0
-                    
+
+                    # Resolve token limit for chunking (honor disable flag)
+                    token_limit_disabled = bool(getattr(self.gui, 'token_limit_disabled', False)) or bool(self.gui.config.get('token_limit_disabled', False))
+                    if token_limit_disabled:
+                        token_limit = 0  # unlimited
+                    else:
+                        try:
+                            raw_limit = self.gui.token_limit_entry.text() if hasattr(self.gui.token_limit_entry, 'text') else self.gui.token_limit_entry.get()
+                        except Exception:
+                            raw_limit = ''
+                        raw_limit = (raw_limit or '').strip()
+                        if raw_limit:
+                            try:
+                                token_limit = int(raw_limit)
+                            except Exception:
+                                token_limit = 65536
+                        else:
+                            try:
+                                token_limit = int(env_vars.get('MAX_OUTPUT_TOKENS', 65536))
+                            except Exception:
+                                token_limit = 65536
+                            try:
+                                cfg_limit = self.gui.config.get('token_limit')
+                                if cfg_limit:
+                                    token_limit = int(cfg_limit)
+                            except Exception:
+                                pass
+
                     for i, chapter_text in enumerate(chapters[:sample_size]):
                         # Count just the content tokens
                         content_tokens = self.count_tokens(chapter_text, model)
@@ -2625,12 +2678,11 @@ class AsyncProcessingDialog:
                         
                         # Check if needs chunking (including overhead)
                         total_chapter_tokens = content_tokens + overhead_tokens
-                        # Get token limit - handle both tkinter and PySide6
-                        if hasattr(self.gui.token_limit_entry, 'text'):
-                            token_limit = int(self.gui.token_limit_entry.text() or 200000)
+                        if token_limit == 0:
+                            needs_chunking = False
                         else:
-                            token_limit = int(self.gui.token_limit_entry.get() or 200000)
-                        if total_chapter_tokens > token_limit * 0.8:
+                            needs_chunking = total_chapter_tokens > token_limit * 0.8
+                        if needs_chunking:
                             chapters_needing_chunking += 1
                         
                         # Update progress
@@ -2991,10 +3043,46 @@ class AsyncProcessingDialog:
         else:
             env_vars['SEND_INTERVAL_SECONDS'] = str(self.gui.delay_entry.text() if hasattr(self.gui.delay_entry, 'text') else '2')
             
+        # Token limit resolution order:
+        # 0) if token_limit_disabled -> unlimited (0)
+        # 1) token_limit_entry if provided by user
+        # 2) GUI max_output_tokens / env_vars['MAX_OUTPUT_TOKENS'] (default 65536)
+        # 3) config token_limit
+        # 4) hard default 65536
         if hasattr(self.gui, 'token_limit_entry'):
-            env_vars['TOKEN_LIMIT'] = _text(self.gui.token_limit_entry, '200000')
+            raw_limit = _text(self.gui.token_limit_entry, '').strip()
         else:
-            env_vars['TOKEN_LIMIT'] = '200000'
+            raw_limit = ''
+
+        token_limit_disabled = False
+        try:
+            token_limit_disabled = bool(getattr(self.gui, 'token_limit_disabled', False))
+        except Exception:
+            pass
+        token_limit_disabled = token_limit_disabled or bool(self.gui.config.get('token_limit_disabled', False))
+
+        if token_limit_disabled:
+            resolved_token_limit = 0  # unlimited
+            source = "disabled (unlimited)"
+        elif raw_limit:
+            resolved_token_limit = int(raw_limit) if str(raw_limit).lstrip('+-').isdigit() else 65536
+            source = "token_limit_entry"
+        else:
+            try:
+                gui_max = int(env_vars.get('MAX_OUTPUT_TOKENS', 0))
+            except Exception:
+                gui_max = 0
+            if gui_max > 0:
+                resolved_token_limit = gui_max
+                source = "max_output_tokens"
+            else:
+                cfg_limit = self.gui.config.get('token_limit')
+                resolved_token_limit = int(cfg_limit) if cfg_limit else 65536
+                source = "config_token_limit" if cfg_limit else "hard_default"
+
+        env_vars['TOKEN_LIMIT'] = str(resolved_token_limit)
+        env_vars['TOKEN_LIMIT_SOURCE'] = source
+        logger.info(f"[ASYNC] TOKEN_LIMIT={env_vars['TOKEN_LIMIT']} (source={source}, raw_field='{raw_limit}', max_output_tokens={getattr(self.gui, 'max_output_tokens', None)}, config_token_limit={self.gui.config.get('token_limit')}, token_limit_disabled={token_limit_disabled})")
 
         # Book title translation - replace {target_lang} with output language
         env_vars['TRANSLATE_BOOK_TITLE'] = "1" if _val(self.gui.translate_book_title_var, False) else "0"
@@ -3122,6 +3210,25 @@ class AsyncProcessingDialog:
         
         return env_vars
 
+    def _safe_int(self, value, default: int, allow_zero: bool = False) -> int:
+        """Safely parse int, falling back to default on errors/blank.
+        If allow_zero is True, 0 is treated as valid."""
+        try:
+            if value is None:
+                return default
+            if isinstance(value, (int, float)):
+                iv = int(value)
+            else:
+                txt = str(value).strip().replace(',', '')
+                iv = int(txt) if txt else default
+            if iv > 0:
+                return iv
+            if allow_zero and iv == 0:
+                return 0
+            return default
+        except Exception:
+            return default
+
     def _extract_chapters_for_async(self, file_path, env_vars):
         """Extract chapters and prepare them for async processing"""
         chapters = []
@@ -3233,13 +3340,44 @@ class AsyncProcessingDialog:
                 
             # Process each chapter to prepare for API
             for idx, (chapter_num, content, original_filename, spine_pos) in enumerate(raw_chapters):
-                # Count tokens
+                # Count tokens (content only)
                 token_count = self.count_tokens(content, env_vars['MODEL'])
                 ordered_num = (spine_pos + 1) if spine_pos is not None else chapter_num
-                
-                # Check if needs chunking
-                token_limit = int(env_vars.get('TOKEN_LIMIT', '200000'))
-                needs_chunking = token_count > token_limit * 0.8  # 80% threshold
+
+                # Determine token limit robustly (allow zero = unlimited)
+                token_limit = self._safe_int(env_vars.get('TOKEN_LIMIT', '200000'), 200000, allow_zero=True)
+
+                # Estimate overhead (system prompt + optional glossary if appended)
+                overhead_tokens = 0
+                try:
+                    overhead_tokens += self.count_tokens(env_vars.get('SYSTEM_PROMPT', ''), env_vars['MODEL'])
+                except Exception:
+                    pass
+                if env_vars.get('MANUAL_GLOSSARY') and env_vars.get('APPEND_GLOSSARY') == '1':
+                    try:
+                        with open(env_vars['MANUAL_GLOSSARY'], 'r', encoding='utf-8') as f:
+                            glossary_preview = f.read(40000)  # cap read for speed
+                        overhead_tokens += self.count_tokens(glossary_preview, env_vars['MODEL'])
+                    except Exception:
+                        pass
+
+                if token_limit == 0:
+                    # Unlimited: never mark for chunking
+                    effective_limit = float('inf')
+                    threshold = float('inf')
+                    needs_chunking = False
+                else:
+                    # Allow for request envelope (~2k) and overhead
+                    effective_limit = max(0, token_limit - overhead_tokens - 2000)
+                    threshold = max(effective_limit, int(token_limit * 0.8))
+                    needs_chunking = token_count > threshold
+
+                # Always log the decision so users can see why a chapter is (or isn't) skipped
+                safe_name = os.path.basename(original_filename) if original_filename else "<unknown>"
+                self._log(
+                    f"[ASYNC] Chapter {ordered_num} ({safe_name}): content_tokens={token_count}, "
+                    f"overhead≈{overhead_tokens}, token_limit={token_limit}, "
+                    f"threshold={threshold}, needs_chunking={needs_chunking}")
                 
                 # Prepare messages format
                 messages = self._prepare_chapter_messages(content, env_vars)
