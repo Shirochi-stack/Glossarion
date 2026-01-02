@@ -3158,7 +3158,11 @@ class AsyncProcessingDialog:
                     with zipfile.ZipFile(file_path, 'r') as zf:
                         # Get all HTML/XHTML files
                         html_files = [f for f in zf.namelist() if f.endswith(('.html', '.xhtml', '.htm')) and not f.startswith('__MACOSX')]
-                        html_files.sort()  # Sort to maintain order
+                        # Order by OPF spine if available, otherwise fallback to name sort
+                        if opf_spine_map:
+                            html_files.sort(key=lambda f: opf_spine_map.get(f) or opf_spine_map.get(os.path.basename(f)) or opf_spine_map.get(os.path.splitext(os.path.basename(f))[0]) or float('inf'))
+                        else:
+                            html_files.sort()
                         
                         for idx, html_file in enumerate(html_files):
                             try:
@@ -3169,7 +3173,6 @@ class AsyncProcessingDialog:
                                 chapter_html = str(soup)
                                 chapter_text = soup.get_text(separator='\n').strip()
 
-                                chapter_num = idx + 1
                                 spine_pos = None
                                 if opf_spine_map:
                                     spine_pos = (
@@ -3177,6 +3180,7 @@ class AsyncProcessingDialog:
                                         or opf_spine_map.get(os.path.basename(html_file))
                                         or opf_spine_map.get(os.path.splitext(os.path.basename(html_file))[0])
                                     )
+                                chapter_num = (spine_pos + 1) if spine_pos is not None else (idx + 1)
 
                                 # Try to extract chapter number from content
                                 for element in soup.find_all(['h1', 'h2', 'h3', 'title']):
