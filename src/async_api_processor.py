@@ -3038,6 +3038,11 @@ class AsyncProcessingDialog:
         env_vars['GLOSSARY_BATCH_SIZE'] = _val(getattr(self.gui, 'glossary_batch_size_var', None), 0)
         env_vars['GLOSSARY_DUPLICATE_KEY_MODE'] = self.gui.config.get('glossary_duplicate_key_mode', 'auto')
         env_vars['GLOSSARY_DUPLICATE_CUSTOM_FIELD'] = self.gui.config.get('glossary_duplicate_custom_field', '')
+        # Compress glossary toggle (was missing, so async path wasn't compressing)
+        if hasattr(self.gui, 'compress_glossary_prompt_var'):
+            env_vars['COMPRESS_GLOSSARY_PROMPT'] = "1" if _val(self.gui.compress_glossary_prompt_var, False) else "0"
+        else:
+            env_vars['COMPRESS_GLOSSARY_PROMPT'] = "1" if self.gui.config.get('compress_glossary_prompt', False) else "0"
         
         # History and summary settings
         env_vars['TRANSLATION_HISTORY_ROLLING'] = "1" if _val(self.gui.translation_history_rolling_var, False) else "0"
