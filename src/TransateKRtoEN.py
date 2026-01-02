@@ -1780,7 +1780,8 @@ class ProgressManager:
         if spine_key and spine_key in self.prog["chapters"]:
             existing_info = self.prog["chapters"][spine_key]
             existing_file = existing_info.get("output_file")
-            if existing_file == filename or _normalize_fname(existing_file) == _normalize_fname(filename):
+            # Require exact filename match to avoid mixing notice/chapter files with same number
+            if existing_file == filename:
                 return spine_key
 
         # Check if simple key exists and matches this file
@@ -1811,6 +1812,10 @@ class ProgressManager:
             file_basename = os.path.splitext(os.path.basename(filename))[0]
             file_basename = file_basename.replace("response_", "")
             composite_key = f"{actual_num}_{file_basename}"
+            # NEW: if existing entry is pending and for a different file, don't overwrite it
+            if existing_status and str(existing_status).lower().startswith("pending"):
+                if existing_file and existing_file != filename:
+                    return composite_key
             return composite_key
         
         # Check if composite key already exists for this file
