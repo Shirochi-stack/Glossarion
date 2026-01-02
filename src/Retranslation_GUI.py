@@ -1543,28 +1543,13 @@ class RetranslationMixin:
             return base
 
         def _find_progress_entry(chapter_info, prog):
-            """
-            Match progress entry by output filename.
-            Priority:
-              1) Exact output_file string match.
-              2) Normalized output filename (strip response_ and extensions) match.
-            No fuzzy, no numeric fallback.
-            """
-            target_out_raw = chapter_info.get('output_file') or ""
-            target_out_norm = _normalize_filename(target_out_raw)
-
-            # 1) Exact output_file match
+            """Strict: match only identical output_file string."""
+            target_out = chapter_info.get('output_file')
+            if not target_out:
+                return None
             for key, ch in prog.get("chapters", {}).items():
-                if ch.get('output_file') == target_out_raw:
+                if ch.get('output_file') == target_out:
                     return key, ch
-
-            # 2) Normalized output filename match
-            if target_out_norm:
-                for key, ch in prog.get("chapters", {}).items():
-                    cand_norm = _normalize_filename(ch.get('output_file'))
-                    if cand_norm and cand_norm == target_out_norm:
-                        return key, ch
-
             return None
         
         def remove_qa_failed_mark():
@@ -1691,22 +1676,21 @@ class RetranslationMixin:
                 actual_num = ch_info['num']
                 
                 if ch_info['status'] != 'not_translated':
-                    # Delete existing file
-                    if output_file:
-                        output_path = os.path.join(data['output_dir'], output_file)
-                        try:
-                            if os.path.exists(output_path):
-                                os.remove(output_path)
-                                deleted_count += 1
-                                print(f"Deleted: {output_path}")
-                        except Exception as e:
-                            print(f"Failed to delete {output_path}: {e}")
-                    
-                    # Reset status to pending for ALL non-not_translated chapters
+                    # Reset status to pending for ALL non-not_translated chapters, but only if we can match the exact progress entry
                     match = _find_progress_entry(ch_info, data['prog'])
                     old_status = ch_info['status']
                     
                     if match:
+                        # Delete existing file only after we know which entry to update
+                        if output_file:
+                            output_path = os.path.join(data['output_dir'], output_file)
+                            try:
+                                if os.path.exists(output_path):
+                                    os.remove(output_path)
+                                    deleted_count += 1
+                                    print(f"Deleted: {output_path}")
+                            except Exception as e:
+                                print(f"Failed to delete {output_path}: {e}")
                         chapter_key, ch_entry = match
                         target_output_file = ch_entry.get('output_file') or ch_info['output_file']
                         print(f"Resetting {old_status} status to pending for chapter {actual_num} (key: {chapter_key}, output file: {target_output_file})")
@@ -1716,19 +1700,7 @@ class RetranslationMixin:
                         progress_updated = True
                         status_reset_count += 1
                     else:
-                        print(f"WARNING: Could not find chapter entry for chapter {actual_num} ({ch_info.get('output_file')}) - creating pending entry")
-                        # Create a new pending entry so cleanup_missing_files will not delete it
-                        new_key = str(actual_num) if str(actual_num) not in data['prog']["chapters"] else ch_info.get('output_file') or f"_pending_{actual_num}"
-                        import time
-                        data['prog']["chapters"][new_key] = {
-                            "actual_num": actual_num,
-                            "output_file": ch_info.get('output_file'),
-                            "status": "pending",
-                            "last_updated": time.time(),
-                            "original_basename": ch_info.get('original_filename') or ch_info.get('key')
-                        }
-                        status_reset_count += 1
-                        progress_updated = True
+                        print(f"WARNING: Could not find exact progress entry for {output_file}; skipped deletion and status reset")
                     
                     # MERGED CHILDREN FIX: Clear any merged children of this chapter
                     # ONLY clear children that still have "merged" status
@@ -1756,6 +1728,7 @@ class RetranslationMixin:
                     print(f"Failed to update progress file: {e}")
             
             # Auto-refresh the display to show updated status
+            data['skip_cleanup'] = True  # Disable cleanup for this dialog after retranslate to avoid deleting pending/failed
             self._refresh_retranslation_data(data)
             
             # Build success message
@@ -2075,17 +2048,17 @@ class RetranslationMixin:
             with open(data['progress_file'], 'r', encoding='utf-8') as f:
                 data['prog'] = json.load(f)
             
-            # Clean up missing files and merged children before display
-            # This handles the case where parent files were manually deleted
-            from TransateKRtoEN import ProgressManager
-            temp_progress = ProgressManager(os.path.dirname(data['progress_file']))
-            temp_progress.prog = data['prog']
-            temp_progress.cleanup_missing_files(data['output_dir'])
-            data['prog'] = temp_progress.prog
-            
-            # Save the cleaned progress back to file
-            with open(data['progress_file'], 'w', encoding='utf-8') as f:
-                json.dump(data['prog'], f, ensure_ascii=False, indent=2)
+            # Clean up missing files and merged children before display unless disabled
+            if not data.get('skip_cleanup', False):
+                from TransateKRtoEN import ProgressManager
+                temp_progress = ProgressManager(os.path.dirname(data['progress_file']))
+                temp_progress.prog = data['prog']
+                temp_progress.cleanup_missing_files(data['output_dir'])
+                data['prog'] = temp_progress.prog
+                
+                # Save the cleaned progress back to file
+                with open(data['progress_file'], 'w', encoding='utf-8') as f:
+                    json.dump(data['prog'], f, ensure_ascii=False, indent=2)
             
             # Check if we're using OPF-based display or fallback
             if data.get('spine_chapters'):
