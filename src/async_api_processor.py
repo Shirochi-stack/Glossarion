@@ -3260,6 +3260,7 @@ class AsyncProcessingDialog:
                     'needs_chunking': needs_chunking,
                     'token_count': token_count,
                     'original_basename': original_filename,  # Use original_filename instead of undefined original_basename
+                    'original_filename': original_filename,  # preserve full original filename for saving
                     'extraction_method': extraction_method,
                     'opf_spine_position': spine_pos
                 }
@@ -3798,50 +3799,56 @@ class AsyncProcessingDialog:
                     soup = BeautifulSoup(item.get_content(), 'html.parser')
                     text = soup.get_text().strip()
                     
-                    if len(text) > 500:  # Valid chapter
-                        actual_chapter_num += 1
-                        
-                        # Try to find chapter number in content
-                        chapter_num = actual_chapter_num
-                        for element in soup.find_all(['h1', 'h2', 'h3', 'title']):
-                            element_text = element.get_text().strip()
-                            match = re.search(r'chapter\s*(\d+)', element_text, re.IGNORECASE)
-                            if match:
-                                chapter_num = int(match.group(1))
-                                break
-                        
-                        # Calculate real content hash
-                        content_hash = get_content_hash(text)
-                        spine_pos = None
-                        if spine_map:
-                            spine_pos = (
-                                spine_map.get(original_name)
-                                or spine_map.get(original_basename)
-                                or spine_map.get(os.path.splitext(original_basename)[0])
-                            )
-                        order_num = (spine_pos + 1) if spine_pos is not None else chapter_num
-                        
-                        chapter_map[order_num] = {
-                            'original_basename': original_basename,
-                            'original_extension': os.path.splitext(original_name)[1],
-                            'content_hash': content_hash,
-                            'text_length': len(text),
-                            'has_images': bool(soup.find_all('img')),
-                            'opf_spine_position': spine_pos,
-                            'detected_chapter_num': chapter_num
-                        }
-                        
-                        chapters_info.append({
-                            'num': order_num,
-                            'title': element_text if 'element_text' in locals() else f"Chapter {chapter_num}",
-                            'original_filename': original_name,
-                            'original_basename': original_basename,
-                            'has_images': bool(soup.find_all('img')),
-                            'text_length': len(text),
-                            'content_hash': content_hash,
-                            'opf_spine_position': spine_pos,
-                            'detected_chapter_num': chapter_num
-                        })
+                    # Keep even very short documents (e.g., covers/credits) to preserve filenames
+                    actual_chapter_num += 1
+                    
+                    # Try to find chapter number from headings
+                    chapter_num = actual_chapter_num
+                    for element in soup.find_all(['h1', 'h2', 'h3', 'title']):
+                        element_text = element.get_text().strip()
+                        match = re.search(r'chapter\\s*(\\d+)', element_text, re.IGNORECASE)
+                        if match:
+                            chapter_num = int(match.group(1))
+                            break
+                    
+                    # Calculate real content hash
+                    content_hash = get_content_hash(text)
+                    spine_pos = None
+                    if spine_map:
+                        spine_pos = (
+                            spine_map.get(original_name)
+                            or spine_map.get(original_basename)
+                            or spine_map.get(os.path.splitext(original_basename)[0])
+                        )
+                    order_num = (spine_pos + 1) if spine_pos is not None else chapter_num
+                    
+                    info = {
+                        'original_basename': original_basename,
+                        'original_extension': os.path.splitext(original_name)[1],
+                        'content_hash': content_hash,
+                        'text_length': len(text),
+                        'has_images': bool(soup.find_all('img')),
+                        'opf_spine_position': spine_pos,
+                        'detected_chapter_num': chapter_num,
+                        'original_filename': original_name,
+                        'title': element_text if 'element_text' in locals() else f"Chapter {chapter_num}"
+                    }
+                    
+                    chapter_map[order_num] = info
+                    if spine_pos is not None:
+                        chapter_map_by_spine[spine_pos] = info
+                    
+                    chapters_info.append({
+                        'num': order_num,
+                        'title': info['title'],
+                        'original_filename': original_name,
+                        'original_basename': original_basename,
+                        'has_images': info['has_images'],
+                        'text_length': info['text_length'],
+                        'content_hash': content_hash,
+                        'opf_spine_position': spine_pos,
+                        'detected_chapter_num': chapter_num
+                    })
             
             # Save chapters_info.json
             chapters_info_path = os.path.join(output_dir, 'chapters_info.json')
