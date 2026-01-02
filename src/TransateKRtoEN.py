@@ -1605,7 +1605,9 @@ class ProgressManager:
         self.payloads_dir = payloads_dir
         self.PROGRESS_FILE = os.path.join(payloads_dir, "translation_progress.json")
         self.prog = self._init_or_load()
-        self._dedup_by_output()
+        # Disable auto-dedup unless explicitly enabled; dedup can drop distinct chapters sharing filenames
+        if os.getenv("ENABLE_PROGRESS_DEDUP", "0") == "1":
+            self._dedup_by_output()
         
     def _init_or_load(self):
         """Initialize or load progress tracking with improved structure"""
@@ -1718,7 +1720,7 @@ class ProgressManager:
             else:
                 new_chapters[new_key] = info
         self.prog["chapters"] = new_chapters
-        self.save()
+        # NOTE: caller is responsible for saving after dedup
     
     def _get_chapter_key(self, actual_num, output_file=None, chapter_obj=None, content_hash=None):
         """Generate consistent chapter key, handling collisions with composite keys.
