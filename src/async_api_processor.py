@@ -3373,8 +3373,9 @@ class AsyncProcessingDialog:
                         chunk_target = max(1024, int(output_limit / compression_factor))
                         chunk_list = splitter.split_chapter(content, max_tokens=chunk_target, filename=original_filename)
                         total_chunks = len(chunk_list)
+                        base_slug = Path(original_filename).stem if original_filename else f"ch{ordered_num}"
                         for ci, (chunk_html, chunk_idx, total) in enumerate(chunk_list, start=1):
-                            part_custom_id = f"chapter_{ordered_num}_part{chunk_idx}"
+                            part_custom_id = f"{ordered_num:04d}_{base_slug}_part{chunk_idx}"
                             messages = self._prepare_chapter_messages(chunk_html, env_vars)
                             chapter_data = {
                                 'id': part_custom_id,
@@ -3412,7 +3413,8 @@ class AsyncProcessingDialog:
                 # Prepare messages format
                 messages = self._prepare_chapter_messages(content, env_vars)
                 # Use ordered number (spine-aware) for the custom id to keep IDs unique and aligned with spine order
-                custom_id = f"chapter_{ordered_num}"
+                base_slug = Path(original_filename).stem if original_filename else f"ch{ordered_num}"
+                custom_id = f"{ordered_num:04d}_{base_slug}"
 
                 chapter_data = {
                     'id': custom_id,
