@@ -1974,7 +1974,7 @@ class ProgressManager:
         if chapter_key in self.prog["chapters"]:
             chapter_info = self.prog["chapters"][chapter_key]
             status = chapter_info.get("status")
-            
+            status_l = status.lower() if isinstance(status, str) else status or ""
             # Failed statuses ALWAYS trigger retranslation
             if status in ["qa_failed", "failed", "error", "file_missing"]:
                 return True, None, None
@@ -2058,7 +2058,7 @@ class ProgressManager:
         for chapter_key, chapter_info in list(self.prog["chapters"].items()):
             output_file = chapter_info.get("output_file")
             status = chapter_info.get("status")
-            
+            status_l = status.lower() if isinstance(status, str) else (status or "")
             # MERGED CHAPTERS FIX: Don't delete merged children in first pass
             # They will be handled in second pass if their parent was deleted
             if status == "merged":
@@ -2070,7 +2070,7 @@ class ProgressManager:
             # - qa_failed/failed: should remain visible for investigation/retry
             # - in_progress: file doesn't exist yet because translation is ongoing
             # - pending: user explicitly marked for retranslation; file may have been deleted on purpose
-            if status in ["qa_failed", "failed", "in_progress", "pending"]:
+            if status_l in ["qa_failed", "failed", "in_progress", "pending"]:
                 continue
             
             if output_file:

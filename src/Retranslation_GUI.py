@@ -1713,6 +1713,7 @@ class RetranslationMixin:
                         ch_entry["status"] = "pending"
                         ch_entry["failure_reason"] = ""
                         ch_entry["error_message"] = ""
+                        progress_updated = True
                         status_reset_count += 1
                     else:
                         print(f"WARNING: Could not find chapter entry for chapter {actual_num} ({ch_info.get('output_file')}) - creating pending entry")
