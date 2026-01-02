@@ -2570,47 +2570,28 @@ class AsyncProcessingDialog:
                     sample_size = min(20, num_chapters)  # Sample up to 20 chapters for better accuracy
                     sampled_content_tokens = 0
 
-                    # Resolve token limit for chunking (honor disable flag)
-                    token_limit_disabled = bool(getattr(self.gui, 'token_limit_disabled', False)) or bool(self.gui.config.get('token_limit_disabled', False))
-                    if token_limit_disabled:
-                        token_limit = 0  # unlimited
+                    # Resolve output token limit for chunking (honor disable flag)
+                    output_limit_disabled = bool(getattr(self.gui, 'token_limit_disabled', False)) or bool(self.gui.config.get('token_limit_disabled', False))
+                    if output_limit_disabled:
+                        output_limit = 0  # unlimited
                     else:
                         try:
-                            raw_limit = self.gui.token_limit_entry.text() if hasattr(self.gui.token_limit_entry, 'text') else self.gui.token_limit_entry.get()
+                            output_limit = int(env_vars.get('MAX_OUTPUT_TOKENS', 65536))
                         except Exception:
-                            raw_limit = ''
-                        raw_limit = (raw_limit or '').strip()
-                        if raw_limit:
-                            try:
-                                token_limit = int(raw_limit)
-                            except Exception:
-                                token_limit = 65536
-                        else:
-                            try:
-                                token_limit = int(env_vars.get('MAX_OUTPUT_TOKENS', 65536))
-                            except Exception:
-                                token_limit = 65536
-                            try:
-                                cfg_limit = self.gui.config.get('token_limit')
-                                if cfg_limit:
-                                    token_limit = int(cfg_limit)
-                            except Exception:
-                                pass
-
-                    for i, chapter_text in enumerate(chapters[:sample_size]):
+                            output_limit = 65536
                         # Count just the content tokens
                         content_tokens = self.count_tokens(chapter_text, model)
                         sampled_content_tokens += content_tokens
                         
                         # Check if needs chunking (including overhead)
                         total_chapter_tokens = content_tokens + overhead_tokens
-                        if token_limit == 0:
+                        if output_limit == 0:
                             needs_chunking = False
                         else:
-                            needs_chunking = total_chapter_tokens > token_limit * 0.8
+                            needs_chunking = total_chapter_tokens > output_limit * 0.8
+
                         if needs_chunking:
                             chapters_needing_chunking += 1
-                        
                         # Update progress
                         if i % 5 == 0:
                             self.cost_info_label.setText(f"Analyzing chapters... {i+1}/{sample_size}")
@@ -3339,13 +3320,16 @@ class AsyncProcessingDialog:
                 raw_chapters.sort(key=lambda ch: ch[0])
                 
             # Process each chapter to prepare for API
+            # Initialize splitter once
+            splitter = None
+
             for idx, (chapter_num, content, original_filename, spine_pos) in enumerate(raw_chapters):
                 # Count tokens (content only)
                 token_count = self.count_tokens(content, env_vars['MODEL'])
                 ordered_num = (spine_pos + 1) if spine_pos is not None else chapter_num
 
-                # Determine token limit robustly (allow zero = unlimited)
-                token_limit = self._safe_int(env_vars.get('TOKEN_LIMIT', '200000'), 200000, allow_zero=True)
+                # Determine output token limit (use MAX_OUTPUT_TOKENS; allow zero = unlimited)
+                output_limit = self._safe_int(env_vars.get('MAX_OUTPUT_TOKENS', '65536'), 65536, allow_zero=True)
 
                 # Estimate overhead (system prompt + optional glossary if appended)
                 overhead_tokens = 0
@@ -3361,29 +3345,75 @@ class AsyncProcessingDialog:
                     except Exception:
                         pass
 
-                if token_limit == 0:
+                if output_limit == 0:
                     # Unlimited: never mark for chunking
                     effective_limit = float('inf')
                     threshold = float('inf')
                     needs_chunking = False
                 else:
                     # Allow for request envelope (~2k) and overhead
-                    effective_limit = max(0, token_limit - overhead_tokens - 2000)
-                    threshold = max(effective_limit, int(token_limit * 0.8))
+                    effective_limit = max(0, output_limit - overhead_tokens - 2000)
+                    threshold = max(effective_limit, int(output_limit * 0.8))
                     needs_chunking = token_count > threshold
 
                 # Always log the decision so users can see why a chapter is (or isn't) skipped
                 safe_name = os.path.basename(original_filename) if original_filename else "<unknown>"
                 self._log(
                     f"[ASYNC] Chapter {ordered_num} ({safe_name}): content_tokens={token_count}, "
-                    f"overhead≈{overhead_tokens}, token_limit={token_limit}, "
+                    f"overhead≈{overhead_tokens}, token_limit={output_limit}, "
                     f"threshold={threshold}, needs_chunking={needs_chunking}")
-                
+
+                # If chunking needed, split instead of skipping
+                if needs_chunking and output_limit != float('inf'):
+                    try:
+                        compression_factor = float(env_vars.get('COMPRESSION_FACTOR', 1.0) or 1.0)
+                        if splitter is None:
+                            chunk_target = max(1024, int(output_limit / compression_factor))
+                            splitter = ChapterSplitter(model_name=env_vars.get('MODEL', 'gpt-4'), target_tokens=chunk_target, compression_factor=compression_factor)
+                        chunk_target = max(1024, int(output_limit / compression_factor))
+                        chunk_list = splitter.split_chapter(content, max_tokens=chunk_target, filename=original_filename)
+                        total_chunks = len(chunk_list)
+                        for ci, (chunk_html, chunk_idx, total) in enumerate(chunk_list, start=1):
+                            part_custom_id = f"chapter_{ordered_num}_part{chunk_idx}"
+                            messages = self._prepare_chapter_messages(chunk_html, env_vars)
+                            chapter_data = {
+                                'id': part_custom_id,
+                                'number': ordered_num + ci * 0.001,  # slight offset to preserve order
+                                'detected_number': chapter_num,
+                                'content': chunk_html,
+                                'messages': messages,
+                                'temperature': float(env_vars.get('TRANSLATION_TEMPERATURE', '0.3')),
+                                'max_tokens': int(env_vars['MAX_OUTPUT_TOKENS']),
+                                'needs_chunking': False,
+                                'token_count': self.count_tokens(chunk_html, env_vars['MODEL']),
+                                'original_basename': original_filename,
+                                'original_filename': original_filename,
+                                'extraction_method': extraction_method,
+                                'opf_spine_position': spine_pos,
+                                'chunk_index': chunk_idx,
+                                'chunk_total': total
+                            }
+                            chapters.append(chapter_data)
+                            chapter_mapping[part_custom_id] = {
+                                'original_filename': original_filename,
+                                'chapter_num': ordered_num,
+                                'extraction_method': extraction_method,
+                                'preserve_structure': preserve_structure,
+                                'opf_spine_position': spine_pos,
+                                'detected_chapter_num': chapter_num,
+                                'chunk_index': chunk_idx,
+                                'chunk_total': total
+                            }
+                        continue  # handled splitting; skip default add
+                    except Exception as split_err:
+                        self._log(f"[ASYNC] Chunk splitting failed for chapter {ordered_num}: {split_err}", level="warning")
+                        # fall through to add original as-is (will be marked needs_chunking)
+
                 # Prepare messages format
                 messages = self._prepare_chapter_messages(content, env_vars)
                 # Use ordered number (spine-aware) for the custom id to keep IDs unique and aligned with spine order
                 custom_id = f"chapter_{ordered_num}"
-                
+
                 chapter_data = {
                     'id': custom_id,
                     'number': ordered_num,
@@ -3399,9 +3429,9 @@ class AsyncProcessingDialog:
                     'extraction_method': extraction_method,
                     'opf_spine_position': spine_pos
                 }
-                
+
                 chapters.append(chapter_data)
-                
+
                 # Store mapping
                 chapter_mapping[custom_id] = {
                     'original_filename': original_filename,
