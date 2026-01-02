@@ -2874,6 +2874,7 @@ class AsyncProcessingDialog:
             job.metadata = job.metadata or {}
             job.metadata['chapter_mapping'] = chapter_mapping  # ADDED: Store mapping for later use
             job.metadata['env'] = env_vars  # preserve env to know extraction mode on save
+            job.metadata['source_file'] = file_path  # ensure job remembers the originating input file
             
             # Save job
             self.processor.jobs[job.job_id] = job
