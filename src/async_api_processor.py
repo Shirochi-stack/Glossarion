@@ -3158,35 +3158,34 @@ class AsyncProcessingDialog:
                                 chapter_html = str(soup)
                                 chapter_text = soup.get_text(separator='\n').strip()
 
-                                if len(chapter_text) > 500:  # Minimum chapter length
-                                    chapter_num = idx + 1
-                                    spine_pos = None
-                                    if opf_spine_map:
-                                        spine_pos = (
-                                            opf_spine_map.get(html_file)
-                                            or opf_spine_map.get(os.path.basename(html_file))
-                                            or opf_spine_map.get(os.path.splitext(os.path.basename(html_file))[0])
-                                        )
+                                chapter_num = idx + 1
+                                spine_pos = None
+                                if opf_spine_map:
+                                    spine_pos = (
+                                        opf_spine_map.get(html_file)
+                                        or opf_spine_map.get(os.path.basename(html_file))
+                                        or opf_spine_map.get(os.path.splitext(os.path.basename(html_file))[0])
+                                    )
 
-                                    # Try to extract chapter number from content
-                                    for element in soup.find_all(['h1', 'h2', 'h3', 'title']):
-                                        text = element.get_text().strip()
-                                        match = re.search(r'chapter\\s*(\\d+)', text, re.IGNORECASE)
-                                        if match:
-                                            chapter_num = int(match.group(1))
-                                            break
+                                # Try to extract chapter number from content
+                                for element in soup.find_all(['h1', 'h2', 'h3', 'title']):
+                                    text = element.get_text().strip()
+                                    match = re.search(r'chapter\\s*(\\d+)', text, re.IGNORECASE)
+                                    if match:
+                                        chapter_num = int(match.group(1))
+                                        break
 
-                                    # Apply extraction mode
-                                    if use_html2text and extractor:
-                                        try:
-                                            cleaned_text, _, _ = extractor.extract_chapter_content(chapter_html, extraction_mode=extraction_method)
-                                            chapter_payload = cleaned_text
-                                        except Exception as e:
-                                            print(f"⚠️ html2text extraction failed, using HTML: {e}")
-                                            chapter_payload = chapter_html
-                                    else:
+                                # Apply extraction mode
+                                if use_html2text and extractor:
+                                    try:
+                                        cleaned_text, _, _ = extractor.extract_chapter_content(chapter_html, extraction_mode=extraction_method)
+                                        chapter_payload = cleaned_text
+                                    except Exception as e:
+                                        print(f"⚠️ html2text extraction failed, using HTML: {e}")
                                         chapter_payload = chapter_html
-                                    raw_chapters.append((chapter_num, chapter_payload, html_file, spine_pos))
+                                else:
+                                    chapter_payload = chapter_html
+                                raw_chapters.append((chapter_num, chapter_payload, html_file, spine_pos))
                                     
                             except Exception as e:
                                 print(f"Error reading {html_file}: {e}")
