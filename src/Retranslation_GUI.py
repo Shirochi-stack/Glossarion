@@ -1580,27 +1580,39 @@ class RetranslationMixin:
             
             # Remove marks
             cleared_count = 0
+            progress_updated = False
             for info in failed_chapters:
-                match = _find_progress_entry(info, data['prog'])
+                match = None
+                progress_key = info.get('progress_key')
+                if progress_key and progress_key in data['prog'].get("chapters", {}):
+                    match = (progress_key, data['prog']["chapters"][progress_key])
+                else:
+                    match = _find_progress_entry(info, data['prog'])
+
+                # Normalize target output for multi-entry cleanup
+                target_out = info.get('output_file')
+                target_norm = _normalize_filename(target_out)
                 if match:
-                    chapter_key, ch_entry = match
-                    actual_num = ch_entry.get('actual_num', info.get('num'))
-                    target_output_file = ch_entry.get('output_file') or info.get('output_file')
-                    print(f"Removing failed mark for chapter {actual_num} (key: {chapter_key}, output file: {target_output_file})")
-                    ch_entry["status"] = "completed"
-                    
-                    # Remove all failure-related fields (QA and regular failures)
+                    # Clear failed/qa_failed on ALL entries sharing this output file (normalized)
                     fields_to_remove = ["qa_issues", "qa_timestamp", "qa_issues_found", "duplicate_confidence", "failure_reason", "error_message"]
-                    for field in fields_to_remove:
-                        ch_entry.pop(field, None)
-                    
-                    cleared_count += 1
+                    for key, entry in data['prog'].get("chapters", {}).items():
+                        entry_out = entry.get('output_file')
+                        if not entry_out:
+                            continue
+                        if _normalize_filename(entry_out) == target_norm:
+                            if entry.get('status') in ['qa_failed', 'failed']:
+                                entry["status"] = "completed"
+                                for field in fields_to_remove:
+                                    entry.pop(field, None)
+                                cleared_count += 1
+                                progress_updated = True
                 else:
                     print(f"WARNING: Could not find chapter entry for {info.get('num')} ({info.get('output_file')})")
             
             # Save the updated progress
-            with open(data['progress_file'], 'w', encoding='utf-8') as f:
-                json.dump(data['prog'], f, ensure_ascii=False, indent=2)
+            if progress_updated:
+                with open(data['progress_file'], 'w', encoding='utf-8') as f:
+                    json.dump(data['prog'], f, ensure_ascii=False, indent=2)
             
             # Auto-refresh the display
             self._refresh_retranslation_data(data)
