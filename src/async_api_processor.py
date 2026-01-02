@@ -3174,7 +3174,6 @@ class AsyncProcessingDialog:
                                     else:
                                         chapter_payload = chapter_html
                                     raw_chapters.append((chapter_num, chapter_payload, html_file, spine_pos))
-                                    raw_chapters.append((chapter_num, chapter_payload, html_file))
                                     
                             except Exception as e:
                                 print(f"Error reading {html_file}: {e}")
@@ -3491,10 +3490,6 @@ class AsyncProcessingDialog:
                             "generation_config": gen_cfg
                         }
                     }
-                    # Maintain spine mapping if available
-                    if spine_pos is not None:
-                        chapter_map_by_spine[spine_pos] = chapter_map[order_num]
-                    
                     # Add safety settings if present
                     if 'safetySettings' in request['generateContentRequest']:
                         batch_line['request']['safety_settings'] = request['generateContentRequest']['safetySettings']
