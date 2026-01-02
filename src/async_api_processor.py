@@ -33,7 +33,8 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
 from PySide6.QtWidgets import (QDialog, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
                                 QLabel, QPushButton, QCheckBox, QSpinBox, QTreeWidget, QTreeWidgetItem,
-                                QScrollArea, QProgressBar, QGroupBox, QFrame, QMessageBox, QMenu, QApplication)
+                                QScrollArea, QProgressBar, QGroupBox, QFrame, QMessageBox, QMenu, QApplication,
+                                QAbstractItemView)
 from PySide6.QtCore import Qt, QTimer, Signal, QObject
 from PySide6.QtGui import QIcon, QBrush, QColor
 from dataclasses import dataclass, asdict
@@ -1823,6 +1824,9 @@ class AsyncProcessingDialog:
             }
         """)
         self.jobs_tree.setAlternatingRowColors(True)
+        # Allow selecting multiple jobs (Ctrl/Cmd-click, Shift-click, or Ctrl+A)
+        self.jobs_tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.jobs_tree.setSelectionBehavior(QAbstractItemView.SelectRows)
         
         # Set column widths
         self.jobs_tree.setColumnWidth(0, 200)  # Job ID
@@ -2124,6 +2128,16 @@ class AsyncProcessingDialog:
             job = self.processor.jobs.get(self.selected_job_id)
             if job:
                 self._update_selected_job_progress(job)
+
+    def _get_selected_job_ids(self) -> List[str]:
+        """Return list of job_ids for current selection"""
+        selected_items = self.jobs_tree.selectedItems()
+        job_ids = []
+        for item in selected_items:
+            job_id = item.data(0, Qt.UserRole)
+            if job_id:
+                job_ids.append(job_id)
+        return job_ids
         
     def _on_job_select(self):
         """Handle job selection"""
@@ -2225,142 +2239,120 @@ class AsyncProcessingDialog:
     
     def _retrieve_selected_results(self):
         """Retrieve results from selected job"""
-        if not self.selected_job_id:
-            QMessageBox.warning(self.dialog, "No Selection", "Please select a job to retrieve results")
+        job_ids = self._get_selected_job_ids()
+        if not job_ids:
+            QMessageBox.warning(self.dialog, "No Selection", "Please select one or more jobs to retrieve results")
             return
-        
-        # Check job status first
-        job = self.processor.jobs.get(self.selected_job_id)
-        if not job:
-            QMessageBox.critical(self.dialog, "Error", "Selected job not found")
+
+        # Partition by status
+        incompletes = []
+        not_found = []
+        for job_id in job_ids:
+            job = self.processor.jobs.get(job_id)
+            if not job:
+                not_found.append(job_id)
+            elif job.status != AsyncAPIStatus.COMPLETED:
+                incompletes.append(job_id)
+
+        if not_found:
+            QMessageBox.critical(self.dialog, "Error", f"{len(not_found)} selected job(s) not found locally.")
             return
-            
-        if job.status != AsyncAPIStatus.COMPLETED:
+        if incompletes:
             QMessageBox.warning(
                 self.dialog,
-                "Job Not Complete", 
-                f"This job is currently {job.status.value}.\n"
-                "Only completed jobs can have results retrieved."
+                "Job Not Complete",
+                f"{len(incompletes)} selected job(s) are not completed yet and were skipped."
             )
+
+        completed_jobs = [jid for jid in job_ids if jid not in incompletes and jid not in not_found]
+        if not completed_jobs:
             return
-        
+
         try:
-            # Set cursor to busy
             if hasattr(self, 'dialog') and self.dialog.isVisible():
                 self.dialog.setCursor(Qt.WaitCursor)
-            
-            # Retrieve results
-            self._handle_completed_job(self.selected_job_id)
-            
+
+            for jid in completed_jobs:
+                self._handle_completed_job(jid)
+
         except Exception as e:
             self._log(f"❌ Error retrieving results: {e}")
-            QMessageBox.critical(self.dialog, "Error", f"Failed to retrieve results: {str(e)}")
+            QMessageBox.critical(self.dialog, "Error", f"Failed to retrieve some results: {str(e)}")
         finally:
-            # Reset cursor
             if hasattr(self, 'dialog') and self.dialog.isVisible():
                 self.dialog.setCursor(Qt.ArrowCursor)
             
     def _cancel_selected_job(self):
         """Cancel selected job"""
-        if not self.selected_job_id:
-            QMessageBox.warning(self.dialog, "No Selection", "Please select a job to cancel")
+        job_ids = self._get_selected_job_ids()
+        if not job_ids:
+            QMessageBox.warning(self.dialog, "No Selection", "Please select one or more jobs to cancel")
             return
-            
-        job = self.processor.jobs.get(self.selected_job_id)
-        if not job:
-            QMessageBox.critical(self.dialog, "Error", "Selected job not found")
+
+        cancellable = []
+        skipped = []
+        for jid in job_ids:
+            job = self.processor.jobs.get(jid)
+            if not job or job.status in [AsyncAPIStatus.COMPLETED, AsyncAPIStatus.FAILED, AsyncAPIStatus.CANCELLED]:
+                skipped.append(jid)
+            else:
+                cancellable.append(job)
+
+        if not cancellable:
+            QMessageBox.information(self.dialog, "Nothing to Cancel", "No selected jobs can be cancelled.")
             return
-            
-        if job.status in [AsyncAPIStatus.COMPLETED, AsyncAPIStatus.FAILED, AsyncAPIStatus.CANCELLED]:
-            QMessageBox.warning(
-                self.dialog,
-                "Cannot Cancel", 
-                f"This job is already {job.status.value}"
-            )
-            return
-            
-        # Confirm cancellation
+
         reply = QMessageBox.question(
             self.dialog,
-            "Cancel Job", 
-            f"Are you sure you want to cancel this job?\n\n"
-            f"Job ID: {job.job_id}\n"
-            f"Status: {job.status.value}",
+            "Cancel Jobs",
+            f"Cancel {len(cancellable)} selected job(s)?",
             QMessageBox.Yes | QMessageBox.No
         )
         if reply != QMessageBox.Yes:
             return
-            
-        try:
-            # Get API key using the helper method
-            api_key = self._get_api_key_from_gui()
-            
-            if job.provider == 'openai':
-                headers = {'Authorization': f'Bearer {api_key}'}
-                
-                response = requests.post(
-                    f'https://api.openai.com/v1/batches/{job.job_id}/cancel',
-                    headers=headers
-                )
-                
-                if response.status_code == 200:
+
+        api_key = self._get_api_key_from_gui()
+        successes, failures = 0, []
+
+        for job in cancellable:
+            try:
+                if job.provider == 'openai':
+                    headers = {'Authorization': f'Bearer {api_key}'}
+                    response = requests.post(f'https://api.openai.com/v1/batches/{job.job_id}/cancel', headers=headers)
+                    if response.status_code == 200:
+                        job.status = AsyncAPIStatus.CANCELLED
+                        successes += 1
+                    else:
+                        failures.append((job.job_id, response.text))
+                elif job.provider == 'gemini':
+                    headers = {'x-goog-api-key': api_key}
+                    batch_name = job.job_id if job.job_id.startswith('batches/') else f'batches/{job.job_id}'
+                    response = requests.post(f'https://generativelanguage.googleapis.com/v1beta/{batch_name}:cancel', headers=headers)
+                    if response.status_code == 200:
+                        job.status = AsyncAPIStatus.CANCELLED
+                        successes += 1
+                    else:
+                        failures.append((job.job_id, response.text))
+                elif job.provider == 'anthropic':
                     job.status = AsyncAPIStatus.CANCELLED
-                    job.updated_at = datetime.now()
-                    self.processor._save_jobs()
-                    self._refresh_jobs_list()
-                    QMessageBox.information(self.dialog, "Job Cancelled", "Job has been cancelled successfully")
+                    successes += 1
                 else:
-                    QMessageBox.critical(self.dialog, "Error", f"Failed to cancel job: {response.text}")
-                    
-            elif job.provider == 'gemini':
-                # Gemini batch cancellation using REST API
-                headers = {'x-goog-api-key': api_key}
-                
-                # Format: batches/123456 -> https://generativelanguage.googleapis.com/v1beta/batches/123456:cancel
-                batch_name = job.job_id if job.job_id.startswith('batches/') else f'batches/{job.job_id}'
-                
-                response = requests.post(
-                    f'https://generativelanguage.googleapis.com/v1beta/{batch_name}:cancel',
-                    headers=headers
-                )
-                
-                if response.status_code == 200:
                     job.status = AsyncAPIStatus.CANCELLED
-                    job.updated_at = datetime.now()
-                    self.processor._save_jobs()
-                    self._refresh_jobs_list()
-                    QMessageBox.information(self.dialog, "Job Cancelled", "Gemini batch job has been cancelled successfully")
-                else:
-                    QMessageBox.critical(self.dialog, "Error", f"Failed to cancel Gemini job: {response.text}")
-                    
-            elif job.provider == 'anthropic':
-                # Anthropic doesn't support cancellation via API yet
-                QMessageBox.information(
-                    self.dialog,
-                    "Not Supported", 
-                    "Anthropic doesn't support job cancellation via API.\n"
-                    "The job will be marked as cancelled locally only."
-                )
-                job.status = AsyncAPIStatus.CANCELLED
+                    successes += 1
+
                 job.updated_at = datetime.now()
-                self.processor._save_jobs()
-                self._refresh_jobs_list()
-                
-            else:
-                # For other providers, just mark as cancelled locally
-                QMessageBox.information(
-                    self.dialog,
-                    "Local Cancellation", 
-                    f"{job.provider.title()} cancellation not implemented.\n"
-                    "The job will be marked as cancelled locally only."
-                )
-                job.status = AsyncAPIStatus.CANCELLED
-                job.updated_at = datetime.now()
-                self.processor._save_jobs()
-                self._refresh_jobs_list()
-                
-        except Exception as e:
-            QMessageBox.critical(self.dialog, "Error", f"Failed to cancel job: {str(e)}")
+            except Exception as e:
+                failures.append((job.job_id, str(e)))
+
+        self.processor._save_jobs()
+        self._refresh_jobs_list()
+
+        summary = f"Cancelled: {successes}"
+        if skipped:
+            summary += f"\nSkipped (already done/failed): {len(skipped)}"
+        if failures:
+            summary += f"\nFailed: {len(failures)}"
+        QMessageBox.information(self.dialog, "Cancel Jobs", summary)
 
     def _cancel_openai_job(self, job, api_key):
         """Cancel OpenAI batch job"""
@@ -3286,43 +3278,30 @@ class AsyncProcessingDialog:
 
     def _delete_selected_job(self):
         """Delete selected job from the list"""
-        if not self.selected_job_id:
-            QMessageBox.warning(self.dialog, "No Selection", "Please select a job to delete")
+        job_ids = self._get_selected_job_ids()
+        if not job_ids:
+            QMessageBox.warning(self.dialog, "No Selection", "Please select one or more jobs to delete")
             return
-        
-        # Get job details for confirmation
-        job = self.processor.jobs.get(self.selected_job_id)
-        if not job:
-            QMessageBox.critical(self.dialog, "Error", "Selected job not found")
-            return
-        
-        # Confirm deletion
+
         reply = QMessageBox.question(
             self.dialog,
             "Confirm Delete",
-            f"Are you sure you want to delete this job?\n\n"
-            f"Job ID: {job.job_id}\n"
-            f"Status: {job.status.value}\n"
-            f"Created: {job.created_at.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-            "Note: This only removes the job from your local list.\n"
-            "The job may still be running on the server.",
+            f"Delete {len(job_ids)} selected job(s) from the local list?\n\n"
+            "Note: This does not stop running jobs on the provider.",
             QMessageBox.Yes | QMessageBox.No
         )
-        
-        if reply == QMessageBox.Yes:
-            # Remove from jobs dictionary
-            del self.processor.jobs[self.selected_job_id]
-            
-            # Save updated jobs
-            self.processor._save_jobs()
-            
-            # Clear selection
-            self.selected_job_id = None
-            
-            # Refresh the display
-            self._refresh_jobs_list()
-            
-            QMessageBox.information(self.dialog, "Job Deleted", "Job removed from local list.")
+
+        if reply != QMessageBox.Yes:
+            return
+
+        for jid in job_ids:
+            if jid in self.processor.jobs:
+                del self.processor.jobs[jid]
+
+        self.processor._save_jobs()
+        self.selected_job_id = None
+        self._refresh_jobs_list()
+        QMessageBox.information(self.dialog, "Job Deleted", f"Removed {len(job_ids)} job(s) from the local list.")
 
     def _clear_completed_jobs(self):
         """Clear all completed/failed/cancelled jobs"""
@@ -3911,16 +3890,17 @@ class AsyncProcessingDialog:
                 # Preserve compound extensions like .htm.xhtml when retaining
                 orig_name = chapter_info.get('original_filename') or chapter_info.get('original_basename')
                 if retain_ext and orig_name:
-                    # Compute full extension suffix beyond the first dot from the left of the basename
+                    # Compute full extension suffix and a base with ALL extensions stripped
                     full = os.path.basename(orig_name)
                     bn, ext1 = os.path.splitext(full)
                     full_ext = ''
                     while ext1:
                         full_ext = ext1 + full_ext
                         bn, ext1 = os.path.splitext(bn)
+                    base_no_ext = bn if bn else os.path.splitext(full)[0]
                     # If no extension found, default to .html
                     suffix = full_ext if full_ext else '.html'
-                    filename = f"{original_basename}{suffix}"
+                    filename = f"{base_no_ext}{suffix}"
                 elif retain_ext:
                     filename = f"{original_basename}.html"
                 else:
