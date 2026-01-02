@@ -1528,6 +1528,44 @@ class RetranslationMixin:
                         data['listbox'].item(idx).setSelected(True)
             count = len(data['listbox'].selectedItems())
             data['selection_count_label'].setText(f"Selected: {count}")
+
+        def _normalize_filename(name: str) -> str:
+            if not name:
+                return ""
+            base = os.path.basename(name)
+            if base.startswith("response_"):
+                base = base[len("response_"):]
+            while True:
+                new_base, ext = os.path.splitext(base)
+                if not ext:
+                    break
+                base = new_base
+            return base
+
+        def _find_progress_entry(chapter_info, prog):
+            """
+            Match progress entry by output filename.
+            Priority:
+              1) Exact output_file string match.
+              2) Normalized output filename (strip response_ and extensions) match.
+            No fuzzy, no numeric fallback.
+            """
+            target_out_raw = chapter_info.get('output_file') or ""
+            target_out_norm = _normalize_filename(target_out_raw)
+
+            # 1) Exact output_file match
+            for key, ch in prog.get("chapters", {}).items():
+                if ch.get('output_file') == target_out_raw:
+                    return key, ch
+
+            # 2) Normalized output filename match
+            if target_out_norm:
+                for key, ch in prog.get("chapters", {}).items():
+                    cand_norm = _normalize_filename(ch.get('output_file'))
+                    if cand_norm and cand_norm == target_out_norm:
+                        return key, ch
+
+            return None
         
         def remove_qa_failed_mark():
             selected_items = data['listbox'].selectedItems()
@@ -1547,6 +1585,7 @@ class RetranslationMixin:
             except Exception as e:
                 print(f"⚠️ Dedup before remove QA failed mark: {e}")
             
+
             selected_indices = [data['listbox'].row(item) for item in selected_items]
             selected_chapters = [data['chapter_display_info'][i] for i in selected_indices]
             failed_chapters = [ch for ch in selected_chapters if ch['status'] in ['qa_failed', 'failed']]
@@ -1566,39 +1605,22 @@ class RetranslationMixin:
             # Remove marks
             cleared_count = 0
             for info in failed_chapters:
-                # Find the chapter by output_file (most reliable)
-                target_output_file = info['output_file']
-                actual_num = info['num']
-                chapter_key = None
-                
-                # Search through all chapters to find the one with matching output_file
-                for key, ch_info in data['prog']["chapters"].items():
-                    if ch_info.get('output_file') == target_output_file:
-                        chapter_key = key
-                        break
-                
-                # Fallback: If not found by output_file, try actual_num (but this is risky)
-                if not chapter_key:
-                    for key, ch_info in data['prog']["chapters"].items():
-                        if ch_info.get('actual_num') == actual_num:
-                            print(f"WARNING: Matching chapter {actual_num} by number only - this may be incorrect!")
-                            chapter_key = key
-                            break
-                
-                # Update the chapter status if we found the key
-                if chapter_key and chapter_key in data['prog']["chapters"]:
+                match = _find_progress_entry(info, data['prog'])
+                if match:
+                    chapter_key, ch_entry = match
+                    actual_num = ch_entry.get('actual_num', info.get('num'))
+                    target_output_file = ch_entry.get('output_file') or info.get('output_file')
                     print(f"Removing failed mark for chapter {actual_num} (key: {chapter_key}, output file: {target_output_file})")
-                    data['prog']["chapters"][chapter_key]["status"] = "completed"
+                    ch_entry["status"] = "completed"
                     
                     # Remove all failure-related fields (QA and regular failures)
                     fields_to_remove = ["qa_issues", "qa_timestamp", "qa_issues_found", "duplicate_confidence", "failure_reason", "error_message"]
                     for field in fields_to_remove:
-                        if field in data['prog']["chapters"][chapter_key]:
-                            del data['prog']["chapters"][chapter_key][field]
+                        ch_entry.pop(field, None)
                     
                     cleared_count += 1
                 else:
-                    print(f"WARNING: Could not find chapter key for chapter {actual_num} (output file: {target_output_file})")
+                    print(f"WARNING: Could not find chapter entry for {info.get('num')} ({info.get('output_file')})")
             
             # Save the updated progress
             with open(data['progress_file'], 'w', encoding='utf-8') as f:
@@ -1681,48 +1703,31 @@ class RetranslationMixin:
                             print(f"Failed to delete {output_path}: {e}")
                     
                     # Reset status to pending for ALL non-not_translated chapters
-                    target_output_file = ch_info['output_file']
-                    chapter_key = None
+                    match = _find_progress_entry(ch_info, data['prog'])
                     old_status = ch_info['status']
                     
-                    # Search through all chapters to find the one with matching output_file
-                    for key, ch_data in data['prog']["chapters"].items():
-                        if ch_data.get('output_file') == target_output_file:
-                            chapter_key = key
-                            break
-                    
-                    # Fallback: If not found by output_file, try actual_num (but this is risky)
-                    if not chapter_key:
-                        for key, ch_data in data['prog']["chapters"].items():
-                            if ch_data.get('actual_num') == actual_num:
-                                print(f"WARNING: Matching chapter {actual_num} by number only - this may be incorrect!")
-                                chapter_key = key
-                                break
-                    
-                    # Update the chapter status if we found the key
-                    if chapter_key and chapter_key in data['prog']["chapters"]:
+                    if match:
+                        chapter_key, ch_entry = match
+                        target_output_file = ch_entry.get('output_file') or ch_info['output_file']
                         print(f"Resetting {old_status} status to pending for chapter {actual_num} (key: {chapter_key}, output file: {target_output_file})")
-                        
-                        # Reset status to pending for retranslation
-                        data['prog']["chapters"][chapter_key]["status"] = "pending"
-                        
-                        # Remove completion-related fields if they exist
-                        fields_to_remove = []
-                        if old_status in ['qa_failed', 'failed']:
-                            # Remove QA-related and failure fields
-                            fields_to_remove = ["qa_issues", "qa_timestamp", "qa_issues_found", "duplicate_confidence", "failure_reason", "error_message"]
-                        elif old_status == 'completed':
-                            # Remove completion-related fields if any exist for completed chapters
-                            fields_to_remove = ["completion_timestamp", "final_word_count", "translation_quality_score"]
-                        
-                        for field in fields_to_remove:
-                            if field in data['prog']["chapters"][chapter_key]:
-                                del data['prog']["chapters"][chapter_key][field]
-                        
+                        ch_entry["status"] = "pending"
+                        ch_entry["failure_reason"] = ""
+                        ch_entry["error_message"] = ""
+                        status_reset_count += 1
+                    else:
+                        print(f"WARNING: Could not find chapter entry for chapter {actual_num} ({ch_info.get('output_file')}) - creating pending entry")
+                        # Create a new pending entry so cleanup_missing_files will not delete it
+                        new_key = str(actual_num) if str(actual_num) not in data['prog']["chapters"] else ch_info.get('output_file') or f"_pending_{actual_num}"
+                        import time
+                        data['prog']["chapters"][new_key] = {
+                            "actual_num": actual_num,
+                            "output_file": ch_info.get('output_file'),
+                            "status": "pending",
+                            "last_updated": time.time(),
+                            "original_basename": ch_info.get('original_filename') or ch_info.get('key')
+                        }
                         status_reset_count += 1
                         progress_updated = True
-                    else:
-                        print(f"WARNING: Could not find chapter key for {old_status} chapter {actual_num} (output file: {target_output_file})")
                     
                     # MERGED CHILDREN FIX: Clear any merged children of this chapter
                     # ONLY clear children that still have "merged" status
@@ -2419,7 +2424,14 @@ class RetranslationMixin:
                 chapter_num = spine_ch['file_chapter_num']
                 output_file = spine_ch['output_file']
                 filename = spine_ch['filename']
-                
+
+                # Require normalized filename match between spine file and output file, and the file must exist
+                norm_spine = _normalize_opf_match_name(filename)
+                norm_out = _normalize_opf_match_name(output_file)
+                file_exists = os.path.exists(os.path.join(output_dir, output_file))
+                if norm_spine != norm_out or not file_exists:
+                    continue
+
                 # Create a progress entry for this auto-discovered file
                 chapter_key = str(chapter_num)
                 
@@ -2440,7 +2452,7 @@ class RetranslationMixin:
         # Save progress file if we added new entries
         if progress_updated:
             try:
-                with open(progress_file, 'w', encoding='utf-8') as f:
+                with open(data['progress_file'], 'w', encoding='utf-8') as f:
                     json.dump(prog, f, ensure_ascii=False, indent=2)
                 print(f"💾 Saved {sum(1 for ch in spine_chapters if ch['status'] == 'completed' and 'progress_entry' not in ch)} auto-discovered files to progress file (refresh)")
             except Exception as e:
@@ -2645,6 +2657,11 @@ class RetranslationMixin:
     
     def _update_listbox_display(self, data):
         """Update the listbox display with current chapter information"""
+        # Add a check to ensure widgets are still valid before proceeding
+        if not self._is_data_valid(data):
+            print("⚠️ Cannot update listbox display - widgets have been deleted")
+            return
+            
         listbox = data['listbox']
         
         # Clear existing items
