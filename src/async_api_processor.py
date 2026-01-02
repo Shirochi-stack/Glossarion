@@ -1593,7 +1593,7 @@ class AsyncProcessingDialog:
         if app:
             screen = app.primaryScreen().availableGeometry()
             dialog_width = int(screen.width() * 0.6)
-            dialog_height = int(screen.height() * 0.6)
+            dialog_height = int(screen.height() * 0.8)
             self.dialog.resize(dialog_width, dialog_height)
             # Ensure it doesn't shrink too small for new columns
             self.dialog.setMinimumWidth(max(900, int(screen.width() * 0.6)))
@@ -3672,10 +3672,14 @@ class AsyncProcessingDialog:
             source_path = ""
             if job and job.metadata:
                 source_path = job.metadata.get('source_file') or ""
+                # Fallback to stored env path if source_file wasn't persisted
+                if not source_path and isinstance(job.metadata.get('env'), dict):
+                    source_path = job.metadata['env'].get('EPUB_PATH') or job.metadata['env'].get('SOURCE_FILE') or ""
             if not source_path:
                 raise ValueError("Source file path missing from job metadata. Please resubmit the job.")
             if not os.path.isfile(source_path):
                 raise ValueError(f"Source file not found: {source_path}")
+            self._log(f"Using source file for results: {source_path}")
 
             # Get output directory - same name as source file, in exe location
             if getattr(sys, 'frozen', False):
@@ -3685,7 +3689,6 @@ class AsyncProcessingDialog:
                 # Running as script - use script directory
                 app_dir = os.path.dirname(os.path.abspath(__file__))
             base_name = os.path.splitext(os.path.basename(source_path))[0]
-            base_name = os.path.splitext(os.path.basename(self.gui.file_path))[0]
             output_dir = os.path.join(app_dir, base_name)
             
             # Handle existing directory
