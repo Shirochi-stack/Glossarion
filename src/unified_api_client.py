@@ -10853,32 +10853,47 @@ class UnifiedClient:
                         finish_reason = 'stop'
                         for event in resp:
                             try:
+                                frag_collected = False
+                                # 1) Standard OpenAI stream chunk
                                 ch = (getattr(event, "choices", None) or [None])[0]
-                                if not ch:
-                                    continue
-                                delta = getattr(ch, "delta", None) or getattr(ch, "message", None)
-                                if delta is None:
-                                    continue
-                                delta_content = getattr(delta, "content", None)
-                                if isinstance(delta_content, list):
-                                    for part in delta_content:
-                                        if isinstance(part, dict) and part.get("type") == "text":
-                                            frag = part.get("text", "")
+                                if ch:
+                                    delta = getattr(ch, "delta", None) or getattr(ch, "message", None)
+                                    if delta is not None:
+                                        delta_content = getattr(delta, "content", None)
+                                        if isinstance(delta_content, list):
+                                            for part in delta_content:
+                                                if isinstance(part, dict) and part.get("type") == "text":
+                                                    frag = part.get("text", "")
+                                                elif hasattr(part, "type") and getattr(part, "type") == "text":
+                                                    frag = getattr(part, "text", "")
+                                                else:
+                                                    frag = None
+                                                if frag:
+                                                    frag_collected = True
+                                                    text_parts.append(frag)
+                                                    if log_stream and not self._is_stop_requested():
+                                                        print(frag, end="", flush=True)
+                                        elif delta_content:
+                                            frag = str(delta_content)
+                                            frag_collected = True
                                             text_parts.append(frag)
-                                            if log_stream and frag and not self._is_stop_requested():
+                                            if log_stream and not self._is_stop_requested():
                                                 print(frag, end="", flush=True)
-                                        elif hasattr(part, "type") and getattr(part, "type") == "text":
-                                            frag = getattr(part, "text", "")
-                                            text_parts.append(frag)
-                                            if log_stream and frag and not self._is_stop_requested():
-                                                print(frag, end="", flush=True)
-                                elif delta_content:
-                                    frag = str(delta_content)
-                                    text_parts.append(frag)
-                                    if log_stream and frag and not self._is_stop_requested():
-                                        print(frag, end="", flush=True)
-                                if getattr(ch, "finish_reason", None):
-                                    finish_reason = ch.finish_reason
+                                    if getattr(ch, "finish_reason", None):
+                                        finish_reason = ch.finish_reason
+                                # 2) Fallback: event has direct text/content fields (provider-specific)
+                                if not frag_collected:
+                                    alt_frag = None
+                                    if hasattr(event, "text") and isinstance(event.text, str):
+                                        alt_frag = event.text
+                                    elif hasattr(event, "content") and isinstance(event.content, str):
+                                        alt_frag = event.content
+                                    elif isinstance(event, dict):
+                                        alt_frag = event.get("text") or event.get("content")
+                                    if alt_frag:
+                                        text_parts.append(alt_frag)
+                                        if log_stream and not self._is_stop_requested():
+                                            print(alt_frag, end="", flush=True)
                             except Exception:
                                 continue
                         if log_stream and not self._is_stop_requested():
