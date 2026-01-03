@@ -10831,6 +10831,15 @@ class UnifiedClient:
 
                         if not enable_ds_env:
                             extra_headers["X-Enable-Thinking"] = "false"
+                        
+                        # Override engine_args to enforce max token limit
+                        # Chutes defaults to ~4k-8k tokens on some models, this attempts to override it
+                        token_limit = params.get("max_tokens") or params.get("max_completion_tokens")
+                        if token_limit:
+                            if "engine_args" not in extra_body:
+                                extra_body["engine_args"] = []
+                            # Pass as list of strings ["--arg", "value"]
+                            extra_body["engine_args"].extend(["--max-completion-tokens", str(token_limit)])
                     if provider == 'openrouter':
                         # OpenRouter requires Referer and Title; also request JSON explicitly
                         extra_headers.update({
