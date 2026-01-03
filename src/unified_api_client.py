@@ -947,6 +947,7 @@ class UnifiedClient:
     # Track displayed log messages to avoid spam
     _displayed_messages = set()
     _message_lock = threading.Lock()
+    _logged_failed_requests = set()
     
     # Cache discovered model token limits to avoid repeated adjustments
     _model_token_limits = {}  # model_name -> max_tokens
@@ -5420,7 +5421,11 @@ class UnifiedClient:
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(failure_data, f, indent=2, ensure_ascii=False)
         
-        logger.info(f"Saved failed request to: {filename}")
+        # Log once per file to avoid duplicates
+        with self._message_lock:
+            if filename not in self._logged_failed_requests:
+                logger.info(f"Saved failed request to: {filename}")
+                self._logged_failed_requests.add(filename)
     
     def _handle_empty_result(self, messages, context, error_info):
         """Handle empty results with context-aware fallbacks"""
