@@ -1120,6 +1120,9 @@ class MultiAPIKeyDialog(QDialog):
             # Save fallback settings - read from checkbox
             use_fallback = self.use_fallback_checkbox.isChecked() if hasattr(self, 'use_fallback_checkbox') else False
             self.translator_gui.config['use_fallback_keys'] = use_fallback
+            # Save main-key-fallback toggle (persist in config)
+            if hasattr(self, 'use_main_key_fallback_checkbox'):
+                self.translator_gui.config['use_main_key_fallback'] = self.use_main_key_fallback_checkbox.isChecked()
             # Update the parent GUI's variable to stay in sync
             if hasattr(self.translator_gui, 'use_fallback_keys_var'):
                 try:
@@ -1540,6 +1543,12 @@ class MultiAPIKeyDialog(QDialog):
         fallback_checkbox_layout.addStretch()
         
         fallback_frame_layout.addWidget(fallback_checkbox_container)
+
+        # Toggle: use main GUI key as first fallback entry
+        self.use_main_key_fallback_var = self.translator_gui.config.get('use_main_key_fallback', True)
+        self.use_main_key_fallback_checkbox = self._create_styled_checkbox("Use Main GUI Key as Fallback #1")
+        self.use_main_key_fallback_checkbox.setChecked(self.use_main_key_fallback_var)
+        fallback_frame_layout.addWidget(self.use_main_key_fallback_checkbox)
         
         # Add fallback key section - store reference for opacity effect
         self.add_fallback_frame = QWidget()

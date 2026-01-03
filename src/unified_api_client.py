@@ -4612,12 +4612,12 @@ class UnifiedClient:
         # CHECK: Multi-key mode is already verified above via self._multi_key_mode
         # DO NOT gate main-GUI-key retry on fallback toggle; only use toggle for additional fallback keys
         use_fallback_keys = os.getenv('USE_FALLBACK_KEYS', '0') == '1'
+        use_main_key_fb = os.getenv('USE_MAIN_KEY_FALLBACK', '1') == '1'
         
-        # CHECK: Verify we have the necessary attributes
-        if not (hasattr(self, 'original_api_key') and 
-                hasattr(self, 'original_model') and
-                self.original_api_key and 
-                self.original_model):
+        # CHECK: Verify we have the necessary attributes (fall back to env if missing)
+        main_api_key = getattr(self, 'original_api_key', None) or os.getenv("API_KEY") or os.getenv("OPENAI_API_KEY")
+        main_model = getattr(self, 'original_model', None) or os.getenv("MODEL")
+        if not (main_api_key and main_model):
             print(f"[MAIN KEY RETRY] Missing original key/model attributes, skipping retry")
             return None
         
@@ -4625,8 +4625,14 @@ class UnifiedClient:
         setattr(tls, retry_flag, True)
         
         try:
-            # Build list from configured fallback keys only; do NOT inject the main GUI key
+            # Build list from main GUI key (optional) + configured fallback keys
             fallback_keys = []
+            if use_main_key_fb:
+                fallback_keys.append({
+                    'api_key': main_api_key,
+                    'model': main_model,
+                    'label': 'MAIN GUI KEY'
+                })
             fallback_keys_json = os.getenv('FALLBACK_KEYS', '[]')
             if use_fallback_keys and fallback_keys_json != '[]':
                 try:

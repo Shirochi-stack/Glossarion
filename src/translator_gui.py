@@ -6577,6 +6577,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'GLOSSARY_MAX_TEXT_SIZE': str(self.config.get('glossary_max_text_size', 0)),
             'GLOSSARY_MAX_SENTENCES': str(self.config.get('glossary_max_sentences', 200)),
             'USE_FALLBACK_KEYS': '1' if self.config.get('use_fallback_keys', False) else '0',
+            'USE_MAIN_KEY_FALLBACK': '1' if self.config.get('use_main_key_fallback', True) else '0',
             'FALLBACK_KEYS': json.dumps(self.config.get('fallback_keys', [])),
 
             # Extraction settings
@@ -10831,6 +10832,7 @@ Important rules:
                 ('PROGRESSIVE_ENCODING', '1' if getattr(self, 'progressive_encoding_var', True) else '0'),
                 ('SAVE_COMPRESSED_IMAGES', '1' if getattr(self, 'save_compressed_images_var', False) else '0'),
                 ('USE_FALLBACK_KEYS', '1' if getattr(self, 'use_fallback_keys_var', False) else '0'),
+                ('USE_MAIN_KEY_FALLBACK', '1' if self.config.get('use_main_key_fallback', True) else '0'),
                 ('FALLBACK_KEYS', _json.dumps(self.config.get('fallback_keys', []))),
                 ('IMAGE_CHUNK_OVERLAP_PERCENT', str(getattr(self, 'image_chunk_overlap_var', '1'))),
 
