@@ -10658,6 +10658,7 @@ class UnifiedClient:
                     
                     # Use extra_body for provider-specific fields the SDK doesn't type-accept
                     extra_body = {}
+                    enable_ds_env = os.getenv('ENABLE_DEEPSEEK_THINKING', '1') == '1'
                     
                     # Inject OpenRouter reasoning configuration (effort/max_tokens) via extra_body
                     if provider == 'openrouter':
@@ -10719,7 +10720,7 @@ class UnifiedClient:
                     # (per DeepSeek docs: extra_body={"thinking":{"type":"enabled"}})
                     if provider == 'deepseek':
                         try:
-                            enable_ds = os.getenv('ENABLE_DEEPSEEK_THINKING', '1') == '1'
+                            enable_ds = enable_ds_env
 
                             # Log once per-thread per (model,state) so users can tell if it is applied,
                             # without spamming the console for every chunk.
@@ -10790,6 +10791,8 @@ class UnifiedClient:
                     # Use Idempotency-Key header to avoid unsupported kwarg on some endpoints
                     idem_key = self._get_idempotency_key()
                     extra_headers = {"Idempotency-Key": idem_key}
+                    if provider == 'chutes' and not enable_ds_env:
+                        extra_headers["X-Enable-Thinking"] = "false"
                     if provider == 'openrouter':
                         # OpenRouter requires Referer and Title; also request JSON explicitly
                         extra_headers.update({

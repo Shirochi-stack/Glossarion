@@ -1451,7 +1451,7 @@ def _create_response_handling_section(self, parent):
     deepseek_h = QHBoxLayout(deepseek_row)
     deepseek_h.setContentsMargins(20, 5, 0, 0)
 
-    deepseek_cb = self._create_styled_checkbox("Enable DeepSeek Thinking")
+    deepseek_cb = self._create_styled_checkbox("Enable DeepSeek Thinking (also controls chutes thinking header)")
     try:
         deepseek_cb.setChecked(bool(getattr(self, 'enable_deepseek_thinking_var', True)))
     except Exception:
