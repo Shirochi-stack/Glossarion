@@ -1755,6 +1755,10 @@ class MultiAPIKeyDialog(QDialog):
         fallback_action_layout.addWidget(clear_all_btn)
         
         fallback_action_layout.addStretch()
+        # Status label specific to fallback actions
+        self.fallback_status_label = QLabel()
+        self.fallback_status_label.setStyleSheet("color: gray;")
+        fallback_action_layout.addWidget(self.fallback_status_label)
         parent_layout.addWidget(self.fallback_action_frame)
         
         # Load existing fallback keys
@@ -3119,10 +3123,19 @@ class MultiAPIKeyDialog(QDialog):
         
         # Reselect the moved items
         new_start_index = adjusted_target
+        first_item_to_scroll = None
         for i in range(len(selected_keys)):
             item = self.tree.topLevelItem(new_start_index + i)
             if item:
                 item.setSelected(True)
+                if first_item_to_scroll is None:
+                    first_item_to_scroll = item
+        # Ensure the first moved item is visible immediately
+        if first_item_to_scroll:
+            try:
+                self.tree.scrollToItem(first_item_to_scroll, QAbstractItemView.PositionAtCenter)
+            except Exception:
+                pass
         
         # Show status
         if len(selected_indices) == 1:
@@ -3132,6 +3145,11 @@ class MultiAPIKeyDialog(QDialog):
         
         # Explicitly accept proposed move to stop Qt from deleting the dragged rows
         event.acceptProposedAction()
+
+    def _show_fallback_status(self, message: str):
+        """Show status message in the fallback section."""
+        if hasattr(self, 'fallback_status_label'):
+            self.fallback_status_label.setText(message)
     
     def _on_fallback_tree_drop(self, event):
         """Handle drop event for reordering fallback keys"""
@@ -3221,9 +3239,9 @@ class MultiAPIKeyDialog(QDialog):
         
         # Show status
         if len(selected_indices) == 1:
-            self._show_status(f"Moved fallback key to position {adjusted_target + 1}")
+            self._show_fallback_status(f"Moved fallback key to position {adjusted_target + 1}")
         else:
-            self._show_status(f"Moved {len(selected_indices)} fallback keys to position {adjusted_target + 1}")
+            self._show_fallback_status(f"Moved {len(selected_indices)} fallback keys to position {adjusted_target + 1}")
         
         # Explicitly accept the proposed move action so Qt doesn't try to delete the dragged items
         event.acceptProposedAction()
