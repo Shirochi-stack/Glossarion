@@ -1715,10 +1715,11 @@ class MultiAPIKeyDialog(QDialog):
         self.fallback_tree.customContextMenuRequested.connect(self._show_fallback_context_menu)
         self.fallback_tree.setMinimumHeight(150)
         
-        # Enable drag and drop for fallback tree
+        # Enable drag and drop for fallback tree (manual move handling)
         self.fallback_tree.setDragEnabled(True)
         self.fallback_tree.setAcceptDrops(True)
-        self.fallback_tree.setDragDropMode(QAbstractItemView.InternalMove)
+        # Use generic DragDrop so Qt does not auto-move items; we handle reordering ourselves
+        self.fallback_tree.setDragDropMode(QAbstractItemView.DragDrop)
         self.fallback_tree.setDefaultDropAction(Qt.MoveAction)
         
         # Store original dropEvent and override
@@ -3116,6 +3117,9 @@ class MultiAPIKeyDialog(QDialog):
     
     def _on_fallback_tree_drop(self, event):
         """Handle drop event for reordering fallback keys"""
+        # Force this as a move operation to prevent Qt from deleting items
+        event.setDropAction(Qt.MoveAction)
+
         # Get the item being dropped and its target position
         drop_indicator = self.fallback_tree.dropIndicatorPosition()
         target_item = self.fallback_tree.itemAt(event.pos())
@@ -3194,7 +3198,8 @@ class MultiAPIKeyDialog(QDialog):
         else:
             self._show_status(f"Moved {len(selected_indices)} fallback keys to position {adjusted_target + 1}")
         
-        event.accept()
+        # Explicitly accept the proposed move action so Qt doesn't try to delete the dragged items
+        event.acceptProposedAction()
 
     def _refresh_key_list(self):
         """Refresh the key list display preserving test results and highlighting key #1"""
