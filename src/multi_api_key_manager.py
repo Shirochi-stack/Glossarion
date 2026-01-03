@@ -1721,6 +1721,9 @@ class MultiAPIKeyDialog(QDialog):
         # Use generic DragDrop so Qt does not auto-move items; we handle reordering ourselves
         self.fallback_tree.setDragDropMode(QAbstractItemView.DragDrop)
         self.fallback_tree.setDefaultDropAction(Qt.MoveAction)
+        self.fallback_tree.setDragDropOverwriteMode(False)
+        self.fallback_tree.dragEnterEvent = lambda e: e.acceptProposedAction()
+        self.fallback_tree.dragMoveEvent = lambda e: e.acceptProposedAction()
         
         # Store original dropEvent and override
         self._fallback_tree_original_dropEvent = self.fallback_tree.dropEvent
@@ -2754,11 +2757,14 @@ class MultiAPIKeyDialog(QDialog):
         # Set selection mode
         self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         
-        # Enable drag and drop
+        # Enable drag and drop (manual handling to avoid Qt auto-removal)
         self.tree.setDragEnabled(True)
         self.tree.setAcceptDrops(True)
-        self.tree.setDragDropMode(QAbstractItemView.InternalMove)
+        self.tree.setDragDropMode(QAbstractItemView.DragDrop)  # prevent automatic moves/deletions
         self.tree.setDefaultDropAction(Qt.MoveAction)
+        self.tree.setDragDropOverwriteMode(False)
+        self.tree.dragEnterEvent = lambda e: e.acceptProposedAction()
+        self.tree.dragMoveEvent = lambda e: e.acceptProposedAction()
         
         # Connect drop event to custom handler
         # Store original dropEvent to wrap it
@@ -3035,6 +3041,8 @@ class MultiAPIKeyDialog(QDialog):
 
     def _on_tree_drop(self, event):
         """Handle drop event for reordering keys"""
+        # Force move action to avoid delete/copy semantics
+        event.setDropAction(Qt.MoveAction)
         # Get the item being dropped and its target position
         drop_indicator = self.tree.dropIndicatorPosition()
         target_item = self.tree.itemAt(event.pos())
@@ -3099,6 +3107,15 @@ class MultiAPIKeyDialog(QDialog):
         
         # Refresh the display
         self._refresh_key_list()
+        try:
+            from PySide6.QtWidgets import QApplication
+            QApplication.processEvents()
+        except Exception:
+            pass
+        try:
+            self.tree.viewport().update()
+        except Exception:
+            pass
         
         # Reselect the moved items
         new_start_index = adjusted_target
@@ -3113,7 +3130,8 @@ class MultiAPIKeyDialog(QDialog):
         else:
             self._show_status(f"Moved {len(selected_indices)} keys to position {adjusted_target + 1}")
         
-        event.accept()
+        # Explicitly accept proposed move to stop Qt from deleting the dragged rows
+        event.acceptProposedAction()
     
     def _on_fallback_tree_drop(self, event):
         """Handle drop event for reordering fallback keys"""
@@ -3185,6 +3203,15 @@ class MultiAPIKeyDialog(QDialog):
         
         # Reload the list
         self._load_fallback_keys()
+        try:
+            from PySide6.QtWidgets import QApplication
+            QApplication.processEvents()
+        except Exception:
+            pass
+        try:
+            self.fallback_tree.viewport().update()
+        except Exception:
+            pass
         
         # Reselect the moved items
         for i in range(len(selected_keys)):
