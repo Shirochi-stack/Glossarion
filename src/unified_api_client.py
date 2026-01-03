@@ -10882,11 +10882,39 @@ class UnifiedClient:
                         else:
                             print(f"🛰️ [{provider}] SDK call finished in {dur:.1f}s, got choices={len(getattr(resp,'choices',[]) or [])}")
                     except Exception as sdk_err:
-                        import traceback
-                        tb = traceback.format_exc()
-                        print(f"🛑 [{provider}] SDK call failed: {sdk_err}")
-                        print(f"[TRACEBACK {provider}] {tb}")
-                        raise
+                        # Special handling for Chutes/vLLM max_completion_tokens limit in non-streaming mode
+                        # Error: max_completion_tokens is too large... (streaming mode allows up to X)
+                        err_str = str(sdk_err)
+                        if (provider == 'chutes' and 
+                            "max_completion_tokens" in err_str and 
+                            "streaming mode allows" in err_str and 
+                            not call_kwargs.get("stream", False)):
+                            
+                            print(f"⚠️ Chutes token limit error: Auto-enabling streaming to bypass non-streaming limit")
+                            
+                            # Enable streaming and retry immediately
+                            call_kwargs["stream"] = True
+                            use_streaming = True
+                            
+                            try:
+                                import time as _t
+                                start_ts = _t.time()
+                                print(f"🛰️ [{provider}] Retrying with streaming enabled...")
+                                resp = client.chat.completions.create(**call_kwargs)
+                                dur = _t.time() - start_ts
+                                print(f"🛰️ [{provider}] SDK stream opened in {dur:.1f}s (retry success)")
+                            except Exception as retry_err:
+                                import traceback
+                                tb = traceback.format_exc()
+                                print(f"🛑 [{provider}] SDK retry failed: {retry_err}")
+                                print(f"[TRACEBACK {provider}] {tb}")
+                                raise retry_err
+                        else:
+                            import traceback
+                            tb = traceback.format_exc()
+                            print(f"🛑 [{provider}] SDK call failed: {sdk_err}")
+                            print(f"[TRACEBACK {provider}] {tb}")
+                            raise
                     
                     # Enhanced extraction for Gemini endpoints
                     content = None
