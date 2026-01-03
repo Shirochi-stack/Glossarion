@@ -10850,6 +10850,8 @@ class UnifiedClient:
                         if os.getenv("BATCH_TRANSLATION", "0") == "1":
                             log_stream = False
                         text_parts = []
+                        log_buf = []
+                        log_flush_len = 240  # user-requested chunk size
                         finish_reason = 'stop'
                         for event in resp:
                             try:
@@ -10872,13 +10874,30 @@ class UnifiedClient:
                                                     frag_collected = True
                                                     text_parts.append(frag)
                                                     if log_stream and not self._is_stop_requested():
-                                                        print(frag, end="", flush=True)
+                                                        _log_frag = frag.replace("\n", "").replace("\r", "")
+                                                        if _log_frag:
+                                                            log_buf.append(_log_frag)
+                                                            if len("".join(log_buf)) >= log_flush_len or _log_frag.endswith((".", " ", ",", ";", "!", "?", ":")):
+                                                                out = "".join(log_buf)
+                                                                # preserve paragraph breaks while flattening stray newlines
+                                                                out = out.replace("\r", "")
+                                                                out = out.replace("\n\n", "\n\n").replace("\n", " ")
+                                                                print(out, end="", flush=True)
+                                                                log_buf.clear()
                                         elif delta_content:
                                             frag = str(delta_content)
                                             frag_collected = True
                                             text_parts.append(frag)
                                             if log_stream and not self._is_stop_requested():
-                                                print(frag, end="", flush=True)
+                                                _log_frag = frag.replace("\n", "").replace("\r", "")
+                                                if _log_frag:
+                                                    log_buf.append(_log_frag)
+                                                    if len("".join(log_buf)) >= log_flush_len or _log_frag.endswith((".", " ", ",", ";", "!", "?", ":")):
+                                                        out = "".join(log_buf)
+                                                        out = out.replace("\r", "")
+                                                        out = out.replace("\n\n", "\n\n").replace("\n", " ")
+                                                        print(out, end="", flush=True)
+                                                        log_buf.clear()
                                     if getattr(ch, "finish_reason", None):
                                         finish_reason = ch.finish_reason
                                 # 2) Fallback: event has direct text/content fields (provider-specific)
@@ -10893,10 +10912,24 @@ class UnifiedClient:
                                     if alt_frag:
                                         text_parts.append(alt_frag)
                                         if log_stream and not self._is_stop_requested():
-                                            print(alt_frag, end="", flush=True)
+                                            _log_frag = alt_frag.replace("\n", "").replace("\r", "")
+                                            if _log_frag:
+                                                log_buf.append(_log_frag)
+                                                if len("".join(log_buf)) >= log_flush_len or _log_frag.endswith((".", " ", ",", ";", "!", "?", ":")):
+                                                    out = "".join(log_buf)
+                                                    out = out.replace("\r", "")
+                                                    out = out.replace("\n\n", "\n\n").replace("\n", " ")
+                                                    print(out, end="", flush=True)
+                                                    log_buf.clear()
                             except Exception:
                                 continue
                         if log_stream and not self._is_stop_requested():
+                            if log_buf:
+                                out = "".join(log_buf)
+                                out = out.replace("\r", "")
+                                out = out.replace("\n\n", "\n\n").replace("\n", " ")
+                                print(out, end="", flush=True)
+                                log_buf.clear()
                             print()  # newline after streaming completes
                         content = "".join(text_parts)
                         return UnifiedResponse(
