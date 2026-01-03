@@ -10910,10 +10910,19 @@ class UnifiedClient:
                                 print(f"[TRACEBACK {provider}] {tb}")
                                 raise retry_err
                         else:
-                            import traceback
-                            tb = traceback.format_exc()
-                            print(f"🛑 [{provider}] SDK call failed: {sdk_err}")
-                            print(f"[TRACEBACK {provider}] {tb}")
+                            # Catch-all for SDK errors - reduce verbosity for timeouts
+                            err_str = str(sdk_err)
+                            is_timeout = "read operation timed out" in err_str or "ReadTimeout" in err_str
+                            
+                            if is_timeout:
+                                # Just log the error, skip full traceback for timeouts
+                                print(f"🛑 [{provider}] SDK error: {sdk_err}")
+                            else:
+                                # Full traceback for other errors
+                                import traceback
+                                tb = traceback.format_exc()
+                                print(f"🛑 [{provider}] SDK call failed: {sdk_err}")
+                                print(f"[TRACEBACK {provider}] {tb}")
                             raise
                     
                     # Enhanced extraction for Gemini endpoints
