@@ -10810,8 +10810,27 @@ class UnifiedClient:
                     # Use Idempotency-Key header to avoid unsupported kwarg on some endpoints
                     idem_key = self._get_idempotency_key()
                     extra_headers = {"Idempotency-Key": idem_key}
-                    if provider == 'chutes' and not enable_ds_env:
-                        extra_headers["X-Enable-Thinking"] = "false"
+                    if provider == 'chutes':
+                        try:
+                            # Log once per-thread per (model,state)
+                            tls = self._get_thread_local_client()
+                            if not hasattr(tls, 'chutes_thinking_logged'):
+                                tls.chutes_thinking_logged = set()
+                            state_key = (str(effective_model or ''), bool(enable_ds_env))
+                            if state_key not in tls.chutes_thinking_logged:
+                                tls.chutes_thinking_logged.add(state_key)
+                                try:
+                                    tname = threading.current_thread().name
+                                except Exception:
+                                    tname = "unknown-thread"
+                                self._debug_log(
+                                    f"🧠 [Chutes:{tname}] thinking={'ENABLED' if enable_ds_env else 'DISABLED'} (model={effective_model})"
+                                )
+                        except Exception:
+                            pass
+
+                        if not enable_ds_env:
+                            extra_headers["X-Enable-Thinking"] = "false"
                     if provider == 'openrouter':
                         # OpenRouter requires Referer and Title; also request JSON explicitly
                         extra_headers.update({
