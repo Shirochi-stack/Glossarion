@@ -2765,7 +2765,8 @@ class MultiAPIKeyDialog(QDialog):
         self.tree.setDragEnabled(True)
         self.tree.setAcceptDrops(True)
         self.tree.setDragDropMode(QAbstractItemView.DragDrop)  # prevent automatic moves/deletions
-        self.tree.setDefaultDropAction(Qt.MoveAction)
+        # Ignore by default; we fully handle drops in _on_tree_drop
+        self.tree.setDefaultDropAction(Qt.IgnoreAction)
         self.tree.setDragDropOverwriteMode(False)
         self.tree.dragEnterEvent = lambda e: e.acceptProposedAction()
         self.tree.dragMoveEvent = lambda e: e.acceptProposedAction()
@@ -3045,17 +3046,20 @@ class MultiAPIKeyDialog(QDialog):
 
     def _on_tree_drop(self, event):
         """Handle drop event for reordering keys"""
-        # Force move action to avoid delete/copy semantics
-        event.setDropAction(Qt.MoveAction)
+        # Block Qt's built-in move; we'll handle reordering ourselves
+        event.setDropAction(Qt.IgnoreAction)
         # Get the item being dropped and its target position
         drop_indicator = self.tree.dropIndicatorPosition()
         target_item = self.tree.itemAt(event.pos())
+        # Ignore drops onto empty viewport (outside rows)
+        if drop_indicator == QAbstractItemView.OnViewport or not self.tree.viewport().rect().contains(event.pos()):
+            event.ignore()
+            return
         
         # Get selected items (items being dragged)
         selected_items = self.tree.selectedItems()
         if not selected_items:
-            # Call original drop event if nothing selected
-            self._tree_original_dropEvent(event)
+            event.ignore()
             return
         
         # Get indices of selected items
@@ -3084,6 +3088,8 @@ class MultiAPIKeyDialog(QDialog):
             elif drop_indicator == QAbstractItemView.OnItem:
                 # Treat as above item
                 pass
+        # Clamp target index to valid range
+        target_index = max(0, min(target_index, len(self.key_pool.keys)))
         
         # Don't do anything if dropping in the same position
         if len(selected_indices) == 1 and selected_indices[0] == target_index:
@@ -3143,8 +3149,9 @@ class MultiAPIKeyDialog(QDialog):
         else:
             self._show_status(f"Moved {len(selected_indices)} keys to position {adjusted_target + 1}")
         
-        # Explicitly accept proposed move to stop Qt from deleting the dragged rows
-        event.acceptProposedAction()
+        # Explicitly accept to finish without Qt moving items
+        event.accept()
+        return  # Prevent any default handling
 
     def _show_fallback_status(self, message: str):
         """Show status message in the fallback section."""
@@ -3153,17 +3160,21 @@ class MultiAPIKeyDialog(QDialog):
     
     def _on_fallback_tree_drop(self, event):
         """Handle drop event for reordering fallback keys"""
-        # Force this as a move operation to prevent Qt from deleting items
-        event.setDropAction(Qt.MoveAction)
+        # Block Qt's built-in move; we'll handle reordering ourselves
+        event.setDropAction(Qt.IgnoreAction)
 
         # Get the item being dropped and its target position
         drop_indicator = self.fallback_tree.dropIndicatorPosition()
         target_item = self.fallback_tree.itemAt(event.pos())
+        # Ignore drops onto empty viewport (outside rows)
+        if drop_indicator == QAbstractItemView.OnViewport or not self.fallback_tree.viewport().rect().contains(event.pos()):
+            event.ignore()
+            return
         
         # Get selected items (items being dragged)
         selected_items = self.fallback_tree.selectedItems()
         if not selected_items:
-            self._fallback_tree_original_dropEvent(event)
+            event.ignore()
             return
         
         # Get current fallback keys
@@ -3192,6 +3203,8 @@ class MultiAPIKeyDialog(QDialog):
                 target_index += 1
             elif drop_indicator == QAbstractItemView.OnItem:
                 pass
+        # Clamp target index to valid range
+        target_index = max(0, min(target_index, len(fallback_keys)))
         
         # Don't do anything if dropping in the same position
         if len(selected_indices) == 1 and selected_indices[0] == target_index:
@@ -3243,8 +3256,9 @@ class MultiAPIKeyDialog(QDialog):
         else:
             self._show_fallback_status(f"Moved {len(selected_indices)} fallback keys to position {adjusted_target + 1}")
         
-        # Explicitly accept the proposed move action so Qt doesn't try to delete the dragged items
-        event.acceptProposedAction()
+        # Explicitly accept to finish without Qt moving items
+        event.accept()
+        return  # Prevent any default handling
 
     def _refresh_key_list(self):
         """Refresh the key list display preserving test results and highlighting key #1"""
