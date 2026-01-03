@@ -3971,15 +3971,19 @@ class UnifiedClient:
                     
                     # If extraction failed but we have a response object
                     if not extracted_content and response:
-                        print(f"⚠️ Failed to extract text from {getattr(self, 'client_type', 'unknown')} response")
-                        print(f"   Response type: {type(response)}")
+                        if extracted_content is None or extracted_content == "":
+                            # Already logged as empty elsewhere; suppress redundant message
+                            pass
+                        else:
+                            print(f"⚠️ Failed to extract text from {getattr(self, 'client_type', 'unknown')} response")
+                            print(f"   Response type: {type(response)}")
                         
                         # Provider-specific guidance
-                        if getattr(self, 'client_type', None) == 'gemini':
-                            print(f"   Consider checking Gemini response structure")
-                            print(f"   Response attributes: {dir(response)[:5]}...")  # Show first 5 attributes
-                        else:
-                            print(f"   Consider checking response extraction for this provider")
+                        # if getattr(self, 'client_type', None) == 'gemini':
+                        #     print(f"   Consider checking Gemini response structure")
+                        #     print(f"   Response attributes: {dir(response)[:5]}...")  # Show first 5 attributes
+                        # else:
+                        #     print(f"   Consider checking response extraction for this provider")
                         
                         # Log the response structure for debugging
                         self._save_failed_request(messages, "Extraction failed", context, response)
@@ -5529,7 +5533,7 @@ class UnifiedClient:
                 if len(response.content) > 0:
                     self._debug_log(f"   ✅ Got text from UnifiedResponse.content: {len(response.content)} chars")
                 else:
-                    self._debug_log(f"   ⚠️ UnifiedResponse has empty content (finish_reason: {response.finish_reason})")
+                    self._debug_log(f"   ⚠️ Model returned no text (finish_reason: {response.finish_reason})")
                 return response.content, response.finish_reason or 'stop'
             elif response.error_details:
                 self._debug_log(f"   ⚠️ UnifiedResponse has error_details: {response.error_details}")
