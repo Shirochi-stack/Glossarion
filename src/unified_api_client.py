@@ -830,7 +830,7 @@ class UnifiedClient:
             per_key_limit = None
 
         if self._is_o_series_model():
-            mct = max_completion_tokens if max_completion_tokens is not None else (max_tokens or getattr(self, 'default_max_tokens', 8192))
+            mct = max_completion_tokens if max_completion_tokens is not None else (max_tokens or int(os.getenv('MAX_OUTPUT_TOKENS', '8192')))
             if per_key_limit is not None:
                 if mct is None or mct <= 0:
                     mct = per_key_limit
@@ -838,7 +838,7 @@ class UnifiedClient:
                     mct = min(mct, per_key_limit)
             return None, mct
         else:
-            mt = max_tokens if max_tokens is not None else (max_completion_tokens or getattr(self, 'default_max_tokens', 8192))
+            mt = max_tokens if max_tokens is not None else (max_completion_tokens or int(os.getenv('MAX_OUTPUT_TOKENS', '8192')))
             if per_key_limit is not None:
                 if mt is None or mt <= 0:
                     mt = per_key_limit
@@ -894,7 +894,7 @@ class UnifiedClient:
             per_key_limit = None
 
         if self._is_o_series_model():
-            mct = max_completion_tokens if max_completion_tokens is not None else (max_tokens or getattr(self, 'default_max_tokens', 8192))
+            mct = max_completion_tokens if max_completion_tokens is not None else (max_tokens or int(os.getenv('MAX_OUTPUT_TOKENS', '8192')))
             if per_key_limit is not None:
                 if mct is None or mct <= 0:
                     mct = per_key_limit
@@ -902,7 +902,7 @@ class UnifiedClient:
                     mct = min(mct, per_key_limit)
             return None, mct
         else:
-            mt = max_tokens if max_tokens is not None else (max_completion_tokens or getattr(self, 'default_max_tokens', 8192))
+            mt = max_tokens if max_tokens is not None else (max_completion_tokens or int(os.getenv('MAX_OUTPUT_TOKENS', '8192')))
             if per_key_limit is not None:
                 if mt is None or mt <= 0:
                     mt = per_key_limit
@@ -2584,7 +2584,7 @@ class UnifiedClient:
             # CRITICAL: Capture all instance vars INSIDE lock to prevent race conditions
             captured_model = self.model
             captured_temp = getattr(self, 'temperature', 0.3)
-            captured_max_tokens = getattr(self, 'max_tokens', 8192)
+            captured_max_tokens = getattr(self, 'max_tokens', int(os.getenv('MAX_OUTPUT_TOKENS', '8192')))
         
         # Create normalized representation (can be done outside lock)
         normalized_messages = []
@@ -2655,7 +2655,7 @@ class UnifiedClient:
             # CRITICAL: Capture all instance vars INSIDE lock
             captured_model = self.model
             captured_temp = getattr(self, 'temperature', 0.3)
-            captured_max_tokens = getattr(self, 'max_tokens', 8192)
+            captured_max_tokens = getattr(self, 'max_tokens', int(os.getenv('MAX_OUTPUT_TOKENS', '8192')))
         
         # Create normalized representation (can be done outside lock)
         normalized_messages = []
@@ -2742,7 +2742,7 @@ class UnifiedClient:
             # CRITICAL: Capture all instance vars INSIDE lock
             captured_model = self.model
             captured_temp = getattr(self, 'temperature', 0.3)
-            captured_max_tokens = getattr(self, 'max_tokens', 8192)
+            captured_max_tokens = getattr(self, 'max_tokens', int(os.getenv('MAX_OUTPUT_TOKENS', '8192')))
         
         # Create normalized representation
         normalized_messages = []
@@ -8129,7 +8129,7 @@ class UnifiedClient:
         # FIX: Ensure max_tokens has a value before passing to handlers
         if max_tokens is None and max_completion_tokens is None:
             # Use instance default or standard default
-            max_tokens = getattr(self, 'max_tokens', 8192)
+            max_tokens = int(os.getenv('MAX_OUTPUT_TOKENS', '8192'))
         elif max_tokens is None and max_completion_tokens is not None:
             # For o-series models, use max_completion_tokens as fallback
             max_tokens = max_completion_tokens
@@ -10845,6 +10845,10 @@ class UnifiedClient:
                     
                     # Extract content with Gemini awareness (includes streaming aggregation)
                     if use_streaming:
+                        # Stream chunks to console unless explicitly suppressed
+                        log_stream = os.getenv("LOG_STREAM_CHUNKS", "1").lower() not in ("0", "false")
+                        if os.getenv("BATCH_TRANSLATION", "0") == "1":
+                            log_stream = False
                         text_parts = []
                         finish_reason = 'stop'
                         for event in resp:
@@ -10859,15 +10863,26 @@ class UnifiedClient:
                                 if isinstance(delta_content, list):
                                     for part in delta_content:
                                         if isinstance(part, dict) and part.get("type") == "text":
-                                            text_parts.append(part.get("text", ""))
+                                            frag = part.get("text", "")
+                                            text_parts.append(frag)
+                                            if log_stream and frag and not self._is_stop_requested():
+                                                print(frag, end="", flush=True)
                                         elif hasattr(part, "type") and getattr(part, "type") == "text":
-                                            text_parts.append(getattr(part, "text", ""))
+                                            frag = getattr(part, "text", "")
+                                            text_parts.append(frag)
+                                            if log_stream and frag and not self._is_stop_requested():
+                                                print(frag, end="", flush=True)
                                 elif delta_content:
-                                    text_parts.append(str(delta_content))
+                                    frag = str(delta_content)
+                                    text_parts.append(frag)
+                                    if log_stream and frag and not self._is_stop_requested():
+                                        print(frag, end="", flush=True)
                                 if getattr(ch, "finish_reason", None):
                                     finish_reason = ch.finish_reason
                             except Exception:
                                 continue
+                        if log_stream and not self._is_stop_requested():
+                            print()  # newline after streaming completes
                         content = "".join(text_parts)
                         return UnifiedResponse(
                             content=content,
