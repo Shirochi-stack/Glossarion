@@ -9722,6 +9722,11 @@ class UnifiedClient:
                             text_parts = []
                             finish_reason = 'stop'
                             response = None
+                            log_stream = os.getenv("LOG_STREAM_CHUNKS", "1").lower() not in ("0", "false")
+                            if os.getenv("BATCH_TRANSLATION", "0") == "1":
+                                log_stream = False
+                            log_buf = []
+                            log_flush_len = 240
                             for evt in stream:
                                 response = evt  # keep last event for debugging
                                 cands = getattr(evt, 'candidates', None)
@@ -9735,6 +9740,20 @@ class UnifiedClient:
                                     for part in content_obj.parts:
                                         if hasattr(part, 'text') and part.text:
                                             text_parts.append(part.text)
+                                            if log_stream and not self._is_stop_requested():
+                                                frag = part.text.replace("\r", "")
+                                                # keep blank lines as paragraph markers, flatten single newlines
+                                                frag = frag.replace("\n\n", "\n\n").replace("\n", " ")
+                                                if frag:
+                                                    log_buf.append(frag)
+                                                    if len("".join(log_buf)) >= log_flush_len or frag.endswith((".", " ", ",", ";", "!", "?", ":")):
+                                                        print("".join(log_buf), end="", flush=True)
+                                                        log_buf.clear()
+                            if log_stream and not self._is_stop_requested():
+                                if log_buf:
+                                    print("".join(log_buf), end="", flush=True)
+                                    log_buf.clear()
+                                print()
                             text_content = "".join(text_parts)
                             if not self._is_stop_requested():
                                 print(f"🛰️ [gemini-native] Stream finished, tokens≈{len(text_content)//4}")
