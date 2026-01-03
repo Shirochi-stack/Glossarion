@@ -4625,21 +4625,9 @@ class UnifiedClient:
         setattr(tls, retry_flag, True)
         
         try:
+            # Build list from configured fallback keys only; do NOT inject the main GUI key
             fallback_keys = []
-            
-            # Avoid re-trying the same main GUI key if we're already on it (prohibited content loop)
-            already_on_main = (self.model == self.original_model)
-            if not already_on_main:
-                fallback_keys.append({
-                    'api_key': self.original_api_key,
-                    'model': self.original_model,
-                    'label': 'MAIN GUI KEY'
-                })
-                print(f"[MAIN KEY RETRY] Using main GUI key with model: {self.original_model}")
-            
-            # Add configured fallback keys only if toggle is enabled
             fallback_keys_json = os.getenv('FALLBACK_KEYS', '[]')
-            
             if use_fallback_keys and fallback_keys_json != '[]':
                 try:
                     configured_fallbacks = json.loads(fallback_keys_json)
@@ -4657,14 +4645,13 @@ class UnifiedClient:
                         })
                 except Exception as e:
                     print(f"[DEBUG] Failed to parse FALLBACK_KEYS: {e}")
-            elif not use_fallback_keys:
-                print("[MAIN KEY RETRY] Fallback keys toggle is OFF — will try main GUI key only")
+            else:
+                print("[MAIN KEY RETRY] Fallback keys toggle is OFF or empty — nothing to try")
             
-            print(f"[MAIN KEY RETRY] Total keys to try (including main GUI key): {len(fallback_keys)}")
+            print(f"[MAIN KEY RETRY] Total fallback keys to try: {len(fallback_keys)}")
             
             # Try each fallback key in the list (all of them, no arbitrary limit)
             max_attempts = len(fallback_keys)
-            fallback_count = max(max_attempts - 1, 0)  # exclude main GUI key from count display
             for idx, fallback_data in enumerate(fallback_keys):
                 label = fallback_data.get('label', 'Fallback')
                 fallback_key = fallback_data.get('api_key')
@@ -4675,14 +4662,8 @@ class UnifiedClient:
                 fallback_azure_api_version = fallback_data.get('azure_api_version')
                 use_individual_endpoint = fallback_data.get('use_individual_endpoint', False)
 
-                # Consistent log prefix
-                if label == 'MAIN GUI KEY':
-                    log_prefix = "[MAIN GUI KEY]"
-                else:
-                    fb_idx = idx  # main GUI key is index 0
-                    display_idx = fb_idx if fb_idx > 0 else 1
-                    display_total = fallback_count if fallback_count > 0 else 1
-                    log_prefix = f"[{label} {display_idx}/{display_total}]"
+                # Consistent log prefix for display (1-based)
+                log_prefix = f"[{label} {idx+1}/{max_attempts}]"
 
                 print(f"{log_prefix} Trying {fallback_model}")
                 
