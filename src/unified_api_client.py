@@ -10910,12 +10910,16 @@ class UnifiedClient:
                                 print(f"[TRACEBACK {provider}] {tb}")
                                 raise retry_err
                         else:
-                            # Catch-all for SDK errors - reduce verbosity for timeouts
+                            # Catch-all for SDK errors - reduce verbosity for known errors
                             err_str = str(sdk_err)
                             is_timeout = "read operation timed out" in err_str or "ReadTimeout" in err_str
+                            is_402 = "402" in err_str and "insufficient" in err_str.lower()
                             
                             if is_timeout:
                                 # Just log the error, skip full traceback for timeouts
+                                print(f"🛑 [{provider}] SDK error: {sdk_err}")
+                            elif is_402:
+                                # Just log the error, skip full traceback for 402 payment errors
                                 print(f"🛑 [{provider}] SDK error: {sdk_err}")
                             else:
                                 # Full traceback for other errors
@@ -10945,10 +10949,27 @@ class UnifiedClient:
                                 frag_collected = False
                                 # 1) Standard OpenAI stream chunk
                                 ch = (getattr(event, "choices", None) or [None])[0]
+                                if not ch and isinstance(event, dict):
+                                    # Fallback for dict-based events
+                                    choices = event.get("choices", [])
+                                    ch = choices[0] if choices else None
+
                                 if ch:
-                                    delta = getattr(ch, "delta", None) or getattr(ch, "message", None)
+                                    # Handle both object and dict access for delta
+                                    delta = None
+                                    if isinstance(ch, dict):
+                                        delta = ch.get("delta") or ch.get("message")
+                                    else:
+                                        delta = getattr(ch, "delta", None) or getattr(ch, "message", None)
+
                                     if delta is not None:
-                                        delta_content = getattr(delta, "content", None)
+                                        # Handle both object and dict access for content
+                                        delta_content = None
+                                        if isinstance(delta, dict):
+                                            delta_content = delta.get("content")
+                                        else:
+                                            delta_content = getattr(delta, "content", None)
+
                                         if isinstance(delta_content, list):
                                             for part in delta_content:
                                                 if isinstance(part, dict) and part.get("type") == "text":
