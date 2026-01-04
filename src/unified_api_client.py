@@ -10888,12 +10888,12 @@ class UnifiedClient:
                         # Special handling for Chutes/vLLM max_completion_tokens limit in non-streaming mode
                         # Error: max_completion_tokens is too large... (streaming mode allows up to X)
                         err_str = str(sdk_err)
-                        if (provider == 'chutes' and 
+                        if (provider in ('chutes', 'openai') and 
                             "max_completion_tokens" in err_str and 
                             "streaming mode allows" in err_str and 
                             not call_kwargs.get("stream", False)):
                             
-                            print(f"⚠️ Chutes token limit error: Auto-enabling streaming to bypass non-streaming limit")
+                            print(f"⚠️ {provider} token limit error: Auto-enabling streaming to bypass non-streaming limit")
                             
                             # Enable streaming and retry immediately
                             call_kwargs["stream"] = True
