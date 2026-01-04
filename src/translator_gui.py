@@ -7694,7 +7694,8 @@ Important rules:
                     'GLOSSARY_FILTER_MODE': self.config.get('glossary_filter_mode', 'all'),
                     'COMPRESSION_FACTOR': str(getattr(self, 'compression_factor_var', self.config.get('compression_factor', 3.0))),
                     'GLOSSARY_INCLUDE_ALL_CHARACTERS': '1' if getattr(self, 'glossary_include_all_characters_var', False) else '0',
-                    'USE_MAIN_KEY_FALLBACK': '1' if self.config.get('use_main_key_as_fallback', False) else '0',
+                    'USE_MAIN_KEY_FALLBACK': '1' if self.config.get('use_main_key_fallback', True) else '0',
+                    'USE_FALLBACK_KEYS': '1' if getattr(self, 'use_fallback_keys_var', False) else '0',
                     
                     # Glossary-specific overrides (with fallback to global settings)
                     'GLOSSARY_REQUEST_MERGING_ENABLED': '1' if self.config.get('glossary_request_merging_enabled', False) else '0',
@@ -10832,7 +10833,7 @@ Important rules:
                 ('OPTIMIZE_FOR_OCR', '1' if getattr(self, 'optimize_for_ocr_var', True) else '0'),
                 ('PROGRESSIVE_ENCODING', '1' if getattr(self, 'progressive_encoding_var', True) else '0'),
                 ('SAVE_COMPRESSED_IMAGES', '1' if getattr(self, 'save_compressed_images_var', False) else '0'),
-                ('USE_FALLBACK_KEYS', '1' if getattr(self, 'use_fallback_keys_var', False) else '0'),
+                ('USE_FALLBACK_KEYS', '1' if self.config.get('use_fallback_keys', False) else '0'),
                 ('USE_MAIN_KEY_FALLBACK', '1' if self.config.get('use_main_key_fallback', True) else '0'),
                 ('FALLBACK_KEYS', _json.dumps(self.config.get('fallback_keys', []))),
                 ('IMAGE_CHUNK_OVERLAP_PERCENT', str(getattr(self, 'image_chunk_overlap_var', '1'))),

@@ -78,6 +78,32 @@ def create_client_with_multi_key_support(api_key, model, output_dir, config):
     # Create UnifiedClient normally - it will check environment variables
     client = UnifiedClient(api_key=api_key, model=model, output_dir=output_dir)
     client.context = 'glossary'
+    
+    # Check if fallback keys should be used
+    # FORCE enable if env var is '1' (handled by GUI toggle)
+    use_fallback_keys = os.getenv('USE_FALLBACK_KEYS', '0') == '1'
+    
+    if use_fallback_keys:
+        # If enabled, ensure the instance knows it
+        client.use_fallback_keys = True
+        client._multi_key_mode = True # Fallback keys imply multi-key logic might be needed
+    else:
+        # If disabled, force disable on the client
+        client.use_fallback_keys = False
+    
+    # Check if we should use main key as fallback
+    use_main_key_fb = os.getenv('USE_MAIN_KEY_FALLBACK', '1') == '1'
+    
+    # If explicitly '0' (False), disable main key fallback
+    # If '1' (True), ensure it is enabled
+    if not use_main_key_fb:
+        client.use_main_key_fallback = False
+        client._use_main_key_fallback = False
+    else:
+        # Explicitly enable if set to '1'
+        client.use_main_key_fallback = True
+        client._use_main_key_fallback = True
+
     return client
     
 def send_with_interrupt(messages, client, temperature, max_tokens, stop_check_fn, chunk_timeout=None):
