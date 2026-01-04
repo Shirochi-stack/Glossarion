@@ -4276,6 +4276,23 @@ class BatchTranslationProcessor:
             cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
             cleaned = ContentProcessor.clean_ai_artifacts(cleaned, remove_artifacts=self.config.REMOVE_AI_ARTIFACTS)
             
+            # Check for empty or failed response BEFORE writing to disk
+            if not cleaned or not str(cleaned).strip():
+                print(f"❌ Batch: Translation empty for chapter {actual_num} — skipping file write")
+                with self.progress_lock:
+                    self.update_progress_fn(idx, actual_num, content_hash, None, status="qa_failed", qa_issues_found=["EMPTY_OUTPUT"])
+                    self.save_progress_fn()
+                return False, actual_num, None, None, None
+
+            if is_qa_failed_response(cleaned):
+                failure_reason = get_failure_reason(cleaned)
+                print(f"❌ Batch: Translation failed for chapter {actual_num} - marked as failed, no output file created ({failure_reason})")
+                with self.progress_lock:
+                    fname = FileUtilities.create_chapter_filename(chapter, actual_num)
+                    self.update_progress_fn(idx, actual_num, content_hash, fname, status="qa_failed", ai_features=ai_features)
+                    self.save_progress_fn()
+                return False, actual_num, None, None, None
+
             # NOTE: We no longer append to translation history here in the worker thread.
             # History is now written in the main thread per batch, in a stable order.
             fname = FileUtilities.create_chapter_filename(chapter, actual_num)
@@ -4343,17 +4360,6 @@ class BatchTranslationProcessor:
                     print(f"⚠️ Batch: Chapter {actual_num} marked as qa_failed: Response was truncated")
                     # Update progress to qa_failed status with TRUNCATED issue
                     self.update_progress_fn(idx, actual_num, content_hash, fname, status=chapter_status, ai_features=ai_features, qa_issues_found=["TRUNCATED"])
-                    self.save_progress_fn()
-                    # DO NOT increment chapters_completed for qa_failed
-                    # Return False to indicate failure (return 5 values to match successful return)
-                    return False, actual_num, None, None, None
-                # Check for QA failures with comprehensive detection
-                elif is_qa_failed_response(cleaned):
-                    chapter_status = "qa_failed"
-                    failure_reason = get_failure_reason(cleaned)
-                    print(f"⚠️ Batch: Chapter {actual_num} marked as qa_failed: {failure_reason}")
-                    # Update progress to qa_failed status
-                    self.update_progress_fn(idx, actual_num, content_hash, fname, status=chapter_status, ai_features=ai_features)
                     self.save_progress_fn()
                     # DO NOT increment chapters_completed for qa_failed
                     # Return False to indicate failure (return 5 values to match successful return)
