@@ -7694,6 +7694,7 @@ Important rules:
                     'GLOSSARY_FILTER_MODE': self.config.get('glossary_filter_mode', 'all'),
                     'COMPRESSION_FACTOR': str(getattr(self, 'compression_factor_var', self.config.get('compression_factor', 3.0))),
                     'GLOSSARY_INCLUDE_ALL_CHARACTERS': '1' if getattr(self, 'glossary_include_all_characters_var', False) else '0',
+                    'USE_MAIN_KEY_FALLBACK': '1' if self.config.get('use_main_key_as_fallback', False) else '0',
                     
                     # Glossary-specific overrides (with fallback to global settings)
                     'GLOSSARY_REQUEST_MERGING_ENABLED': '1' if self.config.get('glossary_request_merging_enabled', False) else '0',
