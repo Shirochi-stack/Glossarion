@@ -4657,9 +4657,11 @@ class UnifiedClient:
                 except Exception as e:
                     print(f"[DEBUG] Failed to parse FALLBACK_KEYS: {e}")
             else:
-                print("[MAIN KEY RETRY] Fallback keys toggle is OFF or empty — nothing to try")
+                # print("[MAIN KEY RETRY] Fallback keys toggle is OFF or empty — nothing to try")
+                pass
             
-            print(f"[MAIN KEY RETRY] Total fallback keys to try: {len(fallback_keys)}")
+            if len(fallback_keys) > 0 or use_main_key_fb:
+                print(f"[MAIN KEY RETRY] Total fallback keys to try: {len(fallback_keys)}")
             
             # Try each fallback key in the list (all of them, no arbitrary limit)
             max_attempts = len(fallback_keys)
@@ -4865,7 +4867,8 @@ class UnifiedClient:
                     print(f"{log_prefix} Traceback:\n{tb}")
                     continue
             
-            print(f"[MAIN KEY RETRY] ❌ All {max_attempts} fallback keys failed")
+            if len(fallback_keys) > 0 or use_main_key_fb:
+                print(f"[MAIN KEY RETRY] ❌ All {max_attempts} fallback keys failed")
             return None
             
         finally:

@@ -4286,7 +4286,7 @@ class BatchTranslationProcessor:
 
             if is_qa_failed_response(cleaned):
                 failure_reason = get_failure_reason(cleaned)
-                print(f"❌ Batch: Translation failed for chapter {actual_num} - marked as failed, no output file created ({failure_reason})")
+                print(f"❌ Batch: Translation failed for chapter {actual_num} - marked as failed, no output file created")
                 with self.progress_lock:
                     fname = FileUtilities.create_chapter_filename(chapter, actual_num)
                     self.update_progress_fn(idx, actual_num, content_hash, fname, status="qa_failed", ai_features=ai_features)
