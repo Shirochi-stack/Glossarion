@@ -10681,6 +10681,7 @@ class UnifiedClient:
                     # Use extra_body for provider-specific fields the SDK doesn't type-accept
                     extra_body = {}
                     enable_ds_env = os.getenv('ENABLE_DEEPSEEK_THINKING', '1') == '1'
+                    is_chutes_thinking_endpoint = str(base_url or '').rstrip('/') == 'https://llm.chutes.ai/v1'
                     
                     # Inject OpenRouter reasoning configuration (effort/max_tokens) via extra_body
                     if provider == 'openrouter':
@@ -10739,8 +10740,8 @@ class UnifiedClient:
                             pass
 
                     # DeepSeek thinking via extra_body
-                    # (per DeepSeek docs: extra_body={"thinking":{"type":"enabled"}})
-                    if provider == 'deepseek':
+                    # (per DeepSeek docs: extra_body={\"thinking\":{\"type\":\"enabled\"}})
+                    if provider == 'deepseek' or is_chutes_thinking_endpoint:
                         try:
                             enable_ds = enable_ds_env
 
@@ -10750,15 +10751,16 @@ class UnifiedClient:
                                 tls = self._get_thread_local_client()
                                 if not hasattr(tls, 'deepseek_thinking_logged'):
                                     tls.deepseek_thinking_logged = set()
-                                state_key = (str(effective_model or ''), bool(enable_ds))
+                                state_key = (str(effective_model or ''), bool(enable_ds), "chutes" if is_chutes_thinking_endpoint else "deepseek")
                                 if state_key not in tls.deepseek_thinking_logged:
                                     tls.deepseek_thinking_logged.add(state_key)
                                     try:
                                         tname = threading.current_thread().name
                                     except Exception:
                                         tname = "unknown-thread"
+                                    label = "Chutes" if is_chutes_thinking_endpoint else "DeepSeek"
                                     self._debug_log(
-                                        f"🧠 [DeepSeek:{tname}] thinking={'ENABLED' if enable_ds else 'DISABLED'} (model={effective_model})"
+                                        f"🧠 [{label}:{tname}] thinking={'ENABLED' if enable_ds else 'DISABLED'} (model={effective_model})"
                                     )
                             except Exception:
                                 pass
@@ -11557,6 +11559,14 @@ class UnifiedClient:
                     data["max_completion_tokens"] = norm_max_completion_tokens
                 elif norm_max_tokens is not None:
                     data["max_tokens"] = norm_max_tokens
+                
+                # Enable DeepSeek thinking when using chutes OpenAI-compatible endpoint
+                try:
+                    enable_ds_env = os.getenv('ENABLE_DEEPSEEK_THINKING', '1') == '1'
+                    if str(base_url or '').rstrip('/') == 'https://llm.chutes.ai/v1' and enable_ds_env:
+                        data.setdefault("extra_body", {})["thinking"] = {"type": "enabled"}
+                except Exception:
+                    pass
                 
                 # Inject OpenRouter reasoning configuration (effort/max_tokens)
                 if provider == 'openrouter':
