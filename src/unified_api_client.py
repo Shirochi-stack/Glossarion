@@ -10824,13 +10824,14 @@ class UnifiedClient:
                             state_key = (str(effective_model or ''), bool(enable_ds_env))
                             if state_key not in tls.chutes_thinking_logged:
                                 tls.chutes_thinking_logged.add(state_key)
-                                try:
-                                    tname = threading.current_thread().name
-                                except Exception:
-                                    tname = "unknown-thread"
-                                self._debug_log(
-                                    f"🧠 [Chutes:{tname}] thinking={'ENABLED' if enable_ds_env else 'DISABLED'} (model={effective_model})"
-                                )
+                                if not is_chutes_thinking_endpoint:
+                                    try:
+                                        tname = threading.current_thread().name
+                                    except Exception:
+                                        tname = "unknown-thread"
+                                    self._debug_log(
+                                        f"🧠 [Chutes:{tname}] thinking={'ENABLED' if enable_ds_env else 'DISABLED'} (model={effective_model})"
+                                    )
                         except Exception:
                             pass
 
