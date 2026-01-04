@@ -10304,135 +10304,6 @@ class UnifiedClient:
             finish_reason='stop',
             raw_response=json_resp
         )
-
-    def _should_stream(self) -> bool:
-        """Return True when streaming is enabled via UI toggle, config, or environment."""
-        env_stream = os.getenv("ENABLE_STREAMING", "0")
-        cfg_stream = False
-        try:
-            cfg_stream = bool(getattr(self, "config", {}).get("enable_streaming", False))
-        except Exception:
-            pass
-        var_stream = bool(getattr(self, "enable_streaming_var", False))
-        return (env_stream not in ("0", "false", "False", "FALSE")) or cfg_stream or var_stream
-
-    def _consume_openai_stream(self, resp, provider: str = "openai") -> Tuple[str, str]:
-        """
-        Collect text from an OpenAI-compatible streaming iterator and mirror chunks to console.
-        Returns (content, finish_reason).
-        """
-        log_stream = os.getenv("LOG_STREAM_CHUNKS", "1").lower() not in ("0", "false")
-        if os.getenv("BATCH_TRANSLATION", "0") == "1":
-            log_stream = False
-
-        text_parts: List[str] = []
-        log_buf: List[str] = []
-        log_flush_len = 240
-        finish_reason = "stop"
-
-        def _stop_requested() -> bool:
-            try:
-                chk = getattr(self, "_is_stop_requested", None)
-                return bool(chk()) if callable(chk) else False
-            except Exception:
-                return False
-
-        for event in resp:
-            if _stop_requested():
-                break
-            try:
-                frag_collected = False
-                ch = (getattr(event, "choices", None) or [None])[0]
-                if not ch and isinstance(event, dict):
-                    choices = event.get("choices", [])
-                    ch = choices[0] if choices else None
-
-                if ch:
-                    delta = None
-                    if isinstance(ch, dict):
-                        delta = ch.get("delta") or ch.get("message")
-                    else:
-                        delta = getattr(ch, "delta", None) or getattr(ch, "message", None)
-
-                    if delta is not None:
-                        delta_content = None
-                        if isinstance(delta, dict):
-                            delta_content = delta.get("content")
-                        else:
-                            delta_content = getattr(delta, "content", None)
-
-                        if isinstance(delta_content, list):
-                            for part in delta_content:
-                                if isinstance(part, dict) and part.get("type") == "text":
-                                    frag = part.get("text", "")
-                                elif hasattr(part, "type") and getattr(part, "type") == "text":
-                                    frag = getattr(part, "text", "")
-                                else:
-                                    frag = None
-                                if frag:
-                                    frag_collected = True
-                                    text_parts.append(frag)
-                                    if log_stream and not _stop_requested():
-                                        _frag = frag.replace("\n", "").replace("\r", "")
-                                        if _frag:
-                                            log_buf.append(_frag)
-                                            if len("".join(log_buf)) >= log_flush_len or _frag.endswith((".", " ", ",", ";", "!", "?", ":")):
-                                                out = "".join(log_buf)
-                                                out = out.replace("\r", "")
-                                                out = out.replace("\n\n", "\n\n").replace("\n", " ")
-                                                print(out, end="", flush=True)
-                                                log_buf.clear()
-                        elif delta_content:
-                            frag = str(delta_content)
-                            frag_collected = True
-                            text_parts.append(frag)
-                            if log_stream and not _stop_requested():
-                                _frag = frag.replace("\n", "").replace("\r", "")
-                                if _frag:
-                                    log_buf.append(_frag)
-                                    if len("".join(log_buf)) >= log_flush_len or _frag.endswith((".", " ", ",", ";", "!", "?", ":")):
-                                        out = "".join(log_buf)
-                                        out = out.replace("\r", "")
-                                        out = out.replace("\n\n", "\n\n").replace("\n", " ")
-                                        print(out, end="", flush=True)
-                                        log_buf.clear()
-                    if getattr(ch, "finish_reason", None):
-                        finish_reason = ch.finish_reason
-
-                if not frag_collected:
-                    alt_frag = None
-                    if hasattr(event, "text") and isinstance(event.text, str):
-                        alt_frag = event.text
-                    elif hasattr(event, "content") and isinstance(event.content, str):
-                        alt_frag = event.content
-                    elif isinstance(event, dict):
-                        alt_frag = event.get("text") or event.get("content")
-                    if alt_frag:
-                        text_parts.append(alt_frag)
-                        if log_stream and not _stop_requested():
-                            _frag = alt_frag.replace("\n", "").replace("\r", "")
-                            if _frag:
-                                log_buf.append(_frag)
-                                if len("".join(log_buf)) >= log_flush_len or _frag.endswith((".", " ", ",", ";", "!", "?", ":")):
-                                    out = "".join(log_buf)
-                                    out = out.replace("\r", "")
-                                    out = out.replace("\n\n", "\n\n").replace("\n", " ")
-                                    print(out, end="", flush=True)
-                                    log_buf.clear()
-            except Exception:
-                continue
-
-        if log_stream and not _stop_requested():
-            if log_buf:
-                out = "".join(log_buf)
-                out = out.replace("\r", "")
-                out = out.replace("\n\n", "\n\n").replace("\n", " ")
-                print(out, end="", flush=True)
-                log_buf.clear()
-            print()
-
-        content = "".join(text_parts)
-        return content, finish_reason
     
     
     def _send_replicate(self, messages, temperature, max_tokens, response_name) -> UnifiedResponse:
@@ -10591,7 +10462,6 @@ class UnifiedClient:
                                 "model": deployment,
                                 "messages": messages
                             }
-                            stream_enabled = self._should_stream()
                             
                             # O-series models don't support temperature parameter
                             if not self._is_o_series_model():
@@ -10603,9 +10473,6 @@ class UnifiedClient:
                                 params["max_completion_tokens"] = norm_max_completion_tokens
                             elif norm_max_tokens is not None:
                                 params["max_tokens"] = norm_max_tokens
-                            # Honor streaming toggle for Azure OpenAI deployments
-                            if stream_enabled:
-                                params["stream"] = True
 
                             # Use Idempotency-Key via headers for compatibility
                             idem_key = self._get_idempotency_key()
@@ -10621,15 +10488,6 @@ class UnifiedClient:
                                 **params,
                                 extra_headers={"Idempotency-Key": idem_key}
                             )
-                            if stream_enabled:
-                                if not self._is_stop_requested():
-                                    print("🛰️ [azure] SDK stream opened")
-                                content, finish_reason = self._consume_openai_stream(response, provider="azure")
-                                return UnifiedResponse(
-                                    content=content,
-                                    finish_reason=finish_reason,
-                                    raw_response=None
-                                )
 
                             # Save incoming SDK response snapshot
                             try:
@@ -11004,8 +10862,15 @@ class UnifiedClient:
                     }
                     if extra_body:
                         call_kwargs["extra_body"] = extra_body
-                    # Honor unified streaming toggle (env/config/UI)
-                    use_streaming = self._should_stream()
+                    # Optional streaming toggle (text-only aggregation) - honor env, config, or runtime var
+                    env_stream = os.getenv("ENABLE_STREAMING", "0")
+                    cfg_stream = False
+                    try:
+                        cfg_stream = bool(getattr(self, 'config', {}).get('enable_streaming', False))
+                    except Exception:
+                        pass
+                    var_stream = bool(getattr(self, 'enable_streaming_var', False))
+                    use_streaming = (env_stream not in ("0", "false", "False", "FALSE")) or cfg_stream or var_stream
                     if use_streaming:
                         call_kwargs["stream"] = True
                     try:
@@ -11074,7 +10939,110 @@ class UnifiedClient:
                     
                     # Extract content with Gemini awareness (includes streaming aggregation)
                     if use_streaming:
-                        content, finish_reason = self._consume_openai_stream(resp, provider=provider)
+                        # Stream chunks to console unless explicitly suppressed
+                        log_stream = os.getenv("LOG_STREAM_CHUNKS", "1").lower() not in ("0", "false")
+                        if os.getenv("BATCH_TRANSLATION", "0") == "1":
+                            log_stream = False
+                        text_parts = []
+                        log_buf = []
+                        log_flush_len = 240  # user-requested chunk size
+                        finish_reason = 'stop'
+                        for event in resp:
+                            try:
+                                frag_collected = False
+                                # 1) Standard OpenAI stream chunk
+                                ch = (getattr(event, "choices", None) or [None])[0]
+                                if not ch and isinstance(event, dict):
+                                    # Fallback for dict-based events
+                                    choices = event.get("choices", [])
+                                    ch = choices[0] if choices else None
+
+                                if ch:
+                                    # Handle both object and dict access for delta
+                                    delta = None
+                                    if isinstance(ch, dict):
+                                        delta = ch.get("delta") or ch.get("message")
+                                    else:
+                                        delta = getattr(ch, "delta", None) or getattr(ch, "message", None)
+
+                                    if delta is not None:
+                                        # Handle both object and dict access for content
+                                        delta_content = None
+                                        if isinstance(delta, dict):
+                                            delta_content = delta.get("content")
+                                        else:
+                                            delta_content = getattr(delta, "content", None)
+
+                                        if isinstance(delta_content, list):
+                                            for part in delta_content:
+                                                if isinstance(part, dict) and part.get("type") == "text":
+                                                    frag = part.get("text", "")
+                                                elif hasattr(part, "type") and getattr(part, "type") == "text":
+                                                    frag = getattr(part, "text", "")
+                                                else:
+                                                    frag = None
+                                                if frag:
+                                                    frag_collected = True
+                                                    text_parts.append(frag)
+                                                    if log_stream and not self._is_stop_requested():
+                                                        _log_frag = frag.replace("\n", "").replace("\r", "")
+                                                        if _log_frag:
+                                                            log_buf.append(_log_frag)
+                                                            if len("".join(log_buf)) >= log_flush_len or _log_frag.endswith((".", " ", ",", ";", "!", "?", ":")):
+                                                                out = "".join(log_buf)
+                                                                # preserve paragraph breaks while flattening stray newlines
+                                                                out = out.replace("\r", "")
+                                                                out = out.replace("\n\n", "\n\n").replace("\n", " ")
+                                                                print(out, end="", flush=True)
+                                                                log_buf.clear()
+                                        elif delta_content:
+                                            frag = str(delta_content)
+                                            frag_collected = True
+                                            text_parts.append(frag)
+                                            if log_stream and not self._is_stop_requested():
+                                                _log_frag = frag.replace("\n", "").replace("\r", "")
+                                                if _log_frag:
+                                                    log_buf.append(_log_frag)
+                                                    if len("".join(log_buf)) >= log_flush_len or _log_frag.endswith((".", " ", ",", ";", "!", "?", ":")):
+                                                        out = "".join(log_buf)
+                                                        out = out.replace("\r", "")
+                                                        out = out.replace("\n\n", "\n\n").replace("\n", " ")
+                                                        print(out, end="", flush=True)
+                                                        log_buf.clear()
+                                    if getattr(ch, "finish_reason", None):
+                                        finish_reason = ch.finish_reason
+                                # 2) Fallback: event has direct text/content fields (provider-specific)
+                                if not frag_collected:
+                                    alt_frag = None
+                                    if hasattr(event, "text") and isinstance(event.text, str):
+                                        alt_frag = event.text
+                                    elif hasattr(event, "content") and isinstance(event.content, str):
+                                        alt_frag = event.content
+                                    elif isinstance(event, dict):
+                                        alt_frag = event.get("text") or event.get("content")
+                                    if alt_frag:
+                                        text_parts.append(alt_frag)
+                                        if log_stream and not self._is_stop_requested():
+                                            _log_frag = alt_frag.replace("\n", "").replace("\r", "")
+                                            if _log_frag:
+                                                log_buf.append(_log_frag)
+                                                if len("".join(log_buf)) >= log_flush_len or _log_frag.endswith((".", " ", ",", ";", "!", "?", ":")):
+                                                    out = "".join(log_buf)
+                                                    out = out.replace("\r", "")
+                                                    out = out.replace("\n\n", "\n\n").replace("\n", " ")
+                                                    print(out, end="", flush=True)
+                                                    log_buf.clear()
+                            except Exception:
+                                continue
+                        if log_stream and not self._is_stop_requested():
+                            if log_buf:
+                                out = "".join(log_buf)
+                                out = out.replace("\r", "")
+                                out = out.replace("\n\n", "\n\n").replace("\n", " ")
+                                print(out, end="", flush=True)
+                                log_buf.clear()
+                            print()  # newline after streaming completes
+                        content = "".join(text_parts)
                         return UnifiedResponse(
                             content=content,
                             finish_reason=finish_reason,
