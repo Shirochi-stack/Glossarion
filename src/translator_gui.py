@@ -7696,6 +7696,8 @@ Important rules:
                     'GLOSSARY_INCLUDE_ALL_CHARACTERS': '1' if getattr(self, 'glossary_include_all_characters_var', False) else '0',
                     'USE_MAIN_KEY_FALLBACK': '1' if self.config.get('use_main_key_fallback', True) else '0',
                     'USE_FALLBACK_KEYS': '1' if getattr(self, 'use_fallback_keys_var', False) else '0',
+                    # Ensure fallback key pool is available to UnifiedClient (parity with translation path)
+                    'FALLBACK_KEYS': json.dumps(self.config.get('fallback_keys', [])),
                     
                     # Glossary-specific overrides (with fallback to global settings)
                     'GLOSSARY_REQUEST_MERGING_ENABLED': '1' if self.config.get('glossary_request_merging_enabled', False) else '0',
