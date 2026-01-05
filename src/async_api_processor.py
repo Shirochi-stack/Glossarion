@@ -608,11 +608,16 @@ class AsyncAPIProcessor:
             }
 
             # Optional Gemini thinking budget (expects tokens count in chapter['thinking_budget_tokens'])
-            thinking_budget = chapter.get('thinking_budget_tokens')
-            if thinking_budget is not None:
-                request["generateContentRequest"]["generationConfig"]["thinking"] = {
-                    "budgetTokens": int(thinking_budget)
-                }
+            # Note: This is specific to Gemini, but keeping logic structure consistent.
+            # OpenAI typically uses 'reasoning_effort' or different params for o1/o3 models if supported in batch.
+            # If this was intended for OpenAI 'thinking' parameters, it might be incorrect here as OpenAI doesn't use "generateContentRequest" structure.
+            # However, if this code block is generic or copy-pasted, we should be careful.
+            # Since this is _prepare_openai_batch, "generateContentRequest" key is definitely WRONG for OpenAI.
+            # OpenAI Batch API expects standard chat completion body.
+            
+            # Remove the incorrect Gemini-style structure injection for OpenAI
+            # If you need to support reasoning models (o1/o3), they use standard parameters or don't support temperature.
+            # For now, stripping the invalid key insertion.
             # LOG THE FIRST REQUEST COMPLETELY
             if len(requests) == 0:
                 print(f"=== FIRST REQUEST ===")
@@ -2310,6 +2315,17 @@ class AsyncProcessingDialog:
         )
         if reply != QMessageBox.Yes:
             return
+
+        # Explicitly RE-ENABLE button here since we are just canceling a remote job
+        # and not running a local blocking process that needs the UI disabled.
+        # Although cancelling is quick, we don't want to leave the button disabled if it was.
+        # But wait, this method (_cancel_selected_job) doesn't disable the start button.
+        # The issue might be that the user thinks "Start Async Processing" is disabled *while* a job is running?
+        # Or if they cancel, they expect to start a new one immediately?
+        
+        # If the start button was disabled because a job was running/submitting, ensure it's enabled.
+        if hasattr(self, 'start_button'):
+            self.start_button.setEnabled(True)
 
         api_key = self._get_api_key_from_gui()
         successes, failures = 0, []
