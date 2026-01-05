@@ -14091,9 +14091,23 @@ class MangaTranslator:
                             except Exception as e:
                                 self._log(f"⚠️ Failed to save cleaned image after early inpainting: {e}", "warning")
                         elif isinstance(fut_inpaint_result, np.ndarray):
-                            # It's the actual image array (shouldn't happen if early inpainting worked)
-                            self._log("⚠️ Got direct inpainted image (early inpainting didn't run)", "warning")
+                            # It's the actual image array (early inpainting didn't run, but inpainting task finished)
+                            self._log("✅ Inpainting completed (direct path)", "info")
                             inpainted = fut_inpaint_result
+                            
+                            # CRITICAL: Save cleaned image for direct path too (to ensure consistency)
+                            try:
+                                if output_path:
+                                    base, ext = os.path.splitext(output_path)
+                                else:
+                                    base, ext = os.path.splitext(image_path)
+                                cleaned_path = f"{base}_cleaned{ext}"
+                                
+                                cv2.imwrite(cleaned_path, inpainted)
+                                
+                                self._log(f"💾 Saved cleaned image (direct path): {os.path.basename(cleaned_path)}", "info")
+                            except Exception as e:
+                                self._log(f"⚠️ Failed to save cleaned image in direct path: {e}", "warning")
                         else:
                             # Unexpected type
                             self._log(f"⚠️ Unexpected inpainting result type: {type(fut_inpaint_result)}", "warning")
