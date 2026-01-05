@@ -3323,7 +3323,7 @@ class TranslationProcessor:
                 print(f"⚠️ Failed to generate rolling summary: {e}")
             return None
     
-    def translate_with_retry(self, msgs, chunk_html, c, chunk_idx, total_chunks):
+    def translate_with_retry(self, msgs, chunk_html, c, chunk_idx, total_chunks, merge_group_len=None):
         """Handle translation with retry logic"""
         
         # CRITICAL FIX: Reset client state for each chunk
@@ -3562,7 +3562,26 @@ class TranslationProcessor:
                 # Treat split failures like truncation for auto-retry
                 split_failed_in_finish = bool(finish_reason and 'split' in str(finish_reason).lower())
                 split_failed_in_body = bool(isinstance(result, str) and 'SPLIT_FAILED' in result)
-                if not retry_needed and (split_failed_in_finish or split_failed_in_body) and split_retry_enabled:
+                
+                # Check for split markers if this is a merged request
+                split_validation_failed = False
+                if merge_group_len and merge_group_len > 1 and result and isinstance(result, str):
+                    # We need to import RequestMerger here or assume it's available in module scope
+                    # RequestMerger is defined at module level
+                    try:
+                        # Clean artifacts first? No, we want to check raw result usually, 
+                        # but split_by_markers is robust. 
+                        # However, translate_with_retry doesn't clean artifacts yet.
+                        # Let's try splitting.
+                        split_sections = RequestMerger.split_by_markers(result, merge_group_len)
+                        if not split_sections or len(split_sections) != merge_group_len:
+                            print(f"    ⚠️ Split validation failed: Expected {merge_group_len} sections")
+                            split_validation_failed = True
+                    except Exception as e:
+                        print(f"    ⚠️ Split validation error: {e}")
+                        split_validation_failed = True
+
+                if not retry_needed and (split_failed_in_finish or split_failed_in_body or split_validation_failed) and split_retry_enabled:
                     if split_failed_retry_count < split_failed_retry_limit:
                         retry_needed = True
                         retry_reason = "split failed"
@@ -9778,8 +9797,11 @@ def main(log_callback=None, stop_callback=None):
                 c['__progress'] = progress_manager.prog
                 c['history_manager'] = history_manager
                 
+                # Prepare merge_group_len if this is a merged request
+                merge_group_len = len(merge_info['group']) if merge_info else None
+
                 result, finish_reason, raw_obj = translation_processor.translate_with_retry(
-                    msgs, chunk_html, c, chunk_idx, total_chunks
+                    msgs, chunk_html, c, chunk_idx, total_chunks, merge_group_len=merge_group_len
                 )
                 
                 # Check if result is None or contains failure markers
