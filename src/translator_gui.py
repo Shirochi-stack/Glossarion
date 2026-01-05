@@ -2107,6 +2107,9 @@ Recent translations to summarize:
             ('single_api_image_chunks_var', 'single_api_image_chunks', False),
             ('enable_image_output_mode_var', 'enable_image_output_mode', False),
             ('enable_streaming_var', 'enable_streaming', False),
+            # Preserve streaming logs during batch mode; must be initialized here so save_config
+            # keeps the user's choice even if the Other Settings dialog is never opened.
+            ('allow_batch_stream_logs_var', 'allow_batch_stream_logs', False),
 
         ]
         
