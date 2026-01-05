@@ -2223,6 +2223,11 @@ def _create_response_handling_section(self, parent):
                 str(os.environ.get('ALLOW_BATCH_STREAM_LOGS', '0')) == '1'
             )
         )
+    # Ensure config mirrors the loaded state so it can be saved even if dialog isn't reopened
+    try:
+        self.config['allow_batch_stream_logs'] = bool(self.allow_batch_stream_logs_var)
+    except Exception:
+        pass
     self.allow_batch_stream_logs_checkbox = self._create_styled_checkbox(
         "Allow streaming logs during batch mode"
     )
@@ -2238,6 +2243,8 @@ def _create_response_handling_section(self, parent):
     def _on_allow_batch_stream_logs_toggle(checked):
         try:
             self.allow_batch_stream_logs_var = bool(checked)
+            # Persist immediately to config so it survives session without requiring another dialog open
+            self.config['allow_batch_stream_logs'] = self.allow_batch_stream_logs_var
             os.environ['ALLOW_BATCH_STREAM_LOGS'] = '1' if checked else '0'
         except Exception:
             pass

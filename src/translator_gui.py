@@ -6828,6 +6828,19 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self.append_log("❌ Glossary extraction module is not available")
                 return
 
+            # Ensure streaming flags are applied to glossary runtime (mirrors translation flow)
+            try:
+                stream_on = bool(self.config.get('enable_streaming', False))
+                os.environ['ENABLE_STREAMING'] = '1' if stream_on else '0'
+                self.append_log(f"🛰️ Streaming {'enabled' if stream_on else 'disabled'} (exported ENABLE_STREAMING)")
+            except Exception:
+                pass
+            try:
+                allow_batch_logs = bool(self.config.get('allow_batch_stream_logs', False))
+                os.environ['ALLOW_BATCH_STREAM_LOGS'] = '1' if allow_batch_logs else '0'
+            except Exception:
+                pass
+
             # Create Glossary folder
             os.makedirs("Glossary", exist_ok=True)
             
@@ -10586,6 +10599,13 @@ Important rules:
         
         if debug_mode:
             self.append_log("🚀 [INIT] Initializing all environment variables from config...")
+
+        # Ensure the batch streaming logs toggle exists on the instance so saves/load work even if the dialog was never opened
+        try:
+            if not hasattr(self, 'allow_batch_stream_logs_var'):
+                self.allow_batch_stream_logs_var = bool(self.config.get('allow_batch_stream_logs', False))
+        except Exception:
+            pass
         
         # Wire verbose payload saving to GUI debug mode
         try:
