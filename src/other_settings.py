@@ -4695,7 +4695,7 @@ def _create_processing_options_section(self, parent):
 
     def _update_retry_split_state():
         try:
-            enabled = retry_split_cb.isChecked()
+            enabled = retry_split_cb.isChecked() and request_merge_cb.isChecked()
             retry_split_edit.setEnabled(enabled)
             retry_split_label.setEnabled(enabled)
             if enabled:
