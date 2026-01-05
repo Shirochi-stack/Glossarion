@@ -6225,9 +6225,36 @@ def _create_custom_api_endpoints_section(self, parent_frame):
     section_v.addWidget(openai_row)
     
     # Help text
-    help_lbl = QLabel("Enable checkbox to use custom endpoint. For Ollama: http://localhost:11434/v1")
+    help_lbl = QLabel("Enable checkbox to use custom endpoint. For Ollama: <a href='http://localhost:11434/v1'>http://localhost:11434/v1</a>")
     help_lbl.setStyleSheet("color: gray; font-size: 8pt;")
     help_lbl.setContentsMargins(0, 0, 0, 10)
+    help_lbl.setTextFormat(Qt.RichText)
+    help_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
+    help_lbl.setOpenExternalLinks(False)
+    help_lbl.setToolTip("Double-click the URL to copy it")
+    try:
+        from PySide6.QtGui import QGuiApplication
+        from PySide6.QtCore import QTimer, QEvent
+        orig_style = help_lbl.styleSheet()
+        orig_text = help_lbl.text()
+        def _copy_ollama_url(_link=None):
+            try:
+                QGuiApplication.clipboard().setText("http://localhost:11434/v1")
+            except Exception:
+                pass
+        def _flash_feedback():
+            try:
+                help_lbl.setStyleSheet(orig_style + " color: #00d084;")
+                help_lbl.setText("Copied: http://localhost:11434/v1")
+                QTimer.singleShot(900, lambda: (help_lbl.setStyleSheet(orig_style), help_lbl.setText(orig_text)))
+            except Exception:
+                pass
+        def _dbl_click(event):
+            _copy_ollama_url()
+            _flash_feedback()
+        help_lbl.mouseDoubleClickEvent = _dbl_click
+    except Exception:
+        pass
     section_v.addWidget(help_lbl)
     
     # Azure version frame (initially hidden)
