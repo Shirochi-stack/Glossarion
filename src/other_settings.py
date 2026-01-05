@@ -4586,7 +4586,9 @@ def _create_processing_options_section(self, parent):
     merge_count_h.addWidget(merge_count_edit)
     merge_count_widgets.append(merge_count_edit)
     
-    merge_count_h.addWidget(QLabel("(default: 3)"))
+    default_merge_label = QLabel("(default: 3)")
+    merge_count_h.addWidget(default_merge_label)
+    merge_count_widgets.append(default_merge_label)
     merge_count_h.addStretch()
     extraction_v.addWidget(merge_count_row)
     
@@ -4741,6 +4743,13 @@ def _create_processing_options_section(self, parent):
         # Enable/disable split merge option (but don't change its checked state)
         for widget in split_merge_widgets:
             widget.setEnabled(checked)
+        # Dim/restore key labels/inputs for visual consistency
+        for lbl in (merge_count_label, default_merge_label,
+                    retry_split_label, retry_split_edit):
+            try:
+                lbl.setStyleSheet("color: white;" if checked else "color: #606060;")
+            except Exception:
+                pass
         _update_retry_split_state()
     request_merge_cb.toggled.disconnect(_on_request_merge_toggle)
     request_merge_cb.toggled.connect(_on_request_merge_toggle_with_split)
