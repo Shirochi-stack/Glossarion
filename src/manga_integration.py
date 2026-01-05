@@ -10655,6 +10655,15 @@ class MangaTranslationTab(QObject):
                     except Exception:
                         batch_size_value = 1
                 
+                # Define helper function first
+                def _get_gui_val(var, default):
+                    try:
+                        if hasattr(var, 'get'):
+                            return var.get()
+                        return var
+                    except Exception:
+                        return default
+
                 # Update environment variables and translator attributes
                 mode_val = str(_get_gui_val(self.main_gui.batch_mode_var, 'aggressive')).strip().lower() if hasattr(self.main_gui, 'batch_mode_var') else str(self.main_gui.config.get('batching_mode', 'aggressive')).strip().lower()
                 group_val = 3
