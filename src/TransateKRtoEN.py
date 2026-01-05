@@ -4522,8 +4522,11 @@ class BatchTranslationProcessor:
                 split_retry_limit = int(getattr(self.config, 'SPLIT_FAILED_RETRY_ATTEMPTS', 2))
             except Exception:
                 split_retry_limit = 2
-            split_retry_enabled = ((os.getenv('RETRY_SPLIT_FAILED', '0') == '1') or bool(getattr(self.config, 'RETRY_SPLIT_FAILED', False))) and not (os.getenv('DISABLE_MERGE_FALLBACK', '0') == '1' or getattr(self.config, 'DISABLE_MERGE_FALLBACK', False))
+            disable_fallback_flag = (os.getenv('DISABLE_MERGE_FALLBACK', '0') == '1') or bool(getattr(self.config, 'DISABLE_MERGE_FALLBACK', False))
+            # Use toggle/config for split retries (works in batch and non-batch)
+            split_retry_enabled = (os.getenv('RETRY_SPLIT_FAILED', '0') == '1') or bool(getattr(self.config, 'RETRY_SPLIT_FAILED', False))
             split_retry_attempts = 0
+            print(f"   [DEBUG] Split retry enabled={split_retry_enabled}, limit={split_retry_limit}, disable_fallback={disable_fallback_flag}")
 
             # Log combined prompt token count for merged request (treated as Chunk 1/1).
             try:
@@ -4576,7 +4579,7 @@ class BatchTranslationProcessor:
                 mtoks = self.config.MAX_OUTPUT_TOKENS
             
             # Finite retry loop to avoid infinite re-requests when Split‑the‑Merge keeps failing.
-            max_merge_attempts = (split_retry_limit + 1) if split_retry_enabled else 1
+            max_merge_attempts = (max(1, split_retry_limit) + 1) if split_retry_enabled else 1
             split_retry_attempts = 0
             while split_retry_attempts < max_merge_attempts:
                 # Call API for merged content
@@ -4700,16 +4703,22 @@ class BatchTranslationProcessor:
                     return results
 
                 # Now handle split-the-merge
-                disable_fallback = os.getenv('DISABLE_MERGE_FALLBACK', '0') == '1'
+                disable_fallback = disable_fallback_flag
                 split_sections = None
                 
                 if split_the_merge and len(chapters_data) > 1:
                     # Try to split by invisible markers
                     split_sections = RequestMerger.split_by_markers(cleaned, len(chapters_data))
                 
-                # If disable fallback is enabled and split failed, mark as qa_failed
-                if split_the_merge and disable_fallback and (not split_sections or len(split_sections) != len(chapters_data)):
-                    print(f"   ⚠️ Split failed and fallback disabled - marking merged group as qa_failed")
+                # If split failed, optionally retry; if retries exhausted, mark qa_failed when fallback disabled
+                if split_the_merge and (not split_sections or len(split_sections) != len(chapters_data)):
+                    if split_retry_enabled and split_retry_attempts + 1 < max_merge_attempts:
+                        split_retry_attempts += 1
+                        print(f"   🔄 Split failed — retrying merged request (attempt {split_retry_attempts}/{max_merge_attempts - 1})")
+                        continue
+
+                    if disable_fallback:
+                        print(f"   ⚠️ Split failed and fallback disabled - marking merged group as qa_failed")
                     
                     # Only save file for debugging if it contains meaningful content beyond error markers
                     cleaned_stripped = cleaned.strip()
