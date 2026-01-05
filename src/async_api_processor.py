@@ -527,7 +527,10 @@ class AsyncAPIProcessor:
     def _prepare_openai_batch(self, chapters: List[Dict[str, Any]], model: str) -> Dict[str, Any]:
         """Prepare OpenAI batch format"""
         
-        # CRITICAL: Map to exact supported model names
+        # Allow any model to be used
+        actual_model = model
+        
+        # Check if model is in our known supported list just for logging, but don't restrict it
         supported_batch_models = {
             # Current models (as of July 2025)
             'gpt-4o': 'gpt-4o',
@@ -548,21 +551,18 @@ class AsyncAPIProcessor:
             'gpt-4-0314': 'gpt-4-0314',
         }
         
-        # Check if model is supported
         model_lower = model.lower()
-        actual_model = None
-        
+        known_mapping = None
         for key, value in supported_batch_models.items():
             if model_lower == key.lower() or model_lower.startswith(key.lower()):
-                actual_model = value
+                known_mapping = value
                 break
         
-        if not actual_model:
-            print(f"Model '{model}' is not supported for batch processing!")
-            print(f"Supported models: {list(supported_batch_models.values())}")
-            raise ValueError(f"Model '{model}' is not supported for OpenAI Batch API")
-        
-        logger.info(f"Using batch-supported model: '{actual_model}' (from '{model}')")
+        if known_mapping:
+            actual_model = known_mapping
+            logger.info(f"Mapped '{model}' to known batch model '{actual_model}'")
+        else:
+            logger.info(f"Using unmapped model '{model}' for batch processing")
         
         requests = []
         
@@ -2908,8 +2908,10 @@ class AsyncProcessingDialog:
                 
             if not chapters_to_process:
                 self._show_error("All chapters require chunking. Async APIs don't support chunked chapters.")
+                # Re-enable button before returning
+                QTimer.singleShot(0, lambda: self.start_button.setEnabled(True))
                 return
-                
+
             # Prepare batch request
             self._log("Preparing batch request...")
             batch_data = self.processor.prepare_batch_request(chapters_to_process, model)
@@ -2950,8 +2952,12 @@ class AsyncProcessingDialog:
             self._log(f"❌ Error: {str(e)}")
             print(f"Async processing error: {traceback.format_exc()}")
             self._show_error(f"Failed to start async processing: {str(e)}")
+            
+            # Re-enable button immediately on error
+            QTimer.singleShot(0, lambda: self.start_button.setEnabled(True))
         finally:
-            # Re-enable button
+            # Only schedule re-enable if not already handled in exception block
+            # (Though redundant re-enables are harmless)
             QTimer.singleShot(0, lambda: self.start_button.setEnabled(True))
 
     def _prepare_environment_variables(self):
