@@ -3371,7 +3371,8 @@ class TranslationProcessor:
 
         disable_merge_fallback_flag = os.getenv("DISABLE_MERGE_FALLBACK", "0") == "1" or getattr(self.config, 'DISABLE_MERGE_FALLBACK', False)
         truncation_retry_enabled = (os.getenv("RETRY_TRUNCATED", "0") == "1") or bool(getattr(self.config, "RETRY_TRUNCATED", False))
-        split_retry_enabled = ((os.getenv("RETRY_SPLIT_FAILED", "0") == "1") or bool(getattr(self.config, "RETRY_SPLIT_FAILED", False))) and not disable_merge_fallback_flag
+        split_retry_enabled = (os.getenv("RETRY_SPLIT_FAILED", "0") == "1") or bool(getattr(self.config, "RETRY_SPLIT_FAILED", False))
+        print(f"   [DEBUG] (sequential) split_retry_enabled={split_retry_enabled}, limit={split_failed_retry_limit}, disable_fallback={disable_merge_fallback_flag}")
         
         duplicate_retry_count = 0
         timeout_retry_count = 0
