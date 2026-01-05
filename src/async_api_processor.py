@@ -2788,6 +2788,14 @@ class AsyncProcessingDialog:
                 f"Error estimating cost: {str(e)}"
             )
             print(f"Cost estimation error: {traceback.format_exc()}")
+    def _estimate_batch_cost(self):
+        """
+        Run the same detailed estimation used by the 'Estimate Cost Only' button.
+        This is invoked automatically right after a batch is submitted so the
+        job list shows the accurate cost (including system prompt/glossary
+        overhead and the user-selected compression factor).
+        """
+        return self._estimate_cost()
 
     def count_tokens(self, text, model):
         """Count tokens in text (content only - system prompt and glossary are counted separately)"""
@@ -2968,10 +2976,9 @@ class AsyncProcessingDialog:
             # Run immediate cost estimate for the newly created job
             # This populates the Cost Estimate column without waiting for user action
             try:
-                # We need to run this on the main thread because it updates UI
-                # IMPORTANT: Use QTimer.singleShot to defer execution to the main loop,
-                # ensuring GUI state is stable and avoiding thread context issues.
-                QTimer.singleShot(0, lambda: self._estimate_batch_cost())
+                # We need to run this on the main thread because it updates UI.
+                # Pass the dialog as the context so the callback is invoked on the GUI thread.
+                QTimer.singleShot(0, self.dialog, lambda: self._estimate_batch_cost())
             except Exception as e:
                 print(f"Failed to auto-run cost estimate: {e}")
             
