@@ -9483,36 +9483,488 @@ def main(log_callback=None, stop_callback=None):
             
             progress_manager.prog["chapter_chunks"][chapter_key_str]["total"] = len(chunks)
             
-            translated_chunks = []
+            # Initialize split retry counters
+            split_retry_attempts = 0
+            split_retry_limit = int(getattr(config, 'SPLIT_FAILED_RETRY_ATTEMPTS', 2))
+            split_retry_enabled = (os.getenv('RETRY_SPLIT_FAILED', '0') == '1') or bool(getattr(config, 'RETRY_SPLIT_FAILED', False))
+            max_merge_attempts = (max(1, split_retry_limit) + 1) if split_retry_enabled else 1
             
-            for chunk_html, chunk_idx, total_chunks in chunks:
-                chapter_key_str = content_hash
-                old_key_str = str(idx)
+            while split_retry_attempts < max_merge_attempts:
+                translated_chunks = []
+            
+                for chunk_html, chunk_idx, total_chunks in chunks:
+                    chapter_key_str = content_hash
+                    old_key_str = str(idx)
                 
-                if chapter_key_str not in progress_manager.prog.get("chapter_chunks", {}) and old_key_str in progress_manager.prog.get("chapter_chunks", {}):
-                    progress_manager.prog["chapter_chunks"][chapter_key_str] = progress_manager.prog["chapter_chunks"][old_key_str]
-                    del progress_manager.prog["chapter_chunks"][old_key_str]
-                    #print(f"[PROGRESS] Migrated chunks for chapter {chap_num} to new tracking system")
+                    if chapter_key_str not in progress_manager.prog.get("chapter_chunks", {}) and old_key_str in progress_manager.prog.get("chapter_chunks", {}):
+                        progress_manager.prog["chapter_chunks"][chapter_key_str] = progress_manager.prog["chapter_chunks"][old_key_str]
+                        del progress_manager.prog["chapter_chunks"][old_key_str]
+                        #print(f"[PROGRESS] Migrated chunks for chapter {chap_num} to new tracking system")
                 
-                if chapter_key_str not in progress_manager.prog["chapter_chunks"]:
-                    progress_manager.prog["chapter_chunks"][chapter_key_str] = {
-                        "total": len(chunks),
-                        "completed": [],
-                        "chunks": {}
-                    }
+                    if chapter_key_str not in progress_manager.prog["chapter_chunks"]:
+                        progress_manager.prog["chapter_chunks"][chapter_key_str] = {
+                            "total": len(chunks),
+                            "completed": [],
+                            "chunks": {}
+                        }
                 
-                progress_manager.prog["chapter_chunks"][chapter_key_str]["total"] = len(chunks)
+                    progress_manager.prog["chapter_chunks"][chapter_key_str]["total"] = len(chunks)
                 
-                # Get chapter status to check for qa_failed
-                chapter_info = progress_manager.prog["chapters"].get(chapter_key_str, {})
-                chapter_status = chapter_info.get("status")
+                    # Get chapter status to check for qa_failed
+                    chapter_info = progress_manager.prog["chapters"].get(chapter_key_str, {})
+                    chapter_status = chapter_info.get("status")
 
-                if chapter_status == "qa_failed":
-                    # Force retranslation of qa_failed chapters
-                    print(f"  [RETRY] Chunk {chunk_idx}/{total_chunks} - retranslating due to QA failure")
+                    if chapter_status == "qa_failed":
+                        # Force retranslation of qa_failed chapters
+                        print(f"  [RETRY] Chunk {chunk_idx}/{total_chunks} - retranslating due to QA failure")
                         
+                    if check_stop():
+                        print(f"❌ Translation stopped during chapter {actual_num}, chunk {chunk_idx}")
+                        # Mark any in_progress chapter(s) as failed so the UI reflects the stop
+                        if merge_info is not None:
+                            for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
+                                g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
+                                progress_manager.update(
+                                    g_idx,
+                                    g_actual_num,
+                                    g_content_hash,
+                                    g_fname,
+                                    status="failed",
+                                    chapter_obj=g_chapter,
+                                )
+                            progress_manager.save()
+                        else:
+                            fname = FileUtilities.create_chapter_filename(c, actual_num)
+                            progress_manager.update(
+                                idx,
+                                actual_num,
+                                content_hash,
+                                fname,
+                                status="failed",
+                                chapter_obj=c,
+                            )
+                            progress_manager.save()
+                        return
+                
+                    current_chunk_number += 1
+                
+                    progress_percent = (current_chunk_number / total_chunks_needed) * 100 if total_chunks_needed > 0 else 0
+                
+                    if chunks_completed > 0:
+                        elapsed_time = time.time() - translation_start_time
+                        avg_time_per_chunk = elapsed_time / chunks_completed
+                        remaining_chunks = total_chunks_needed - current_chunk_number + 1
+                        eta_seconds = remaining_chunks * avg_time_per_chunk
+                    
+                        eta_hours = int(eta_seconds // 3600)
+                        eta_minutes = int((eta_seconds % 3600) // 60)
+                        eta_str = f"{eta_hours}h {eta_minutes}m" if eta_hours > 0 else f"{eta_minutes}m"
+                    else:
+                        eta_str = "calculating..."
+                
+                    # For logging, strip data URIs so inline images don't explode char counts
+                    display_len = len(re.sub(r'data:image/[^;]+;base64,[A-Za-z0-9+/=]+', 'data:image;base64,', chunk_html))
+                    if total_chunks > 1:
+                        print(f"  🔄 Translating chunk {chunk_idx}/{total_chunks} for #{idx+1} (Overall: {current_chunk_number}/{total_chunks_needed} - {progress_percent:.1f}% - ETA: {eta_str})")
+                        print(f"  ⏳ Chunk size: {display_len:,} characters (~{chapter_splitter.count_tokens(chunk_html):,} tokens)")
+                    else:
+                        # Determine terminology and file reference
+                        is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
+                        terminology = "Section" if is_text_source else "Chapter"
+                    
+                        # Consistent file reference
+                        if c.get('is_chunk', False):
+                            file_ref = f"Section_{c['num']}"
+                        else:
+                            file_ref = c.get('original_basename', f'{terminology}_{actual_num}')
+                    
+                        chunk_tokens = chapter_splitter.count_tokens(chunk_html)
+                        print(f"  📄 {terminology} {actual_num} [{display_len:,} chars, {chunk_tokens:,} tokens]")
+                
+                    print(f"  ℹ️ This may take 30-60 seconds. Stop will take effect after completion.")
+                
+                    if log_callback:
+                        if hasattr(log_callback, '__self__') and hasattr(log_callback.__self__, 'append_chunk_progress'):
+                            if total_chunks == 1:
+                                # Determine terminology based on source type
+                                is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
+                                terminology = "Section" if is_text_source else "Chapter"
+
+                                log_callback.__self__.append_chunk_progress(
+                                    1, 1, "text", 
+                                    f"{terminology} {actual_num}",
+                                    overall_current=current_chunk_number,
+                                    overall_total=total_chunks_needed,
+                                    extra_info=f"{display_len:,} chars"
+                                )
+                            else:
+                                log_callback.__self__.append_chunk_progress(
+                                    chunk_idx, 
+                                    total_chunks, 
+                                    "text", 
+                                    f"{terminology} {actual_num}",
+                                    overall_current=current_chunk_number,
+                                    overall_total=total_chunks_needed
+                                )
+                        else:
+                            # Determine terminology based on source type
+                            is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
+                            terminology = "Section" if is_text_source else "Chapter"
+                            terminology_lower = "section" if is_text_source else "chapter"
+
+                            if total_chunks == 1:
+                                log_callback(f"📄 Processing {terminology} {actual_num} ({chapters_completed + 1}/{chapters_to_process}) - {progress_percent:.1f}% complete")
+                            else:
+                                log_callback(f"📄 processing chunk {chunk_idx}/{total_chunks} for {terminology_lower} {actual_num} - {progress_percent:.1f}% complete")
+                        
+                    # Get custom chunk prompt template from environment
+                    chunk_prompt_template = os.getenv("TRANSLATION_CHUNK_PROMPT", "[PART {chunk_idx}/{total_chunks}]\n{chunk_html}")
+                
+                    if total_chunks > 1:
+                        user_prompt = chunk_prompt_template.format(
+                            chunk_idx=chunk_idx,
+                            total_chunks=total_chunks,
+                            chunk_html=chunk_html
+                        )
+                    else:
+                        user_prompt = chunk_html
+                
+                    if config.CONTEXTUAL:
+                        # The load_history() method already handles its own locking internally
+                        # Don't acquire the lock here to avoid deadlock
+                        history = history_manager.load_history()
+                        trimmed = history[-config.HIST_LIMIT*2:]
+                        chunk_context = chunk_context_manager.get_context_messages(limit=2)
+
+                        # Check if using Gemini 3 model that needs thought signatures preserved
+                        is_gemini_3 = False
+                        model_name = getattr(config, 'MODEL', '').lower()
+                        if 'gemini-3' in model_name or 'gemini-exp-' in model_name:
+                            is_gemini_3 = True
+                    
+                        # Determine whether to include previous source text (user messages) as memory
+                        include_source = os.getenv("INCLUDE_SOURCE_IN_HISTORY", "0") == "1"
+                    
+                        if is_gemini_3:
+                            # For Gemini 3, preserve raw objects for thought signatures
+                            memory_msgs = []
+                            for h in trimmed:
+                                if not isinstance(h, dict):
+                                    continue
+                                role = h.get('role', 'user')
+                                content = h.get('content', '')
+                                if not content:
+                                    continue
+                            
+                                # Skip user messages if not including source
+                                if role == 'user' and not include_source:
+                                    continue
+                            
+                                # Build message preserving raw content object if present
+                                # When we have _raw_content_object with parts, don't include content field
+                                # to avoid duplication (the text is already in the parts)
+                                if '_raw_content_object' in h:
+                                    # Check if raw object has parts (which would contain the text)
+                                    raw_obj = h['_raw_content_object']
+                                    has_parts = False
+                                    if isinstance(raw_obj, dict) and 'parts' in raw_obj:
+                                        has_parts = True
+                                    elif hasattr(raw_obj, 'parts'):
+                                        has_parts = True
+                                
+                                    if has_parts and role == 'assistant':
+                                        # For assistant messages with parts in raw object, omit content field
+                                        # The text is already in the parts
+                                        msg = {'role': role, '_raw_content_object': raw_obj}
+                                    else:
+                                        # Include both content and raw object (for user messages or when no parts)
+                                        msg = {'role': role, 'content': content, '_raw_content_object': raw_obj}
+                                else:
+                                    # No raw object, just include content normally
+                                    msg = {'role': role, 'content': content}
+                                memory_msgs.append(msg)
+                        else:
+                            # Original memory block approach for other models
+                            # Collect memory blocks (source + translation) and emit as a single assistant message
+                            memory_blocks = []
+                            for h in trimmed:
+                                if not isinstance(h, dict):
+                                    continue
+                                role = h.get('role', 'user')
+                                content = h.get('content', '')
+                                if not content:
+                                    continue
+
+                                # Optionally skip previous source text when disabled
+                                if role == 'user' and not include_source:
+                                    continue
+
+                                if role == 'user':
+                                    prefix = (
+                                        "[MEMORY - PREVIOUS SOURCE TEXT]\\n"
+                                        "This is prior source content provided for context only.\\n"
+                                        "Do NOT translate or repeat this text directly in your response.\\n\\n"
+                                    )
+                                else:
+                                    prefix = (
+                                        "[MEMORY - PREVIOUS TRANSLATION]\\n"
+                                        "This is prior translated content provided for context only.\\n"
+                                        "Do NOT repeat or re-output this translation.\\n\\n"
+                                    )
+                                footer = "\\n\\n[END MEMORY BLOCK]\n"
+                                memory_blocks.append(prefix + content + footer)
+
+                            if memory_blocks:
+                                combined_memory = "\n".join(memory_blocks)
+                                # Always present history as an assistant message so the model
+                                # treats it as prior context, not a new user instruction.
+                                memory_msgs = [{
+                                    'role': 'assistant',
+                                    'content': combined_memory
+                                }]
+                            else:
+                                memory_msgs = []
+                    else:
+                        history = []  # Set empty history when not contextual
+                        trimmed = []
+                        chunk_context = []
+                        memory_msgs = []
+
+                    # Build the current system prompt from the original each time.
+                    # Apply per-chunk glossary compression if enabled
+                    if os.getenv("COMPRESS_GLOSSARY_PROMPT", "0") == "1" and glossary_path and os.path.exists(glossary_path):
+                        # Rebuild system prompt with compressed glossary for THIS SPECIFIC CHUNK
+                        current_system_content = build_system_prompt(config.SYSTEM_PROMPT, glossary_path, source_text=chunk_html)
+                    else:
+                        current_system_content = original_system_prompt
+                
+                    current_base = [{"role": "system", "content": current_system_content}]
+
+                    # Inject rolling_summary.txt verbatim as an assistant message.
+                    # IMPORTANT: Do NOT parse, re-header, or otherwise modify rolling_summary.txt here.
+                    summary_msgs_list = []
+                    if config.USE_ROLLING_SUMMARY:
+                        rolling_summary_text = ""
+                        try:
+                            summary_file = os.path.join(out, "rolling_summary.txt")
+                            if os.path.exists(summary_file):
+                                with open(summary_file, "r", encoding="utf-8") as sf:
+                                    rolling_summary_text = (sf.read() or "")
+                        except Exception:
+                            rolling_summary_text = ""
+
+                        # Only inject if the file has content
+                        if isinstance(rolling_summary_text, str) and rolling_summary_text:
+                            summary_content = (
+                                "CONTEXT ONLY - DO NOT INCLUDE IN TRANSLATION:\n"
+                                "[MEMORY] Previous context summary:\n\n"
+                                + rolling_summary_text + "\n\n"
+                                "[END MEMORY]\n"
+                                "END OF CONTEXT - BEGIN ACTUAL CONTENT TO TRANSLATE:"
+                            )
+                            summary_msgs_list = [{"role": "assistant", "content": summary_content}]
+
+                    # Build final message list for this chunk
+                    msgs = current_base + summary_msgs_list + chunk_context + memory_msgs + [{"role": "user", "content": user_prompt}]
+
+                    c['__index'] = idx
+                    c['__progress'] = progress_manager.prog
+                    c['history_manager'] = history_manager
+                
+                    result, finish_reason, raw_obj = translation_processor.translate_with_retry(
+                        msgs, chunk_html, c, chunk_idx, total_chunks
+                    )
+                
+                    # Check if result is None or contains failure markers
+                    # Only check for failure markers if response is short (< 50 chars)
+                    # Longer responses are likely legitimate translations even if they contain error keywords
+                    is_failed = result is None or (len(str(result).strip()) < 50 and is_qa_failed_response(result))
+                
+                    if is_failed:
+                        fname = FileUtilities.create_chapter_filename(c, actual_num)
+                        progress_manager.update(idx, actual_num, content_hash, fname, status="failed")
+                        progress_manager.save()
+                        print(f"❌ Translation failed for chapter {actual_num} - marked as failed, no output file created")
+                        continue
+                
+                    # ENHANCED TRUNCATION CHECK: Compare input vs output character counts
+                    # Skip this check if base64 images are present (they skew the character count)
+                    has_base64_image = 'data:image' in chunk_html or 'base64,' in chunk_html
+                
+                    # Check if this result came from a fallback key
+                    used_fallback = hasattr(translation_processor.client, '_used_fallback_key') and translation_processor.client._used_fallback_key
+                
+                    if not has_base64_image:
+                        input_char_count = len(chunk_html)
+                        output_char_count = len(result)
+                        char_ratio = output_char_count / input_char_count if input_char_count > 0 else 0
+                    
+                        # If output is less than half of input, likely truncated
+                        if char_ratio < 0.5 and output_char_count > 100:  # Only check if output has substance
+                            if used_fallback:
+                                # For fallback keys, just warn - don't retry (would go back to refusing model)
+                                print(f"    ⚠️ Truncated output from fallback key - accepting as-is")
+                            else:
+                                print(f"    ⚠️ TRUNCATION DETECTED (char comparison): Input={input_char_count:,} chars, Output={output_char_count:,} chars ({char_ratio:.1%} ratio)")
+                            
+                                # Override finish_reason to trigger retry logic
+                                # This will be caught by the retry logic if RETRY_TRUNCATED is enabled
+                                if finish_reason != "length" and finish_reason != "max_tokens":
+                                    print(f"    🔄 Setting finish_reason to 'length' to trigger auto-retry logic")
+                                    finish_reason = "length"
+                                
+                                    # If retry is enabled, call translate_with_retry again with increased tokens
+                                    retry_truncated_enabled = os.getenv("RETRY_TRUNCATED", "0") == "1"
+                                    if retry_truncated_enabled and config.MAX_OUTPUT_TOKENS < config.MAX_RETRY_TOKENS:
+                                        print(f"    🔄 Retrying with increased token limit...")
+                                        # Temporarily increase max tokens
+                                        original_max = config.MAX_OUTPUT_TOKENS
+                                        config.MAX_OUTPUT_TOKENS = config.MAX_RETRY_TOKENS
+                                    
+                                        # Retry the translation
+                                        result_retry, finish_reason_retry, raw_obj_retry = translation_processor.translate_with_retry(
+                                            msgs, chunk_html, c, chunk_idx, total_chunks
+                                        )
+                                    
+                                        # Restore original max tokens
+                                        config.MAX_OUTPUT_TOKENS = original_max
+                                    
+                                        if result_retry and len(result_retry) > len(result):
+                                            print(f"    ✅ Retry succeeded: {len(result):,} → {len(result_retry):,} chars")
+                                            result = result_retry
+                                            finish_reason = finish_reason_retry
+                                            raw_obj = raw_obj_retry
+                                        else:
+                                            print(f"    ⚠️ Retry did not improve output, using original")
+
+                    if config.REMOVE_AI_ARTIFACTS:
+                        result = ContentProcessor.clean_ai_artifacts(result, True)
+
+                    if config.EMERGENCY_RESTORE:
+                        result = ContentProcessor.emergency_restore_paragraphs(result, chunk_html)
+
+                    if config.REMOVE_AI_ARTIFACTS:
+                        lines = result.split('\n')
+                    
+                        json_line_count = 0
+                        for i, line in enumerate(lines[:5]):
+                            if line.strip() and any(pattern in line for pattern in [
+                                '"role":', '"content":', '"messages":', 
+                                '{"role"', '{"content"', '[{', '}]'
+                            ]):
+                                json_line_count = i + 1
+                            else:
+                                break
+                    
+                        if json_line_count > 0 and json_line_count < len(lines):
+                            remaining = '\n'.join(lines[json_line_count:])
+                            if remaining.strip() and len(remaining) > 100:
+                                result = remaining
+                                print(f"✂️ Removed {json_line_count} lines of JSON artifacts")
+
+                    result = re.sub(r'\[PART \d+/\d+\]\s*', '', result, flags=re.IGNORECASE)
+
+                    translated_chunks.append((result, chunk_idx, total_chunks))
+                
+                    chunk_context_manager.add_chunk(user_prompt, result, chunk_idx, total_chunks)
+
+                    progress_manager.prog["chapter_chunks"][chapter_key_str]["completed"].append(chunk_idx)
+                    progress_manager.prog["chapter_chunks"][chapter_key_str]["chunks"][str(chunk_idx)] = result
+                    progress_manager.save()
+
+                    chunks_completed += 1
+                    
+                    will_reset = history_manager.will_reset_on_next_append(
+                        config.HIST_LIMIT if config.CONTEXTUAL else 0, 
+                        config.TRANSLATION_HISTORY_ROLLING
+                    )
+
+
+                    # Check if we captured thought signatures
+                    if raw_obj:
+                        # print("🧠 Captured thought signature for history")
+                        pass
+                
+                    # Add microsecond delay before history append to prevent race conditions
+                    time.sleep(0.000001)  # 1 microsecond delay
+                    history = history_manager.append_to_history(
+                        user_prompt, 
+                        result, 
+                        config.HIST_LIMIT if config.CONTEXTUAL else 0,
+                        reset_on_limit=True,
+                        rolling_window=config.TRANSLATION_HISTORY_ROLLING,
+                        raw_assistant_object=raw_obj
+                    )
+
+                    if chunk_idx < total_chunks:
+                        # Handle float delays while checking for stop
+                        full_seconds = int(config.DELAY)
+                        fractional_second = config.DELAY - full_seconds
+                    
+                        # Check stop signal every second for full seconds
+                        for i in range(full_seconds):
+                            if check_stop():
+                                print("❌ Translation stopped during delay")
+                                # Mark any in_progress chapter(s) as failed so the UI reflects the stop
+                                if merge_info is not None:
+                                    for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
+                                        g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
+                                        progress_manager.update(
+                                            g_idx,
+                                            g_actual_num,
+                                            g_content_hash,
+                                            g_fname,
+                                            status="failed",
+                                            chapter_obj=g_chapter,
+                                        )
+                                    progress_manager.save()
+                                else:
+                                    fname = FileUtilities.create_chapter_filename(c, actual_num)
+                                    progress_manager.update(
+                                        idx,
+                                        actual_num,
+                                        content_hash,
+                                        fname,
+                                        status="failed",
+                                        chapter_obj=c,
+                                    )
+                                    progress_manager.save()
+                                return
+                            time.sleep(1)
+                    
+                        # Handle the fractional part if any
+                        if fractional_second > 0:
+                            if check_stop():
+                                print("❌ Translation stopped during delay")
+                                # Mark any in_progress chapter(s) as failed so the UI reflects the stop
+                                if merge_info is not None:
+                                    for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
+                                        g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
+                                        progress_manager.update(
+                                            g_idx,
+                                            g_actual_num,
+                                            g_content_hash,
+                                            g_fname,
+                                            status="failed",
+                                            chapter_obj=g_chapter,
+                                        )
+                                    progress_manager.save()
+                                else:
+                                    fname = FileUtilities.create_chapter_filename(c, actual_num)
+                                    progress_manager.update(
+                                        idx,
+                                        actual_num,
+                                        content_hash,
+                                        fname,
+                                        status="failed",
+                                        chapter_obj=c,
+                                    )
+                                    progress_manager.save()
+                                return
+                            time.sleep(fractional_second)
+
                 if check_stop():
-                    print(f"❌ Translation stopped during chapter {actual_num}, chunk {chunk_idx}")
+                    print(f"❌ Translation stopped before saving chapter {actual_num}")
                     # Mark any in_progress chapter(s) as failed so the UI reflects the stop
                     if merge_info is not None:
                         for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
@@ -9538,974 +9990,538 @@ def main(log_callback=None, stop_callback=None):
                         )
                         progress_manager.save()
                     return
-                
-                current_chunk_number += 1
-                
-                progress_percent = (current_chunk_number / total_chunks_needed) * 100 if total_chunks_needed > 0 else 0
-                
-                if chunks_completed > 0:
-                    elapsed_time = time.time() - translation_start_time
-                    avg_time_per_chunk = elapsed_time / chunks_completed
-                    remaining_chunks = total_chunks_needed - current_chunk_number + 1
-                    eta_seconds = remaining_chunks * avg_time_per_chunk
-                    
-                    eta_hours = int(eta_seconds // 3600)
-                    eta_minutes = int((eta_seconds % 3600) // 60)
-                    eta_str = f"{eta_hours}h {eta_minutes}m" if eta_hours > 0 else f"{eta_minutes}m"
+
+                if len(translated_chunks) > 1:
+                    print(f"  📎 Merging {len(translated_chunks)} chunks...")
+                    translated_chunks.sort(key=lambda x: x[1])
+                    merged_result = chapter_splitter.merge_translated_chunks(translated_chunks)
                 else:
-                    eta_str = "calculating..."
+                    merged_result = translated_chunks[0][0] if translated_chunks else ""
+
+                if config.CONTEXTUAL and len(translated_chunks) > 1:
+                    user_summary, assistant_summary = chunk_context_manager.get_summary_for_history()
                 
-                # For logging, strip data URIs so inline images don't explode char counts
-                display_len = len(re.sub(r'data:image/[^;]+;base64,[A-Za-z0-9+/=]+', 'data:image;base64,', chunk_html))
-                if total_chunks > 1:
-                    print(f"  🔄 Translating chunk {chunk_idx}/{total_chunks} for #{idx+1} (Overall: {current_chunk_number}/{total_chunks_needed} - {progress_percent:.1f}% - ETA: {eta_str})")
-                    print(f"  ⏳ Chunk size: {display_len:,} characters (~{chapter_splitter.count_tokens(chunk_html):,} tokens)")
-                else:
-                    # Determine terminology and file reference
-                    is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
-                    terminology = "Section" if is_text_source else "Chapter"
-                    
-                    # Consistent file reference
-                    if c.get('is_chunk', False):
-                        file_ref = f"Section_{c['num']}"
-                    else:
-                        file_ref = c.get('original_basename', f'{terminology}_{actual_num}')
-                    
-                    chunk_tokens = chapter_splitter.count_tokens(chunk_html)
-                    print(f"  📄 {terminology} {actual_num} [{display_len:,} chars, {chunk_tokens:,} tokens]")
-                
-                print(f"  ℹ️ This may take 30-60 seconds. Stop will take effect after completion.")
-                
-                if log_callback:
-                    if hasattr(log_callback, '__self__') and hasattr(log_callback.__self__, 'append_chunk_progress'):
-                        if total_chunks == 1:
-                            # Determine terminology based on source type
-                            is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
-                            terminology = "Section" if is_text_source else "Chapter"
-
-                            log_callback.__self__.append_chunk_progress(
-                                1, 1, "text", 
-                                f"{terminology} {actual_num}",
-                                overall_current=current_chunk_number,
-                                overall_total=total_chunks_needed,
-                                extra_info=f"{display_len:,} chars"
-                            )
-                        else:
-                            log_callback.__self__.append_chunk_progress(
-                                chunk_idx, 
-                                total_chunks, 
-                                "text", 
-                                f"{terminology} {actual_num}",
-                                overall_current=current_chunk_number,
-                                overall_total=total_chunks_needed
-                            )
-                    else:
-                        # Determine terminology based on source type
-                        is_text_source = is_text_file or c.get('filename', '').endswith('.txt') or c.get('is_chunk', False)
-                        terminology = "Section" if is_text_source else "Chapter"
-                        terminology_lower = "section" if is_text_source else "chapter"
-
-                        if total_chunks == 1:
-                            log_callback(f"📄 Processing {terminology} {actual_num} ({chapters_completed + 1}/{chapters_to_process}) - {progress_percent:.1f}% complete")
-                        else:
-                            log_callback(f"📄 processing chunk {chunk_idx}/{total_chunks} for {terminology_lower} {actual_num} - {progress_percent:.1f}% complete")
-                        
-                # Get custom chunk prompt template from environment
-                chunk_prompt_template = os.getenv("TRANSLATION_CHUNK_PROMPT", "[PART {chunk_idx}/{total_chunks}]\n{chunk_html}")
-                
-                if total_chunks > 1:
-                    user_prompt = chunk_prompt_template.format(
-                        chunk_idx=chunk_idx,
-                        total_chunks=total_chunks,
-                        chunk_html=chunk_html
-                    )
-                else:
-                    user_prompt = chunk_html
-                
-                if config.CONTEXTUAL:
-                    # The load_history() method already handles its own locking internally
-                    # Don't acquire the lock here to avoid deadlock
-                    history = history_manager.load_history()
-                    trimmed = history[-config.HIST_LIMIT*2:]
-                    chunk_context = chunk_context_manager.get_context_messages(limit=2)
-
-                    # Check if using Gemini 3 model that needs thought signatures preserved
-                    is_gemini_3 = False
-                    model_name = getattr(config, 'MODEL', '').lower()
-                    if 'gemini-3' in model_name or 'gemini-exp-' in model_name:
-                        is_gemini_3 = True
-                    
-                    # Determine whether to include previous source text (user messages) as memory
-                    include_source = os.getenv("INCLUDE_SOURCE_IN_HISTORY", "0") == "1"
-                    
-                    if is_gemini_3:
-                        # For Gemini 3, preserve raw objects for thought signatures
-                        memory_msgs = []
-                        for h in trimmed:
-                            if not isinstance(h, dict):
-                                continue
-                            role = h.get('role', 'user')
-                            content = h.get('content', '')
-                            if not content:
-                                continue
-                            
-                            # Skip user messages if not including source
-                            if role == 'user' and not include_source:
-                                continue
-                            
-                            # Build message preserving raw content object if present
-                            # When we have _raw_content_object with parts, don't include content field
-                            # to avoid duplication (the text is already in the parts)
-                            if '_raw_content_object' in h:
-                                # Check if raw object has parts (which would contain the text)
-                                raw_obj = h['_raw_content_object']
-                                has_parts = False
-                                if isinstance(raw_obj, dict) and 'parts' in raw_obj:
-                                    has_parts = True
-                                elif hasattr(raw_obj, 'parts'):
-                                    has_parts = True
-                                
-                                if has_parts and role == 'assistant':
-                                    # For assistant messages with parts in raw object, omit content field
-                                    # The text is already in the parts
-                                    msg = {'role': role, '_raw_content_object': raw_obj}
-                                else:
-                                    # Include both content and raw object (for user messages or when no parts)
-                                    msg = {'role': role, 'content': content, '_raw_content_object': raw_obj}
-                            else:
-                                # No raw object, just include content normally
-                                msg = {'role': role, 'content': content}
-                            memory_msgs.append(msg)
-                    else:
-                        # Original memory block approach for other models
-                        # Collect memory blocks (source + translation) and emit as a single assistant message
-                        memory_blocks = []
-                        for h in trimmed:
-                            if not isinstance(h, dict):
-                                continue
-                            role = h.get('role', 'user')
-                            content = h.get('content', '')
-                            if not content:
-                                continue
-
-                            # Optionally skip previous source text when disabled
-                            if role == 'user' and not include_source:
-                                continue
-
-                            if role == 'user':
-                                prefix = (
-                                    "[MEMORY - PREVIOUS SOURCE TEXT]\\n"
-                                    "This is prior source content provided for context only.\\n"
-                                    "Do NOT translate or repeat this text directly in your response.\\n\\n"
-                                )
-                            else:
-                                prefix = (
-                                    "[MEMORY - PREVIOUS TRANSLATION]\\n"
-                                    "This is prior translated content provided for context only.\\n"
-                                    "Do NOT repeat or re-output this translation.\\n\\n"
-                                )
-                            footer = "\\n\\n[END MEMORY BLOCK]\n"
-                            memory_blocks.append(prefix + content + footer)
-
-                        if memory_blocks:
-                            combined_memory = "\n".join(memory_blocks)
-                            # Always present history as an assistant message so the model
-                            # treats it as prior context, not a new user instruction.
-                            memory_msgs = [{
-                                'role': 'assistant',
-                                'content': combined_memory
-                            }]
-                        else:
-                            memory_msgs = []
-                else:
-                    history = []  # Set empty history when not contextual
-                    trimmed = []
-                    chunk_context = []
-                    memory_msgs = []
-
-                # Build the current system prompt from the original each time.
-                # Apply per-chunk glossary compression if enabled
-                if os.getenv("COMPRESS_GLOSSARY_PROMPT", "0") == "1" and glossary_path and os.path.exists(glossary_path):
-                    # Rebuild system prompt with compressed glossary for THIS SPECIFIC CHUNK
-                    current_system_content = build_system_prompt(config.SYSTEM_PROMPT, glossary_path, source_text=chunk_html)
-                else:
-                    current_system_content = original_system_prompt
-                
-                current_base = [{"role": "system", "content": current_system_content}]
-
-                # Inject rolling_summary.txt verbatim as an assistant message.
-                # IMPORTANT: Do NOT parse, re-header, or otherwise modify rolling_summary.txt here.
-                summary_msgs_list = []
-                if config.USE_ROLLING_SUMMARY:
-                    rolling_summary_text = ""
-                    try:
-                        summary_file = os.path.join(out, "rolling_summary.txt")
-                        if os.path.exists(summary_file):
-                            with open(summary_file, "r", encoding="utf-8") as sf:
-                                rolling_summary_text = (sf.read() or "")
-                    except Exception:
-                        rolling_summary_text = ""
-
-                    # Only inject if the file has content
-                    if isinstance(rolling_summary_text, str) and rolling_summary_text:
-                        summary_content = (
-                            "CONTEXT ONLY - DO NOT INCLUDE IN TRANSLATION:\n"
-                            "[MEMORY] Previous context summary:\n\n"
-                            + rolling_summary_text + "\n\n"
-                            "[END MEMORY]\n"
-                            "END OF CONTEXT - BEGIN ACTUAL CONTENT TO TRANSLATE:"
+                    if user_summary and assistant_summary:
+                        # Add microsecond delay before summary append
+                        time.sleep(0.000001)  # 1 microsecond delay
+                        history_manager.append_to_history(
+                            user_summary,
+                            assistant_summary,
+                            config.HIST_LIMIT,
+                            reset_on_limit=False,
+                            rolling_window=config.TRANSLATION_HISTORY_ROLLING
                         )
-                        summary_msgs_list = [{"role": "assistant", "content": summary_content}]
+                        print(f"  📝 Added chapter summary to history")
 
-                # Build final message list for this chunk
-                msgs = current_base + summary_msgs_list + chunk_context + memory_msgs + [{"role": "user", "content": user_prompt}]
+                chunk_context_manager.clear()
 
-                c['__index'] = idx
-                c['__progress'] = progress_manager.prog
-                c['history_manager'] = history_manager
-                
-                result, finish_reason, raw_obj = translation_processor.translate_with_retry(
-                    msgs, chunk_html, c, chunk_idx, total_chunks
-                )
-                
-                # Check if result is None or contains failure markers
-                # Only check for failure markers if response is short (< 50 chars)
-                # Longer responses are likely legitimate translations even if they contain error keywords
-                is_failed = result is None or (len(str(result).strip()) < 50 and is_qa_failed_response(result))
-                
-                if is_failed:
-                    fname = FileUtilities.create_chapter_filename(c, actual_num)
-                    progress_manager.update(idx, actual_num, content_hash, fname, status="failed")
-                    progress_manager.save()
-                    print(f"❌ Translation failed for chapter {actual_num} - marked as failed, no output file created")
-                    continue
-                
-                # ENHANCED TRUNCATION CHECK: Compare input vs output character counts
-                # Skip this check if base64 images are present (they skew the character count)
-                has_base64_image = 'data:image' in chunk_html or 'base64,' in chunk_html
-                
-                # Check if this result came from a fallback key
-                used_fallback = hasattr(translation_processor.client, '_used_fallback_key') and translation_processor.client._used_fallback_key
-                
-                if not has_base64_image:
-                    input_char_count = len(chunk_html)
-                    output_char_count = len(result)
-                    char_ratio = output_char_count / input_char_count if input_char_count > 0 else 0
-                    
-                    # If output is less than half of input, likely truncated
-                    if char_ratio < 0.5 and output_char_count > 100:  # Only check if output has substance
-                        if used_fallback:
-                            # For fallback keys, just warn - don't retry (would go back to refusing model)
-                            print(f"    ⚠️ Truncated output from fallback key - accepting as-is")
-                        else:
-                            print(f"    ⚠️ TRUNCATION DETECTED (char comparison): Input={input_char_count:,} chars, Output={output_char_count:,} chars ({char_ratio:.1%} ratio)")
-                            
-                            # Override finish_reason to trigger retry logic
-                            # This will be caught by the retry logic if RETRY_TRUNCATED is enabled
-                            if finish_reason != "length" and finish_reason != "max_tokens":
-                                print(f"    🔄 Setting finish_reason to 'length' to trigger auto-retry logic")
-                                finish_reason = "length"
-                                
-                                # If retry is enabled, call translate_with_retry again with increased tokens
-                                retry_truncated_enabled = os.getenv("RETRY_TRUNCATED", "0") == "1"
-                                if retry_truncated_enabled and config.MAX_OUTPUT_TOKENS < config.MAX_RETRY_TOKENS:
-                                    print(f"    🔄 Retrying with increased token limit...")
-                                    # Temporarily increase max tokens
-                                    original_max = config.MAX_OUTPUT_TOKENS
-                                    config.MAX_OUTPUT_TOKENS = config.MAX_RETRY_TOKENS
-                                    
-                                    # Retry the translation
-                                    result_retry, finish_reason_retry, raw_obj_retry = translation_processor.translate_with_retry(
-                                        msgs, chunk_html, c, chunk_idx, total_chunks
-                                    )
-                                    
-                                    # Restore original max tokens
-                                    config.MAX_OUTPUT_TOKENS = original_max
-                                    
-                                    if result_retry and len(result_retry) > len(result):
-                                        print(f"    ✅ Retry succeeded: {len(result):,} → {len(result_retry):,} chars")
-                                        result = result_retry
-                                        finish_reason = finish_reason_retry
-                                        raw_obj = raw_obj_retry
-                                    else:
-                                        print(f"    ⚠️ Retry did not improve output, using original")
-
-                if config.REMOVE_AI_ARTIFACTS:
-                    result = ContentProcessor.clean_ai_artifacts(result, True)
-
-                if config.EMERGENCY_RESTORE:
-                    result = ContentProcessor.emergency_restore_paragraphs(result, chunk_html)
-
-                if config.REMOVE_AI_ARTIFACTS:
-                    lines = result.split('\n')
-                    
-                    json_line_count = 0
-                    for i, line in enumerate(lines[:5]):
-                        if line.strip() and any(pattern in line for pattern in [
-                            '"role":', '"content":', '"messages":', 
-                            '{"role"', '{"content"', '[{', '}]'
-                        ]):
-                            json_line_count = i + 1
-                        else:
-                            break
-                    
-                    if json_line_count > 0 and json_line_count < len(lines):
-                        remaining = '\n'.join(lines[json_line_count:])
-                        if remaining.strip() and len(remaining) > 100:
-                            result = remaining
-                            print(f"✂️ Removed {json_line_count} lines of JSON artifacts")
-
-                result = re.sub(r'\[PART \d+/\d+\]\s*', '', result, flags=re.IGNORECASE)
-
-                translated_chunks.append((result, chunk_idx, total_chunks))
-                
-                chunk_context_manager.add_chunk(user_prompt, result, chunk_idx, total_chunks)
-
-                progress_manager.prog["chapter_chunks"][chapter_key_str]["completed"].append(chunk_idx)
-                progress_manager.prog["chapter_chunks"][chapter_key_str]["chunks"][str(chunk_idx)] = result
-                progress_manager.save()
-
-                chunks_completed += 1
-                    
-                will_reset = history_manager.will_reset_on_next_append(
-                    config.HIST_LIMIT if config.CONTEXTUAL else 0, 
-                    config.TRANSLATION_HISTORY_ROLLING
-                )
-
-
-                # Check if we captured thought signatures
-                if raw_obj:
-                    # print("🧠 Captured thought signature for history")
-                    pass
-                
-                # Add microsecond delay before history append to prevent race conditions
-                time.sleep(0.000001)  # 1 microsecond delay
-                history = history_manager.append_to_history(
-                    user_prompt, 
-                    result, 
-                    config.HIST_LIMIT if config.CONTEXTUAL else 0,
-                    reset_on_limit=True,
-                    rolling_window=config.TRANSLATION_HISTORY_ROLLING,
-                    raw_assistant_object=raw_obj
-                )
-
-                if chunk_idx < total_chunks:
-                    # Handle float delays while checking for stop
-                    full_seconds = int(config.DELAY)
-                    fractional_second = config.DELAY - full_seconds
-                    
-                    # Check stop signal every second for full seconds
-                    for i in range(full_seconds):
-                        if check_stop():
-                            print("❌ Translation stopped during delay")
-                            # Mark any in_progress chapter(s) as failed so the UI reflects the stop
-                            if merge_info is not None:
-                                for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
-                                    g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
-                                    progress_manager.update(
-                                        g_idx,
-                                        g_actual_num,
-                                        g_content_hash,
-                                        g_fname,
-                                        status="failed",
-                                        chapter_obj=g_chapter,
-                                    )
-                                progress_manager.save()
-                            else:
-                                fname = FileUtilities.create_chapter_filename(c, actual_num)
-                                progress_manager.update(
-                                    idx,
-                                    actual_num,
-                                    content_hash,
-                                    fname,
-                                    status="failed",
-                                    chapter_obj=c,
-                                )
-                                progress_manager.save()
-                            return
-                        time.sleep(1)
-                    
-                    # Handle the fractional part if any
-                    if fractional_second > 0:
-                        if check_stop():
-                            print("❌ Translation stopped during delay")
-                            # Mark any in_progress chapter(s) as failed so the UI reflects the stop
-                            if merge_info is not None:
-                                for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
-                                    g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
-                                    progress_manager.update(
-                                        g_idx,
-                                        g_actual_num,
-                                        g_content_hash,
-                                        g_fname,
-                                        status="failed",
-                                        chapter_obj=g_chapter,
-                                    )
-                                progress_manager.save()
-                            else:
-                                fname = FileUtilities.create_chapter_filename(c, actual_num)
-                                progress_manager.update(
-                                    idx,
-                                    actual_num,
-                                    content_hash,
-                                    fname,
-                                    status="failed",
-                                    chapter_obj=c,
-                                )
-                                progress_manager.save()
-                            return
-                        time.sleep(fractional_second)
-
-            if check_stop():
-                print(f"❌ Translation stopped before saving chapter {actual_num}")
-                # Mark any in_progress chapter(s) as failed so the UI reflects the stop
-                if merge_info is not None:
-                    for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
-                        g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
-                        progress_manager.update(
-                            g_idx,
-                            g_actual_num,
-                            g_content_hash,
-                            g_fname,
-                            status="failed",
-                            chapter_obj=g_chapter,
-                        )
-                    progress_manager.save()
+                # For text file chunks, ensure we pass the decimal number
+                if is_text_file and c.get('is_chunk', False) and isinstance(c.get('num'), float):
+                    fname = FileUtilities.create_chapter_filename(c, c['num'])  # Use the decimal num directly
+                    print(f"[DEBUG] Text file chunk - using decimal num {c['num']} -> filename: {fname}")
                 else:
                     fname = FileUtilities.create_chapter_filename(c, actual_num)
+                    if is_text_file:
+                        print(f"[DEBUG] Text file - using actual_num {actual_num} -> filename: {fname}")
+
+                client.set_output_filename(fname)
+                cleaned = re.sub(r"^```(?:html)?\s*\n?", "", merged_result, count=1, flags=re.MULTILINE)
+                cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
+
+                cleaned = ContentProcessor.clean_ai_artifacts(cleaned, remove_artifacts=config.REMOVE_AI_ARTIFACTS)
+
+                # If the cleaned translation is empty/whitespace, treat as failure and skip file write
+                if not cleaned or not str(cleaned).strip():
+                    print(f"❌ Translation empty for chapter {actual_num} — skipping file write")
+                    chapter_key = progress_manager._get_chapter_key(actual_num, FileUtilities.create_chapter_filename(c, actual_num), c, content_hash)
+                    existing = progress_manager.prog.get("chapters", {}).get(chapter_key, {})
+                    # If already qa_failed (e.g., prohibited content), keep that; otherwise mark qa_failed with EMPTY_OUTPUT
+                    new_status = existing.get("status") if existing.get("status") == "qa_failed" else "qa_failed"
+                    qa_issues = existing.get("qa_issues_found") or []
+                    if "EMPTY_OUTPUT" not in qa_issues:
+                        qa_issues = qa_issues + ["EMPTY_OUTPUT"]
                     progress_manager.update(
                         idx,
                         actual_num,
                         content_hash,
-                        fname,
-                        status="failed",
+                        FileUtilities.create_chapter_filename(c, actual_num),
+                        status=new_status,
+                        qa_issues_found=qa_issues,
                         chapter_obj=c,
                     )
                     progress_manager.save()
-                return
-
-            if len(translated_chunks) > 1:
-                print(f"  📎 Merging {len(translated_chunks)} chunks...")
-                translated_chunks.sort(key=lambda x: x[1])
-                merged_result = chapter_splitter.merge_translated_chunks(translated_chunks)
-            else:
-                merged_result = translated_chunks[0][0] if translated_chunks else ""
-
-            if config.CONTEXTUAL and len(translated_chunks) > 1:
-                user_summary, assistant_summary = chunk_context_manager.get_summary_for_history()
-                
-                if user_summary and assistant_summary:
-                    # Add microsecond delay before summary append
-                    time.sleep(0.000001)  # 1 microsecond delay
-                    history_manager.append_to_history(
-                        user_summary,
-                        assistant_summary,
-                        config.HIST_LIMIT,
-                        reset_on_limit=False,
-                        rolling_window=config.TRANSLATION_HISTORY_ROLLING
-                    )
-                    print(f"  📝 Added chapter summary to history")
-
-            chunk_context_manager.clear()
-
-            # For text file chunks, ensure we pass the decimal number
-            if is_text_file and c.get('is_chunk', False) and isinstance(c.get('num'), float):
-                fname = FileUtilities.create_chapter_filename(c, c['num'])  # Use the decimal num directly
-                print(f"[DEBUG] Text file chunk - using decimal num {c['num']} -> filename: {fname}")
-            else:
-                fname = FileUtilities.create_chapter_filename(c, actual_num)
-                if is_text_file:
-                    print(f"[DEBUG] Text file - using actual_num {actual_num} -> filename: {fname}")
-
-            client.set_output_filename(fname)
-            cleaned = re.sub(r"^```(?:html)?\s*\n?", "", merged_result, count=1, flags=re.MULTILINE)
-            cleaned = re.sub(r"\n?```\s*$", "", cleaned, count=1, flags=re.MULTILINE)
-
-            cleaned = ContentProcessor.clean_ai_artifacts(cleaned, remove_artifacts=config.REMOVE_AI_ARTIFACTS)
-
-            # If the cleaned translation is empty/whitespace, treat as failure and skip file write
-            if not cleaned or not str(cleaned).strip():
-                print(f"❌ Translation empty for chapter {actual_num} — skipping file write")
-                chapter_key = progress_manager._get_chapter_key(actual_num, FileUtilities.create_chapter_filename(c, actual_num), c, content_hash)
-                existing = progress_manager.prog.get("chapters", {}).get(chapter_key, {})
-                # If already qa_failed (e.g., prohibited content), keep that; otherwise mark qa_failed with EMPTY_OUTPUT
-                new_status = existing.get("status") if existing.get("status") == "qa_failed" else "qa_failed"
-                qa_issues = existing.get("qa_issues_found") or []
-                if "EMPTY_OUTPUT" not in qa_issues:
-                    qa_issues = qa_issues + ["EMPTY_OUTPUT"]
-                progress_manager.update(
-                    idx,
-                    actual_num,
-                    content_hash,
-                    FileUtilities.create_chapter_filename(c, actual_num),
-                    status=new_status,
-                    qa_issues_found=qa_issues,
-                    chapter_obj=c,
-                )
-                progress_manager.save()
-                # Move to next chapter without writing a file
-                continue
+                    # Move to next chapter without writing a file
+                    break
             
-            if is_mixed_content and image_translations:
-                print(f"🔀 Merging {len(image_translations)} image translations with text...")
-                from bs4 import BeautifulSoup
-                # Parse the translated text (which has the translated title/header)
-                soup_translated = BeautifulSoup(cleaned, 'html.parser')
+                if is_mixed_content and image_translations:
+                    print(f"🔀 Merging {len(image_translations)} image translations with text...")
+                    from bs4 import BeautifulSoup
+                    # Parse the translated text (which has the translated title/header)
+                    soup_translated = BeautifulSoup(cleaned, 'html.parser')
                 
-                # For each image translation, insert it into the document
-                for img_path, translation_html in image_translations.items():
-                    if translation_html and '<div' in translation_html:
-                        # Parse the translation HTML
-                        trans_soup = BeautifulSoup(translation_html, 'html.parser')
-                        container = trans_soup.find('div', class_=['translated-text-only', 'image-with-translation'])
+                    # For each image translation, insert it into the document
+                    for img_path, translation_html in image_translations.items():
+                        if translation_html and '<div' in translation_html:
+                            # Parse the translation HTML
+                            trans_soup = BeautifulSoup(translation_html, 'html.parser')
+                            container = trans_soup.find('div', class_=['translated-text-only', 'image-with-translation'])
                         
-                        if container:
-                            # Clone the container to avoid issues
-                            new_container = BeautifulSoup(str(container), 'html.parser').find('div')
+                            if container:
+                                # Clone the container to avoid issues
+                                new_container = BeautifulSoup(str(container), 'html.parser').find('div')
                             
-                            # Find where to insert - after header or at beginning of body
-                            if soup_translated.body:
-                                # Try to find a header to insert after
-                                header = soup_translated.body.find(['h1', 'h2', 'h3'])
-                                if header:
-                                    header.insert_after(new_container)
+                                # Find where to insert - after header or at beginning of body
+                                if soup_translated.body:
+                                    # Try to find a header to insert after
+                                    header = soup_translated.body.find(['h1', 'h2', 'h3'])
+                                    if header:
+                                        header.insert_after(new_container)
+                                    else:
+                                        # No header, insert at beginning of body
+                                        soup_translated.body.insert(0, new_container)
                                 else:
-                                    # No header, insert at beginning of body
-                                    soup_translated.body.insert(0, new_container)
-                            else:
-                                # No body tag, try to find any header
-                                header = soup_translated.find(['h1', 'h2', 'h3'])
-                                if header:
-                                    header.insert_after(new_container)
-                                else:
-                                    # Just append to the document
-                                    soup_translated.append(new_container)
+                                    # No body tag, try to find any header
+                                    header = soup_translated.find(['h1', 'h2', 'h3'])
+                                    if header:
+                                        header.insert_after(new_container)
+                                    else:
+                                        # Just append to the document
+                                        soup_translated.append(new_container)
                 
-                # Update cleaned with the merged content
-                cleaned = str(soup_translated)
-                print(f"✅ Successfully merged image translations")
+                    # Update cleaned with the merged content
+                    cleaned = str(soup_translated)
+                    print(f"✅ Successfully merged image translations")
             
-            # REQUEST MERGING: If this was a merged request, save to parent chapter file only
-            if merge_info is not None:
-                print(f"\n🔗 Saving merged response to parent chapter file...")
+                # REQUEST MERGING: If this was a merged request, save to parent chapter file only
+                if merge_info is not None:
+                    print(f"\n🔗 Saving merged response to parent chapter file...")
                 
-                # Get parent chapter info (first in the group)
-                parent_idx, parent_chapter, parent_actual_num, parent_content_hash = merge_info['group'][0]
-                merged_child_nums = [g[2] for g in merge_info['group'][1:]]  # All except parent
+                    # Get parent chapter info (first in the group)
+                    parent_idx, parent_chapter, parent_actual_num, parent_content_hash = merge_info['group'][0]
+                    merged_child_nums = [g[2] for g in merge_info['group'][1:]]  # All except parent
                 
-                # Track whether the underlying API response was truncated; if so mark qa_failed immediately
-                preserved_fr = locals().get("merged_finish_reason", finish_reason)
-                was_truncated = preserved_fr in ["length", "max_tokens"]
-                if was_truncated:
-                    print(f"   ⚠️ Merged response was TRUNCATED (finish_reason: {preserved_fr})")
-                    qa_issues = ["TRUNCATED"]
-                    parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
-                    progress_manager.update(
-                        parent_idx, parent_actual_num, parent_content_hash, parent_fname,
-                        status="qa_failed", chapter_obj=parent_chapter, qa_issues_found=qa_issues
-                    )
-                    for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group'][1:]:
-                        progress_manager.update(
-                            g_idx, g_actual_num, g_content_hash, None,
-                            status="qa_failed", chapter_obj=g_chapter, qa_issues_found=qa_issues
-                        )
-                    progress_manager.save()
-                    print(f"   ⚠️ Merged group marked as qa_failed due to truncation")
-                    continue
-
-                # We may exit early on QA failure below, but we still want to strip
-                # injected split markers from any saved merged output when Split-the-Merge is enabled.
-                split_the_merge = os.getenv('SPLIT_THE_MERGE', '0') == '1'
-                
-                # Check for QA failures first (independent of truncation)
-                if is_qa_failed_response(cleaned):
-                    print(f"   ⚠️ Merged response marked as qa_failed for parent + children")
-                    
-                    # Only save file for debugging if it contains meaningful content beyond error markers
-                    cleaned_stripped = cleaned.strip()
-                    is_only_error_marker = cleaned_stripped in [
-                        "[TRANSLATION FAILED]",
-                        "[Content Blocked]",
-                        "[IMAGE TRANSLATION FAILED]",
-                        "[EXTRACTION FAILED]",
-                        "[RATE LIMITED]",
-                        "[]"
-                    ] or cleaned_stripped.startswith("[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]") or cleaned_stripped.startswith("[CONTENT BLOCKED - ORIGINAL TEXT PRESERVED]")
-                    
-                    if not is_only_error_marker:
-                        # Save for debugging - contains actual translation attempt that failed QA
+                    # Track whether the underlying API response was truncated; if so mark qa_failed immediately
+                    preserved_fr = locals().get("merged_finish_reason", finish_reason)
+                    was_truncated = preserved_fr in ["length", "max_tokens"]
+                    if was_truncated:
+                        print(f"   ⚠️ Merged response was TRUNCATED (finish_reason: {preserved_fr})")
+                        qa_issues = ["TRUNCATED"]
                         parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
-                        try:
-                            cleaned_to_save = cleaned
-                            if split_the_merge:
-                                cleaned_to_save = re.sub(
-                                    r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
-                                    '',
-                                    cleaned_to_save,
-                                    flags=re.IGNORECASE | re.DOTALL,
-                                )
-                            with open(os.path.join(out, parent_fname), 'w', encoding='utf-8') as f:
-                                f.write(cleaned_to_save)
-                        except Exception:
-                            pass
-                    
-                    # Mark ALL chapters in the merge group as qa_failed using
-                    # their own expected filenames so we overwrite existing
-                    # in_progress entries instead of creating composite keys.
-                    for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
-                        g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
                         progress_manager.update(
-                            g_idx,
-                            g_actual_num,
-                            g_content_hash,
-                            g_fname,
-                            status="qa_failed",
-                            chapter_obj=g_chapter,
+                            parent_idx, parent_actual_num, parent_content_hash, parent_fname,
+                            status="qa_failed", chapter_obj=parent_chapter, qa_issues_found=qa_issues
                         )
-                    progress_manager.save()
-                    print(f"   ⚠️ Merged group marked as qa_failed")
-                    continue
-                
-                # Check if Split the Merge is enabled
-                split_the_merge = os.getenv('SPLIT_THE_MERGE', '0') == '1'
-                disable_fallback = os.getenv('DISABLE_MERGE_FALLBACK', '0') == '1'
-                split_sections = None
-                
-                if split_the_merge and len(merge_info['group']) > 1:
-                    # Try to split by invisible markers
-                    split_sections = RequestMerger.split_by_markers(cleaned, len(merge_info['group']))
-                
-                # If disable fallback is enabled and split failed, mark as qa_failed
-                if split_the_merge and disable_fallback and (not split_sections or len(split_sections) != len(merge_info['group'])):
-                    print(f"   ⚠️ Split failed and fallback disabled - marking merged group as qa_failed")
-                    
-                    # Only save file for debugging if it contains meaningful content beyond error markers
-                    cleaned_stripped = cleaned.strip()
-                    is_only_error_marker = cleaned_stripped in [
-                        "[TRANSLATION FAILED]",
-                        "[Content Blocked]",
-                        "[IMAGE TRANSLATION FAILED]",
-                        "[EXTRACTION FAILED]",
-                        "[RATE LIMITED]",
-                        "[]"
-                    ] or cleaned_stripped.startswith("[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]") or cleaned_stripped.startswith("[CONTENT BLOCKED - ORIGINAL TEXT PRESERVED]")
-                    
-                    if not is_only_error_marker:
-                        parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
-                        try:
-                            cleaned_to_save = cleaned
-                            if split_the_merge:
-                                cleaned_to_save = re.sub(
-                                    r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
-                                    '',
-                                    cleaned_to_save,
-                                    flags=re.IGNORECASE | re.DOTALL,
-                                )
-                            with open(os.path.join(out, parent_fname), 'w', encoding='utf-8') as f:
-                                f.write(cleaned_to_save)
-                        except Exception:
-                            pass
+                        for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group'][1:]:
+                            progress_manager.update(
+                                g_idx, g_actual_num, g_content_hash, None,
+                                status="qa_failed", chapter_obj=g_chapter, qa_issues_found=qa_issues
+                            )
+                        progress_manager.save()
+                        print(f"   ⚠️ Merged group marked as qa_failed due to truncation")
+                        break
 
-                    # Mark ALL chapters in the merge group as qa_failed
-                    for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
-                        g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
-                        progress_manager.update(
-                            g_idx,
-                            g_actual_num,
-                            g_content_hash,
-                            g_fname,
-                            status="qa_failed",
-                            chapter_obj=g_chapter,
-                            qa_issues_found=["SPLIT_FAILED"],
-                        )
-                    progress_manager.save()
-                    print(f"   ⚠️ Merged group ({len(merge_info['group'])} chapters) marked as qa_failed with SPLIT_FAILED")
-                    continue
+                    # We may exit early on QA failure below, but we still want to strip
+                    # injected split markers from any saved merged output when Split-the-Merge is enabled.
+                    split_the_merge = os.getenv('SPLIT_THE_MERGE', '0') == '1'
                 
-                if split_sections and len(split_sections) == len(merge_info['group']):
-                    # Split successful - save each section as individual file
-                    print(f"   ✂️ Splitting merged content into {len(split_sections)} individual files")
+                    # Check for QA failures first (independent of truncation)
+                    if is_qa_failed_response(cleaned):
+                        print(f"   ⚠️ Merged response marked as qa_failed for parent + children")
                     
-                    saved_files = []
-                    for i, (g_idx, g_chapter, g_actual_num, g_content_hash) in enumerate(merge_info['group']):
-                        section_content = split_sections[i]
-                        
-                        # Generate filename for this chapter using content.opf naming
-                        split_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
-                        
-                        # Handle text file mode
-                        if is_text_file:
-                            split_fname = split_fname.replace('.html', '.txt')
-                            from bs4 import BeautifulSoup
-                            soup = BeautifulSoup(section_content, 'html.parser')
-                            section_content = soup.get_text(strip=True)
-                        
-                        # Save the section
-                        split_output_path = os.path.join(out, split_fname)
-                        with open(split_output_path, 'w', encoding='utf-8') as f:
-                            f.write(section_content)
-                        
-                        # Verify file was written successfully
-                        if os.path.exists(split_output_path):
-                            saved_files.append((g_idx, g_chapter, g_actual_num, g_content_hash, split_fname))
-                            print(f"      💾 Saved Chapter {g_actual_num}: {split_fname} ({len(section_content)} chars)")
-                        else:
-                            print(f"      ⚠️ ERROR: Failed to write file {split_fname} - file does not exist after write")
+                        # Only save file for debugging if it contains meaningful content beyond error markers
+                        cleaned_stripped = cleaned.strip()
+                        is_only_error_marker = cleaned_stripped in [
+                            "[TRANSLATION FAILED]",
+                            "[Content Blocked]",
+                            "[IMAGE TRANSLATION FAILED]",
+                            "[EXTRACTION FAILED]",
+                            "[RATE LIMITED]",
+                            "[]"
+                        ] or cleaned_stripped.startswith("[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]") or cleaned_stripped.startswith("[CONTENT BLOCKED - ORIGINAL TEXT PRESERVED]")
                     
-                    # Mark all chapters as completed or qa_failed (for truncated)
-                    for g_idx, g_chapter, g_actual_num, g_content_hash, split_fname in saved_files:
-                        chapter_status = "qa_failed" if was_truncated else "completed"
-                        qa_issues = ["TRUNCATED"] if was_truncated else None
+                        if not is_only_error_marker:
+                            # Save for debugging - contains actual translation attempt that failed QA
+                            parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
+                            try:
+                                cleaned_to_save = cleaned
+                                if split_the_merge:
+                                    cleaned_to_save = re.sub(
+                                        r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
+                                        '',
+                                        cleaned_to_save,
+                                        flags=re.IGNORECASE | re.DOTALL,
+                                    )
+                                with open(os.path.join(out, parent_fname), 'w', encoding='utf-8') as f:
+                                    f.write(cleaned_to_save)
+                            except Exception:
+                                pass
+                    
+                        # Mark ALL chapters in the merge group as qa_failed using
+                        # their own expected filenames so we overwrite existing
+                        # in_progress entries instead of creating composite keys.
+                        for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
+                            g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
+                            progress_manager.update(
+                                g_idx,
+                                g_actual_num,
+                                g_content_hash,
+                                g_fname,
+                                status="qa_failed",
+                                chapter_obj=g_chapter,
+                            )
+                        progress_manager.save()
+                        print(f"   ⚠️ Merged group marked as qa_failed")
+                        break
+                
+                    # Check if Split the Merge is enabled
+                    split_the_merge = os.getenv('SPLIT_THE_MERGE', '0') == '1'
+                    disable_fallback = os.getenv('DISABLE_MERGE_FALLBACK', '0') == '1'
+                    split_sections = None
+                
+                    if split_the_merge and len(merge_info['group']) > 1:
+                        # Try to split by invisible markers
+                        split_sections = RequestMerger.split_by_markers(cleaned, len(merge_info['group']))
+                
+                    # If disable fallback is enabled and split failed, mark as qa_failed
+                    if split_the_merge and (not split_sections or len(split_sections) != len(merge_info['group'])):
+                        # Check retry
+                        if split_retry_enabled and split_retry_attempts + 1 < max_merge_attempts:
+                            split_retry_attempts += 1
+                            print(f"   🔄 Split failed — retrying merged request (attempt {split_retry_attempts}/{max_merge_attempts - 1})")
+                            time.sleep(2)
+                            continue
+                    
+                        if disable_fallback:
+                            print(f"   ⚠️ Split failed and fallback disabled - marking merged group as qa_failed")
+                    
+                            # Only save file for debugging if it contains meaningful content beyond error markers
+                            cleaned_stripped = cleaned.strip()
+                            is_only_error_marker = cleaned_stripped in [
+                                "[TRANSLATION FAILED]",
+                                "[Content Blocked]",
+                                "[IMAGE TRANSLATION FAILED]",
+                                "[EXTRACTION FAILED]",
+                                "[RATE LIMITED]",
+                                "[]"
+                            ] or cleaned_stripped.startswith("[TRANSLATION FAILED - ORIGINAL TEXT PRESERVED]") or cleaned_stripped.startswith("[CONTENT BLOCKED - ORIGINAL TEXT PRESERVED]")
+                    
+                            if not is_only_error_marker:
+                                parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
+                                try:
+                                    cleaned_to_save = cleaned
+                                    if split_the_merge:
+                                        cleaned_to_save = re.sub(
+                                            r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
+                                            '',
+                                            cleaned_to_save,
+                                            flags=re.IGNORECASE | re.DOTALL,
+                                        )
+                                    with open(os.path.join(out, parent_fname), 'w', encoding='utf-8') as f:
+                                        f.write(cleaned_to_save)
+                                except Exception:
+                                    pass
+
+                            # Mark ALL chapters in the merge group as qa_failed
+                            for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
+                                g_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
+                                progress_manager.update(
+                                    g_idx,
+                                    g_actual_num,
+                                    g_content_hash,
+                                    g_fname,
+                                    status="qa_failed",
+                                    chapter_obj=g_chapter,
+                                    qa_issues_found=["SPLIT_FAILED"],
+                                )
+                            progress_manager.save()
+                            print(f"   ⚠️ Merged group ({len(merge_info['group'])} chapters) marked as qa_failed with SPLIT_FAILED")
+                            break
+                
+                    if split_sections and len(split_sections) == len(merge_info['group']):
+                        # Split successful - save each section as individual file
+                        print(f"   ✂️ Splitting merged content into {len(split_sections)} individual files")
+                    
+                        saved_files = []
+                        for i, (g_idx, g_chapter, g_actual_num, g_content_hash) in enumerate(merge_info['group']):
+                            section_content = split_sections[i]
+                        
+                            # Generate filename for this chapter using content.opf naming
+                            split_fname = FileUtilities.create_chapter_filename(g_chapter, g_actual_num)
+                        
+                            # Handle text file mode
+                            if is_text_file:
+                                split_fname = split_fname.replace('.html', '.txt')
+                                from bs4 import BeautifulSoup
+                                soup = BeautifulSoup(section_content, 'html.parser')
+                                section_content = soup.get_text(strip=True)
+                        
+                            # Save the section
+                            split_output_path = os.path.join(out, split_fname)
+                            with open(split_output_path, 'w', encoding='utf-8') as f:
+                                f.write(section_content)
+                        
+                            # Verify file was written successfully
+                            if os.path.exists(split_output_path):
+                                saved_files.append((g_idx, g_chapter, g_actual_num, g_content_hash, split_fname))
+                                print(f"      💾 Saved Chapter {g_actual_num}: {split_fname} ({len(section_content)} chars)")
+                            else:
+                                print(f"      ⚠️ ERROR: Failed to write file {split_fname} - file does not exist after write")
+                    
+                        # Mark all chapters as completed or qa_failed (for truncated)
+                        for g_idx, g_chapter, g_actual_num, g_content_hash, split_fname in saved_files:
+                            chapter_status = "qa_failed" if was_truncated else "completed"
+                            qa_issues = ["TRUNCATED"] if was_truncated else None
+                            progress_manager.update(
+                                g_idx, g_actual_num, g_content_hash, split_fname,
+                                status=chapter_status, chapter_obj=g_chapter, qa_issues_found=qa_issues
+                            )
+                            chapters_completed += 1
+                    
+                        # Save once after all updates
+                        progress_manager.save()
+                        print(f"   ✅ Split the Merge complete: {len(saved_files)} files created")
+                        break
+                
+                    # Normal merged behavior (split not enabled or header count mismatch)
+                    # Save entire merged response to parent chapter's file
+                    cleaned_to_save = cleaned
+                    if split_the_merge and len(merge_info['group']) > 1:
+                        cleaned_to_save = re.sub(
+                            r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
+                            '',
+                            cleaned_to_save,
+                            flags=re.IGNORECASE | re.DOTALL,
+                        )
+
+                    if is_text_file and not is_pdf_file:
+                        parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num).replace('.html', '.txt')
+                        from bs4 import BeautifulSoup
+                        soup = BeautifulSoup(cleaned_to_save, 'html.parser')
+                        text_content = soup.get_text(strip=True)
+                    
+                        parent_output_path = os.path.join(out, parent_fname)
+                        with open(parent_output_path, 'w', encoding='utf-8') as f:
+                            f.write(text_content)
+                    else:
+                        parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
+                        parent_output_path = os.path.join(out, parent_fname)
+                        with open(parent_output_path, 'w', encoding='utf-8') as f:
+                            f.write(cleaned_to_save)
+                
+                    # Verify file was actually written before marking as completed
+                    if not os.path.exists(parent_output_path):
+                        print(f"   ⚠️ ERROR: Failed to write merged file {parent_fname} - file does not exist after write")
+                        # Mark all chapters in the group as failed since parent file wasn't written
+                        for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
+                            progress_manager.update(g_idx, g_actual_num, g_content_hash, None, status="failed", chapter_obj=g_chapter)
+                        progress_manager.save()
+                        break
+                
+                    print(f"   💾 Saved merged content to Chapter {parent_actual_num}: {parent_fname} ({len(cleaned_to_save)} chars)")
+                
+                    if was_truncated:
+                        # For truncated merged responses, mark ALL chapters as qa_failed
+                        qa_issues = ["TRUNCATED"]
                         progress_manager.update(
-                            g_idx, g_actual_num, g_content_hash, split_fname,
-                            status=chapter_status, chapter_obj=g_chapter, qa_issues_found=qa_issues
+                            parent_idx, parent_actual_num, parent_content_hash, parent_fname,
+                            status="qa_failed", chapter_obj=parent_chapter, qa_issues_found=qa_issues
+                        )
+                        for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group'][1:]:
+                            progress_manager.update(
+                                g_idx, g_actual_num, g_content_hash, None,
+                                status="qa_failed", chapter_obj=g_chapter, qa_issues_found=qa_issues
+                            )
+                        chapters_completed += len(merge_info['group'])
+
+                        # Save once after all updates
+                        progress_manager.save()
+                        print(f"   ⚠️ Merged group marked as qa_failed due to truncation")
+                    else:
+                        # Normal success path: parent completed, children marked as merged
+                        progress_manager.update(
+                            parent_idx, parent_actual_num, parent_content_hash, parent_fname,
+                            status="completed", chapter_obj=parent_chapter,
+                            merged_chapters=merged_child_nums
                         )
                         chapters_completed += 1
                     
-                    # Save once after all updates
-                    progress_manager.save()
-                    print(f"   ✅ Split the Merge complete: {len(saved_files)} files created")
-                    continue
+                        # Mark child chapters as merged (point to parent's output file) - atomically after parent
+                        for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group'][1:]:
+                            progress_manager.mark_as_merged(g_idx, g_actual_num, g_content_hash, parent_actual_num, g_chapter, parent_output_file=parent_fname)
+                            chapters_completed += 1
+                    
+                        # Save once after all updates
+                        progress_manager.save()
+                        print(f"   📊 Saved merged content for {len(merge_info['group'])} chapters")
                 
-                # Normal merged behavior (split not enabled or header count mismatch)
-                # Save entire merged response to parent chapter's file
-                cleaned_to_save = cleaned
-                if split_the_merge and len(merge_info['group']) > 1:
-                    cleaned_to_save = re.sub(
-                        r'<h1[^>]*id="split-\d+"[^>]*>.*?</h1>\s*',
-                        '',
-                        cleaned_to_save,
-                        flags=re.IGNORECASE | re.DOTALL,
-                    )
+                    # Skip normal save since we handled it above and exit this translation run
+                    break
 
                 if is_text_file and not is_pdf_file:
-                    parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num).replace('.html', '.txt')
+                    # For text files (but NOT PDFs), save as plain text instead of HTML
+                    fname_txt = fname.replace('.html', '.txt')  # Change extension to .txt
+                
+                    # Extract text from HTML
                     from bs4 import BeautifulSoup
-                    soup = BeautifulSoup(cleaned_to_save, 'html.parser')
+                    soup = BeautifulSoup(cleaned, 'html.parser')
                     text_content = soup.get_text(strip=True)
-                    
-                    parent_output_path = os.path.join(out, parent_fname)
-                    with open(parent_output_path, 'w', encoding='utf-8') as f:
+                
+                    # Write plain text file
+                    output_path = os.path.join(out, fname_txt)
+                    with open(output_path, 'w', encoding='utf-8') as f:
                         f.write(text_content)
-                else:
-                    parent_fname = FileUtilities.create_chapter_filename(parent_chapter, parent_actual_num)
-                    parent_output_path = os.path.join(out, parent_fname)
-                    with open(parent_output_path, 'w', encoding='utf-8') as f:
-                        f.write(cleaned_to_save)
                 
-                # Verify file was actually written before marking as completed
-                if not os.path.exists(parent_output_path):
-                    print(f"   ⚠️ ERROR: Failed to write merged file {parent_fname} - file does not exist after write")
-                    # Mark all chapters in the group as failed since parent file wasn't written
-                    for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group']:
-                        progress_manager.update(g_idx, g_actual_num, g_content_hash, None, status="failed", chapter_obj=g_chapter)
-                    progress_manager.save()
-                    continue
+                    # Verify file was actually written before marking as completed
+                    if not os.path.exists(output_path):
+                        print(f"⚠️ ERROR: Failed to write file {fname_txt} - file does not exist after write")
+                        # Keep status as in_progress or mark as failed
+                        progress_manager.save()  # Save current in_progress state
+                        break
                 
-                print(f"   💾 Saved merged content to Chapter {parent_actual_num}: {parent_fname} ({len(cleaned_to_save)} chars)")
+                    print(f"💾 Saved text file: {fname_txt} (Chapter {actual_num})")
                 
-                if was_truncated:
-                    # For truncated merged responses, mark ALL chapters as qa_failed
-                    qa_issues = ["TRUNCATED"]
-                    progress_manager.update(
-                        parent_idx, parent_actual_num, parent_content_hash, parent_fname,
-                        status="qa_failed", chapter_obj=parent_chapter, qa_issues_found=qa_issues
-                    )
-                    for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group'][1:]:
-                        progress_manager.update(
-                            g_idx, g_actual_num, g_content_hash, None,
-                            status="qa_failed", chapter_obj=g_chapter, qa_issues_found=qa_issues
-                        )
-                    chapters_completed += len(merge_info['group'])
+                    final_title = c['title'] or make_safe_filename(c['title'], actual_num)
+                    # Don't print individual "Processed" messages - these are redundant with the main progress display
+                    if os.getenv('DEBUG_CHAPTER_SAVES', '0') == '1':
+                        print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {actual_num}: {final_title}")
+                
+                    # Determine status based on comprehensive failure detection
+                    qa_issues = None
+                    if is_qa_failed_response(cleaned):
+                        chapter_status = "qa_failed"
+                        failure_reason = get_failure_reason(cleaned)
+                        print(f"⚠️ Chapter {actual_num} marked as qa_failed: {failure_reason}")
+                    elif finish_reason in ["length", "max_tokens"]:
+                        chapter_status = "qa_failed"
+                        qa_issues = ["TRUNCATED"]
+                        print(f"⚠️ Chapter {actual_num} marked as qa_failed: truncated (finish_reason: {finish_reason})")
+                    else:
+                        chapter_status = "completed"
 
-                    # Save once after all updates
-                    progress_manager.save()
-                    print(f"   ⚠️ Merged group marked as qa_failed due to truncation")
+                    progress_manager.update(idx, actual_num, content_hash, fname_txt, status=chapter_status, chapter_obj=c, qa_issues_found=qa_issues)
                 else:
-                    # Normal success path: parent completed, children marked as merged
-                    progress_manager.update(
-                        parent_idx, parent_actual_num, parent_content_hash, parent_fname,
-                        status="completed", chapter_obj=parent_chapter,
-                        merged_chapters=merged_child_nums
-                    )
-                    chapters_completed += 1
-                    
-                    # Mark child chapters as merged (point to parent's output file) - atomically after parent
-                    for g_idx, g_chapter, g_actual_num, g_content_hash in merge_info['group'][1:]:
-                        progress_manager.mark_as_merged(g_idx, g_actual_num, g_content_hash, parent_actual_num, g_chapter, parent_output_file=parent_fname)
-                        chapters_completed += 1
-                    
-                    # Save once after all updates
-                    progress_manager.save()
-                    print(f"   📊 Saved merged content for {len(merge_info['group'])} chapters")
+                    # For EPUB files, keep original HTML behavior
+                    output_path = os.path.join(out, fname)
+                    with open(output_path, 'w', encoding='utf-8') as f:
+                        f.write(cleaned)
                 
-                # Skip normal save since we handled it above and exit this translation run
-                continue
+                    # Verify file was actually written before marking as completed
+                    if not os.path.exists(output_path):
+                        print(f"⚠️ ERROR: Failed to write file {fname} - file does not exist after write")
+                        # Keep status as in_progress or mark as failed
+                        progress_manager.save()  # Save current in_progress state
+                        break
+                
+                    final_title = c['title'] or make_safe_filename(c['title'], actual_num)
+                    # Don't print individual "Processed" messages - these are redundant with the main progress display
+                    if os.getenv('DEBUG_CHAPTER_SAVES', '0') == '1':
+                        print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {actual_num}: {final_title}")
+                
+                    # Determine status based on comprehensive failure detection
+                    qa_issues = None
+                    if is_qa_failed_response(cleaned):
+                        chapter_status = "qa_failed"
+                        failure_reason = get_failure_reason(cleaned)
+                        print(f"⚠️ Chapter {actual_num} marked as qa_failed: {failure_reason}")
+                    elif finish_reason in ["length", "max_tokens"]:
+                        chapter_status = "qa_failed"
+                        qa_issues = ["TRUNCATED"]
+                        print(f"⚠️ Chapter {actual_num} marked as qa_failed: truncated (finish_reason: {finish_reason})")
+                    else:
+                        chapter_status = "completed"
 
-            if is_text_file and not is_pdf_file:
-                # For text files (but NOT PDFs), save as plain text instead of HTML
-                fname_txt = fname.replace('.html', '.txt')  # Change extension to .txt
-                
-                # Extract text from HTML
-                from bs4 import BeautifulSoup
-                soup = BeautifulSoup(cleaned, 'html.parser')
-                text_content = soup.get_text(strip=True)
-                
-                # Write plain text file
-                output_path = os.path.join(out, fname_txt)
-                with open(output_path, 'w', encoding='utf-8') as f:
-                    f.write(text_content)
-                
-                # Verify file was actually written before marking as completed
-                if not os.path.exists(output_path):
-                    print(f"⚠️ ERROR: Failed to write file {fname_txt} - file does not exist after write")
-                    # Keep status as in_progress or mark as failed
-                    progress_manager.save()  # Save current in_progress state
-                    continue
-                
-                print(f"💾 Saved text file: {fname_txt} (Chapter {actual_num})")
-                
-                final_title = c['title'] or make_safe_filename(c['title'], actual_num)
-                # Don't print individual "Processed" messages - these are redundant with the main progress display
-                if os.getenv('DEBUG_CHAPTER_SAVES', '0') == '1':
-                    print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {actual_num}: {final_title}")
-                
-                # Determine status based on comprehensive failure detection
-                qa_issues = None
-                if is_qa_failed_response(cleaned):
-                    chapter_status = "qa_failed"
-                    failure_reason = get_failure_reason(cleaned)
-                    print(f"⚠️ Chapter {actual_num} marked as qa_failed: {failure_reason}")
-                elif finish_reason in ["length", "max_tokens"]:
-                    chapter_status = "qa_failed"
-                    qa_issues = ["TRUNCATED"]
-                    print(f"⚠️ Chapter {actual_num} marked as qa_failed: truncated (finish_reason: {finish_reason})")
-                else:
-                    chapter_status = "completed"
-
-                progress_manager.update(idx, actual_num, content_hash, fname_txt, status=chapter_status, chapter_obj=c, qa_issues_found=qa_issues)
-            else:
-                # For EPUB files, keep original HTML behavior
-                output_path = os.path.join(out, fname)
-                with open(output_path, 'w', encoding='utf-8') as f:
-                    f.write(cleaned)
-                
-                # Verify file was actually written before marking as completed
-                if not os.path.exists(output_path):
-                    print(f"⚠️ ERROR: Failed to write file {fname} - file does not exist after write")
-                    # Keep status as in_progress or mark as failed
-                    progress_manager.save()  # Save current in_progress state
-                    continue
-                
-                final_title = c['title'] or make_safe_filename(c['title'], actual_num)
-                # Don't print individual "Processed" messages - these are redundant with the main progress display
-                if os.getenv('DEBUG_CHAPTER_SAVES', '0') == '1':
-                    print(f"[Processed {idx+1}/{total_chapters}] ✅ Saved Chapter {actual_num}: {final_title}")
-                
-                # Determine status based on comprehensive failure detection
-                qa_issues = None
-                if is_qa_failed_response(cleaned):
-                    chapter_status = "qa_failed"
-                    failure_reason = get_failure_reason(cleaned)
-                    print(f"⚠️ Chapter {actual_num} marked as qa_failed: {failure_reason}")
-                elif finish_reason in ["length", "max_tokens"]:
-                    chapter_status = "qa_failed"
-                    qa_issues = ["TRUNCATED"]
-                    print(f"⚠️ Chapter {actual_num} marked as qa_failed: truncated (finish_reason: {finish_reason})")
-                else:
-                    chapter_status = "completed"
-
-                progress_manager.update(idx, actual_num, content_hash, fname, status=chapter_status, chapter_obj=c, qa_issues_found=qa_issues)
-            progress_manager.save()
+                    progress_manager.update(idx, actual_num, content_hash, fname, status=chapter_status, chapter_obj=c, qa_issues_found=qa_issues)
+                progress_manager.save()
             
-            # After completing this chapter, produce a rolling summary and store it for the NEXT chapter
-            if config.USE_ROLLING_SUMMARY:
-                # Use the original system prompt to build the summary system prompt
-                base_system_content = original_system_prompt
+                # After completing this chapter, produce a rolling summary and store it for the NEXT chapter
+                if config.USE_ROLLING_SUMMARY:
+                    # Use the original system prompt to build the summary system prompt
+                    base_system_content = original_system_prompt
 
-                summary_mode = str(getattr(config, 'ROLLING_SUMMARY_MODE', 'replace') or 'replace').strip().lower()
+                    summary_mode = str(getattr(config, 'ROLLING_SUMMARY_MODE', 'replace') or 'replace').strip().lower()
 
-                def _load_previous_rolling_summary_text(*, full_file: bool = False) -> str:
-                    """Load rolling_summary.txt to use as assistant context (no parsing)."""
-                    try:
-                        summary_file = os.path.join(out, "rolling_summary.txt")
-                        if not os.path.exists(summary_file):
+                    def _load_previous_rolling_summary_text(*, full_file: bool = False) -> str:
+                        """Load rolling_summary.txt to use as assistant context (no parsing)."""
+                        try:
+                            summary_file = os.path.join(out, "rolling_summary.txt")
+                            if not os.path.exists(summary_file):
+                                return ""
+                            with open(summary_file, "r", encoding="utf-8") as f:
+                                content = f.read().strip()
+                            return content
+                        except Exception:
                             return ""
-                        with open(summary_file, "r", encoding="utf-8") as f:
-                            content = f.read().strip()
-                        return content
-                    except Exception:
-                        return ""
 
-                def _get_last_translated_outputs(n: int) -> str:
-                    """Build the user text from the last N translated chapter outputs (by completed_list)."""
-                    try:
-                        n = int(n or 0)
-                        if n <= 0:
+                    def _get_last_translated_outputs(n: int) -> str:
+                        """Build the user text from the last N translated chapter outputs (by completed_list)."""
+                        try:
+                            n = int(n or 0)
+                            if n <= 0:
+                                return cleaned
+                            # completed_list is saved (sorted) by ProgressManager.save()
+                            completed_list = progress_manager.prog.get("completed_list") or []
+                            if not isinstance(completed_list, list) or not completed_list:
+                                return cleaned
+                            last_items = completed_list[-n:]
+                            blocks = []
+                            for item in last_items:
+                                try:
+                                    chap_num = item.get("num")
+                                    rel_file = item.get("file")
+                                    if not rel_file:
+                                        break
+                                    fp = os.path.join(out, rel_file)
+                                    if not os.path.exists(fp):
+                                        break
+                                    with open(fp, "r", encoding="utf-8") as f:
+                                        txt = f.read().strip()
+                                    if not txt:
+                                        break
+                                    blocks.append(
+                                        f"=== Previous Translated Text: Chapter {chap_num} ===\n"
+                                        f"{txt}\n"
+                                        f"=== End Previous Translated Text ==="
+                                    )
+                                except Exception:
+                                    break
+                            return "\n\n".join(blocks) if blocks else cleaned
+                        except Exception:
                             return cleaned
-                        # completed_list is saved (sorted) by ProgressManager.save()
-                        completed_list = progress_manager.prog.get("completed_list") or []
-                        if not isinstance(completed_list, list) or not completed_list:
-                            return cleaned
-                        last_items = completed_list[-n:]
-                        blocks = []
-                        for item in last_items:
-                            try:
-                                chap_num = item.get("num")
-                                rel_file = item.get("file")
-                                if not rel_file:
-                                    continue
-                                fp = os.path.join(out, rel_file)
-                                if not os.path.exists(fp):
-                                    continue
-                                with open(fp, "r", encoding="utf-8") as f:
-                                    txt = f.read().strip()
-                                if not txt:
-                                    continue
-                                blocks.append(
-                                    f"=== Previous Translated Text: Chapter {chap_num} ===\n"
-                                    f"{txt}\n"
-                                    f"=== End Previous Translated Text ==="
-                                )
-                            except Exception:
-                                continue
-                        return "\n\n".join(blocks) if blocks else cleaned
-                    except Exception:
-                        return cleaned
 
-                if summary_mode == 'replace':
-                    # In replace mode, update the rolling summary using:
-                    # - assistant: previous rolling summary (from rolling_summary.txt)
-                    # - user: last N translated chapter outputs (configured by ROLLING_SUMMARY_EXCHANGES)
-                    prev_summary = _load_previous_rolling_summary_text()
-                    n = int(getattr(config, 'ROLLING_SUMMARY_EXCHANGES', 5) or 5)
-                    user_text = _get_last_translated_outputs(n)
-                    summary_text = translation_processor.generate_rolling_summary(
-                        history_manager,
-                        actual_num,
-                        base_system_content,
-                        source_text=user_text,
-                        previous_summary_text=prev_summary,
-                        previous_summary_chapter_num=None,
-                        prefer_translations_only_user=True,
-                    )
-                else:
-                    # append (and any unknown value): summarize ONLY this chapter's translated output.
-                    # Do NOT send the previous rolling summary in append mode.
-                    summary_text = translation_processor.generate_rolling_summary(
-                        history_manager,
-                        actual_num,
-                        base_system_content,
-                        source_text=cleaned,
-                        previous_summary_text=None,
-                        previous_summary_chapter_num=None,
-                    )
+                    if summary_mode == 'replace':
+                        # In replace mode, update the rolling summary using:
+                        # - assistant: previous rolling summary (from rolling_summary.txt)
+                        # - user: last N translated chapter outputs (configured by ROLLING_SUMMARY_EXCHANGES)
+                        prev_summary = _load_previous_rolling_summary_text()
+                        n = int(getattr(config, 'ROLLING_SUMMARY_EXCHANGES', 5) or 5)
+                        user_text = _get_last_translated_outputs(n)
+                        summary_text = translation_processor.generate_rolling_summary(
+                            history_manager,
+                            actual_num,
+                            base_system_content,
+                            source_text=user_text,
+                            previous_summary_text=prev_summary,
+                            previous_summary_chapter_num=None,
+                            prefer_translations_only_user=True,
+                        )
+                    else:
+                        # append (and any unknown value): summarize ONLY this chapter's translated output.
+                        # Do NOT send the previous rolling summary in append mode.
+                        summary_text = translation_processor.generate_rolling_summary(
+                            history_manager,
+                            actual_num,
+                            base_system_content,
+                            source_text=cleaned,
+                            previous_summary_text=None,
+                            previous_summary_chapter_num=None,
+                        )
 
-                if summary_text:
-                    last_summary_block_text = summary_text
-                    last_summary_chapter_num = actual_num
+                    if summary_text:
+                        last_summary_block_text = summary_text
+                        last_summary_chapter_num = actual_num
             
-            chapters_completed += 1
+                chapters_completed += 1
+                break  # Exit retry loop on success
 
     # Check if PDF should output as PDF or EPUB
     pdf_output_format = os.getenv('PDF_OUTPUT_FORMAT', 'pdf').lower()
