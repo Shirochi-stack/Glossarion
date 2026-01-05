@@ -595,6 +595,13 @@ class AsyncAPIProcessor:
                 print(f"No valid messages for chapter {chapter['id']}")
                 continue
             
+            # Decide correct token param name: newer O-series / GPT-5+ require max_completion_tokens
+            model_is_o_or_5 = self._is_o_series_model(actual_model)
+            token_param_name = "max_completion_tokens" if model_is_o_or_5 else "max_tokens"
+
+            # Honor the requested limit without capping so large outputs aren't truncated
+            requested_max_tokens = int(chapter.get('max_tokens', 65536))
+
             request = {
                 "custom_id": chapter['id'],
                 "method": "POST",
@@ -603,7 +610,7 @@ class AsyncAPIProcessor:
                     "model": actual_model,
                     "messages": valid_messages,
                     "temperature": float(chapter.get('temperature', 0.3)),
-                    "max_tokens": int(chapter.get('max_tokens', 65536))
+                    token_param_name: requested_max_tokens
                 }
             }
 
@@ -747,6 +754,11 @@ class AsyncAPIProcessor:
                 formatted_parts.append(f"{role}: {content}")
                 
         return "\n\n".join(formatted_parts)
+
+    def _is_o_series_model(self, model: str) -> bool:
+        """Detect OpenAI o-series and GPT-5+ models that require max_completion_tokens."""
+        ml = model.lower()
+        return ml.startswith(('o1', 'o3', 'o4', 'gpt-5'))
         
     async def submit_batch(self, batch_data: Dict[str, Any], model: str, api_key: str) -> AsyncJobInfo:
         """Submit batch to provider and create job entry"""
@@ -2209,6 +2221,11 @@ class AsyncProcessingDialog:
             
             if 'last_check' in job.metadata:
                 status_text += f"Last Checked: {job.metadata['last_check']}\n"
+            # If OpenAI provided an error file, fetch a brief excerpt so the user sees the actual failure reason
+            if job.provider == 'openai' and job.metadata.get('error_file_id'):
+                snippet = self._fetch_openai_error_snippet(job.metadata['error_file_id'])
+                if snippet:
+                    status_text += f"\nErrors (first 5):\n{snippet}\n"
                 
             # Show output file if available
             if job.output_file:
@@ -2218,6 +2235,38 @@ class AsyncProcessingDialog:
             
         except Exception as e:
             QMessageBox.critical(self.dialog, "Error", f"Failed to check status: {str(e)}")
+
+    def _fetch_openai_error_snippet(self, error_file_id: str) -> str:
+        """
+        Download the OpenAI batch error file and return the first few error messages.
+        Returns empty string on failure.
+        """
+        try:
+            api_key = self._get_api_key_from_gui()
+            if not api_key:
+                return ""
+            headers = {'Authorization': f'Bearer {api_key}'}
+            response = requests.get(
+                f'https://api.openai.com/v1/files/{error_file_id}/content',
+                headers=headers,
+                timeout=15
+            )
+            if response.status_code != 200:
+                return ""
+            lines = response.text.strip().split('\n')
+            snippets = []
+            for line in lines[:5]:
+                try:
+                    obj = json.loads(line)
+                    msg = obj.get('error', {}).get('message') or obj.get('message') or str(obj)
+                    snippets.append(f"• {msg}")
+                except Exception:
+                    snippets.append(f"• {line}")
+            if len(lines) > 5:
+                snippets.append(f"... and {len(lines) - 5} more")
+            return "\n".join(snippets)
+        except Exception:
+            return ""
  
     def _start_auto_refresh(self, interval_seconds=30):
         """Start automatic status refresh"""
