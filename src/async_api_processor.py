@@ -2571,7 +2571,12 @@ class AsyncProcessingDialog:
                     sampled_content_tokens = 0
 
                     # Resolve output token limit for chunking (honor disable flag)
-                    output_limit_disabled = bool(getattr(self.gui, 'token_limit_disabled', False)) or bool(self.gui.config.get('token_limit_disabled', False))
+                    try:
+                        output_limit_disabled = bool(getattr(self.gui, 'token_limit_disabled', False))
+                    except Exception:
+                        output_limit_disabled = False
+                    output_limit_disabled = output_limit_disabled or bool(self.gui.config.get('token_limit_disabled', False))
+                    
                     if output_limit_disabled:
                         output_limit = 0  # unlimited
                     else:
