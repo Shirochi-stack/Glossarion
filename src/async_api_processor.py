@@ -2944,6 +2944,14 @@ class AsyncProcessingDialog:
                 "Tip: Use the 'Estimate Cost Only' button to get accurate cost estimates before submitting."
             )
             
+            # Run immediate cost estimate for the newly created job
+            # This populates the Cost Estimate column without waiting for user action
+            try:
+                # We need to run this on the main thread because it updates UI
+                QTimer.singleShot(0, lambda: self.estimate_batch_cost(selected_job_id=job.job_id))
+            except Exception as e:
+                print(f"Failed to auto-run cost estimate: {e}")
+            
             # Start polling if requested
             if self.wait_for_completion_checkbox.isChecked():
                 self._start_polling(job.job_id)
