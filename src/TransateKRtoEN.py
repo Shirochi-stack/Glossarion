@@ -820,28 +820,8 @@ class RequestMerger:
         except Exception as e:
             print(f"   ⚠️ Split the Merge: Text marker fallback failed: {e}")
         
-        # Strategy 4: ANY h1 tags (last resort - assumes each chapter starts with h1)
-        try:
-            soup = BeautifulSoup(content, 'html.parser')
-            h1_tags = soup.find_all('h1')
-            
-            if len(h1_tags) == expected_count:
-                print(f"   ⚠️ Split the Merge: Using generic h1 tags as fallback ({len(h1_tags)} found)")
-                positions = []
-                for tag in h1_tags:
-                    tag_str = str(tag)
-                    opening_tag = re.escape(tag_str.split('>')[0] + '>')
-                    match = re.search(opening_tag, content, flags=re.IGNORECASE)
-                    if match:
-                        positions.append(match.start())
-                
-                if len(positions) == expected_count:
-                    return cls._split_by_positions(content, sorted(positions))
-        except Exception as e:
-            print(f"   ⚠️ Split the Merge: Generic h1 fallback failed: {e}")
-        
         # All strategies failed
-        print(f"   ❌ Split the Merge: Could not reliably split content (found varying h1 counts across strategies)")
+        print(f"   ❌ Split the Merge: Could not reliably split content (found varying marker counts across strategies)")
         return None
     
     @classmethod
