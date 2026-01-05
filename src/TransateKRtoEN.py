@@ -3587,7 +3587,7 @@ class TranslationProcessor:
                         retry_reason = "split failed"
                         retry_limit_for_reason = split_failed_retry_limit
                         split_failed_retry_count += 1
-                        print(f"    🔄 SPLIT FAILED RETRY: Attempt {split_failed_retry_count}/{split_failed_retry_limit}")
+                        print(f"    🔄 Split failed retry: Attempt {split_failed_retry_count}/{split_failed_retry_limit}")
                     else:
                         print(f"    ⚠️ SPLIT FAILED: Max split-failed retries ({split_failed_retry_limit}) reached - accepting response")
                 
@@ -3655,10 +3655,6 @@ class TranslationProcessor:
                 if retry_needed:
                     if is_duplicate_retry:
                         print(f"    🔄 Duplicate retry {duplicate_retry_count}/{max_duplicate_retries}")
-                    else:
-                        attempt_num = split_failed_retry_count if retry_reason == "split failed" else truncation_retry_count
-                        limit = retry_limit_for_reason or max_retries
-                        print(f"    🔄 Retry {attempt_num}/{limit}: {retry_reason}")
                     
                     time.sleep(2)
                     continue
