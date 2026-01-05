@@ -2953,7 +2953,9 @@ class AsyncProcessingDialog:
             # This populates the Cost Estimate column without waiting for user action
             try:
                 # We need to run this on the main thread because it updates UI
-                QTimer.singleShot(0, lambda: self.estimate_batch_cost(selected_job_id=job.job_id))
+                # IMPORTANT: Use QTimer.singleShot to defer execution to the main loop,
+                # ensuring GUI state is stable and avoiding thread context issues.
+                QTimer.singleShot(0, lambda: self._estimate_batch_cost())
             except Exception as e:
                 print(f"Failed to auto-run cost estimate: {e}")
             
