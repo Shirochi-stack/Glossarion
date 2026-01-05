@@ -2214,6 +2214,35 @@ def _create_response_handling_section(self, parent):
     self.enable_streaming_checkbox.toggled.connect(_on_streaming_toggle)
     http_main_v.addSpacing(6)
     http_main_v.addWidget(self.enable_streaming_checkbox)
+
+    # Allow streaming logs during batch mode
+    if not hasattr(self, 'allow_batch_stream_logs_var'):
+        self.allow_batch_stream_logs_var = bool(
+            self.config.get(
+                'allow_batch_stream_logs',
+                str(os.environ.get('ALLOW_BATCH_STREAM_LOGS', '0')) == '1'
+            )
+        )
+    self.allow_batch_stream_logs_checkbox = self._create_styled_checkbox(
+        "Allow streaming logs during batch mode"
+    )
+    self.allow_batch_stream_logs_checkbox.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "Show streaming token logs even while batch translation is running. "
+        "Default is off to reduce log noise.</p></qt>"
+    )
+    try:
+        self.allow_batch_stream_logs_checkbox.setChecked(bool(self.allow_batch_stream_logs_var))
+    except Exception:
+        pass
+    def _on_allow_batch_stream_logs_toggle(checked):
+        try:
+            self.allow_batch_stream_logs_var = bool(checked)
+            os.environ['ALLOW_BATCH_STREAM_LOGS'] = '1' if checked else '0'
+        except Exception:
+            pass
+    self.allow_batch_stream_logs_checkbox.toggled.connect(_on_allow_batch_stream_logs_toggle)
+    http_main_v.addWidget(self.allow_batch_stream_logs_checkbox)
     
     section_v.addWidget(http_main)
     

@@ -9726,7 +9726,8 @@ class UnifiedClient:
                             finish_reason = 'stop'
                             response = None
                             log_stream = os.getenv("LOG_STREAM_CHUNKS", "1").lower() not in ("0", "false")
-                            if os.getenv("BATCH_TRANSLATION", "0") == "1":
+                            allow_batch_logs = os.getenv("ALLOW_BATCH_STREAM_LOGS", "0").lower() not in ("0", "false")
+                            if os.getenv("BATCH_TRANSLATION", "0") == "1" and not allow_batch_logs:
                                 log_stream = False
                             log_buf = []
                             log_flush_len = 240
@@ -10944,7 +10945,8 @@ class UnifiedClient:
                     if use_streaming:
                         # Stream chunks to console unless explicitly suppressed
                         log_stream = os.getenv("LOG_STREAM_CHUNKS", "1").lower() not in ("0", "false")
-                        if os.getenv("BATCH_TRANSLATION", "0") == "1":
+                        allow_batch_logs = os.getenv("ALLOW_BATCH_STREAM_LOGS", "0").lower() not in ("0", "false")
+                        if os.getenv("BATCH_TRANSLATION", "0") == "1" and not allow_batch_logs:
                             log_stream = False
                         text_parts = []
                         log_buf = []

@@ -5229,6 +5229,11 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self.append_log(f"🛰️ Streaming {'enabled' if stream_on else 'disabled'} (exported ENABLE_STREAMING)")
             except Exception:
                 pass
+            try:
+                allow_batch_logs = bool(self.config.get('allow_batch_stream_logs', False))
+                os.environ['ALLOW_BATCH_STREAM_LOGS'] = '1' if allow_batch_logs else '0'
+            except Exception:
+                pass
 
             # SET GLOSSARY IN ENVIRONMENT
             if hasattr(self, 'manual_glossary_path') and self.manual_glossary_path:
@@ -9987,6 +9992,7 @@ Important rules:
                 ('http_pool_maxsize', ['http_pool_maxsize_entry', 'http_pool_maxsize_var'], 50, lambda v: safe_int(v, 50)),
                 ('ignore_retry_after', ['ignore_retry_after_checkbox', 'ignore_retry_after_var'], False, bool),
                 ('enable_streaming', ['enable_streaming_checkbox', 'enable_streaming_var'], False, bool),
+                ('allow_batch_stream_logs', ['allow_batch_stream_logs_checkbox', 'allow_batch_stream_logs_var'], False, bool),
                 ('max_retries', ['max_retries_var'], 3, lambda v: safe_int(v, 3)),
                 ('indefinite_rate_limit_retry', ['indefinite_rate_limit_retry_var'], False, bool),
 
@@ -10600,6 +10606,7 @@ Important rules:
                 # Thinking toggles
                 ('ENABLE_DEEPSEEK_THINKING', '1' if self.config.get('enable_deepseek_thinking', True) else '0'),
                 ('ENABLE_STREAMING', '1' if self.config.get('enable_streaming', False) else '0'),
+                ('ALLOW_BATCH_STREAM_LOGS', '1' if self.config.get('allow_batch_stream_logs', False) else '0'),
                 
                 # General settings
                 ('EXTRACTION_WORKERS', str(self.config.get('extraction_workers', 1)) if self.config.get('enable_parallel_extraction', False) else '1'),
