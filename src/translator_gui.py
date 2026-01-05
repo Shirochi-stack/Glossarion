@@ -10599,13 +10599,6 @@ Important rules:
         
         if debug_mode:
             self.append_log("🚀 [INIT] Initializing all environment variables from config...")
-
-        # Ensure the batch streaming logs toggle exists on the instance so saves/load work even if the dialog was never opened
-        try:
-            if not hasattr(self, 'allow_batch_stream_logs_var'):
-                self.allow_batch_stream_logs_var = bool(self.config.get('allow_batch_stream_logs', False))
-        except Exception:
-            pass
         
         # Wire verbose payload saving to GUI debug mode
         try:
