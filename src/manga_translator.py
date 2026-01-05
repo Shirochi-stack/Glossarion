@@ -915,6 +915,20 @@ class MangaTranslator:
             self.batch_mode = os.getenv('BATCH_TRANSLATION', '0') == '1'
         except Exception:
             self.batch_mode = False
+        # New batching configuration (with legacy fallback)
+        try:
+            self.batching_mode = os.getenv('BATCHING_MODE', '').strip().lower() or \
+                                 getattr(main_gui, 'config', {}).get('batching_mode', 'aggressive')
+        except Exception:
+            self.batching_mode = 'aggressive'
+        try:
+            self.batch_group_size = int(os.getenv('BATCH_GROUP_SIZE', '0') or \
+                                        getattr(main_gui, 'config', {}).get('batch_group_size', 3) or 3)
+        except Exception:
+            self.batch_group_size = 3
+        # Legacy compatibility: CONSERVATIVE_BATCHING forces conservative mode
+        if os.getenv('CONSERVATIVE_BATCHING', '0') == '1':
+            self.batching_mode = 'conservative'
         
         # Store references for print hijacking (will be activated on demand, not during init)
         import builtins
@@ -1037,7 +1051,8 @@ class MangaTranslator:
         self.batch_current = 1 
         
         if self.batch_mode:
-            self._log(f"📦 BATCH MODE: Processing {self.batch_size} images")
+            mode_label = self.batching_mode.capitalize() if isinstance(getattr(self, 'batching_mode', ''), str) else 'Aggressive'
+            self._log(f"📦 BATCH MODE: Processing {self.batch_size} images (Mode: {mode_label}, Group: {self.batch_group_size})")
             self._log(f"⏱️ Keeping API delay for rate limit protection")
             
             # NOTE: We NO LONGER preload models here!
@@ -13264,7 +13279,8 @@ class MangaTranslator:
         # Batch translation (parallel API calls) should work independently of parallel processing
         if batch_enabled:
             max_workers = getattr(self, 'batch_size', max_workers)
-            self._log(f"📦 Using BATCH TRANSLATION with {max_workers} concurrent API calls")
+            mode_label = getattr(self, 'batching_mode', 'aggressive')
+            self._log(f"📦 Using BATCH TRANSLATION ({mode_label}) with {max_workers} concurrent API calls")
             return self._translate_regions_parallel(regions, image_path, max_workers)
         elif parallel_enabled and len(regions) > 1:
             self._log(f"🚀 Using PARALLEL processing with {max_workers} workers")
@@ -13364,7 +13380,13 @@ class MangaTranslator:
             if getattr(self, 'batch_mode', False):
                 bs = int(getattr(self, 'batch_size', 0) or int(os.getenv('BATCH_SIZE', '0')))
                 if bs and bs > 0:
-                    max_workers = bs
+                    # Apply batching mode semantics (lightweight):
+                    mode = getattr(self, 'batching_mode', 'aggressive')
+                    group = max(1, int(getattr(self, 'batch_group_size', 3) or 3))
+                    if mode == 'conservative':
+                        max_workers = bs * group
+                    else:
+                        max_workers = bs
         except Exception:
             pass
         # Bound to number of regions

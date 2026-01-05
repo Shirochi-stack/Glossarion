@@ -10533,14 +10533,49 @@ class MangaTranslationTab(QObject):
                     except Exception:
                         batch_size_value = 1
                 
+                # Determine batching mode & group size with config/GUI fallbacks
+                def _get_gui_val(var, default):
+                    try:
+                        if hasattr(var, 'get'):
+                            return var.get()
+                        return var
+                    except Exception:
+                        return default
+                mode_val = 'aggressive'
+                if hasattr(self.main_gui, 'batch_mode_var'):
+                    mode_val = str(_get_gui_val(self.main_gui.batch_mode_var, 'aggressive')).strip().lower() or 'aggressive'
+                else:
+                    try:
+                        mode_val = str(self.main_gui.config.get('batching_mode', 'aggressive')).strip().lower()
+                    except Exception:
+                        pass
+                group_val = 3
+                if hasattr(self.main_gui, 'batch_group_size_var'):
+                    try:
+                        group_val = int(_get_gui_val(self.main_gui.batch_group_size_var, 3) or 3)
+                    except Exception:
+                        group_val = 3
+                else:
+                    try:
+                        group_val = int(self.main_gui.config.get('batch_group_size', 3) or 3)
+                    except Exception:
+                        group_val = 3
+
                 # Set environment variables for the translator to pick up
                 if batch_translation_enabled:
                     os.environ['BATCH_TRANSLATION'] = '1'
                     os.environ['BATCH_SIZE'] = str(max(1, batch_size_value))
-                    self._log(f"📦 Batch Translation ENABLED: {batch_size_value} concurrent API calls", "info")
+                    os.environ['BATCHING_MODE'] = mode_val
+                    os.environ['BATCH_GROUP_SIZE'] = str(max(1, group_val))
+                    # Legacy compatibility
+                    os.environ['CONSERVATIVE_BATCHING'] = '1' if mode_val == 'conservative' else '0'
+                    self._log(f"📦 Batch Translation ENABLED: {batch_size_value} concurrent API calls (mode={mode_val}, group={group_val})", "info")
                 else:
                     os.environ['BATCH_TRANSLATION'] = '0'
                     os.environ['BATCH_SIZE'] = '1'
+                    os.environ['BATCHING_MODE'] = mode_val
+                    os.environ['BATCH_GROUP_SIZE'] = str(max(1, group_val))
+                    os.environ['CONSERVATIVE_BATCHING'] = '1' if mode_val == 'conservative' else '0'
                     self._log("📦 Batch Translation DISABLED: Sequential API calls", "info")
             except Exception as e:
                 self._log(f"⚠️ Warning: Could not set batch settings: {e}", "warning")
@@ -10621,17 +10656,37 @@ class MangaTranslationTab(QObject):
                         batch_size_value = 1
                 
                 # Update environment variables and translator attributes
+                mode_val = str(_get_gui_val(self.main_gui.batch_mode_var, 'aggressive')).strip().lower() if hasattr(self.main_gui, 'batch_mode_var') else str(self.main_gui.config.get('batching_mode', 'aggressive')).strip().lower()
+                group_val = 3
+                try:
+                    if hasattr(self.main_gui, 'batch_group_size_var'):
+                        group_val = int(_get_gui_val(self.main_gui.batch_group_size_var, 3) or 3)
+                    else:
+                        group_val = int(self.main_gui.config.get('batch_group_size', 3) or 3)
+                except Exception:
+                    group_val = 3
+
                 if batch_translation_enabled:
                     os.environ['BATCH_TRANSLATION'] = '1'
                     os.environ['BATCH_SIZE'] = str(max(1, batch_size_value))
+                    os.environ['BATCHING_MODE'] = mode_val
+                    os.environ['BATCH_GROUP_SIZE'] = str(max(1, group_val))
+                    os.environ['CONSERVATIVE_BATCHING'] = '1' if mode_val == 'conservative' else '0'
                     self.translator.batch_mode = True
                     self.translator.batch_size = max(1, batch_size_value)
-                    self._log(f"📦 Batch Translation UPDATED: {batch_size_value} concurrent API calls", "info")
+                    self.translator.batching_mode = mode_val
+                    self.translator.batch_group_size = max(1, group_val)
+                    self._log(f"📦 Batch Translation UPDATED: {batch_size_value} concurrent API calls (mode={mode_val}, group={group_val})", "info")
                 else:
                     os.environ['BATCH_TRANSLATION'] = '0'
                     os.environ['BATCH_SIZE'] = '1'
+                    os.environ['BATCHING_MODE'] = mode_val
+                    os.environ['BATCH_GROUP_SIZE'] = str(max(1, group_val))
+                    os.environ['CONSERVATIVE_BATCHING'] = '1' if mode_val == 'conservative' else '0'
                     self.translator.batch_mode = False
                     self.translator.batch_size = 1
+                    self.translator.batching_mode = mode_val
+                    self.translator.batch_group_size = max(1, group_val)
                     self._log("📦 Batch Translation UPDATED: Sequential API calls", "info")
             except Exception as e:
                 self._log(f"⚠️ Warning: Could not update batch settings: {e}", "warning")

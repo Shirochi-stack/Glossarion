@@ -129,7 +129,15 @@ class GlossarionWeb:
         if 'batch_size' not in self.config:
             self.config['batch_size'] = 10
             self.decrypted_config['batch_size'] = 10
+        # New batching mode defaults
+        if 'batching_mode' not in self.config:
+            self.config['batching_mode'] = 'aggressive'
+            self.decrypted_config['batching_mode'] = 'aggressive'
+        if 'batch_group_size' not in self.config:
+            self.config['batch_group_size'] = 3
+            self.decrypted_config['batch_group_size'] = 3
         print(f"📦 Initialized batch translation: {self.config['batch_translation']}, batch size: {self.config['batch_size']}")
+        print(f"📦 Initialized batching mode: {self.config['batching_mode']} (group size {self.config['batch_group_size']})")
         
         # CRITICAL: Ensure extraction method and filtering level are initialized
         if 'text_extraction_method' not in self.config:
@@ -338,6 +346,8 @@ class GlossarionWeb:
             'api_call_delay': 0.5,  # Default 0.5 seconds between API calls
             'batch_translation': True,  # Enable batch translation by default
             'batch_size': 10,  # Default batch size
+            'batching_mode': 'aggressive',  # Default batching mode (aggressive/direct/conservative)
+            'batch_group_size': 3,  # Group size for conservative mode
             'text_extraction_method': 'standard',  # CRITICAL: Default extraction method (standard=BeautifulSoup, enhanced=html2text)
             'file_filtering_level': 'smart',  # CRITICAL: Default filtering level (smart/comprehensive/full)
             'enhanced_preserve_structure': True,  # Preserve HTML structure in enhanced mode
@@ -462,7 +472,13 @@ class GlossarionWeb:
         os.environ['USE_NCX_NAVIGATION'] = '1' if config('use_ncx_navigation', False) else '0'
         os.environ['ATTACH_CSS_TO_CHAPTERS'] = '1' if config('attach_css_to_chapters', False) else '0'
         os.environ['RETAIN_SOURCE_EXTENSION'] = '1' if config('retain_source_extension', True) else '0'
-        os.environ['USE_CONSERVATIVE_BATCHING'] = '1' if config('use_conservative_batching', False) else '0'
+        # New batching configuration (supersedes use_conservative_batching)
+        batching_mode = config('batching_mode', 'aggressive')
+        batch_group_size = config('batch_group_size', 3)
+        os.environ['BATCHING_MODE'] = batching_mode
+        os.environ['BATCH_GROUP_SIZE'] = str(batch_group_size)
+        # Backward compatibility export
+        os.environ['USE_CONSERVATIVE_BATCHING'] = '1' if batching_mode == 'conservative' or config('use_conservative_batching', False) else '0'
         os.environ['DISABLE_GEMINI_SAFETY'] = '1' if config('disable_gemini_safety', False) else '0'
         os.environ['USE_HTTP_OPENROUTER'] = '1' if config('use_http_openrouter', False) else '0'
         os.environ['DISABLE_OPENROUTER_COMPRESSION'] = '1' if config('disable_openrouter_compression', False) else '0'
@@ -2155,7 +2171,12 @@ class GlossarionWeb:
             # CRITICAL: Set batch environment variables from mock_gui variables
             os.environ['BATCH_TRANSLATION'] = '1' if mock_gui.batch_translation_var.get() else '0'
             os.environ['BATCH_SIZE'] = str(mock_gui.batch_size_var.get())
-            print(f"📦 Set BATCH_TRANSLATION={os.environ['BATCH_TRANSLATION']}, BATCH_SIZE={os.environ['BATCH_SIZE']}")
+            # Use web config defaults if not present
+            os.environ['BATCHING_MODE'] = str(merged_config.get('batching_mode', 'aggressive'))
+            os.environ['BATCH_GROUP_SIZE'] = str(merged_config.get('batch_group_size', 3))
+            # Backward compatibility: expose USE_CONSERVATIVE_BATCHING flag
+            os.environ['USE_CONSERVATIVE_BATCHING'] = '1' if os.environ['BATCHING_MODE'] == 'conservative' else os.environ.get('USE_CONSERVATIVE_BATCHING', '0')
+            print(f"📦 Set BATCH_TRANSLATION={os.environ['BATCH_TRANSLATION']}, BATCH_SIZE={os.environ['BATCH_SIZE']}, MODE={os.environ['BATCHING_MODE']}, GROUP={os.environ['BATCH_GROUP_SIZE']}")
             
             # Ensure model path is in config for local inpainting
             if enable_inpainting:

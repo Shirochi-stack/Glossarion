@@ -5062,22 +5062,78 @@ def _create_processing_options_section(self, parent):
     scan_desc.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(scan_desc)
     
-    # Conservative Batching
-    batch_cb = self._create_styled_checkbox("Use Conservative Batching")
-    try:
-        batch_cb.setChecked(bool(self.conservative_batching_var))
-    except Exception:
-        pass
-    def _on_batch_toggle(checked):
+    # Batching Mode
+    batch_title = QLabel("Batching Mode")
+    batch_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    batch_title.setContentsMargins(0, 8, 0, 4)
+    section_v.addWidget(batch_title)
+
+    from PySide6.QtWidgets import QButtonGroup, QRadioButton
+
+    batch_group = QButtonGroup(section_v)
+
+    batch_row = QWidget()
+    batch_row_h = QHBoxLayout(batch_row)
+    batch_row_h.setContentsMargins(0, 0, 0, 0)
+
+    conservative_rb = QRadioButton("Conservative batching")
+    direct_rb = QRadioButton("Direct batching")
+    aggressive_rb = QRadioButton("Aggressive batching")
+
+    batch_group.addButton(conservative_rb)
+    batch_group.addButton(direct_rb)
+    batch_group.addButton(aggressive_rb)
+
+    # Load current selection
+    current_mode = getattr(self, 'batch_mode_var', 'aggressive') or 'aggressive'
+    if current_mode == 'conservative':
+        conservative_rb.setChecked(True)
+    elif current_mode == 'direct':
+        direct_rb.setChecked(True)
+    else:
+        aggressive_rb.setChecked(True)
+
+    # Batch group size (multiplier) for conservative mode
+    batch_group_input = QLineEdit()
+    batch_group_input.setFixedWidth(50)
+    batch_group_input.setText(str(getattr(self, 'batch_group_size_var', '3')))
+    batch_group_input.setToolTip("Conservative mode multiplier applied to batch size")
+
+    def _set_mode(mode):
         try:
-            self.conservative_batching_var = bool(checked)
+            self.batch_mode_var = mode
         except Exception:
             pass
-    batch_cb.toggled.connect(_on_batch_toggle)
-    batch_cb.setContentsMargins(0, 10, 0, 0)
-    section_v.addWidget(batch_cb)
-    
-    batch_desc = QLabel("Groups chapters in batches of 3x batch size for memory management\nWhen disabled (default): Uses direct batch size for faster processing")
+
+    conservative_rb.toggled.connect(lambda checked: _set_mode('conservative') if checked else None)
+    direct_rb.toggled.connect(lambda checked: _set_mode('direct') if checked else None)
+    aggressive_rb.toggled.connect(lambda checked: _set_mode('aggressive') if checked else None)
+
+    def _on_batch_group_change(text):
+        try:
+            self.batch_group_size_var = text
+        except Exception:
+            pass
+    batch_group_input.textChanged.connect(_on_batch_group_change)
+
+    batch_row_h.addWidget(conservative_rb)
+    batch_row_h.addSpacing(6)
+    batch_row_h.addWidget(batch_group_input)
+    batch_row_h.addWidget(QLabel("× batch size"))
+    batch_row_h.addStretch()
+    section_v.addWidget(batch_row)
+
+    # Secondary row for other modes
+    mode_row = QWidget()
+    mode_row_h = QHBoxLayout(mode_row)
+    mode_row_h.setContentsMargins(0, 0, 0, 0)
+    mode_row_h.addWidget(direct_rb)
+    mode_row_h.addSpacing(12)
+    mode_row_h.addWidget(aggressive_rb)
+    mode_row_h.addStretch()
+    section_v.addWidget(mode_row)
+
+    batch_desc = QLabel("Direct: fixed batches of batch size.\nConservative: groups = batch size × multiplier (set above).\nAggressive: keeps parallel slots full by opening a new request whenever one finishes.")
     batch_desc.setStyleSheet("color: gray; font-size: 10pt;")
     batch_desc.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(batch_desc)

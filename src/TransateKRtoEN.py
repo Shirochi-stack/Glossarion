@@ -372,6 +372,8 @@ class TranslationConfig:
         self.EMERGENCY_RESTORE = os.getenv("EMERGENCY_PARAGRAPH_RESTORE", "1") == "1"
         self.BATCH_TRANSLATION = os.getenv("BATCH_TRANSLATION", "0") == "1"  
         self.BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10"))
+        self.BATCHING_MODE = os.getenv("BATCHING_MODE", "aggressive")
+        self.BATCH_GROUP_SIZE = int(os.getenv("BATCH_GROUP_SIZE", os.getenv("CONSERVATIVE_BATCH_GROUP_SIZE", "3")))
         self.REQUEST_MERGING_ENABLED = os.getenv("REQUEST_MERGING_ENABLED", "0") == "1"
         self.REQUEST_MERGE_COUNT = int(os.getenv("REQUEST_MERGE_COUNT", "3"))
         # Synthetic header injection for merged requests (Split-the-Merge helper)
@@ -8371,14 +8373,25 @@ def main(log_callback=None, stop_callback=None):
         total_to_process = len(chapters_to_translate)
         processed = 0
         
-        # Apply conservative batching setting
-        batch_multiplier = 3 if os.getenv('CONSERVATIVE_BATCHING', '0') == '1' else 1
-        batch_group_size = config.BATCH_SIZE * batch_multiplier
-        
-        if batch_multiplier > 1:
-            print(f"📦 Using conservative batching: {batch_group_size} chapters per group, {config.BATCH_SIZE} parallel")
-        else:
-            print(f"📦 Using direct batching (default): {batch_group_size} chapters per group, {config.BATCH_SIZE} parallel")
+        # ==========================
+        # Batching mode selection
+        # ==========================
+        batching_mode = getattr(config, 'BATCHING_MODE', 'aggressive')
+        batch_group_size_cfg = max(1, int(getattr(config, 'BATCH_GROUP_SIZE', 3)))
+        if batching_mode not in ('direct', 'conservative', 'aggressive'):
+            batching_mode = 'aggressive'
+        # Backwards compatibility with CONSERVATIVE_BATCHING env
+        if os.getenv('CONSERVATIVE_BATCHING', '0') == '1':
+            batching_mode = 'conservative'
+        if batching_mode == 'conservative':
+            batch_group_size = config.BATCH_SIZE * batch_group_size_cfg
+            print(f"📦 Using conservative batching: group size {batch_group_size} (batch size {config.BATCH_SIZE}, multiplier {batch_group_size_cfg})")
+        elif batching_mode == 'direct':
+            batch_group_size = config.BATCH_SIZE  # legacy behavior
+            print(f"📦 Using direct batching: group size {batch_group_size}, parallel {config.BATCH_SIZE}")
+        else:  # aggressive
+            batch_group_size = batch_group_size_cfg  # not used for throttling, only for logging/summary grouping
+            print(f"⚡ Using AGGRESSIVE batching (default): keeps {config.BATCH_SIZE} parallel calls, auto-refills when any finishes")
         
         # Create merge groups if request merging is enabled
         if use_request_merging:
@@ -8436,216 +8449,360 @@ def main(log_callback=None, stop_callback=None):
             is_merged_mode = False
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=config.BATCH_SIZE) as executor:
-            for batch_start in range(0, len(units_to_process), batch_group_size if not is_merged_mode else config.BATCH_SIZE):
-                if check_stop():
-                    print("❌ Translation stopped during parallel processing")
-                    executor.shutdown(wait=False)
-                    return
+            if batching_mode == 'aggressive':
+                import threading
+                batch_submit_lock = threading.Lock()
+                active_futures = {}
+                next_unit_idx = 0
                 
-                effective_batch_size = batch_group_size if not is_merged_mode else config.BATCH_SIZE
-                batch_end = min(batch_start + effective_batch_size, len(units_to_process))
-                current_batch_units = units_to_process[batch_start:batch_end]
+                def submit_next_unit():
+                    nonlocal next_unit_idx
+                    if next_unit_idx >= len(units_to_process):
+                        return False
+                    unit = units_to_process[next_unit_idx]
+                    if config.USE_ROLLING_SUMMARY:
+                        batch_processor.set_batch_rolling_summary_text(rolling_summary_for_next_batch)
+                        time.sleep(0.000001)
+                    if is_merged_mode:
+                        fut = executor.submit(batch_processor.process_merged_group, unit, progress_manager)
+                    else:
+                        fut = executor.submit(batch_processor.process_single_chapter, unit[0])
+                    active_futures[fut] = unit
+                    next_unit_idx += 1
+                    return True
                 
-                # Count total chapters in this batch
-                chapters_in_batch = sum(len(unit) for unit in current_batch_units)
+                # Prime the executor
+                with batch_submit_lock:
+                    while len(active_futures) < config.BATCH_SIZE and submit_next_unit():
+                        pass
                 
-                batch_number = (batch_start // effective_batch_size) + 1
-                if is_merged_mode:
-                    print(f"\n📦 Submitting batch {batch_number}: {len(current_batch_units)} merged groups ({chapters_in_batch} chapters)")
-                else:
-                    print(f"\n📦 Submitting batch {batch_number}: {chapters_in_batch} chapters")
-                
-                # Set the rolling summary snapshot to be injected for THIS batch.
-                # First batch has empty summary; subsequent batches get the previous batch's summary.
-                if config.USE_ROLLING_SUMMARY:
-                    batch_processor.set_batch_rolling_summary_text(rolling_summary_for_next_batch)
-                    # micro-delay to reduce contention spikes across threads
-                    time.sleep(0.000001)
-
-                # Submit work units (either single chapters or merge groups)
-                if is_merged_mode:
-                    future_to_unit = {
-                        executor.submit(batch_processor.process_merged_group, unit, progress_manager): unit
-                        for unit in current_batch_units
-                    }
-                else:
-                    future_to_unit = {
-                        executor.submit(batch_processor.process_single_chapter, unit[0]): unit
-                        for unit in current_batch_units
-                    }
-                
-                active_count = 0
-                completed_in_batch = 0
-                failed_in_batch = 0
-                
-                # Collect history entries for this batch keyed by chapter index
-                batch_history_map = {}
-                
-                for future in concurrent.futures.as_completed(future_to_unit):
-                    if check_stop():
-                        print("❌ Translation stopped")
-                        executor.shutdown(wait=False)
-                        return
-                    
-                    unit = future_to_unit[future]
-                    
-                    try:
-                        if is_merged_mode:
-                            # Merged mode returns list of results
-                            results = future.result()
-                            for result in results:
-                                success, chap_num, hist_user, hist_assistant, raw_obj = result
+                while active_futures:
+                    for future in concurrent.futures.as_completed(list(active_futures.keys())):
+                        if check_stop():
+                            print("❌ Translation stopped")
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            return
+                        unit = active_futures.pop(future)
+                        completed_in_batch = 0
+                        failed_in_batch = 0
+                        batch_history_map = {}
+                        chapters_in_batch = sum(len(u) for u in [unit])
+                        try:
+                            if is_merged_mode:
+                                results = future.result()
+                                for result in results:
+                                    success, chap_num, hist_user, hist_assistant, raw_obj = result
+                                    if success:
+                                        completed_in_batch += 1
+                                        if hist_user and hist_assistant:
+                                            for idx, ch in unit:
+                                                if ch.get('actual_chapter_num', ch['num']) == chap_num:
+                                                    batch_history_map[idx] = (hist_user, hist_assistant, raw_obj)
+                                                    break
+                                    else:
+                                        failed_in_batch += 1
+                                    processed += 1
+                                print(f"✅ Merged group done: {len(results)} chapters")
+                            else:
+                                success, chap_num, hist_user, hist_assistant, raw_obj = future.result()
+                                idx, chapter = unit[0]
                                 if success:
                                     completed_in_batch += 1
                                     if hist_user and hist_assistant:
-                                        # Find the idx from the unit
-                                        for idx, ch in unit:
-                                            if ch.get('actual_chapter_num', ch['num']) == chap_num:
-                                                batch_history_map[idx] = (hist_user, hist_assistant, raw_obj)
-                                                break
+                                        batch_history_map[idx] = (hist_user, hist_assistant, raw_obj)
+                                    print(f"✅ Chapter {chap_num} done")
                                 else:
                                     failed_in_batch += 1
+                                    print(f"❌ Chapter {chap_num} failed")
                                 processed += 1
-                            print(f"✅ Merged group done: {len(results)} chapters")
-                        else:
-                            # Single chapter mode
-                            success, chap_num, hist_user, hist_assistant, raw_obj = future.result()
-                            idx, chapter = unit[0]
-                            if success:
-                                completed_in_batch += 1
-                                print(f"✅ Chapter {chap_num} done ({completed_in_batch + failed_in_batch}/{chapters_in_batch} in batch)")
-                                if hist_user and hist_assistant:
-                                    batch_history_map[idx] = (hist_user, hist_assistant, raw_obj)
+                        except Exception as e:
+                            if is_merged_mode:
+                                failed_in_batch += len(unit)
+                                processed += len(unit)
                             else:
                                 failed_in_batch += 1
-                                print(f"❌ Chapter {chap_num} failed ({completed_in_batch + failed_in_batch}/{chapters_in_batch} in batch)")
-                            processed += 1
-                    except Exception as e:
-                        if is_merged_mode:
-                            failed_in_batch += len(unit)
-                            processed += len(unit)
-                        else:
-                            failed_in_batch += 1
-                            processed += 1
-                        print(f"❌ Thread error: {e}")
-                    
-                    progress_percent = (processed / total_to_process) * 100
-                    print(f"📊 Overall Progress: {processed}/{total_to_process} ({progress_percent:.1f}%)")
-                
-                # After all futures in this batch complete, append their history entries
-                # Thread-safe history updates with microsecond delays between appends
-                if config.CONTEXTUAL and getattr(config, 'HIST_LIMIT', 0) > 0:
-                    hist_limit = getattr(config, 'HIST_LIMIT', 0)
-                    # Flatten units to get all chapters and sort by index
-                    all_chapters_in_batch = []
-                    for unit in current_batch_units:
-                        all_chapters_in_batch.extend(unit)
-                    sorted_chapters = sorted(all_chapters_in_batch, key=lambda x: x[0])
-                    for idx, chapter in sorted_chapters:
-                        if idx in batch_history_map:
-                            user_content, assistant_content, raw_obj = batch_history_map[idx]
+                                processed += 1
+                            print(f"❌ Thread error: {e}")
+                        
+                        progress_percent = (processed / total_to_process) * 100
+                        print(f"📊 Overall Progress: {processed}/{total_to_process} ({progress_percent:.1f}%)")
+                        
+                        # History append immediately for this unit
+                        if config.CONTEXTUAL and getattr(config, 'HIST_LIMIT', 0) > 0:
+                            hist_limit = getattr(config, 'HIST_LIMIT', 0)
+                            sorted_chapters = sorted(unit, key=lambda x: x[0])
+                            for idx, chapter in sorted_chapters:
+                                if idx in batch_history_map:
+                                    user_content, assistant_content, raw_obj = batch_history_map[idx]
+                                    try:
+                                        time.sleep(0.000001)
+                                        history_manager.append_to_history(
+                                            user_content,
+                                            assistant_content,
+                                            hist_limit,
+                                            reset_on_limit=True,
+                                            rolling_window=config.TRANSLATION_HISTORY_ROLLING,
+                                            raw_assistant_object=raw_obj
+                                        )
+                                    except Exception as e:
+                                        actual_num_for_log = chapter.get('actual_chapter_num', chapter.get('num'))
+                                        print(f"⚠️ Failed to append Chapter {actual_num_for_log} to translation history (batch): {e}")
+                        
+                        # Rolling summary update per unit
+                        if config.USE_ROLLING_SUMMARY and summary_translation_processor is not None:
                             try:
-                                # Add microsecond delay between history appends to prevent race conditions
-                                time.sleep(0.000001)  # 1 microsecond delay
-                                history_manager.append_to_history(
-                                    user_content,
-                                    assistant_content,
-                                    hist_limit,
-                                    reset_on_limit=True,
-                                    rolling_window=config.TRANSLATION_HISTORY_ROLLING,
-                                    raw_assistant_object=raw_obj
-                                )
+                                batch_items = sorted(unit, key=lambda x: x[0])
+                                translated_blocks = []
+                                last_actual_num_in_batch = None
+                                for idx, chapter in batch_items:
+                                    actual_num = chapter.get('actual_chapter_num', chapter.get('num'))
+                                    last_actual_num_in_batch = actual_num
+                                    fname_guess = FileUtilities.create_chapter_filename(chapter, actual_num)
+                                    candidates = [fname_guess]
+                                    if isinstance(fname_guess, str) and fname_guess.endswith('.html'):
+                                        candidates.insert(0, fname_guess.replace('.html', '.txt'))
+                                    elif isinstance(fname_guess, str) and fname_guess.endswith('.txt'):
+                                        candidates.append(fname_guess.replace('.txt', '.html'))
+                                    content = ""
+                                    for cand in candidates:
+                                        fp = os.path.join(out, cand)
+                                        if os.path.exists(fp):
+                                            with open(fp, 'r', encoding='utf-8') as f:
+                                                content = f.read()
+                                            if content:
+                                                break
+                                    if isinstance(content, str) and content:
+                                        translated_blocks.append(content)
+                                batch_translations_text = "\n\n---\n\n".join(translated_blocks)
+                                if batch_translations_text:
+                                    old_mode = getattr(config, 'ROLLING_SUMMARY_MODE', 'replace')
+                                    old_max_entries = getattr(config, 'ROLLING_SUMMARY_MAX_ENTRIES', 0)
+                                    try:
+                                        config.ROLLING_SUMMARY_MODE = 'replace'
+                                        config.ROLLING_SUMMARY_MAX_ENTRIES = int(chapters_in_batch or 0)
+                                        with rolling_summary_update_lock:
+                                            time.sleep(0.000001)
+                                            summary_translation_processor.generate_rolling_summary(
+                                                history_manager,
+                                                last_actual_num_in_batch,
+                                                base_system_content=None,
+                                                source_text=batch_translations_text,
+                                                previous_summary_text=None,
+                                                previous_summary_chapter_num=None,
+                                                prefer_translations_only_user=True,
+                                            )
+                                            summary_file = os.path.join(out, 'rolling_summary.txt')
+                                            if os.path.exists(summary_file):
+                                                with open(summary_file, 'r', encoding='utf-8') as sf:
+                                                    rolling_summary_for_next_batch = (sf.read() or "")
+                                            else:
+                                                rolling_summary_for_next_batch = ""
+                                    finally:
+                                        config.ROLLING_SUMMARY_MODE = old_mode
+                                        config.ROLLING_SUMMARY_MAX_ENTRIES = old_max_entries
+                                else:
+                                    rolling_summary_for_next_batch = ""
                             except Exception as e:
-                                actual_num_for_log = chapter.get('actual_chapter_num', chapter.get('num'))
-                                print(f"⚠️ Failed to append Chapter {actual_num_for_log} to translation history (batch): {e}")
-                
-                # After the batch completes, update rolling_summary.txt ONCE (for the next batch).
-                if config.USE_ROLLING_SUMMARY and summary_translation_processor is not None:
-                    try:
-                        # Build a concatenated translation text for the chapters in THIS batch, in stable order.
-                        batch_items = []
-                        for unit in current_batch_units:
-                            batch_items.extend(unit)
-                        batch_items = sorted(batch_items, key=lambda x: x[0])  # sort by idx
+                                print(f"⚠️ Batch rolling summary update failed: {e}")
+                                rolling_summary_for_next_batch = ""
+                        
+                        # Refill slots aggressively
+                        with batch_submit_lock:
+                            while len(active_futures) < config.BATCH_SIZE and submit_next_unit():
+                                pass
+            
+            else:
+                # direct or conservative: keep legacy batch grouping behaviour
+                for batch_start in range(0, len(units_to_process), batch_group_size if not is_merged_mode else config.BATCH_SIZE):
+                    if check_stop():
+                        print("❌ Translation stopped during parallel processing")
+                        executor.shutdown(wait=False)
+                        return
+                    
+                    effective_batch_size = batch_group_size if not is_merged_mode else config.BATCH_SIZE
+                    batch_end = min(batch_start + effective_batch_size, len(units_to_process))
+                    current_batch_units = units_to_process[batch_start:batch_end]
+                    
+                    # Count total chapters in this batch
+                    chapters_in_batch = sum(len(unit) for unit in current_batch_units)
+                    
+                    batch_number = (batch_start // effective_batch_size) + 1
+                    if is_merged_mode:
+                        print(f"\n📦 Submitting batch {batch_number}: {len(current_batch_units)} merged groups ({chapters_in_batch} chapters)")
+                    else:
+                        print(f"\n📦 Submitting batch {batch_number}: {chapters_in_batch} chapters")
+                    
+                    if config.USE_ROLLING_SUMMARY:
+                        batch_processor.set_batch_rolling_summary_text(rolling_summary_for_next_batch)
+                        time.sleep(0.000001)
 
-                        translated_blocks = []
-                        last_actual_num_in_batch = None
-                        for idx, chapter in batch_items:
-                            try:
-                                actual_num = chapter.get('actual_chapter_num', chapter.get('num'))
-                                last_actual_num_in_batch = actual_num
-                                # Try to read the saved output file for this chapter.
-                                fname_guess = FileUtilities.create_chapter_filename(chapter, actual_num)
-                                candidates = [fname_guess]
-                                # Text mode sometimes uses .txt; also tolerate html/txt mismatch.
-                                if isinstance(fname_guess, str) and fname_guess.endswith('.html'):
-                                    candidates.insert(0, fname_guess.replace('.html', '.txt'))
-                                elif isinstance(fname_guess, str) and fname_guess.endswith('.txt'):
-                                    candidates.append(fname_guess.replace('.txt', '.html'))
-
-                                content = ""
-                                for cand in candidates:
-                                    fp = os.path.join(out, cand)
-                                    if os.path.exists(fp):
-                                        with open(fp, 'r', encoding='utf-8') as f:
-                                            content = f.read()
-                                        if content:
-                                            break
-
-                                if isinstance(content, str) and content:
-                                    translated_blocks.append(content)
-                            except Exception:
-                                continue
-
-                        batch_translations_text = "\n\n---\n\n".join(translated_blocks)
-
-                        if batch_translations_text:
-                            # Force replace semantics for batch-mode rolling summary.
-                            old_mode = getattr(config, 'ROLLING_SUMMARY_MODE', 'replace')
-                            old_max_entries = getattr(config, 'ROLLING_SUMMARY_MAX_ENTRIES', 0)
-                            try:
-                                config.ROLLING_SUMMARY_MODE = 'replace'
-                                # Show "Last N" where N ~= batch size (chapters in batch)
-                                try:
-                                    config.ROLLING_SUMMARY_MAX_ENTRIES = int(chapters_in_batch or 0)
-                                except Exception:
-                                    config.ROLLING_SUMMARY_MAX_ENTRIES = 0
-
-                                with rolling_summary_update_lock:
-                                    # micro-delay before summarization to avoid contention with filesystem
-                                    time.sleep(0.000001)
-                                    summary_translation_processor.generate_rolling_summary(
-                                        history_manager,
-                                        last_actual_num_in_batch,
-                                        base_system_content=None,
-                                        source_text=batch_translations_text,
-                                        previous_summary_text=None,
-                                        previous_summary_chapter_num=None,
-                                        prefer_translations_only_user=True,
-                                    )
-                                    # Load the file verbatim for the next batch injection
-                                    summary_file = os.path.join(out, 'rolling_summary.txt')
-                                    if os.path.exists(summary_file):
-                                        with open(summary_file, 'r', encoding='utf-8') as sf:
-                                            rolling_summary_for_next_batch = (sf.read() or "")
+                    if is_merged_mode:
+                        future_to_unit = {
+                            executor.submit(batch_processor.process_merged_group, unit, progress_manager): unit
+                            for unit in current_batch_units
+                        }
+                    else:
+                        future_to_unit = {
+                            executor.submit(batch_processor.process_single_chapter, unit[0]): unit
+                            for unit in current_batch_units
+                        }
+                    
+                    completed_in_batch = 0
+                    failed_in_batch = 0
+                    batch_history_map = {}
+                    
+                    for future in concurrent.futures.as_completed(future_to_unit):
+                        if check_stop():
+                            print("❌ Translation stopped")
+                            executor.shutdown(wait=False)
+                            return
+                        
+                        unit = future_to_unit[future]
+                        
+                        try:
+                            if is_merged_mode:
+                                results = future.result()
+                                for result in results:
+                                    success, chap_num, hist_user, hist_assistant, raw_obj = result
+                                    if success:
+                                        completed_in_batch += 1
+                                        if hist_user and hist_assistant:
+                                            for idx, ch in unit:
+                                                if ch.get('actual_chapter_num', ch['num']) == chap_num:
+                                                    batch_history_map[idx] = (hist_user, hist_assistant, raw_obj)
+                                                    break
                                     else:
-                                        rolling_summary_for_next_batch = ""
-                            finally:
-                                config.ROLLING_SUMMARY_MODE = old_mode
-                                config.ROLLING_SUMMARY_MAX_ENTRIES = old_max_entries
-                        else:
-                            rolling_summary_for_next_batch = ""
-                    except Exception as e:
-                        print(f"⚠️ Batch rolling summary update failed: {e}")
-                        rolling_summary_for_next_batch = ""
+                                        failed_in_batch += 1
+                                    processed += 1
+                                print(f"✅ Merged group done: {len(results)} chapters")
+                            else:
+                                success, chap_num, hist_user, hist_assistant, raw_obj = future.result()
+                                idx, chapter = unit[0]
+                                if success:
+                                    completed_in_batch += 1
+                                    print(f"✅ Chapter {chap_num} done ({completed_in_batch + failed_in_batch}/{chapters_in_batch} in batch)")
+                                    if hist_user and hist_assistant:
+                                        batch_history_map[idx] = (hist_user, hist_assistant, raw_obj)
+                                else:
+                                    failed_in_batch += 1
+                                    print(f"❌ Chapter {chap_num} failed ({completed_in_batch + failed_in_batch}/{chapters_in_batch} in batch)")
+                                processed += 1
+                        except Exception as e:
+                            if is_merged_mode:
+                                failed_in_batch += len(unit)
+                                processed += len(unit)
+                            else:
+                                failed_in_batch += 1
+                                processed += 1
+                            print(f"❌ Thread error: {e}")
+                        
+                        progress_percent = (processed / total_to_process) * 100
+                        print(f"📊 Overall Progress: {processed}/{total_to_process} ({progress_percent:.1f}%)")
+                    
+                    # After all futures in this batch complete, append their history entries
+                    if config.CONTEXTUAL and getattr(config, 'HIST_LIMIT', 0) > 0:
+                        hist_limit = getattr(config, 'HIST_LIMIT', 0)
+                        all_chapters_in_batch = []
+                        for unit in current_batch_units:
+                            all_chapters_in_batch.extend(unit)
+                        sorted_chapters = sorted(all_chapters_in_batch, key=lambda x: x[0])
+                        for idx, chapter in sorted_chapters:
+                            if idx in batch_history_map:
+                                user_content, assistant_content, raw_obj = batch_history_map[idx]
+                                try:
+                                    time.sleep(0.000001)
+                                    history_manager.append_to_history(
+                                        user_content,
+                                        assistant_content,
+                                        hist_limit,
+                                        reset_on_limit=True,
+                                        rolling_window=config.TRANSLATION_HISTORY_ROLLING,
+                                        raw_assistant_object=raw_obj
+                                    )
+                                except Exception as e:
+                                    actual_num_for_log = chapter.get('actual_chapter_num', chapter.get('num'))
+                                    print(f"⚠️ Failed to append Chapter {actual_num_for_log} to translation history (batch): {e}")
+                    
+                    # After the batch completes, update rolling_summary.txt ONCE (for the next batch).
+                    if config.USE_ROLLING_SUMMARY and summary_translation_processor is not None:
+                        try:
+                            batch_items = []
+                            for unit in current_batch_units:
+                                batch_items.extend(unit)
+                            batch_items = sorted(batch_items, key=lambda x: x[0])
 
-                print(f"\n📦 Batch Summary:")
-                print(f"   ✅ Successful: {completed_in_batch}")
-                print(f"   ❌ Failed: {failed_in_batch}")
-                
-                if batch_end < total_to_process:
-                    print(f"⏳ Waiting {config.DELAY}s before next batch...")
-                    time.sleep(config.DELAY)
+                            translated_blocks = []
+                            last_actual_num_in_batch = None
+                            for idx, chapter in batch_items:
+                                try:
+                                    actual_num = chapter.get('actual_chapter_num', chapter.get('num'))
+                                    last_actual_num_in_batch = actual_num
+                                    fname_guess = FileUtilities.create_chapter_filename(chapter, actual_num)
+                                    candidates = [fname_guess]
+                                    if isinstance(fname_guess, str) and fname_guess.endswith('.html'):
+                                        candidates.insert(0, fname_guess.replace('.html', '.txt'))
+                                    elif isinstance(fname_guess, str) and fname_guess.endswith('.txt'):
+                                        candidates.append(fname_guess.replace('.txt', '.html'))
+
+                                    content = ""
+                                    for cand in candidates:
+                                        fp = os.path.join(out, cand)
+                                        if os.path.exists(fp):
+                                            with open(fp, 'r', encoding='utf-8') as f:
+                                                content = f.read()
+                                            if content:
+                                                break
+
+                                    if isinstance(content, str) and content:
+                                        translated_blocks.append(content)
+                                except Exception:
+                                    continue
+
+                            batch_translations_text = "\n\n---\n\n".join(translated_blocks)
+
+                            if batch_translations_text:
+                                old_mode = getattr(config, 'ROLLING_SUMMARY_MODE', 'replace')
+                                old_max_entries = getattr(config, 'ROLLING_SUMMARY_MAX_ENTRIES', 0)
+                                try:
+                                    config.ROLLING_SUMMARY_MODE = 'replace'
+                                    try:
+                                        config.ROLLING_SUMMARY_MAX_ENTRIES = int(chapters_in_batch or 0)
+                                    except Exception:
+                                        config.ROLLING_SUMMARY_MAX_ENTRIES = 0
+
+                                    with rolling_summary_update_lock:
+                                        time.sleep(0.000001)
+                                        summary_translation_processor.generate_rolling_summary(
+                                            history_manager,
+                                            last_actual_num_in_batch,
+                                            base_system_content=None,
+                                            source_text=batch_translations_text,
+                                            previous_summary_text=None,
+                                            previous_summary_chapter_num=None,
+                                            prefer_translations_only_user=True,
+                                        )
+                                        summary_file = os.path.join(out, 'rolling_summary.txt')
+                                        if os.path.exists(summary_file):
+                                            with open(summary_file, 'r', encoding='utf-8') as sf:
+                                                rolling_summary_for_next_batch = (sf.read() or "")
+                                        else:
+                                            rolling_summary_for_next_batch = ""
+                                finally:
+                                    config.ROLLING_SUMMARY_MODE = old_mode
+                                    config.ROLLING_SUMMARY_MAX_ENTRIES = old_max_entries
+                            else:
+                                rolling_summary_for_next_batch = ""
+                        except Exception as e:
+                            print(f"⚠️ Batch rolling summary update failed: {e}")
+                            rolling_summary_for_next_batch = ""
+
+                    print(f"\n📦 Batch Summary:")
+                    print(f"   ✅ Successful: {completed_in_batch}")
+                    print(f"   ❌ Failed: {failed_in_batch}")
+                    
+                    if batch_end < total_to_process:
+                        print(f"⏳ Waiting {config.DELAY}s before next batch...")
+                        time.sleep(config.DELAY)
         
         chapters_completed = batch_processor.chapters_completed
         chunks_completed = batch_processor.chunks_completed

@@ -3965,10 +3965,25 @@ def _translate_individually(self, recognized_texts: list, image_path: str) -> li
                 os.environ['BATCH_SIZE'] = str(self.main_gui.batch_size_var)
                 print(f"[DEBUG] Set BATCH_SIZE: {self.main_gui.batch_size_var}")
             
-            if hasattr(self.main_gui, 'conservative_batching_var'):
-                conservative = '1' if self.main_gui.conservative_batching_var else '0'
-                os.environ['CONSERVATIVE_BATCHING'] = conservative
-                print(f"[DEBUG] Set CONSERVATIVE_BATCHING: {conservative}")
+            # Batching mode + group size (with tkinter / PySide detection)
+            if hasattr(self.main_gui, 'batch_mode_var'):
+                try:
+                    val = self.main_gui.batch_mode_var.get() if hasattr(self.main_gui.batch_mode_var, 'get') else self.main_gui.batch_mode_var
+                    val_str = str(val).strip().lower() if val else 'aggressive'
+                except Exception:
+                    val_str = 'aggressive'
+                os.environ['BATCHING_MODE'] = val_str
+                # Backward compatibility
+                os.environ['CONSERVATIVE_BATCHING'] = '1' if val_str == 'conservative' else '0'
+                print(f"[DEBUG] Set BATCHING_MODE: {val_str}")
+            if hasattr(self.main_gui, 'batch_group_size_var'):
+                try:
+                    gval = self.main_gui.batch_group_size_var.get() if hasattr(self.main_gui.batch_group_size_var, 'get') else self.main_gui.batch_group_size_var
+                    gval_int = int(gval) if str(gval).strip() else 3
+                except Exception:
+                    gval_int = 3
+                os.environ['BATCH_GROUP_SIZE'] = str(max(1, gval_int))
+                print(f"[DEBUG] Set BATCH_GROUP_SIZE: {gval_int}")
             
             # Temperature
             if hasattr(self.main_gui, 'trans_temp'):

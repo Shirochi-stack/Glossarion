@@ -3079,7 +3079,10 @@ class AsyncProcessingDialog:
         env_vars['REMOVE_AI_ARTIFACTS'] = "1" if _val(self.gui.REMOVE_AI_ARTIFACTS_var, False) else "0"
         env_vars['BATCH_TRANSLATION'] = "1" if _val(self.gui.batch_translation_var, False) else "0"
         env_vars['BATCH_SIZE'] = _val(self.gui.batch_size_var, 1)
-        env_vars['CONSERVATIVE_BATCHING'] = "1" if _val(self.gui.conservative_batching_var, False) else "0"
+        env_vars['BATCHING_MODE'] = str(_val(getattr(self.gui, 'batch_mode_var', 'aggressive'), 'aggressive'))
+        env_vars['BATCH_GROUP_SIZE'] = str(_val(getattr(self.gui, 'batch_group_size_var', 3), 3))
+        # Backward compatibility for downstream components expecting CONSERVATIVE_BATCHING
+        env_vars['CONSERVATIVE_BATCHING'] = "1" if env_vars['BATCHING_MODE'] == 'conservative' else "0"
         
         # Anti-duplicate parameters
         env_vars['ENABLE_ANTI_DUPLICATE'] = '1' if hasattr(self.gui, 'enable_anti_duplicate_var') and _val(self.gui.enable_anti_duplicate_var, False) else '0'

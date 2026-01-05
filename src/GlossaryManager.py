@@ -525,6 +525,11 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     extraction_workers = int(os.getenv("EXTRACTION_WORKERS", "1"))
     batch_translation = os.getenv("BATCH_TRANSLATION", "0") == "1"
     api_batch_size = int(os.getenv("BATCH_SIZE", "5"))
+    batching_mode = os.getenv("BATCHING_MODE", "aggressive")
+    batch_group_size = int(os.getenv("BATCH_GROUP_SIZE", "3"))
+    # Backward compatibility
+    if os.getenv("CONSERVATIVE_BATCHING", "0") == "1":
+        batching_mode = "conservative"
     
     # Log the settings
     print(f"📑 Filter mode: {filter_mode}")
@@ -532,6 +537,9 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         print(f"📑 Parallel extraction enabled: {extraction_workers} workers")
     if batch_translation:
         print(f"📑 Batch API calls enabled: {api_batch_size} chunks per batch")
+        print(f"📑 Batching mode: {batching_mode}")
+        if batching_mode == "conservative":
+            print(f"📑 Conservative group size: {batch_group_size}")
     
     all_text = ' '.join(clean_html(chapter["body"]) for chapter in chapters)
     print(f"📑 Processing {len(all_text):,} characters of text")

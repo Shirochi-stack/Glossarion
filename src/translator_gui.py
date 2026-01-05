@@ -742,7 +742,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 65536
         self.proc = self.glossary_proc = None
-        __version__ = "6.9.1"
+        __version__ = "6.9.2"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -815,7 +815,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID to separate from python.exe in taskbar
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.6.9.1')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.6.9.2')
                         
                         # Load icon from file and set it on the window
                         # This must be done after the window is created
@@ -2046,6 +2046,16 @@ Recent translations to summarize:
         if not hasattr(self, 'fuzzy_threshold_var'):
             self.fuzzy_threshold_var = self.config.get('glossary_fuzzy_threshold', 0.90)
         
+        # Legacy migration: map old conservative_batching flag to new batching_mode/batch_group_size
+        if 'batching_mode' not in self.config:
+            if self.config.get('conservative_batching', False):
+                self.config['batching_mode'] = 'conservative'
+            else:
+                self.config['batching_mode'] = 'aggressive'
+        if 'batch_group_size' not in self.config:
+            # legacy hardcoded multiplier was 3
+            self.config['batch_group_size'] = str(self.config.get('conservative_batch_multiplier', 3) or 3)
+        
         # Create all config variables with helper
         def create_var(var_type, key, default):
             # For PySide6 conversion: just return the value directly
@@ -2080,7 +2090,6 @@ Recent translations to summarize:
             ('hide_image_translation_label_var', 'hide_image_translation_label', True),
             ('retry_timeout_var', 'retry_timeout', True),
             ('batch_translation_var', 'batch_translation', False),
-            ('conservative_batching_var', 'conservative_batching', True),
             ('disable_epub_gallery_var', 'disable_epub_gallery', False),
             # NEW: Disable automatic cover creation (affects extraction and EPUB cover page)
             ('disable_automatic_cover_creation_var', 'disable_automatic_cover_creation', False),
@@ -2133,6 +2142,8 @@ Recent translations to summarize:
             ('image_output_resolution_var', 'image_output_resolution', '1K'),
             ('chunk_timeout_var', 'chunk_timeout', '900'),
             ('batch_size_var', 'batch_size', '3'),
+            ('batch_mode_var', 'batching_mode', 'aggressive'),
+            ('batch_group_size_var', 'batch_group_size', '3'),
             ('chapter_number_offset_var', 'chapter_number_offset', '0'),
             ('compression_factor_var', 'compression_factor', '3.0'),
             # NEW: scanning phase mode (quick-scan/aggressive/ai-hunter/custom)
@@ -2276,7 +2287,7 @@ Recent translations to summarize:
             # Set the initial active profile for autosave
             self._active_profile_for_autosave = self.profile_var
         
-        self.append_log("🚀 Glossarion v6.9.1 - Ready to use!")
+        self.append_log("🚀 Glossarion v6.9.2 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -6571,7 +6582,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'QA_AUTO_SEARCH_OUTPUT': '1' if self.config.get('qa_auto_search_output', True) else '0',
             'BATCH_TRANSLATION': "1" if self.batch_translation_var else "0",
             'BATCH_SIZE': str(self.batch_size_var),
-            'CONSERVATIVE_BATCHING': "1" if self.conservative_batching_var else "0",
+            'BATCHING_MODE': str(getattr(self, 'batch_mode_var', 'aggressive')),
+            'BATCH_GROUP_SIZE': str(getattr(self, 'batch_group_size_var', '3')),
+            # Backward compatibility for older scripts expecting CONSERVATIVE_BATCHING
+            'CONSERVATIVE_BATCHING': "1" if str(getattr(self, 'batch_mode_var', 'aggressive')) == 'conservative' else "0",
             'DISABLE_ZERO_DETECTION': "1" if self.disable_zero_detection_var else "0",
             'TRANSLATION_HISTORY_ROLLING': "1" if self.translation_history_rolling_var else "0",
             'USE_GEMINI_OPENAI_ENDPOINT': '1' if self.use_gemini_openai_endpoint_var else '0',
@@ -9875,7 +9889,6 @@ Important rules:
                 ('emergency_image_restore', ['emergency_image_restore_var'], False, bool),
                 ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),
                 ('token_limit_disabled', ['token_limit_disabled'], False, bool),
-                ('conservative_batching', ['conservative_batching_var'], False, bool),
                 ('translation_history_rolling', ['rolling_checkbox', 'translation_history_rolling_var'], False, bool),
                 ('disable_epub_gallery', ['disable_epub_gallery_var'], False, bool),
                 ('disable_automatic_cover_creation', ['disable_automatic_cover_creation_var'], False, bool),
@@ -9931,6 +9944,8 @@ Important rules:
                 # Batching
                 ('batch_translation', ['batch_checkbox', 'batch_translation_var'], False, bool),
                 ('batch_size', ['batch_size_entry', 'batch_size_var'], 3, lambda v: safe_int(v, 3)),
+                ('batching_mode', ['batch_mode_var'], 'aggressive', str),
+                ('batch_group_size', ['batch_group_size_var'], 3, lambda v: safe_int(v, 3)),
                 ('headers_per_batch', ['headers_per_batch_var'], 10, int),
 
                 # Gemini/GPT/DeepSeek Thinking
@@ -11058,7 +11073,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v6.9.1...")
+    print("🚀 Starting Glossarion v6.9.2...")
     
     # Initialize splash screen
     splash_manager = None
