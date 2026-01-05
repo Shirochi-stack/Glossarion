@@ -4167,6 +4167,57 @@ class UnifiedClient:
                                 print(f"  📊 Already at max retry tokens ({current_max_tokens}) and retry already attempted, not retrying")
                     else:
                         print(f"  📋 RETRY_TRUNCATED disabled - accepting truncated response")
+
+                # Check for Split-the-Merge failures and handle retry if enabled
+                split_failed_detected = bool(extracted_content and "SPLIT_FAILED" in extracted_content)
+                retry_split_enabled = os.getenv("RETRY_SPLIT_FAILED", "0") == "1"
+                split_retry_attempts = max(1, int(os.getenv("SPLIT_FAILED_RETRY_ATTEMPTS", "1") or "1"))
+                attempts_remaining = internal_retries - (attempt + 1)
+                already_split_retry = bool(retry_reason and "split_failed_retry" in str(retry_reason))
+
+                if split_failed_detected:
+                    print("⚠️ Split-the-Merge indicated failure (SPLIT_FAILED marker detected)")
+
+                    if retry_split_enabled:
+                        if attempts_remaining <= 0:
+                            print(f"  📊 No internal retries remaining ({internal_retries}); skipping split-failed retry")
+                        elif already_split_retry:
+                            print("  📊 Split-failed retry already attempted in this chain; skipping")
+                        else:
+                            allowed_attempts = min(split_retry_attempts, attempts_remaining)
+
+                            def _run_split_retry(reason_suffix: str):
+                                tls = self._get_thread_local_client()
+                                prev_override = getattr(tls, 'max_retries_override', None)
+                                tls.max_retries_override = max(1, attempts_remaining)
+                                try:
+                                    return self._send_internal(
+                                        messages=messages,
+                                        temperature=temperature,
+                                        max_tokens=max_tokens,
+                                        max_completion_tokens=max_completion_tokens,
+                                        context=context,
+                                        retry_reason=f"split_failed_retry_{reason_suffix}",
+                                        request_id=request_id,
+                                        image_data=image_data
+                                    )
+                                finally:
+                                    tls.max_retries_override = prev_override
+
+                            for attempt_idx in range(allowed_attempts):
+                                try:
+                                    retry_content, retry_finish_reason = _run_split_retry(f"{attempt_idx+1}")
+                                    if retry_content and "SPLIT_FAILED" not in retry_content:
+                                        print(f"  ✅ Split-failed retry #{attempt_idx+1} succeeded")
+                                        return retry_content, retry_finish_reason
+                                    else:
+                                        print(f"  ⚠️ Split-failed retry #{attempt_idx+1} still failed")
+                                except Exception as retry_error:
+                                    print(f"  ❌ Split-failed retry #{attempt_idx+1} errored: {retry_error}")
+
+                            print(f"  ⚠️ All split-failed retries ({allowed_attempts}) exhausted; returning original response")
+                    else:
+                        print("  📋 RETRY_SPLIT_FAILED disabled - accepting split failure result")
                 
                 # Apply API delay after successful call (even if truncated)
                 # SKIP DELAY DURING CLEANUP

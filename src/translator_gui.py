@@ -6497,25 +6497,6 @@ If you see multiple p-b cookies, use the one with the longest value."""
         
         auto_inject_book_title = bool(getattr(self, 'auto_inject_book_title_var', self.config.get('auto_inject_book_title', False)))
 
-        # --- Normalize split-failure retry settings from the live UI state ---
-        try:
-            retry_split_enabled = bool(getattr(self, 'retry_split_failed_var', self.config.get('retry_split_failed', False)))
-        except Exception:
-            retry_split_enabled = bool(self.config.get('retry_split_failed', False))
-        attempts_raw = getattr(self, 'split_failed_retry_attempts_var', self.config.get('split_failed_retry_attempts', '1'))
-        try:
-            split_retry_attempts = max(1, int(str(attempts_raw).strip() or "1"))
-        except Exception:
-            split_retry_attempts = 1
-        # Keep the normalized values in both the instance and config so downstream save/export stays consistent
-        self.retry_split_failed_var = retry_split_enabled
-        self.split_failed_retry_attempts_var = split_retry_attempts
-        try:
-            self.config['retry_split_failed'] = retry_split_enabled
-            self.config['split_failed_retry_attempts'] = split_retry_attempts
-        except Exception:
-            pass
-
         return {
             'EPUB_PATH': epub_path,
             'MODEL': self.model_var,
@@ -6557,8 +6538,8 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'RETRY_TRUNCATED': "1" if self.retry_truncated_var else "0",
             'MAX_RETRY_TOKENS': str(resolved_max_retry_tokens),
             'TRUNCATION_RETRY_ATTEMPTS': str(self.truncation_retry_attempts_var),
-            'RETRY_SPLIT_FAILED': "1" if retry_split_enabled else "0",
-            'SPLIT_FAILED_RETRY_ATTEMPTS': str(split_retry_attempts),
+            'RETRY_SPLIT_FAILED': "1" if bool(getattr(self, 'retry_split_failed_var', self.config.get('retry_split_failed', False))) else "0",
+            'SPLIT_FAILED_RETRY_ATTEMPTS': str(max(1, int(str(getattr(self, 'split_failed_retry_attempts_var', self.config.get('split_failed_retry_attempts', '1'))).strip() or "1"))),
             'RETRY_DUPLICATE_BODIES': "1" if self.retry_duplicate_var else "0",
             'PRESERVE_ORIGINAL_TEXT_ON_FAILURE': "1" if self.preserve_original_text_var else "0",
             'DUPLICATE_LOOKBACK_CHAPTERS': str(self.duplicate_lookback_var),
