@@ -2289,6 +2289,11 @@ Recent translations to summarize:
             self.prompt_text.setPlainText(initial_prompt)
             # Set the initial active profile for autosave
             self._active_profile_for_autosave = self.profile_var
+            
+            # Store original content for revert capability
+            if not hasattr(self, '_original_profile_content'):
+                self._original_profile_content = {}
+            self._original_profile_content[self.profile_var] = initial_prompt
         
         self.append_log("🚀 Glossarion v6.9.3 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")

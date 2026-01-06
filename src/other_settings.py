@@ -7822,6 +7822,15 @@ def save_profile(self):
     if not name:
         QMessageBox.critical(None, "Error", "Profile cannot be empty.")
         return
+
+    # Check if we need to revert changes to the previous profile
+    # This happens if the user edited a profile but then changed the name to save as a new profile
+    if hasattr(self, '_active_profile_for_autosave') and self._active_profile_for_autosave and name != self._active_profile_for_autosave:
+        if hasattr(self, '_original_profile_content') and self._active_profile_for_autosave in self._original_profile_content:
+            # Revert the previous profile to its original content
+            original = self._original_profile_content[self._active_profile_for_autosave]
+            self.prompt_profiles[self._active_profile_for_autosave] = original
+            # Note: We don't update self.config here as it will be updated when save_profiles() is called
     
     # PySide6: Get text from QTextEdit
     content = self.prompt_text.toPlainText().strip()
