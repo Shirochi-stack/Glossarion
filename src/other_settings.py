@@ -1432,6 +1432,80 @@ def _create_response_handling_section(self, parent):
     section_v.setContentsMargins(8, 8, 8, 8)  # Compact margins
     section_v.setSpacing(4)  # Compact spacing between widgets
     
+    # Real-time Translation (Streaming)
+    streaming_title = QLabel("Real-time Translation (Streaming)")
+    streaming_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+    section_v.addWidget(streaming_title)
+
+    # Streaming toggle
+    if not hasattr(self, 'enable_streaming_var'):
+        self.enable_streaming_var = bool(self.config.get('enable_streaming', str(os.environ.get('ENABLE_STREAMING', '1')) == '1'))
+    self.enable_streaming_checkbox = self._create_styled_checkbox("Enable streaming responses (OpenAI-compatible)")
+    self.enable_streaming_checkbox.setToolTip("<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>Streams tokens as they are generated.\n Reduces time to first byte but requires stable connections; if the stream drops mid-response you may see truncated text.</p></qt>")
+    try:
+        self.enable_streaming_checkbox.setChecked(bool(self.enable_streaming_var))
+    except Exception:
+        pass
+
+    # Allow streaming logs during batch mode
+    if not hasattr(self, 'allow_batch_stream_logs_var'):
+        self.allow_batch_stream_logs_var = bool(
+            self.config.get(
+                'allow_batch_stream_logs',
+                str(os.environ.get('ALLOW_BATCH_STREAM_LOGS', '0')) == '1'
+            )
+        )
+    # Ensure config mirrors the loaded state so it can be saved even if dialog isn't reopened
+    try:
+        self.config['allow_batch_stream_logs'] = bool(self.allow_batch_stream_logs_var)
+    except Exception:
+        pass
+    self.allow_batch_stream_logs_checkbox = self._create_styled_checkbox(
+        "Allow streaming logs during batch mode"
+    )
+    self.allow_batch_stream_logs_checkbox.setToolTip(
+        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
+        "Show streaming token logs even while batch translation is running. "
+        "Default is off to reduce log noise.</p></qt>"
+    )
+    try:
+        self.allow_batch_stream_logs_checkbox.setChecked(bool(self.allow_batch_stream_logs_var))
+    except Exception:
+        pass
+    def _on_allow_batch_stream_logs_toggle(checked):
+        try:
+            self.allow_batch_stream_logs_var = bool(checked)
+            # Persist immediately to config so it survives session without requiring another dialog open
+            self.config['allow_batch_stream_logs'] = self.allow_batch_stream_logs_var
+            os.environ['ALLOW_BATCH_STREAM_LOGS'] = '1' if checked else '0'
+        except Exception:
+            pass
+    self.allow_batch_stream_logs_checkbox.toggled.connect(_on_allow_batch_stream_logs_toggle)
+
+    def _on_streaming_toggle(checked):
+        try:
+            self.enable_streaming_var = bool(checked)
+            # Keep environment in sync immediately
+            os.environ['ENABLE_STREAMING'] = '1' if checked else '0'
+            # Enable/disable logs toggle based on streaming state
+            # The global stylesheet handles the visual graying out for QCheckBox:disabled
+            self.allow_batch_stream_logs_checkbox.setEnabled(checked)
+        except Exception:
+            pass
+    self.enable_streaming_checkbox.toggled.connect(_on_streaming_toggle)
+    
+    # Initialize state (must be called AFTER allow_batch_stream_logs_checkbox is created)
+    _on_streaming_toggle(self.enable_streaming_checkbox.isChecked())
+
+    section_v.addWidget(self.enable_streaming_checkbox)
+    section_v.addWidget(self.allow_batch_stream_logs_checkbox)
+
+    # Separator
+    sep_stream = QFrame()
+    sep_stream.setFrameShape(QFrame.HLine)
+    sep_stream.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep_stream)
+
     # GPT-5/OpenAI Reasoning Toggle
     gpt5_title = QLabel("GPT-5 Thinking (OpenRouter/OpenAI-style)")
     gpt5_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
@@ -1643,14 +1717,6 @@ def _create_response_handling_section(self, parent):
 
     deepseek_desc = QLabel("Adds extra_body={thinking:{type:enabled}} for DeepSeek OpenAI-compatible requests.\nEnables reasoning_content when supported.")
     deepseek_desc.setStyleSheet("color: gray; font-size: 10pt;")
-    deepseek_desc.setContentsMargins(20, 0, 0, 10)
-    section_v.addWidget(deepseek_desc)
-    
-    # Separator
-    sep1 = QFrame()
-    sep1.setFrameShape(QFrame.HLine)
-    sep1.setFrameShadow(QFrame.Sunken)
-    section_v.addWidget(sep1)
     
     # Parallel Extraction
     parallel_title = QLabel("Parallel Extraction")
@@ -2367,61 +2433,6 @@ def _create_response_handling_section(self, parent):
     self.ignore_retry_after_checkbox.toggled.connect(_on_ignore_retry_after_toggle)
     http_main_v.addWidget(self.ignore_retry_after_checkbox)
 
-    # Streaming toggle
-    if not hasattr(self, 'enable_streaming_var'):
-        self.enable_streaming_var = bool(self.config.get('enable_streaming', str(os.environ.get('ENABLE_STREAMING', '0')) == '1'))
-    self.enable_streaming_checkbox = self._create_styled_checkbox("Enable streaming responses (OpenAI-compatible)")
-    self.enable_streaming_checkbox.setToolTip("<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>Streams tokens as they are generated.\n Reduces time to first byte but requires stable connections; if the stream drops mid-response you may see truncated text.</p></qt>")
-    try:
-        self.enable_streaming_checkbox.setChecked(bool(self.enable_streaming_var))
-    except Exception:
-        pass
-    def _on_streaming_toggle(checked):
-        try:
-            self.enable_streaming_var = bool(checked)
-            # Keep environment in sync immediately
-            os.environ['ENABLE_STREAMING'] = '1' if checked else '0'
-        except Exception:
-            pass
-    self.enable_streaming_checkbox.toggled.connect(_on_streaming_toggle)
-    http_main_v.addSpacing(6)
-    http_main_v.addWidget(self.enable_streaming_checkbox)
-
-    # Allow streaming logs during batch mode
-    if not hasattr(self, 'allow_batch_stream_logs_var'):
-        self.allow_batch_stream_logs_var = bool(
-            self.config.get(
-                'allow_batch_stream_logs',
-                str(os.environ.get('ALLOW_BATCH_STREAM_LOGS', '0')) == '1'
-            )
-        )
-    # Ensure config mirrors the loaded state so it can be saved even if dialog isn't reopened
-    try:
-        self.config['allow_batch_stream_logs'] = bool(self.allow_batch_stream_logs_var)
-    except Exception:
-        pass
-    self.allow_batch_stream_logs_checkbox = self._create_styled_checkbox(
-        "Allow streaming logs during batch mode"
-    )
-    self.allow_batch_stream_logs_checkbox.setToolTip(
-        "<qt><p style='white-space: normal; max-width: 32em; margin: 0;'>"
-        "Show streaming token logs even while batch translation is running. "
-        "Default is off to reduce log noise.</p></qt>"
-    )
-    try:
-        self.allow_batch_stream_logs_checkbox.setChecked(bool(self.allow_batch_stream_logs_var))
-    except Exception:
-        pass
-    def _on_allow_batch_stream_logs_toggle(checked):
-        try:
-            self.allow_batch_stream_logs_var = bool(checked)
-            # Persist immediately to config so it survives session without requiring another dialog open
-            self.config['allow_batch_stream_logs'] = self.allow_batch_stream_logs_var
-            os.environ['ALLOW_BATCH_STREAM_LOGS'] = '1' if checked else '0'
-        except Exception:
-            pass
-    self.allow_batch_stream_logs_checkbox.toggled.connect(_on_allow_batch_stream_logs_toggle)
-    http_main_v.addWidget(self.allow_batch_stream_logs_checkbox)
     
     section_v.addWidget(http_main)
     
