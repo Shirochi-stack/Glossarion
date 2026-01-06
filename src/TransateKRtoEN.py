@@ -365,12 +365,19 @@ class TranslationConfig:
         self.CONTEXTUAL = os.getenv("CONTEXTUAL", "1") == "1"
         self.DELAY = float(os.getenv("SEND_INTERVAL_SECONDS", "1"))
         self.SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "").strip()
+        self.REQUEST_MERGING_ENABLED = os.getenv("REQUEST_MERGING_ENABLED", "0") == "1"
         
-        # Strip split marker instruction from SYSTEM_PROMPT
-        # Use regex to handle potential newlines and whitespace around it
+        # Handle split marker instruction placeholder
         if self.SYSTEM_PROMPT:
             import re
-            self.SYSTEM_PROMPT = re.sub(r'\s*\{split_marker_instruction\}\s*', '', self.SYSTEM_PROMPT)
+            if self.REQUEST_MERGING_ENABLED:
+                split_instr = "- CRITICAL Requirement: If you see any HTML tags containing 'SPLIT MARKER' (Example: <h1 id=\"split-1\">SPLIT MARKER: Do Not Remove This Tag</h1>), you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers."
+                # Replace placeholder with instruction (handling potential newlines if user added them, though usually we want to ensure it has its own line)
+                # We simply replace the placeholder. The prompt template likely has newlines around it.
+                self.SYSTEM_PROMPT = self.SYSTEM_PROMPT.replace("{split_marker_instruction}", split_instr)
+            else:
+                # Strip placeholder if merging is disabled
+                self.SYSTEM_PROMPT = re.sub(r'\s*\{split_marker_instruction\}\s*', '', self.SYSTEM_PROMPT)
             
         self.REMOVE_AI_ARTIFACTS = os.getenv("REMOVE_AI_ARTIFACTS", "0") == "1"
         self.TEMP = float(os.getenv("TRANSLATION_TEMPERATURE", "0.3"))
