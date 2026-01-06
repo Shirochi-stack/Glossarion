@@ -329,9 +329,10 @@ class RetranslationMixin:
                 files = [
                     f for f in os.listdir(output_dir)
                     if os.path.isfile(os.path.join(output_dir, f))
-                    # accept any extension
+                    # accept any extension except .epub
                     and not f.lower().endswith("_translated.txt")
                     and f != "translation_progress.json"
+                    and not f.lower().endswith(".epub")
                 ]
                 for fname in files:
                     base = os.path.basename(fname)
@@ -2091,9 +2092,10 @@ class RetranslationMixin:
                         files = [
                             f for f in os.listdir(output_dir)
                             if os.path.isfile(os.path.join(output_dir, f))
-                            # accept any extension
+                            # accept any extension except .epub
                             and not f.lower().endswith("_translated.txt")
                             and f != "translation_progress.json"
+                            and not f.lower().endswith(".epub")
                         ]
                         for fname in files:
                             base = os.path.basename(fname)
