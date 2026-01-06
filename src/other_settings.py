@@ -1488,14 +1488,17 @@ def _create_response_handling_section(self, parent):
             # Keep environment in sync immediately
             os.environ['ENABLE_STREAMING'] = '1' if checked else '0'
             # Enable/disable logs toggle based on streaming state
-            # The global stylesheet handles the visual graying out for QCheckBox:disabled
             self.allow_batch_stream_logs_checkbox.setEnabled(checked)
+            # Force style update to ensure visual state (color) updates immediately
+            self.allow_batch_stream_logs_checkbox.style().unpolish(self.allow_batch_stream_logs_checkbox)
+            self.allow_batch_stream_logs_checkbox.style().polish(self.allow_batch_stream_logs_checkbox)
         except Exception:
             pass
     self.enable_streaming_checkbox.toggled.connect(_on_streaming_toggle)
     
-    # Initialize state (must be called AFTER allow_batch_stream_logs_checkbox is created)
-    _on_streaming_toggle(self.enable_streaming_checkbox.isChecked())
+    # Initialize state (scheduled to run after widget construction)
+    from PySide6.QtCore import QTimer
+    QTimer.singleShot(0, lambda: _on_streaming_toggle(self.enable_streaming_checkbox.isChecked()))
 
     section_v.addWidget(self.enable_streaming_checkbox)
     section_v.addWidget(self.allow_batch_stream_logs_checkbox)
