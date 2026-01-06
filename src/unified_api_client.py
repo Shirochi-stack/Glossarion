@@ -9747,8 +9747,20 @@ class UnifiedClient:
                                             if log_stream and not self._is_stop_requested():
                                                 frag = part.text.replace("\r", "")
                                                 # Use local line buffering to preserve structure
-                                                if "\n" in frag:
-                                                    parts = ("".join(log_buf) + frag).split("\n")
+                                                combined = "".join(log_buf) + frag
+                                                
+                                                # Inject newlines after HTML closing tags
+                                                temp_combined = combined
+                                                for tag in ['</h1>', '</h2>', '3>', '4>', '5>', '6>', '</p>']:
+                                                    if tag in ['3>', '4>', '5>', '6>']:
+                                                        tag = '</h' + tag[0] + '>'
+                                                        if tag not in combined: continue
+                                                
+                                                for tag in ['</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>']:
+                                                    temp_combined = temp_combined.replace(tag, tag + '\n')
+                                                
+                                                if "\n" in temp_combined:
+                                                    parts = temp_combined.split("\n")
                                                     for p in parts[:-1]:
                                                         print(p)
                                                     log_buf = [parts[-1]]
@@ -10996,9 +11008,15 @@ class UnifiedClient:
                                                         text_parts.append(frag)
                                                         if log_stream and not self._is_stop_requested():
                                                             # Process fragment for line breaks
-                                                            if "\n" in frag:
-                                                                # Split by newline, print complete lines
-                                                                parts = ("".join(log_buf) + frag).split("\n")
+                                                            combined = "".join(log_buf) + frag
+                                                            
+                                                            # Inject newlines after HTML closing tags
+                                                            temp_combined = combined
+                                                            for tag in ['</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>']:
+                                                                temp_combined = temp_combined.replace(tag, tag + '\n')
+                                                            
+                                                            if "\n" in temp_combined:
+                                                                parts = temp_combined.split("\n")
                                                                 # Print all but the last part (which is incomplete)
                                                                 for part in parts[:-1]:
                                                                     print(part)
@@ -11018,8 +11036,14 @@ class UnifiedClient:
                                                 if log_stream and not self._is_stop_requested():
                                                     # Process fragment for line breaks
                                                     combined = "".join(log_buf) + frag
-                                                    if "\n" in combined:
-                                                        parts = combined.split("\n")
+                                                    
+                                                    # Inject newlines after HTML closing tags
+                                                    temp_combined = combined
+                                                    for tag in ['</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>']:
+                                                        temp_combined = temp_combined.replace(tag, tag + '\n')
+                                                    
+                                                    if "\n" in temp_combined:
+                                                        parts = temp_combined.split("\n")
                                                         # Print all complete lines
                                                         for part in parts[:-1]:
                                                             print(part)
@@ -11047,8 +11071,14 @@ class UnifiedClient:
                                             text_parts.append(alt_frag)
                                             if log_stream and not self._is_stop_requested():
                                                 combined = "".join(log_buf) + alt_frag
-                                                if "\n" in combined:
-                                                    parts = combined.split("\n")
+                                                
+                                                # Inject newlines after HTML closing tags
+                                                temp_combined = combined
+                                                for tag in ['</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>']:
+                                                    temp_combined = temp_combined.replace(tag, tag + '\n')
+                                                
+                                                if "\n" in temp_combined:
+                                                    parts = temp_combined.split("\n")
                                                     for part in parts[:-1]:
                                                         print(part)
                                                     log_buf = [parts[-1]]
