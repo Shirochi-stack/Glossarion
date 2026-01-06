@@ -1121,6 +1121,7 @@ def _create_context_management_section(self, parent):
 
     # Rolling summary toggle
     rolling_cb = self._create_styled_checkbox("Use Rolling Summary (Memory)")
+    rolling_cb.setToolTip("Injects a summary request API call after every translation.\nIf batch translation is enabled, the summary request is performed on a per-batch basis.")
     try:
         rolling_cb.setChecked(bool(self.rolling_summary_var))
     except Exception:
