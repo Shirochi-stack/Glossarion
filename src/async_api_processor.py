@@ -3949,15 +3949,22 @@ class AsyncProcessingDialog:
                 raise ValueError(f"Source file not found: {source_path}")
             self._log(f"Using source file for results: {source_path}")
 
-            # Get output directory - same name as source file, in exe location
-            if getattr(sys, 'frozen', False):
-                # Running as compiled exe - use exe directory
-                app_dir = os.path.dirname(sys.executable)
-            else:
-                # Running as script - use script directory
-                app_dir = os.path.dirname(os.path.abspath(__file__))
+            # Get output directory
             base_name = os.path.splitext(os.path.basename(source_path))[0]
-            output_dir = os.path.join(app_dir, base_name)
+            
+            # Check for override
+            override_dir = os.environ.get('OUTPUT_DIRECTORY')
+            if override_dir:
+                output_dir = os.path.join(override_dir, base_name)
+            else:
+                # Default: same name as source file, in exe location
+                if getattr(sys, 'frozen', False):
+                    # Running as compiled exe - use exe directory
+                    app_dir = os.path.dirname(sys.executable)
+                else:
+                    # Running as script - use script directory
+                    app_dir = os.path.dirname(os.path.abspath(__file__))
+                output_dir = os.path.join(app_dir, base_name)
             
             # Handle existing directory
             if os.path.exists(output_dir):
