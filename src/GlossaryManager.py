@@ -354,6 +354,22 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     # This ensures child processes spawned by ProcessPoolExecutor get the latest values
     # Force fresh read of all environment variables (they were set by save_config)
     print("🔄 Reloading glossary settings from environment variables...")
+
+    # Honor output directory override (same behavior as translation pipeline)
+    try:
+        override_dir = os.getenv("OUTPUT_DIRECTORY")
+        if override_dir:
+            override_dir = os.path.abspath(override_dir)
+            leaf = os.path.basename(os.path.abspath(output_dir)) or "output"
+            # Avoid double-applying override if already under override_dir
+            abs_output = os.path.abspath(output_dir)
+            if not os.path.commonpath([abs_output, override_dir]).startswith(override_dir):
+                output_dir = os.path.join(override_dir, leaf)
+            else:
+                output_dir = abs_output
+    except Exception as e:
+        print(f"⚠️ OUTPUT_DIRECTORY override failed: {e}")
+    print(f"📁 Glossary output directory: {os.path.abspath(output_dir)}")
     
     # Check stop flag at start
     # Ensure output directory exists
