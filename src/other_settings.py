@@ -978,6 +978,24 @@ def _create_danger_zone_section(self, parent):
             # 5. Model Name
             if 'model' in current_config:
                 keys_to_preserve['model'] = current_config['model']
+
+            # 6. Azure Computer Vision credentials
+            if 'azure_vision_key' in current_config:
+                keys_to_preserve['azure_vision_key'] = current_config['azure_vision_key']
+            if 'azure_vision_endpoint' in current_config:
+                keys_to_preserve['azure_vision_endpoint'] = current_config['azure_vision_endpoint']
+
+            # 7. Azure Document Intelligence credentials
+            if 'azure_document_intelligence_key' in current_config:
+                keys_to_preserve['azure_document_intelligence_key'] = current_config['azure_document_intelligence_key']
+            if 'azure_document_intelligence_endpoint' in current_config:
+                keys_to_preserve['azure_document_intelligence_endpoint'] = current_config['azure_document_intelligence_endpoint']
+
+            # 8. Google Vision credentials path
+            if 'google_vision_credentials' in current_config:
+                keys_to_preserve['google_vision_credentials'] = current_config['google_vision_credentials']
+            if 'google_cloud_credentials' in current_config:
+                keys_to_preserve['google_cloud_credentials'] = current_config['google_cloud_credentials']
             
             # Show warning dialog
             msg = QMessageBox(getattr(self, '_other_settings_dialog', self))
@@ -990,6 +1008,9 @@ def _create_danger_zone_section(self, parent):
                 "• Multi-API Keys\n"
                 "• Fallback Keys\n"
                 "• Replicate API Key\n"
+                "• Azure Vision Key & Endpoint\n"
+                "• Azure Document Intelligence Key & Endpoint\n"
+                "• Google Vision Credentials Path\n"
                 "• Selected Model\n\n"
                 "All other settings (prompts, history limits, custom endpoints, etc.) will be lost."
             )
