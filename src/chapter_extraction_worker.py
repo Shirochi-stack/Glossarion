@@ -33,6 +33,19 @@ def run_chapter_extraction(epub_path, output_dir, extraction_mode="smart", progr
         dict: Extraction results including chapters and metadata
     """
     try:
+        # Honor OUTPUT_DIRECTORY override (keep leaf folder)
+        try:
+            override_dir = os.getenv("OUTPUT_DIRECTORY")
+            if override_dir:
+                override_dir = os.path.abspath(override_dir)
+                leaf = os.path.basename(os.path.abspath(output_dir)) or "output"
+                abs_output = os.path.abspath(output_dir)
+                if not os.path.commonpath([abs_output, override_dir]).startswith(override_dir):
+                    output_dir = os.path.join(override_dir, leaf)
+                else:
+                    output_dir = abs_output
+        except Exception as e:
+            print(f"[WARNING] OUTPUT_DIRECTORY override failed: {e}", flush=True)
         # Suppress XML parsing warnings that can crash the subprocess
         import warnings
         from bs4 import XMLParsedAsHTMLWarning
@@ -54,6 +67,9 @@ def run_chapter_extraction(epub_path, output_dir, extraction_mode="smart", progr
         print(f"[INFO] Output directory: {output_dir}", flush=True)
         print(f"[INFO] Extraction mode: {extraction_mode}", flush=True)
         
+        # Create output directory early (after override)
+        os.makedirs(output_dir, exist_ok=True)
+
         with zipfile.ZipFile(epub_path, 'r') as zf:
             # Extract metadata first
             metadata = Chapter_Extractor._extract_epub_metadata(zf)
@@ -140,6 +156,20 @@ def main():
         print(f"[ERROR] EPUB file not found: {epub_path}", flush=True)
         sys.exit(1)
     
+    # Honor OUTPUT_DIRECTORY override for CLI entry as well
+    try:
+        override_dir = os.getenv("OUTPUT_DIRECTORY")
+        if override_dir:
+            override_dir = os.path.abspath(override_dir)
+            leaf = os.path.basename(os.path.abspath(output_dir)) or "output"
+            abs_output = os.path.abspath(output_dir)
+            if not os.path.commonpath([abs_output, override_dir]).startswith(override_dir):
+                output_dir = os.path.join(override_dir, leaf)
+            else:
+                output_dir = abs_output
+    except Exception as e:
+        print(f"[WARNING] OUTPUT_DIRECTORY override failed: {e}", flush=True)
+
     # Create output directory if needed
     os.makedirs(output_dir, exist_ok=True)
     

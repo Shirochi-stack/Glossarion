@@ -5388,6 +5388,15 @@ If you see multiple p-b cookies, use the one with the longest value."""
             total_files = len(self.selected_files)
             successful = 0
             failed = 0
+
+            # Honor OUTPUT_DIRECTORY override globally for this run
+            try:
+                override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+                if override_dir:
+                    os.environ['OUTPUT_DIRECTORY'] = os.path.abspath(override_dir)
+                    self.append_log(f"📁 Using output override: {os.environ['OUTPUT_DIRECTORY']}")
+            except Exception as e:
+                self.append_log(f"⚠️ Could not apply OUTPUT_DIRECTORY override: {e}")
             
             # Check if we're processing multiple images - if so, create a combined output folder
             image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
