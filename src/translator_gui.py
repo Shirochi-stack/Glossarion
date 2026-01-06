@@ -3148,6 +3148,9 @@ Recent translations to summarize:
         # Determine output directory
         # Logic matching run_translation_direct / _process_image_file / _process_text_file
         
+        # Check for output directory override
+        override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+        
         # Check for batch image mode
         image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
         image_files = [f for f in files if os.path.splitext(f)[1].lower() in image_extensions]
@@ -3158,13 +3161,19 @@ Recent translations to summarize:
             # Batch image mode
             parent_dir = os.path.dirname(files[0])
             folder_name = os.path.basename(parent_dir) if parent_dir else "translated_images"
-            output_path = os.path.join(os.getcwd(), folder_name)
+            if override_dir:
+                output_path = os.path.join(override_dir, folder_name)
+            else:
+                output_path = os.path.join(os.getcwd(), folder_name)
         else:
             # Single file or non-batch-image
             # Use the first file
             file_path = files[0]
             base_name = os.path.splitext(os.path.basename(file_path))[0]
-            output_path = os.path.join(os.getcwd(), base_name)
+            if override_dir:
+                output_path = os.path.join(override_dir, base_name)
+            else:
+                output_path = os.path.join(os.getcwd(), base_name)
             
         # Try to open
         if output_path:
@@ -5393,7 +5402,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # Get the common parent directory name or use timestamp
                 parent_dir = os.path.dirname(self.selected_files[0])
                 folder_name = os.path.basename(parent_dir) if parent_dir else f"translated_images_{int(time.time())}"
-                combined_image_output_dir = folder_name
+                
+                # Check for output directory override
+                override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+                if override_dir:
+                    combined_image_output_dir = os.path.join(override_dir, folder_name)
+                else:
+                    combined_image_output_dir = folder_name
+                
                 os.makedirs(combined_image_output_dir, exist_ok=True)
                 
                 # Create images subdirectory for originals
@@ -5553,7 +5569,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
             if combined_output_dir:
                 output_dir = combined_output_dir
             else:
-                output_dir = base_name
+                # Check for output directory override
+                override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+                if override_dir:
+                    output_dir = os.path.join(override_dir, base_name)
+                else:
+                    output_dir = base_name
             
             # Initialize progress manager if not already done
             if not hasattr(self, 'image_progress_manager'):
@@ -6424,7 +6445,19 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # Determine output directory and save source EPUB path
             if file_path.lower().endswith('.epub'):
                 base_name = os.path.splitext(os.path.basename(file_path))[0]
-                output_dir = base_name  # This is how your code determines the output dir
+                
+                # Check for output directory override
+                override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+                if override_dir:
+                    # If absolute, use as is. If relative, join with CWD (or file dir?)
+                    # TransateKRtoEN treats it as root, so we should too.
+                    # It creates a subdir 'base_name' inside it if it's a root.
+                    # Wait, TransateKRtoEN logic: out = os.path.join(output_root, file_base)
+                    
+                    # So here we should expect the same:
+                    output_dir = os.path.join(override_dir, base_name)
+                else:
+                    output_dir = base_name  # Relative to CWD (default)
                 
                 # Save source EPUB path for EPUB converter
                 source_epub_file = os.path.join(output_dir, 'source_epub.txt')
