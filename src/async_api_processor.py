@@ -3106,7 +3106,10 @@ class AsyncProcessingDialog:
             system_prompt = self.gui.prompt_text.get("1.0", "end").strip()
         else:
             system_prompt = self.gui.prompt_text.toPlainText().strip()
-        env_vars['SYSTEM_PROMPT'] = system_prompt.replace('{target_lang}', target_lang)
+        env_vars['SYSTEM_PROMPT'] = system_prompt.replace('{target_lang}', target_lang).replace('{split_marker_instruction}', '')
+        
+        # Async processing does not support request merging logic, so force it off
+        env_vars['REQUEST_MERGING_ENABLED'] = '0'
             
         env_vars['TRANSLATION_TEMPERATURE'] = _text(getattr(self.gui, 'trans_temp', None), '0.3')
         env_vars['TRANSLATION_HISTORY_LIMIT'] = _text(getattr(self.gui, 'trans_history', None), '8')

@@ -1245,7 +1245,7 @@ Text to analyze:
                 "You are a professional novel translator. You MUST translate the following text to {target_lang}.\n"
                 "- You MUST output ONLY in {target_lang}. No other languages are permitted.\n"
                 "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, <img>, etc.\n"
-                "- CRITICAL: If you see any HTML tags containing 'SPLIT MARKER', you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers.\n"
+                "{split_marker_instruction}"
                 "- Preserve any Markdown formatting (headers, bold, italic, lists, etc.) if present.\n"
                 "- If the text does not contain HTML tags, use line breaks for proper formatting as expected of a novel.\n"
                 "- Maintain the original meaning, tone, and style.\n"
@@ -1264,7 +1264,7 @@ Text to analyze:
                 "- Keep original Korean quotation marks (" ", ' ', 「」, 『』) as-is without converting to English quotes.\n"
                 "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 생 means 'life/living', 활 means 'active', 관 means 'hall/building' - together 생활관 means Dormitory.\n"
                 "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.\n"
-                "- CRITICAL: If you see any HTML tags containing 'SPLIT MARKER', you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers.\n"
+                "{split_marker_instruction}"
             ),
             "Japanese_BeautifulSoup": (
                 "You are a professional Japanese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
@@ -1279,7 +1279,7 @@ Text to analyze:
                 "- Keep original Japanese quotation marks (「」 and 『』) as-is without converting to English quotes.\n"
                 "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory.\n"
                 "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.\n"
-                "- CRITICAL: If you see any HTML tags containing 'SPLIT MARKER', you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers.\n"
+                "{split_marker_instruction}"
             ),
             "Chinese_BeautifulSoup": (
                 "You are a professional Chinese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
@@ -1294,7 +1294,7 @@ Text to analyze:
                 "- Keep original Chinese quotation marks (「」 for dialogue, 《》 for titles) as-is without converting to English quotes.\n"
                 "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory.\n"
                 "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.\n"
-                "- CRITICAL: If you see any HTML tags containing 'SPLIT MARKER', you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers.\n"
+                "{split_marker_instruction}"
             ),
             "korean_OCR": (
                 "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
@@ -1355,7 +1355,7 @@ Text to analyze:
                 "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 생 means 'life/living', 활 means 'active', 관 means 'hall/building' - together 생활관 means Dormitory. When you see [생활관], write [Dormitory]. Do not write [생활관] anywhere in your output - this is forbidden. Apply this rule to every single Asian character - convert them all to English.\n"
                 "- Use line breaks for proper formatting as expected of a novel.\n"
                 "- Preserve all <h1> tags or Markdown present.\n"
-                "- CRITICAL: If you see any HTML tags containing 'SPLIT MARKER', you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers.\n"
+                "{split_marker_instruction}"
                 "- Preserve any image tags.\n"
             ),
             "Japanese_html2text": (
@@ -1372,7 +1372,7 @@ Text to analyze:
                 "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory.\n"
                 "- Use line breaks for proper formatting as expected of a novel.\n"
                 "- Preserve all <h1> tags or Markdown present.\n"
-                "- CRITICAL: If you see any HTML tags containing 'SPLIT MARKER', you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers.\n"
+                "{split_marker_instruction}"
                 "- Preserve any image tags.\n"
             ),
             "Chinese_html2text": (
@@ -1389,7 +1389,7 @@ Text to analyze:
                 "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory.\n"
                 "- Use line breaks for proper formatting as expected of a novel.\n"
                 "- Preserve all <h1> tags or Markdown present.\n"
-                "- CRITICAL: If you see any HTML tags containing 'SPLIT MARKER', you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers.\n"
+                "{split_marker_instruction}"
                 "- Preserve any image tags.\n"
             ),
             "Manga_JP": (
@@ -5760,6 +5760,12 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # Last fallback - empty string
                 system_prompt = ""
 
+            # Replace split marker instruction placeholder
+            split_instr = ""
+            if getattr(self, 'request_merging_enabled_var', False):
+                split_instr = "- CRITICAL: If you see any HTML tags containing 'SPLIT MARKER', you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers.\\n"
+            system_prompt = system_prompt.replace("{split_marker_instruction}", split_instr)
+
             # Check if we should append glossary to the prompt
             append_glossary = self.config.get('append_glossary', True)  # Default to True
             if hasattr(self, 'append_glossary_var'):
@@ -6333,6 +6339,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 
                 # Get the system prompt and log first 100 characters
                 system_prompt = self.prompt_text.toPlainText().strip()
+                
+                # Replace split marker instruction placeholder
+                split_instr = ""
+                if getattr(self, 'request_merging_enabled_var', False):
+                    split_instr = "- CRITICAL: If you see any HTML tags containing 'SPLIT MARKER', you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers.\\n"
+                system_prompt = system_prompt.replace("{split_marker_instruction}", split_instr)
+
                 prompt_preview = system_prompt[:] if len(system_prompt) > 100 else system_prompt
                 self.append_log(f"📝 System prompt: {prompt_preview}")
                 self.append_log(f"📏 System prompt length: {len(system_prompt)} characters")
