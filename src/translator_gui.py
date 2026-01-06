@@ -1251,7 +1251,7 @@ Text to analyze:
                 "- Maintain the original meaning, tone, and style.\n"
                 "- Output ONLY the translated text in {target_lang}. Do not add any explanations, notes, or conversational filler.\n"
             ),
-            "korean": (
+            "Korean_BeautifulSoup": (
                 "You are a professional Korean to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
                 "- Use a natural, comedy-friendly English translation style that captures both humor and readability without losing any original meaning.\n"
                 "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
@@ -1266,7 +1266,7 @@ Text to analyze:
                 "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.\n"
                 "- CRITICAL: If you see any HTML tags containing 'SPLIT MARKER', you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers.\n"
             ),
-            "japanese": (
+            "Japanese_BeautifulSoup": (
                 "You are a professional Japanese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
                 "- Use a natural, comedy-friendly English translation style that captures both humor and readability without losing any original meaning.\n"
                 "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
@@ -1281,7 +1281,7 @@ Text to analyze:
                 "- Preserve ALL HTML tags exactly as they appear in the source, including <head>, <title>, <h1>, <h2>, <p>, <br>, <div>, etc.\n"
                 "- CRITICAL: If you see any HTML tags containing 'SPLIT MARKER', you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers.\n"
             ),
-            "chinese": (
+            "Chinese_BeautifulSoup": (
                 "You are a professional Chinese to English novel translator, you must strictly output only English text and HTML tags while following these rules:\n"
                 "- Use a natural, comedy-friendly English translation style that captures both humor and readability without losing any original meaning.\n"
                 "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
@@ -1341,7 +1341,7 @@ Text to analyze:
                 "- Add HTML tags for proper formatting as expected of a novel.\n"
                 "- Wrap every paragraph in <p> tags; do not insert any literal tabs or spaces.\n"
             ),
-            "korean_TXT": (
+            "Korean_html2text": (
                 "You are a professional Korean to English novel translator, you must strictly output only English text while following these rules:\n"
                 "- Use a natural, comedy-friendly English translation style that captures both humor and readability without losing any original meaning.\n"
                 "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
@@ -1358,7 +1358,7 @@ Text to analyze:
                 "- CRITICAL: If you see any HTML tags containing 'SPLIT MARKER', you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers.\n"
                 "- Preserve any image tags.\n"
             ),
-            "japanese_TXT": (
+            "Japanese_html2text": (
                 "You are a professional Japanese to English novel translator, you must strictly output only English text while following these rules:\n"
                 "- Use a natural, comedy-friendly English translation style that captures both humor and readability without losing any original meaning.\n"
                 "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
@@ -1375,7 +1375,7 @@ Text to analyze:
                 "- CRITICAL: If you see any HTML tags containing 'SPLIT MARKER', you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers.\n"
                 "- Preserve any image tags.\n"
             ),
-            "chinese_TXT": (
+            "Chinese_html2text": (
                 "You are a professional Chinese to English novel translator, you must strictly output only English text while following these rules:\n"
                 "- Use a natural, comedy-friendly English translation style that captures both humor and readability without losing any original meaning.\n"
                 "- Include 100% of the source text - every word, phrase, and sentence must be fully translated without exception.\n"
@@ -5739,7 +5739,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 return False
             
             # Get system prompt from configuration
-            profile_name = self.config.get('active_profile', 'korean')
+            profile_name = self.config.get('active_profile', 'Korean_BeautifulSoup')
             prompt_profiles = self.config.get('prompt_profiles', {})
             
             # Get the main translation prompt
