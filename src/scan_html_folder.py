@@ -3559,18 +3559,19 @@ def update_progress_file(folder_path, results, log):
         return
     
     faulty_chapters = [row for row in results if row["issues"]]
+    resolved_chapters = [row for row in results if not row["issues"]]
     
-    if not faulty_chapters:
-        log("✅ No faulty chapters found - progress unchanged")
+    if not faulty_chapters and not resolved_chapters:
+        log("✅ No changes to progress - no faulty or resolved chapters found")
         return
     
     # Detect progress format version
     is_new_format = "chapters" in prog and isinstance(prog.get("chapters"), dict)
     
     if is_new_format:
-        update_new_format_progress(prog, faulty_chapters, log, folder_path)
+        update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, folder_path)
     else:
-        update_legacy_format_progress(prog, faulty_chapters, log)
+        update_legacy_format_progress(prog, faulty_chapters, resolved_chapters, log)
     
     # Write back updated progress
     try:
@@ -3601,8 +3602,17 @@ def update_progress_file(folder_path, results, log):
 
     if affected_chapters_for_log:
         log(f"📝 Chapters marked for re-translation: {', '.join(str(c) for c in sorted(affected_chapters_for_log))}")
+    
+    # Log resolved chapters (those that had qa_failed but now pass)
+    resolved_nums_for_log = []
+    for resolved_row in resolved_chapters:
+        chapter_num = resolved_row.get("chapter_num")
+        if chapter_num is not None:
+            resolved_nums_for_log.append(chapter_num)
+    if resolved_nums_for_log:
+        log(f"✅ Chapters cleared of QA issues: {', '.join(str(c) for c in sorted(set(resolved_nums_for_log)))}")
 
-def update_new_format_progress(prog, faulty_chapters, log, folder_path):
+def update_new_format_progress(prog, faulty_chapters, resolved_chapters, log, folder_path):
     """Update new format progress file with content hash support"""
     log("[INFO] Detected new progress format")
     
@@ -3669,94 +3679,72 @@ def update_new_format_progress(prog, faulty_chapters, log, folder_path):
             for child_num in merged_chapters_list:
                 if child_num not in merged_child_to_parent:
                     merged_child_to_parent[child_num] = actual_num
+
+    def find_chapter_key(filename):
+        """Map a filename to a chapter key, respecting merged-child redirects."""
+        chapter_key = None
+        is_merged_child = False
+        file_chapter_num = None
+        import re
+        num_matches = re.findall(r'(\d+)', filename)
+        if num_matches:
+            file_chapter_num = int(num_matches[-1])
+        
+        # MERGED CHILDREN HANDLING
+        if file_chapter_num is not None and file_chapter_num in merged_child_to_parent:
+            parent_num = merged_child_to_parent[file_chapter_num]
+            is_merged_child = True
+            log(f"   🔗 File {filename} (chapter {file_chapter_num}) is merged child of chapter {parent_num} - redirecting QA updates to parent")
+            if parent_num in actual_num_to_chapter_key:
+                parent_keys = actual_num_to_chapter_key[parent_num]
+                chapter_key = parent_keys[0]
+            return chapter_key, is_merged_child, file_chapter_num
+
+        # Method 1: Direct output file match
+        chapter_key = output_file_to_chapter_key.get(filename)
+        if not chapter_key:
+            # Try swapping .html/.txt
+            if filename.endswith('.html'):
+                alt_filename = filename[:-5] + '.txt'
+                chapter_key = output_file_to_chapter_key.get(alt_filename)
+            elif filename.endswith('.txt'):
+                alt_filename = filename[:-4] + '.html'
+                chapter_key = output_file_to_chapter_key.get(alt_filename)
+
+        # Method 2: Try without response_ prefix
+        if not chapter_key and filename.startswith("response_"):
+            base_name = filename[9:]
+            chapter_key = basename_to_chapter_key.get(base_name)
+
+        # Method 3: Match by chapter number
+        if not chapter_key and file_chapter_num is not None:
+            if file_chapter_num in actual_num_to_chapter_key:
+                candidates = actual_num_to_chapter_key[file_chapter_num]
+                for candidate_key in candidates:
+                    candidate_info = prog["chapters"][candidate_key]
+                    candidate_output = candidate_info.get("output_file", "")
+                    if candidate_output and (candidate_output == filename or candidate_output.endswith(filename)):
+                        chapter_key = candidate_key
+                        break
+                if not chapter_key and candidates:
+                    chapter_key = candidates[0]
+
+        # Method 4: Fallback - scan chapters for matching output_file
+        if not chapter_key and os.path.exists(os.path.join(folder_path, filename)):
+            try:
+                for ch_key, ch_info in prog["chapters"].items():
+                    if ch_info.get("output_file") == filename:
+                        chapter_key = ch_key
+                        break
+            except Exception:
+                pass
+
+        return chapter_key, is_merged_child, file_chapter_num
     
     updated_count = 0
     for faulty_row in faulty_chapters:
         faulty_filename = faulty_row["filename"]
-        chapter_key = None
-        
-        # MERGED CHILDREN HANDLING: Check if this file is for a merged child chapter
-        # If so, redirect QA issues to the parent chapter
-        import re
-        file_chapter_num = None
-        num_matches = re.findall(r'(\d+)', faulty_filename)
-        if num_matches:
-            file_chapter_num = int(num_matches[-1])
-        
-        is_merged_child = False
-        if file_chapter_num is not None and file_chapter_num in merged_child_to_parent:
-            parent_num = merged_child_to_parent[file_chapter_num]
-            is_merged_child = True
-            log(f"   🔗 File {faulty_filename} (chapter {file_chapter_num}) is merged child of chapter {parent_num} - redirecting QA issues to parent")
-            
-            # Find the parent chapter key - this is the only key we want to update
-            if parent_num in actual_num_to_chapter_key:
-                parent_keys = actual_num_to_chapter_key[parent_num]
-                log(f"      DEBUG: actual_num_to_chapter_key[{parent_num}] = {parent_keys}")
-                chapter_key = parent_keys[0]
-                log(f"      DEBUG: Using chapter_key = '{chapter_key}' for parent")
-                # Skip all other matching methods - we ONLY want to update the parent
-            else:
-                log(f"      DEBUG: parent_num {parent_num} NOT in actual_num_to_chapter_key!")
-                log(f"      DEBUG: actual_num_to_chapter_key keys = {list(actual_num_to_chapter_key.keys())}")
-        
-        # Method 1: Direct output file match (if not already found via merge redirect)
-        if not chapter_key and not is_merged_child:
-            chapter_key = output_file_to_chapter_key.get(faulty_filename)
-            
-            # Also try matching with different extensions for text mode (PDF sources use .html)
-            if not chapter_key:
-                # Try swapping .html <-> .txt since PDFs produce .html in text mode
-                if faulty_filename.endswith('.html'):
-                    alt_filename = faulty_filename[:-5] + '.txt'
-                    chapter_key = output_file_to_chapter_key.get(alt_filename)
-                elif faulty_filename.endswith('.txt'):
-                    alt_filename = faulty_filename[:-4] + '.html'
-                    chapter_key = output_file_to_chapter_key.get(alt_filename)
-        
-        # Method 2: Try without response_ prefix
-        if not chapter_key and not is_merged_child and faulty_filename.startswith("response_"):
-            base_name = faulty_filename[9:]
-            chapter_key = basename_to_chapter_key.get(base_name)
-        
-        # Method 3: Extract chapter number and match
-        if not chapter_key and not is_merged_child:
-            # Extract chapter number from filename
-            import re
-            matches = re.findall(r'(\d+)', faulty_filename)
-            if matches:
-                chapter_num = int(matches[-1])  # Use last number found
-                
-                # Look for matching chapter by number
-                if chapter_num in actual_num_to_chapter_key:
-                    # If multiple entries, find the one with matching output file
-                    candidates = actual_num_to_chapter_key[chapter_num]
-                    for candidate_key in candidates:
-                        candidate_info = prog["chapters"][candidate_key]
-                        candidate_output = candidate_info.get("output_file", "")
-                        if candidate_output and (candidate_output == faulty_filename or candidate_output.endswith(faulty_filename)):
-                            chapter_key = candidate_key
-                            break
-                    
-                    # If still not found, use first candidate
-                    if not chapter_key and candidates:
-                        chapter_key = candidates[0]
-        
-        # Method 4: If still not found, try to calculate content hash from file
-        if not chapter_key and not is_merged_child and os.path.exists(os.path.join(folder_path, faulty_filename)):
-            try:
-                # Read the file and calculate its content hash
-                # This is a fallback for when the mapping isn't found
-                with open(os.path.join(folder_path, faulty_filename), 'r', encoding='utf-8') as f:
-                    content = f.read()
-                
-                # Try to find by scanning all chapters for matching output file
-                for ch_key, ch_info in prog["chapters"].items():
-                    if ch_info.get("output_file") == faulty_filename:
-                        chapter_key = ch_key
-                        break
-            except:
-                pass
+        chapter_key, is_merged_child, file_chapter_num = find_chapter_key(faulty_filename)
         
         if chapter_key and chapter_key in prog["chapters"]:
             chapter_info = prog["chapters"][chapter_key]
@@ -3848,8 +3836,36 @@ def update_new_format_progress(prog, faulty_chapters, log, folder_path):
                 updated_count += 1
     
     log(f"🔧 Updated {updated_count} chapters in new format")
-    
-def update_legacy_format_progress(prog, faulty_chapters, log):
+
+    # --- RESOLVED CHAPTERS: clear qa_failed back to completed ---
+    resolved_count = 0
+    for resolved_row in resolved_chapters:
+        filename = resolved_row["filename"]
+        chapter_key, is_merged_child, file_chapter_num = find_chapter_key(filename)
+
+        if not chapter_key or chapter_key not in prog["chapters"]:
+            continue
+
+        chapter_info = prog["chapters"][chapter_key]
+        old_status = chapter_info.get("status", "")
+        was_qa_failed = old_status == "qa_failed" or chapter_info.get("qa_issues")
+
+        if was_qa_failed:
+            chapter_info["status"] = "completed"
+            chapter_info["qa_issues"] = False
+            chapter_info["qa_issues_found"] = []
+            chapter_info["qa_timestamp"] = time.time()
+            chapter_info["duplicate_confidence"] = resolved_row.get("duplicate_confidence", 0)
+            # Keep content_hash/output_file untouched
+
+            resolved_count += 1
+            chapter_num = resolved_row.get("chapter_num") or chapter_info.get("actual_num", file_chapter_num)
+            log(f"   ✅ Marked chapter {chapter_num} as completed (QA issues resolved, was: {old_status})")
+
+    if resolved_count:
+        log(f"🔧 Cleared qa_failed status for {resolved_count} chapter(s)")
+
+def update_legacy_format_progress(prog, faulty_chapters, resolved_chapters, log):
     """Update legacy format progress file"""
     log("[INFO] Detected legacy progress format")
     
@@ -3858,7 +3874,11 @@ def update_legacy_format_progress(prog, faulty_chapters, log):
     updated = [idx for idx in existing if idx not in faulty_indices]
     removed_count = len(existing) - len(updated)
     
-    prog["completed"] = updated
+    # Re-add resolved chapters to completed list
+    resolved_indices = [row["file_index"] for row in resolved_chapters]
+    combined = set(updated)
+    combined.update(resolved_indices)
+    prog["completed"] = sorted(combined)
     
     # Remove chunk data
     if "chapter_chunks" in prog:
