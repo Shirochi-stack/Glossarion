@@ -5403,7 +5403,7 @@ def _create_processing_options_section(self, parent):
 
     conservative_rb = QRadioButton("Conservative batching")
     direct_rb = QRadioButton("Direct batching")
-    aggressive_rb = QRadioButton("Aggressive batching")
+    aggressive_rb = QRadioButton("No batching")
 
     batch_group.addButton(conservative_rb)
     batch_group.addButton(direct_rb)
@@ -5458,7 +5458,7 @@ def _create_processing_options_section(self, parent):
     mode_row_h.addStretch()
     section_v.addWidget(mode_row)
 
-    batch_desc = QLabel("Direct: fixed batches of batch size.\nConservative: groups = batch size × multiplier (set above).\nAggressive: keeps parallel slots full by opening a new request whenever one finishes.")
+    batch_desc = QLabel("Direct: fixed batches of batch size.\nConservative: groups = batch size × multiplier (set above).\nNo batching: keeps parallel slots full by opening a new request whenever one finishes.")
     batch_desc.setStyleSheet("color: gray; font-size: 10pt;")
     batch_desc.setContentsMargins(20, 0, 0, 10)
     section_v.addWidget(batch_desc)
