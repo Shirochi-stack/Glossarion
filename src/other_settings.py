@@ -2237,6 +2237,7 @@ def _create_response_handling_section(self, parent):
             else:
                 retry_tokens_label.setStyleSheet("color: #606060;")
                 retry_desc.setStyleSheet("color: #606060; font-size: 10pt;")
+                retry_tokens_edit.setStyleSheet("color: #909090;")
                 retry_attempts_label.setStyleSheet("color: #606060;")
                 retry_attempts_edit.setStyleSheet("color: #909090;")
         except Exception:
