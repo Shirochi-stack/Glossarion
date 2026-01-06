@@ -9746,17 +9746,21 @@ class UnifiedClient:
                                             text_parts.append(part.text)
                                             if log_stream and not self._is_stop_requested():
                                                 frag = part.text.replace("\r", "")
-                                                # keep blank lines as paragraph markers, flatten single newlines
-                                                frag = frag.replace("\n\n", "\n\n").replace("\n", " ")
-                                                if frag:
+                                                # Use local line buffering to preserve structure
+                                                if "\n" in frag:
+                                                    parts = ("".join(log_buf) + frag).split("\n")
+                                                    for p in parts[:-1]:
+                                                        print(p)
+                                                    log_buf = [parts[-1]]
+                                                else:
                                                     log_buf.append(frag)
-                                                    if len("".join(log_buf)) >= log_flush_len or frag.endswith((".", " ", ",", ";", "!", "?", ":")):
+                                                    # Flush if buffer gets too long (fallback)
+                                                    if len("".join(log_buf)) > 150:
                                                         print("".join(log_buf), end="", flush=True)
-                                                        log_buf.clear()
+                                                        log_buf = []
                             if log_stream and not self._is_stop_requested():
                                 if log_buf:
-                                    print("".join(log_buf), end="", flush=True)
-                                    log_buf.clear()
+                                    print("".join(log_buf))
                                 print()
                             text_content = "".join(text_parts)
                             if not self._is_stop_requested():
