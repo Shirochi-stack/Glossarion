@@ -4560,7 +4560,104 @@ def _create_processing_options_section(self, parent):
             pass
     request_merge_cb.toggled.connect(_on_request_merge_toggle)
     request_merge_cb.setContentsMargins(0, 2, 0, 0)
-    extraction_v.addWidget(request_merge_cb)
+    # extraction_v.addWidget(request_merge_cb) # Moved to custom layout below
+    
+    # Create row for toggle and label
+    req_merge_row = QWidget()
+    req_merge_h = QHBoxLayout(req_merge_row)
+    req_merge_h.setContentsMargins(0, 2, 0, 0)
+    req_merge_h.addWidget(request_merge_cb)
+    
+    # Add placeholder label that can be double-clicked to copy
+    placeholder_label = QLabel("{split_marker_instruction}")
+    
+    # Define styles
+    base_style = """
+        QLabel {
+            color: #17a2b8; 
+            font-family: Consolas, monospace;
+            padding: 2px 5px;
+            background-color: #2d2d2d;
+            border-radius: 3px;
+            border: 1px solid #4a5568;
+        }
+        QLabel:hover {
+            background-color: #3d3d3d;
+            border-color: #5a9fd4;
+        }
+    """
+    
+    pressed_style = """
+        QLabel {
+            color: #ffffff; 
+            font-family: Consolas, monospace;
+            padding: 2px 5px;
+            background-color: #4a5568;
+            border-radius: 3px;
+            border: 1px solid #5a9fd4;
+        }
+    """
+    
+    copied_style = """
+        QLabel {
+            color: #28a745; 
+            font-family: Consolas, monospace;
+            padding: 2px 5px;
+            background-color: #2d2d2d;
+            border-radius: 3px;
+            border: 1px solid #28a745;
+            font-weight: bold;
+        }
+    """
+    
+    placeholder_label.setStyleSheet(base_style)
+    placeholder_label.setToolTip("Click to copy.\nPaste this into your system prompt to inject instructions for preserving split markers.")
+    placeholder_label.setCursor(Qt.PointingHandCursor)
+    
+    # Store state
+    placeholder_label._is_copied = False
+    
+    def reset_label_state():
+        placeholder_label.setStyleSheet(base_style)
+        placeholder_label.setText("{split_marker_instruction}")
+        placeholder_label._is_copied = False
+
+    # Handle mouse events for interaction
+    def on_press(event):
+        if event.button() == Qt.LeftButton:
+            if not placeholder_label._is_copied:
+                placeholder_label.setStyleSheet(pressed_style)
+                
+    def on_release(event):
+        if event.button() == Qt.LeftButton:
+            # Check if release is inside the widget
+            if placeholder_label.rect().contains(event.pos()):
+                from PySide6.QtWidgets import QApplication
+                from PySide6.QtCore import QTimer
+                clipboard = QApplication.clipboard()
+                clipboard.setText("{split_marker_instruction}")
+                
+                # Visual feedback
+                placeholder_label.setStyleSheet(copied_style)
+                placeholder_label.setText("Copied!")
+                placeholder_label._is_copied = True
+                
+                # Reset after 1 second (standard feedback duration)
+                QTimer.singleShot(1000, reset_label_state)
+            else:
+                # Dragged out, cancel press
+                if not placeholder_label._is_copied:
+                    placeholder_label.setStyleSheet(base_style)
+            
+    placeholder_label.mousePressEvent = on_press
+    placeholder_label.mouseReleaseEvent = on_release
+    # Remove double click handler to prevent conflict/confusion
+    placeholder_label.mouseDoubleClickEvent = lambda e: None
+    
+    req_merge_h.addWidget(placeholder_label)
+    req_merge_h.addStretch()
+    
+    extraction_v.addWidget(req_merge_row)
     
     # Row for merge count setting
     merge_count_row = QWidget()
