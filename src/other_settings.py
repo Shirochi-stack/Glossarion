@@ -974,6 +974,10 @@ def _create_danger_zone_section(self, parent):
             # 4. Replicate API Key
             if 'replicate_api_key' in current_config:
                 keys_to_preserve['replicate_api_key'] = current_config['replicate_api_key']
+
+            # 5. Model Name
+            if 'model' in current_config:
+                keys_to_preserve['model'] = current_config['model']
             
             # Show warning dialog
             msg = QMessageBox(getattr(self, '_other_settings_dialog', self))
@@ -985,7 +989,8 @@ def _create_danger_zone_section(self, parent):
                 "• Main API Key\n"
                 "• Multi-API Keys\n"
                 "• Fallback Keys\n"
-                "• Replicate API Key\n\n"
+                "• Replicate API Key\n"
+                "• Selected Model\n\n"
                 "All other settings (prompts, history limits, custom endpoints, etc.) will be lost."
             )
             msg.setIcon(QMessageBox.Warning)
