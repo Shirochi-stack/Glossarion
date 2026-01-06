@@ -3443,6 +3443,7 @@ class MangaTranslationTab(QObject):
         self.azure_key_entry.setEchoMode(QLineEdit.Password)
         self.azure_key_entry.setMinimumWidth(150)  # Reduced for better fit
         self.azure_key_entry.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.azure_key_entry.textChanged.connect(self._on_azure_credentials_change)
         azure_key_layout.addWidget(self.azure_key_entry)
 
         # Show/Hide button for Azure key
@@ -3466,6 +3467,7 @@ class MangaTranslationTab(QObject):
         self.azure_endpoint_entry = QLineEdit()
         self.azure_endpoint_entry.setMinimumWidth(150)  # Reduced for better fit
         self.azure_endpoint_entry.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.azure_endpoint_entry.textChanged.connect(self._on_azure_credentials_change)
         azure_endpoint_layout.addWidget(self.azure_endpoint_entry)
         azure_endpoint_layout.addStretch()
         azure_frame_layout.addWidget(azure_endpoint_frame)
@@ -5573,6 +5575,23 @@ class MangaTranslationTab(QObject):
         else:
             # Hide the key
             self.azure_key_entry.setEchoMode(QLineEdit.Password)
+
+    def _on_azure_credentials_change(self, text=None):
+        """Save Azure Computer Vision credentials when the user edits them."""
+        try:
+            key = self.azure_key_entry.text() if hasattr(self, 'azure_key_entry') else ''
+            endpoint = self.azure_endpoint_entry.text() if hasattr(self, 'azure_endpoint_entry') else ''
+
+            self.main_gui.config['azure_vision_key'] = key
+            self.main_gui.config['azure_vision_endpoint'] = endpoint
+
+            # Keep status indicator fresh
+            self._check_provider_status()
+
+            if hasattr(self.main_gui, 'save_config'):
+                self.main_gui.save_config(show_message=False)
+        except Exception as e:
+            self._log(f"Error saving Azure credentials: {e}", "error")
     
     def _toggle_azure_doc_intel_key_visibility(self, state):
         """Toggle visibility of Azure Document Intelligence API key"""
