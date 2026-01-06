@@ -321,6 +321,51 @@ class RetranslationMixin:
         else:
             with open(progress_file, 'r', encoding='utf-8') as f:
                 prog = json.load(f)
+
+        # Helper: auto-discover completed files when no OPF is available
+        def _auto_discover_from_output_dir(output_dir, prog):
+            updated = False
+            try:
+                files = [
+                    f for f in os.listdir(output_dir)
+                    if os.path.isfile(os.path.join(output_dir, f))
+                    # accept any extension
+                    and not f.lower().endswith("_translated.txt")
+                    and f != "translation_progress.json"
+                ]
+                for fname in files:
+                    base = os.path.basename(fname)
+                    # Normalize by stripping response_ and all extensions
+                    if base.startswith("response_"):
+                        base = base[len("response_"):]
+                    while True:
+                        new_base, ext = os.path.splitext(base)
+                        if not ext:
+                            break
+                        base = new_base
+
+                    import re
+                    m = re.findall(r"(\d+)", base)
+                    chapter_num = int(m[-1]) if m else None
+                    key = str(chapter_num) if chapter_num is not None else f"special_{base}"
+                    actual_num = chapter_num if chapter_num is not None else 0
+
+                    if key in prog.get("chapters", {}):
+                        continue
+
+                    prog.setdefault("chapters", {})[key] = {
+                        "actual_num": actual_num,
+                        "content_hash": "",
+                        "output_file": fname,
+                        "status": "completed",
+                        "last_updated": os.path.getmtime(os.path.join(output_dir, fname)),
+                        "auto_discovered": True,
+                        "original_basename": fname
+                    }
+                    updated = True
+            except Exception as e:
+                print(f"⚠️ Auto-discovery (no OPF) failed: {e}")
+            return updated
         
         # Clean up missing files and merged children when opening the GUI
         # This handles the case where parent files were manually deleted
@@ -344,7 +389,8 @@ class RetranslationMixin:
         spine_chapters = []
         opf_chapter_order = {}
         is_epub = file_path.lower().endswith('.epub')
-        
+        opf_parsed = False
+
         if is_epub and os.path.exists(file_path):
             try:
                 import xml.etree.ElementTree as ET
@@ -448,9 +494,20 @@ class RetranslationMixin:
                                     # Also store without extension for matching
                                     filename_noext = os.path.splitext(filename)[0]
                                     opf_chapter_order[filename_noext] = len(spine_chapters) - 1
+                                    opf_parsed = True
                         
             except Exception as e:
                 print(f"Warning: Could not parse OPF: {e}")
+
+        # If no OPF/spine, fall back to auto-discovery from output_dir
+        if not opf_parsed or len(spine_chapters) == 0:
+            if _auto_discover_from_output_dir(output_dir, prog):
+                try:
+                    with open(progress_file, 'w', encoding='utf-8') as f:
+                        json.dump(prog, f, ensure_ascii=False, indent=2)
+                    print("💾 Saved auto-discovered progress (no OPF available)")
+                except Exception as e:
+                    print(f"⚠️ Failed to save auto-discovered progress: {e}")
         
         # =====================================================
         # MATCH OPF CHAPTERS WITH TRANSLATION PROGRESS
@@ -2021,26 +2078,62 @@ class RetranslationMixin:
             # Reload progress file - check if it exists first
             if not os.path.exists(data['progress_file']):
                 print(f"⚠️ Progress file not found: {data['progress_file']}")
-                QMessageBox.information(data.get('dialog', self), "Output Folder Not Found", 
-                                      f"The output folder appears to have been deleted.\n\n"
-                                      f"Progress file not found:\n{data['progress_file']}")
-                # Force-restart the Progress Manager for this file
+                # Recreate a minimal progress file and auto-discover completed files from output_dir
+                prog = {
+                    "chapters": {},
+                    "chapter_chunks": {},
+                    "version": "2.1"
+                }
+
+                def _auto_discover_from_output_dir(output_dir, prog):
+                    updated = False
+                    try:
+                        files = [
+                            f for f in os.listdir(output_dir)
+                            if os.path.isfile(os.path.join(output_dir, f))
+                            # accept any extension
+                            and not f.lower().endswith("_translated.txt")
+                            and f != "translation_progress.json"
+                        ]
+                        for fname in files:
+                            base = os.path.basename(fname)
+                            if base.startswith("response_"):
+                                base = base[len("response_"):]
+                            while True:
+                                new_base, ext = os.path.splitext(base)
+                                if not ext:
+                                    break
+                                base = new_base
+                            import re
+                            m = re.findall(r"(\\d+)", base)
+                            chapter_num = int(m[-1]) if m else None
+                            key = str(chapter_num) if chapter_num is not None else f"special_{base}"
+                            actual_num = chapter_num if chapter_num is not None else 0
+                            if key in prog.get("chapters", {}):
+                                continue
+                            prog.setdefault("chapters", {})[key] = {
+                                "actual_num": actual_num,
+                                "content_hash": "",
+                                "output_file": fname,
+                                "status": "completed",
+                                "last_updated": os.path.getmtime(os.path.join(output_dir, fname)),
+                                "auto_discovered": True,
+                                "original_basename": fname
+                            }
+                            updated = True
+                    except Exception as e:
+                        print(f"⚠️ Auto-discovery (refresh no OPF) failed: {e}")
+                    return updated
+
+                if _auto_discover_from_output_dir(data['output_dir'], prog):
+                    print("💾 Recreated progress file via auto-discovery (refresh)")
                 try:
-                    file_path = data.get('file_path')
-                    # Remove cached dialog so a fresh one is built
-                    if file_path:
-                        file_key = os.path.abspath(file_path)
-                        if hasattr(self, '_retranslation_dialog_cache') and isinstance(self._retranslation_dialog_cache, dict):
-                            self._retranslation_dialog_cache.pop(file_key, None)
-                    dlg = data.get('dialog')
-                    if dlg:
-                        dlg.close()
-                    # Reopen after event loop returns
-                    from PySide6.QtCore import QTimer
-                    QTimer.singleShot(0, lambda fp=file_path: self._force_retranslation_epub_or_text(fp) if fp else None)
+                    with open(data['progress_file'], 'w', encoding='utf-8') as f:
+                        json.dump(prog, f, ensure_ascii=False, indent=2)
                 except Exception as e:
-                    print(f"⚠️ Could not restart Progress Manager: {e}")
-                return
+                    QMessageBox.warning(data.get('dialog', self), "Progress File Error",
+                                        f"Could not recreate progress file:\n{e}")
+                    return
             
             with open(data['progress_file'], 'r', encoding='utf-8') as f:
                 data['prog'] = json.load(f)
