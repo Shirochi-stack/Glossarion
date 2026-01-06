@@ -111,6 +111,7 @@ def setup_other_settings_methods(gui_instance):
         '_create_prompt_management_section', '_create_processing_options_section',
         '_create_image_translation_section', '_create_anti_duplicate_section',
         '_create_custom_api_endpoints_section', '_create_debug_controls_section',
+        '_create_danger_zone_section',
         # Helper methods
         '_create_multi_key_row', '_create_manual_config_backup', '_manual_restore_config',
         '_open_backup_folder', '_backup_config_file', '_restore_config_from_backup',
@@ -811,7 +812,10 @@ def open_other_settings(self):
     
     # Add debug controls section at the bottom
     self._create_debug_controls_section(container)
-
+    
+    # Add Danger Zone section
+    self._create_danger_zone_section(container)
+    
     scroll.setWidget(container)
     scroll.setWidgetResizable(True)
     
@@ -915,6 +919,133 @@ def open_other_settings(self):
         if needed_width > dialog.width():
             dialog.resize(needed_width, dialog.height())
     QTimer.singleShot(0, adjust_width)
+
+def _create_danger_zone_section(self, parent):
+    """Create danger zone section (Reset to Defaults)"""
+    from PySide6.QtWidgets import QGroupBox, QVBoxLayout, QPushButton, QMessageBox, QLabel, QFrame
+    from PySide6.QtCore import Qt
+    
+    # Check if parent is a grid layout (standard case) or just a widget
+    grid = parent.layout() if hasattr(parent, 'layout') else None
+    
+    section_box = QGroupBox("Danger Zone")
+    section_box.setStyleSheet("""
+        QGroupBox {
+            border: 1px solid #dc3545;
+            border-radius: 5px;
+            margin-top: 10px;
+            font-weight: bold;
+            color: #ff6b6b;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            left: 10px;
+            padding: 0 5px;
+        }
+    """)
+    
+    section_v = QVBoxLayout(section_box)
+    section_v.setContentsMargins(15, 15, 15, 15)
+    section_v.setSpacing(10)
+    
+    warning_lbl = QLabel("Reset all settings to default values. API keys will be preserved.")
+    warning_lbl.setStyleSheet("color: #ffa5a5; font-size: 10pt;")
+    warning_lbl.setWordWrap(True)
+    section_v.addWidget(warning_lbl)
+    
+    def _reset_config_to_defaults():
+        try:
+            # Preservation logic
+            keys_to_preserve = {}
+            current_config = self.config
+            
+            # 1. Main API Key
+            if 'api_key' in current_config:
+                keys_to_preserve['api_key'] = current_config['api_key']
+                
+            # 2. Multi API Keys
+            if 'multi_api_keys' in current_config:
+                keys_to_preserve['multi_api_keys'] = current_config['multi_api_keys']
+                
+            # 3. Fallback Keys
+            if 'fallback_keys' in current_config:
+                keys_to_preserve['fallback_keys'] = current_config['fallback_keys']
+                
+            # 4. Replicate API Key
+            if 'replicate_api_key' in current_config:
+                keys_to_preserve['replicate_api_key'] = current_config['replicate_api_key']
+            
+            # Show warning dialog
+            msg = QMessageBox(getattr(self, '_other_settings_dialog', self))
+            msg.setWindowTitle("Reset to Defaults")
+            msg.setText("Are you sure you want to reset ALL settings to default values?")
+            msg.setInformativeText(
+                "This will restart the application.\n\n"
+                "The following API keys will be PRESERVED:\n"
+                "• Main API Key\n"
+                "• Multi-API Keys\n"
+                "• Fallback Keys\n"
+                "• Replicate API Key\n\n"
+                "All other settings (prompts, history limits, custom endpoints, etc.) will be lost."
+            )
+            msg.setIcon(QMessageBox.Warning)
+            msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            msg.setDefaultButton(QMessageBox.No)
+            
+            if msg.exec() == QMessageBox.Yes:
+                # Delete config.json
+                config_path = os.path.join(os.getcwd(), CONFIG_FILE)
+                if os.path.exists(config_path):
+                    try:
+                        # Write temporary config with just the preserved keys
+                        # This effectively resets everything else since the app will fill in defaults
+                        with open(config_path, 'w', encoding='utf-8') as f:
+                            json.dump(keys_to_preserve, f, indent=2, ensure_ascii=False)
+                            
+                        # Restart
+                        import sys
+                        import subprocess
+                        # Close the dialog first
+                        if hasattr(self, '_other_settings_dialog') and self._other_settings_dialog:
+                            self._other_settings_dialog.close()
+                            
+                        # Launch new instance
+                        subprocess.Popen([sys.executable] + sys.argv)
+                        # Exit current instance
+                        sys.exit(0)
+                    except Exception as e:
+                        QMessageBox.critical(None, "Error", f"Failed to reset config: {e}")
+        except Exception as e:
+            print(f"Error resetting config: {e}")
+            import traceback
+            traceback.print_exc()
+
+    reset_btn = QPushButton("⚠️ Reset Settings to Defaults")
+    reset_btn.clicked.connect(_reset_config_to_defaults)
+    reset_btn.setMinimumHeight(35)
+    reset_btn.setStyleSheet(
+        "QPushButton { "
+        "  background-color: #dc3545; "
+        "  color: white; "
+        "  font-weight: bold; "
+        "  border-radius: 4px; "
+        "  font-size: 11pt; "
+        "} "
+        "QPushButton:hover { background-color: #c82333; }"
+    )
+    section_v.addWidget(reset_btn)
+    
+    # Place at the bottom, spanning both columns if in a grid
+    if isinstance(grid, QGridLayout):
+        # Find next available row (though we can just append to end)
+        row = grid.rowCount()
+        grid.addWidget(section_box, row, 0, 1, 2)  # Span 2 columns
+    else:
+        # Fallback
+        if hasattr(parent, 'layout') and parent.layout():
+            parent.layout().addWidget(section_box)
+        else:
+            section_box.setParent(parent)
 
 def _create_context_management_section(self, parent):
     """Create context management section (PySide6)"""
