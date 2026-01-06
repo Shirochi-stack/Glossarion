@@ -5764,7 +5764,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
             split_instr = ""
             if getattr(self, 'request_merging_enabled_var', False):
                 split_instr = "- CRITICAL Requirement: If you see any HTML tags containing 'SPLIT MARKER' (Example: <h1 id=\"split-1\">SPLIT MARKER: Do Not Remove This Tag</h1>), you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers."
-            system_prompt = system_prompt.replace("{split_marker_instruction}", split_instr)
+            
+            # Use a regex to replace the placeholder regardless of surrounding whitespace or newlines
+            import re
+            system_prompt = re.sub(r'\s*\{split_marker_instruction\}\s*', lambda m: '\n' + split_instr if split_instr else '', system_prompt)
 
             # Check if we should append glossary to the prompt
             append_glossary = self.config.get('append_glossary', True)  # Default to True
@@ -6344,7 +6347,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 split_instr = ""
                 if getattr(self, 'request_merging_enabled_var', False):
                     split_instr = "- CRITICAL Requirement: If you see any HTML tags containing 'SPLIT MARKER' (Example: <h1 id=\"split-1\">SPLIT MARKER: Do Not Remove This Tag</h1>), you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers."
-                system_prompt = system_prompt.replace("{split_marker_instruction}", split_instr)
+                
+                # Use a regex to replace the placeholder regardless of surrounding whitespace or newlines
+                import re
+                system_prompt = re.sub(r'\s*\{split_marker_instruction\}\s*', lambda m: '\n' + split_instr if split_instr else '', system_prompt)
 
                 prompt_preview = system_prompt[:] if len(system_prompt) > 100 else system_prompt
                 self.append_log(f"📝 System prompt: {prompt_preview}")

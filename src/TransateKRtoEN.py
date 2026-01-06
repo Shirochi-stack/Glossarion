@@ -365,6 +365,13 @@ class TranslationConfig:
         self.CONTEXTUAL = os.getenv("CONTEXTUAL", "1") == "1"
         self.DELAY = float(os.getenv("SEND_INTERVAL_SECONDS", "1"))
         self.SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "").strip()
+        
+        # Strip split marker instruction from SYSTEM_PROMPT
+        # Use regex to handle potential newlines and whitespace around it
+        if self.SYSTEM_PROMPT:
+            import re
+            self.SYSTEM_PROMPT = re.sub(r'\s*\{split_marker_instruction\}\s*', '', self.SYSTEM_PROMPT)
+            
         self.REMOVE_AI_ARTIFACTS = os.getenv("REMOVE_AI_ARTIFACTS", "0") == "1"
         self.TEMP = float(os.getenv("TRANSLATION_TEMPERATURE", "0.3"))
         self.HIST_LIMIT = int(os.getenv("TRANSLATION_HISTORY_LIMIT", "20"))

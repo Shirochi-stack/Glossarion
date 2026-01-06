@@ -10875,6 +10875,11 @@ class UnifiedClient:
                         pass
                     var_stream = bool(getattr(self, 'enable_streaming_var', False))
                     use_streaming = (env_stream not in ("0", "false", "False", "FALSE")) or cfg_stream or var_stream
+                    # Streaming log toggle (must be defined before streaming extraction)
+                    allow_batch_logs = os.getenv("ALLOW_BATCH_STREAM_LOGS", "0").lower() not in ("0", "false")
+                    log_stream = os.getenv("LOG_STREAM_CHUNKS", "1").lower() not in ("0", "false") if use_streaming else False
+                    if os.getenv("BATCH_TRANSLATION", "0") == "1" and not allow_batch_logs:
+                        log_stream = False
                     if use_streaming:
                         call_kwargs["stream"] = True
                     try:
@@ -10943,110 +10948,120 @@ class UnifiedClient:
                     
                     # Extract content with Gemini awareness (includes streaming aggregation)
                     if use_streaming:
-                        # Stream chunks to console unless explicitly suppressed
-                        log_stream = os.getenv("LOG_STREAM_CHUNKS", "1").lower() not in ("0", "false")
-                        allow_batch_logs = os.getenv("ALLOW_BATCH_STREAM_LOGS", "0").lower() not in ("0", "false")
-                        if os.getenv("BATCH_TRANSLATION", "0") == "1" and not allow_batch_logs:
-                            log_stream = False
-                        text_parts = []
-                        log_buf = []
-                        log_flush_len = 240  # user-requested chunk size
-                        finish_reason = 'stop'
-                        for event in resp:
-                            try:
-                                frag_collected = False
-                                # 1) Standard OpenAI stream chunk
-                                ch = (getattr(event, "choices", None) or [None])[0]
-                                if not ch and isinstance(event, dict):
-                                    # Fallback for dict-based events
-                                    choices = event.get("choices", [])
-                                    ch = choices[0] if choices else None
-
-                                if ch:
-                                    # Handle both object and dict access for delta
-                                    delta = None
-                                    if isinstance(ch, dict):
-                                        delta = ch.get("delta") or ch.get("message")
-                                    else:
-                                        delta = getattr(ch, "delta", None) or getattr(ch, "message", None)
-
-                                    if delta is not None:
-                                        # Handle both object and dict access for content
-                                        delta_content = None
-                                        if isinstance(delta, dict):
-                                            delta_content = delta.get("content")
-                                        else:
-                                            delta_content = getattr(delta, "content", None)
-
-                                        if isinstance(delta_content, list):
-                                            for part in delta_content:
-                                                if isinstance(part, dict) and part.get("type") == "text":
-                                                    frag = part.get("text", "")
-                                                elif hasattr(part, "type") and getattr(part, "type") == "text":
-                                                    frag = getattr(part, "text", "")
-                                                else:
-                                                    frag = None
-                                                if frag:
-                                                    frag_collected = True
-                                                    text_parts.append(frag)
-                                                    if log_stream and not self._is_stop_requested():
-                                                        _log_frag = frag.replace("\n", "").replace("\r", "")
-                                                        if _log_frag:
-                                                            log_buf.append(_log_frag)
-                                                            if len("".join(log_buf)) >= log_flush_len or _log_frag.endswith((".", " ", ",", ";", "!", "?", ":")):
-                                                                out = "".join(log_buf)
-                                                                # preserve paragraph breaks while flattening stray newlines
-                                                                out = out.replace("\r", "")
-                                                                out = out.replace("\n\n", "\n\n").replace("\n", " ")
-                                                                print(out, end="", flush=True)
-                                                                log_buf.clear()
-                                        elif delta_content:
-                                            frag = str(delta_content)
-                                            frag_collected = True
-                                            text_parts.append(frag)
-                                            if log_stream and not self._is_stop_requested():
-                                                _log_frag = frag.replace("\n", "").replace("\r", "")
-                                                if _log_frag:
-                                                    log_buf.append(_log_frag)
-                                                    if len("".join(log_buf)) >= log_flush_len or _log_frag.endswith((".", " ", ",", ";", "!", "?", ":")):
-                                                        out = "".join(log_buf)
-                                                        out = out.replace("\r", "")
-                                                        out = out.replace("\n\n", "\n\n").replace("\n", " ")
-                                                        print(out, end="", flush=True)
-                                                        log_buf.clear()
-                                    if getattr(ch, "finish_reason", None):
-                                        finish_reason = ch.finish_reason
-                                # 2) Fallback: event has direct text/content fields (provider-specific)
-                                if not frag_collected:
-                                    alt_frag = None
-                                    if hasattr(event, "text") and isinstance(event.text, str):
-                                        alt_frag = event.text
-                                    elif hasattr(event, "content") and isinstance(event.content, str):
-                                        alt_frag = event.content
-                                    elif isinstance(event, dict):
-                                        alt_frag = event.get("text") or event.get("content")
-                                    if alt_frag:
-                                        text_parts.append(alt_frag)
-                                        if log_stream and not self._is_stop_requested():
-                                            _log_frag = alt_frag.replace("\n", "").replace("\r", "")
-                                            if _log_frag:
-                                                log_buf.append(_log_frag)
-                                                if len("".join(log_buf)) >= log_flush_len or _log_frag.endswith((".", " ", ",", ";", "!", "?", ":")):
-                                                    out = "".join(log_buf)
-                                                    out = out.replace("\r", "")
-                                                    out = out.replace("\n\n", "\n\n").replace("\n", " ")
-                                                    print(out, end="", flush=True)
-                                                    log_buf.clear()
-                            except Exception:
-                                continue
                         if log_stream and not self._is_stop_requested():
-                            if log_buf:
-                                out = "".join(log_buf)
-                                out = out.replace("\r", "")
-                                out = out.replace("\n\n", "\n\n").replace("\n", " ")
-                                print(out, end="", flush=True)
-                                log_buf.clear()
-                            print()  # newline after streaming completes
+                            log_buf = []  # Use a local buffer to detect line breaks
+                            text_parts = []
+                            finish_reason = 'stop'
+                            
+                            for event in resp:
+                                try:
+                                    frag_collected = False
+                                    # 1) Standard OpenAI stream chunk
+                                    ch = (getattr(event, "choices", None) or [None])[0]
+                                    if not ch and isinstance(event, dict):
+                                        # Fallback for dict-based events
+                                        choices = event.get("choices", [])
+                                        ch = choices[0] if choices else None
+
+                                    if ch:
+                                        # Handle both object and dict access for delta
+                                        delta = None
+                                        if isinstance(ch, dict):
+                                            delta = ch.get("delta") or ch.get("message")
+                                        else:
+                                            delta = getattr(ch, "delta", None) or getattr(ch, "message", None)
+
+                                        if delta is not None:
+                                            # Handle both object and dict access for content
+                                            delta_content = None
+                                            if isinstance(delta, dict):
+                                                delta_content = delta.get("content")
+                                            else:
+                                                delta_content = getattr(delta, "content", None)
+
+                                            if isinstance(delta_content, list):
+                                                for part in delta_content:
+                                                    if isinstance(part, dict) and part.get("type") == "text":
+                                                        frag = part.get("text", "")
+                                                    elif hasattr(part, "type") and getattr(part, "type") == "text":
+                                                        frag = getattr(part, "text", "")
+                                                    else:
+                                                        frag = None
+                                                    if frag:
+                                                        frag_collected = True
+                                                        text_parts.append(frag)
+                                                        if log_stream and not self._is_stop_requested():
+                                                            # Process fragment for line breaks
+                                                            if "\n" in frag:
+                                                                # Split by newline, print complete lines
+                                                                parts = ("".join(log_buf) + frag).split("\n")
+                                                                # Print all but the last part (which is incomplete)
+                                                                for part in parts[:-1]:
+                                                                    print(part)
+                                                                # Keep the last part in buffer
+                                                                log_buf = [parts[-1]]
+                                                            else:
+                                                                log_buf.append(frag)
+                                                                # Optional: flush if buffer gets too long without newline
+                                                                if len("".join(log_buf)) > 150:
+                                                                    print("".join(log_buf), end="", flush=True)
+                                                                    log_buf = []
+
+                                            elif delta_content:
+                                                frag = str(delta_content)
+                                                frag_collected = True
+                                                text_parts.append(frag)
+                                                if log_stream and not self._is_stop_requested():
+                                                    # Process fragment for line breaks
+                                                    combined = "".join(log_buf) + frag
+                                                    if "\n" in combined:
+                                                        parts = combined.split("\n")
+                                                        # Print all complete lines
+                                                        for part in parts[:-1]:
+                                                            print(part)
+                                                        # Reset buffer with the remainder
+                                                        log_buf = [parts[-1]]
+                                                    else:
+                                                        log_buf.append(frag)
+                                                        # Flush if buffer is getting long to show progress
+                                                        if len("".join(log_buf)) > 150:
+                                                            print("".join(log_buf), end="", flush=True)
+                                                            log_buf = []
+
+                                        if getattr(ch, "finish_reason", None):
+                                            finish_reason = ch.finish_reason
+                                    # 2) Fallback: event has direct text/content fields (provider-specific)
+                                    if not frag_collected:
+                                        alt_frag = None
+                                        if hasattr(event, "text") and isinstance(event.text, str):
+                                            alt_frag = event.text
+                                        elif hasattr(event, "content") and isinstance(event.content, str):
+                                            alt_frag = event.content
+                                        elif isinstance(event, dict):
+                                            alt_frag = event.get("text") or event.get("content")
+                                        if alt_frag:
+                                            text_parts.append(alt_frag)
+                                            if log_stream and not self._is_stop_requested():
+                                                combined = "".join(log_buf) + alt_frag
+                                                if "\n" in combined:
+                                                    parts = combined.split("\n")
+                                                    for part in parts[:-1]:
+                                                        print(part)
+                                                    log_buf = [parts[-1]]
+                                                else:
+                                                    log_buf.append(alt_frag)
+                                                    if len("".join(log_buf)) > 150:
+                                                        print("".join(log_buf), end="", flush=True)
+                                                        log_buf = []
+                                except Exception:
+                                    continue
+                            
+                            # Print any remaining buffer content at the end
+                            if log_buf and log_stream and not self._is_stop_requested():
+                                print("".join(log_buf))
+                            
+                            if log_stream and not self._is_stop_requested():
+                                print()  # final newline
                         content = "".join(text_parts)
                         return UnifiedResponse(
                             content=content,
