@@ -7876,9 +7876,17 @@ Important rules:
             old_argv = sys.argv
             old_env = dict(os.environ)
             
-            # Output file - do NOT prepend Glossary/ because extract_glossary_from_epub.py handles that
+            # Determine output directory
             epub_base = os.path.splitext(os.path.basename(file_path))[0]
-            output_path = f"{epub_base}_glossary.json"
+            override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+            
+            if override_dir:
+                glossary_dir = os.path.join(override_dir, "Glossary")
+            else:
+                glossary_dir = "Glossary"
+            
+            os.makedirs(glossary_dir, exist_ok=True)
+            output_path = os.path.join(glossary_dir, f"{epub_base}_glossary.json")
             
             try:
                 # Set up environment variables
