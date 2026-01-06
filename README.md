@@ -15,6 +15,7 @@
 ![Python](https://img.shields.io/badge/Python-3.10+-blue)
 ![Python application](https://github.com/Shirochi-stack/Glossarion/workflows/Python%20application/badge.svg)
 [![GitHub release](https://img.shields.io/github/release/Shirochi-stack/Glossarion.svg)](https://GitHub.com/Shirochi-stack/Glossarion/releases/)
+[![Discord](https://img.shields.io/badge/Discord-Join%20Community-7289da?style=flat&logo=discord&logoColor=white)](https://discord.gg/n7WXRXn533)
 
 ## ✨ Key Features
 
@@ -360,6 +361,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 📞 Support
 
 - **Issues**: [GitHub Issues](https://github.com/Shirochi-stack/Glossarion/issues)
+- **Discord**: [Join our Community](https://discord.gg/n7WXRXn533)
 ---
 
 <p align="center">Made with 🌸 for the translation community</p>
