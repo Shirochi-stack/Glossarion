@@ -851,7 +851,26 @@ class AIHunterConfigGUI:
         lang_options = list(ai_config['language_detection']['languages'].keys())
         self.target_lang_combo = QComboBox()
         self.target_lang_combo.addItems(lang_options)
-        self.target_lang_combo.setCurrentText(ai_config['language_detection']['target_language'])
+        
+        # Prioritize main config's target language for sync
+        main_target_lang = self.config.get('glossary_target_language') or self.config.get('output_language')
+        if main_target_lang:
+             # Find closest match
+             if main_target_lang in lang_options:
+                 self.target_lang_combo.setCurrentText(main_target_lang)
+             else:
+                 # Try case-insensitive
+                 found = False
+                 for opt in lang_options:
+                     if opt.lower() == main_target_lang.lower():
+                         self.target_lang_combo.setCurrentText(opt)
+                         found = True
+                         break
+                 if not found:
+                     self.target_lang_combo.setCurrentText(ai_config['language_detection']['target_language'])
+        else:
+             self.target_lang_combo.setCurrentText(ai_config['language_detection']['target_language'])
+             
         self.target_lang_combo.setFixedWidth(150)
         self._disable_mousewheel(self.target_lang_combo)
         target_layout.addWidget(self.target_lang_combo)
@@ -925,8 +944,16 @@ class AIHunterConfigGUI:
         
         # Language detection settings
         ai_config['language_detection']['enabled'] = self.lang_enabled_checkbox.isChecked()
-        ai_config['language_detection']['target_language'] = self.target_lang_combo.currentText()
+        new_target_lang = self.target_lang_combo.currentText()
+        ai_config['language_detection']['target_language'] = new_target_lang
         ai_config['language_detection']['threshold_characters'] = self.lang_threshold_spinbox.value()
+        
+        # Sync back to main config
+        self.config['output_language'] = new_target_lang
+        self.config['glossary_target_language'] = new_target_lang
+        # Also update environment variable immediately
+        os.environ['OUTPUT_LANGUAGE'] = new_target_lang
+        os.environ['GLOSSARY_TARGET_LANGUAGE'] = new_target_lang
         
         # Update retry attempts and temperature change settings
         ai_config['retry_attempts'] = self.retry_attempts_spinbox.value()

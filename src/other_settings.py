@@ -2976,6 +2976,12 @@ def show_ai_hunter_settings(self):
                     pass
             if hasattr(self, 'ai_hunter_enabled_var'):
                 self.ai_hunter_enabled_var = self.config.get('ai_hunter_config', {}).get('enabled', True)
+                
+            # Sync main target language dropdown if it changed (two-way sync)
+            if 'output_language' in self.config and hasattr(self, 'update_target_language'):
+                # Call update_target_language with the new value
+                # This function handles the logic to update UI only if needed
+                self.update_target_language(self.config['output_language'])
         
         # Store reference to prevent garbage collection
         self._ai_hunter_gui = AIHunterConfigGUI(None, self.config, on_config_saved)

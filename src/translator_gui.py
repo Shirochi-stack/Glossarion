@@ -3497,6 +3497,11 @@ Recent translations to summarize:
         if 'manual_edit' not in self.config['manga_settings']:
             self.config['manga_settings']['manual_edit'] = {}
         self.config['manga_settings']['manual_edit']['translate_target_language'] = text
+        
+        # Sync with AI Hunter config
+        if 'ai_hunter_config' in self.config:
+            if 'language_detection' in self.config['ai_hunter_config']:
+                self.config['ai_hunter_config']['language_detection']['target_language'] = text
 
     def _update_target_lang_state(self):
         """Update target language dropdown state based on prompt and model"""
