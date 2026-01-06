@@ -7006,7 +7006,13 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 pass
 
             # Create Glossary folder
-            os.makedirs("Glossary", exist_ok=True)
+            override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+            if override_dir:
+                glossary_base_dir = os.path.join(override_dir, "Glossary")
+            else:
+                glossary_base_dir = "Glossary"
+                
+            os.makedirs(glossary_base_dir, exist_ok=True)
             
             # ========== NEW: APPLY OPF-BASED SORTING ==========
             # Sort files based on OPF order if available
@@ -7061,9 +7067,14 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self.append_log(f"{'='*60}")
                 
                 # Process all images in this folder and extract glossary
-                if self._process_image_folder_for_glossary(folder_name, images):
+                if self._process_image_folder_for_glossary(folder_name, images, glossary_base_dir):
                     successful += 1
-                    successful_items.append(f"📁 Glossary/{folder_name}_glossary.json (Images)")
+                    # Use absolute path for log if override is set, otherwise relative
+                    if override_dir:
+                        display_path = os.path.join(glossary_base_dir, f"{folder_name}_glossary.json")
+                    else:
+                        display_path = f"Glossary/{folder_name}_glossary.json"
+                    successful_items.append(f"📁 {display_path} (Images)")
                 else:
                     failed += 1
             
@@ -7078,17 +7089,29 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 self.append_log(f"📄 Processing file ({current_group}/{total_groups}): {os.path.basename(text_file)}")
                 self.append_log(f"{'='*60}")
                 
+                # Set output path environment variable for the script
+                base_name = os.path.splitext(os.path.basename(text_file))[0]
+                
+                # Determine output directory
+                override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+                if override_dir:
+                    glossary_dir = os.path.join(override_dir, "Glossary")
+                else:
+                    glossary_dir = "Glossary"
+                
+                os.makedirs(glossary_dir, exist_ok=True)
+                output_path = os.path.join(glossary_dir, f"{base_name}_glossary.json")
+                os.environ["OUTPUT_PATH"] = output_path
+                
                 if self._extract_glossary_from_text_file(text_file):
                     successful += 1
-                    base_name = os.path.splitext(os.path.basename(text_file))[0]
-                    successful_items.append(f"📄 Glossary/{base_name}_glossary.json")
+                    successful_items.append(f"📄 {output_path}")
                 else:
                     # If failed but we have a partial file (checked inside _extract...), add to success list with note
-                    base_name = os.path.splitext(os.path.basename(text_file))[0]
                     # We need to manually check if partial file exists since _extract returns False on stop
-                    partial_path = os.path.join("Glossary", f"{base_name}_glossary.csv")
+                    partial_path = os.path.join(glossary_dir, f"{base_name}_glossary.csv")
                     if os.path.exists(partial_path):
-                        successful_items.append(f"📄 Glossary/{base_name}_glossary.csv (Partial)")
+                        successful_items.append(f"📄 {partial_path} (Partial)")
                     failed += 1
             
             # Final summary
@@ -7146,14 +7169,18 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # Emit signal to update button (thread-safe)
             self.thread_complete_signal.emit()
 
-    def _process_image_folder_for_glossary(self, folder_name, image_files):
+    def _process_image_folder_for_glossary(self, folder_name, image_files, output_dir=None):
         """Process all images from a folder and create a combined glossary with new format"""
         try:
             import hashlib
             from unified_api_client import UnifiedClient, UnifiedClientError
             
+            # Default output dir if not provided
+            if not output_dir:
+                output_dir = "Glossary"
+            
             # Initialize folder-specific progress manager for images
-            self.glossary_progress_manager = self._init_image_glossary_progress_manager(folder_name)
+            self.glossary_progress_manager = self._init_image_glossary_progress_manager(folder_name, output_dir)
             
             all_glossary_entries = []
             processed = 0
@@ -7504,7 +7531,7 @@ Important rules:
             self.append_log(f"\n📝 Extracted {len(all_glossary_entries)} total entries from {processed} images")
             
             # Save the final glossary with skip logic
-            output_file = os.path.join("Glossary", f"{folder_name}_glossary.json")
+            output_file = os.path.join(output_dir, f"{folder_name}_glossary.json")
             
             try:
                 # Apply skip logic for duplicates
@@ -7568,7 +7595,7 @@ Important rules:
                     self.append_log(f"✅ Kept {len(final_entries)} unique entries (skipped {skipped} duplicates)")
                 
                 # Save final glossary
-                os.makedirs("Glossary", exist_ok=True)
+                os.makedirs(output_dir, exist_ok=True)
                 
                 self.append_log(f"💾 Writing glossary to: {output_file}")
                 with open(output_file, 'w', encoding='utf-8') as f:
@@ -7628,13 +7655,13 @@ Important rules:
             self.append_log(f"❌ Full error: {traceback.format_exc()}")
             return False
 
-    def _init_image_glossary_progress_manager(self, folder_name):
+    def _init_image_glossary_progress_manager(self, folder_name, output_dir="Glossary"):
         """Initialize a folder-specific progress manager for image glossary extraction"""
         import hashlib
         
         class ImageGlossaryProgressManager:
-            def __init__(self, folder_name):
-                self.PROGRESS_FILE = os.path.join("Glossary", f"{folder_name}_glossary_progress.json")
+            def __init__(self, folder_name, base_dir):
+                self.PROGRESS_FILE = os.path.join(base_dir, f"{folder_name}_glossary_progress.json")
                 self.prog = self._init_or_load()
             
             def _init_or_load(self):
@@ -7728,14 +7755,22 @@ Important rules:
                 self.save()
         
         # Create and return the progress manager
-        progress_manager = ImageGlossaryProgressManager(folder_name)
-        self.append_log(f"📊 Progress tracking in: Glossary/{folder_name}_glossary_progress.json")
+        progress_manager = ImageGlossaryProgressManager(folder_name, output_dir)
+        self.append_log(f"📊 Progress tracking in: {output_dir}/{folder_name}_glossary_progress.json")
         return progress_manager
 
     def _save_intermediate_glossary_with_skip(self, folder_name, entries):
         """Save intermediate glossary results with skip logic"""
         try:
-            output_file = os.path.join("Glossary", f"{folder_name}_glossary.json")
+            # Determine output directory (same logic as main process)
+            override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+            if override_dir:
+                output_dir = os.path.join(override_dir, "Glossary")
+            else:
+                output_dir = "Glossary"
+                
+            os.makedirs(output_dir, exist_ok=True)
+            output_file = os.path.join(output_dir, f"{folder_name}_glossary.json")
             
             # Apply skip logic
             try:

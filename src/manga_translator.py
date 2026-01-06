@@ -13735,8 +13735,14 @@ class MangaTranslator:
             if output_path:
                 output_dir = os.path.dirname(output_path)
             else:
-                # If no output path specified, use default
-                output_dir = os.path.join(os.path.dirname(image_path), "translated_images")
+                # Check for output directory override from environment
+                override_dir = os.environ.get('OUTPUT_DIRECTORY')
+                if override_dir:
+                    # Use override directory
+                    output_dir = os.path.join(override_dir, "translated_images")
+                else:
+                    # If no output path specified, use default relative to input
+                    output_dir = os.path.join(os.path.dirname(image_path), "translated_images")
             
             # Ensure output directory exists
             os.makedirs(output_dir, exist_ok=True)

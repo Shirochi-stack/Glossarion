@@ -301,7 +301,16 @@ class RetranslationMixin:
         """
         
         epub_base = os.path.splitext(os.path.basename(file_path))[0]
-        output_dir = epub_base
+        
+        # Check for output directory override
+        override_dir = os.environ.get('OUTPUT_DIRECTORY')
+        if not override_dir and hasattr(self, 'config'):
+            override_dir = self.config.get('output_directory')
+            
+        if override_dir:
+            output_dir = os.path.join(override_dir, epub_base)
+        else:
+            output_dir = epub_base
         
         if not os.path.exists(output_dir):
             if not parent_dialog:
@@ -3649,6 +3658,16 @@ class RetranslationMixin:
             folder_name,  # Just the folder name in current directory
             f"{folder_name}_translated",  # folder_translated in current directory
         ]
+        
+        # Check for output directory override
+        override_dir = os.environ.get('OUTPUT_DIRECTORY')
+        if not override_dir and hasattr(self, 'config'):
+            override_dir = self.config.get('output_directory')
+            
+        if override_dir:
+            # If override is set, check inside it for the folder name
+            possible_output_dirs.insert(0, os.path.join(override_dir, folder_name))
+            possible_output_dirs.insert(1, os.path.join(override_dir, f"{folder_name}_translated"))
         
         output_dir = None
         for possible_dir in possible_output_dirs:

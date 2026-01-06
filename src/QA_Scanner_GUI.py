@@ -1346,6 +1346,12 @@ class QAScannerMixin:
                         os.path.join(current_dir, 'src', epub_base), # src subdirectory from current dir
                     ]
                     
+                    # Add output directory override if configured
+                    override_dir = os.environ.get('OUTPUT_DIRECTORY') or self.config.get('output_directory')
+                    if override_dir:
+                        candidates.insert(0, os.path.join(override_dir, epub_base))
+                        self.append_log(f"🔍 DEBUG: Checking override dir: {override_dir}")
+                    
                     folder_found = None
                     for i, candidate in enumerate(candidates):
                         exists = os.path.isdir(candidate)
