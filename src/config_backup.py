@@ -267,7 +267,7 @@ def _manual_restore_config(self):
         
         # Get screen dimensions and calculate size
         screen = app.primaryScreen().geometry()
-        dialog_width = int(screen.width() * 0.3)  # Reduced from 0.6 to 0.3
+        dialog_width = int(screen.width() * 0.315)  # Reduced from 0.6 to 0.3
         dialog_height = int(screen.height() * 0.4)  # Reduced from 0.8 to 0.4
         dialog.resize(dialog_width, dialog_height)
         
@@ -417,10 +417,16 @@ def _manual_restore_config(self):
                     msg.setIcon(QMessageBox.Information)
                     msg.setWindowTitle("Restore Complete")
                     msg.setText(f"Configuration restored from: {selected_backup}\n\n"
-                              f"Please restart the application for changes to take effect.")
+                              f"The application will now restart for changes to take effect.")
                     msg.setWindowIcon(icon)
                     msg.exec()
                     dialog.close()
+                    
+                    # Restart application
+                    import sys
+                    import subprocess
+                    subprocess.Popen([sys.executable] + sys.argv)
+                    sys.exit(0)
                     
                 except Exception as e:
                     msg = QMessageBox(dialog)
