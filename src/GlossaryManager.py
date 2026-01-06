@@ -361,12 +361,8 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         if override_dir:
             override_dir = os.path.abspath(override_dir)
             leaf = os.path.basename(os.path.abspath(output_dir)) or "output"
-            # Avoid double-applying override if already under override_dir
-            abs_output = os.path.abspath(output_dir)
-            if not os.path.commonpath([abs_output, override_dir]).startswith(override_dir):
-                output_dir = os.path.join(override_dir, leaf)
-            else:
-                output_dir = abs_output
+            # Always place under the override root (handles different drives safely)
+            output_dir = os.path.join(override_dir, leaf)
     except Exception as e:
         print(f"⚠️ OUTPUT_DIRECTORY override failed: {e}")
     print(f"📁 Glossary output directory: {os.path.abspath(output_dir)}")
@@ -472,7 +468,11 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
         return {}
     
     # Check for existing glossary from manual extraction
-    glossary_folder_path = os.path.join(output_dir, "Glossary")
+    # Avoid double-nesting when output_dir already ends with "Glossary"
+    if os.path.basename(os.path.abspath(output_dir)).lower() == "glossary":
+        glossary_folder_path = output_dir
+    else:
+        glossary_folder_path = os.path.join(output_dir, "Glossary")
     # existing_glossary may already be set by MANUAL_GLOSSARY above
     
     if os.path.exists(glossary_folder_path):

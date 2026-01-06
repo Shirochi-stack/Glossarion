@@ -2899,10 +2899,18 @@ CRITICAL EXTRACTION RULES:
                self.append_log(f"❌ Failed to load glossary: {e}")
        
         def browse_glossary():
+           start_dir = ""
+           try:
+               override_dir = os.environ.get("OUTPUT_DIRECTORY") or self.config.get("output_directory", "")
+               if override_dir:
+                   start_dir = os.path.abspath(override_dir)
+           except Exception:
+               start_dir = ""
+
            path, _ = QFileDialog.getOpenFileName(
                parent,
                "Select glossary file",
-               "",
+               start_dir,
                "Glossary files (*.json *.csv);;JSON files (*.json);;CSV files (*.csv)"
            )
            if path:
@@ -4358,7 +4366,11 @@ CRITICAL EXTRACTION RULES:
         
         # Get current file path
         current_path = self.editor_file_entry.text()
-        default_csv_path = current_path.replace('.json', '.csv')
+        if current_path:
+            default_csv_path = current_path.replace('.json', '.csv')
+        else:
+            override_dir = os.environ.get("OUTPUT_DIRECTORY") or self.config.get("output_directory", "")
+            default_csv_path = os.path.join(os.path.abspath(override_dir) if override_dir else os.getcwd(), "glossary.csv")
         
         # Ask user for CSV save location
         csv_path, _ = QFileDialog.getSaveFileName(

@@ -2755,7 +2755,11 @@ def main(log_callback=None, stop_callback=None):
         args.output = f"{file_base}_glossary.json" 
 
     # ensure we have a Glossary subfolder next to the JSON/MD outputs
-    glossary_dir = os.path.join(os.path.dirname(args.output), "Glossary")
+    base_out_dir = os.path.dirname(args.output)
+    if os.path.basename(os.path.abspath(base_out_dir)).lower() == "glossary":
+        glossary_dir = base_out_dir
+    else:
+        glossary_dir = os.path.join(base_out_dir, "Glossary")
     os.makedirs(glossary_dir, exist_ok=True)
 
     # override the module‐level PROGRESS_FILE to include epub name
