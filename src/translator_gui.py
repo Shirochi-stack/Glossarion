@@ -742,7 +742,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         
         self.max_output_tokens = 65536
         self.proc = self.glossary_proc = None
-        __version__ = "6.9.3"
+        __version__ = "6.9.4"
         self.__version__ = __version__
         self.setWindowTitle(f"Glossarion v{__version__}")
         
@@ -815,7 +815,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
                     import platform
                     if platform.system() == 'Windows':
                         # Set app user model ID to separate from python.exe in taskbar
-                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.6.9.3')
+                        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Glossarion.Translator.6.9.4')
                         
                         # Load icon from file and set it on the window
                         # This must be done after the window is created
@@ -2051,7 +2051,7 @@ Recent translations to summarize:
             if self.config.get('conservative_batching', False):
                 self.config['batching_mode'] = 'conservative'
             else:
-                self.config['batching_mode'] = 'aggressive'
+                self.config['batching_mode'] = 'direct'
         if 'batch_group_size' not in self.config:
             # legacy hardcoded multiplier was 3
             self.config['batch_group_size'] = str(self.config.get('conservative_batch_multiplier', 3) or 3)
@@ -2145,7 +2145,7 @@ Recent translations to summarize:
             ('image_output_resolution_var', 'image_output_resolution', '1K'),
             ('chunk_timeout_var', 'chunk_timeout', '900'),
             ('batch_size_var', 'batch_size', '3'),
-            ('batch_mode_var', 'batching_mode', 'aggressive'),
+            ('batch_mode_var', 'batching_mode', 'direct'),
             ('batch_group_size_var', 'batch_group_size', '3'),
             ('chapter_number_offset_var', 'chapter_number_offset', '0'),
             ('compression_factor_var', 'compression_factor', '3.0'),
@@ -2295,7 +2295,7 @@ Recent translations to summarize:
                 self._original_profile_content = {}
             self._original_profile_content[self.profile_var] = initial_prompt
         
-        self.append_log("🚀 Glossarion v6.9.3 - Ready to use!")
+        self.append_log("🚀 Glossarion v6.9.4 - Ready to use!")
         self.append_log("💡 Click any function button to load modules automatically")
         
         # Initialize auto compression factor based on current output token limit
@@ -6746,10 +6746,10 @@ If you see multiple p-b cookies, use the one with the longest value."""
             'QA_AUTO_SEARCH_OUTPUT': '1' if self.config.get('qa_auto_search_output', True) else '0',
             'BATCH_TRANSLATION': "1" if self.batch_translation_var else "0",
             'BATCH_SIZE': str(self.batch_size_var),
-            'BATCHING_MODE': str(getattr(self, 'batch_mode_var', 'aggressive')),
+            'BATCHING_MODE': str(getattr(self, 'batch_mode_var', 'direct')),
             'BATCH_GROUP_SIZE': str(getattr(self, 'batch_group_size_var', '3')),
             # Backward compatibility for older scripts expecting CONSERVATIVE_BATCHING
-            'CONSERVATIVE_BATCHING': "1" if str(getattr(self, 'batch_mode_var', 'aggressive')) == 'conservative' else "0",
+            'CONSERVATIVE_BATCHING': "1" if str(getattr(self, 'batch_mode_var', 'direct')) == 'conservative' else "0",
             'DISABLE_ZERO_DETECTION': "1" if self.disable_zero_detection_var else "0",
             'TRANSLATION_HISTORY_ROLLING': "1" if self.translation_history_rolling_var else "0",
             'USE_GEMINI_OPENAI_ENDPOINT': '1' if self.use_gemini_openai_endpoint_var else '0',
@@ -11293,7 +11293,7 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    print("🚀 Starting Glossarion v6.9.3...")
+    print("🚀 Starting Glossarion v6.9.4...")
     
     # Initialize splash screen
     splash_manager = None

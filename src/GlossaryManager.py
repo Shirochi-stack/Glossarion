@@ -525,7 +525,7 @@ def save_glossary(output_dir, chapters, instructions, language="korean", log_cal
     extraction_workers = int(os.getenv("EXTRACTION_WORKERS", "1"))
     batch_translation = os.getenv("BATCH_TRANSLATION", "0") == "1"
     api_batch_size = int(os.getenv("BATCH_SIZE", "5"))
-    batching_mode = os.getenv("BATCHING_MODE", "aggressive")
+    batching_mode = os.getenv("BATCHING_MODE", "direct")
     batch_group_size = int(os.getenv("BATCH_GROUP_SIZE", "3"))
     # Backward compatibility
     if os.getenv("CONSERVATIVE_BATCHING", "0") == "1":

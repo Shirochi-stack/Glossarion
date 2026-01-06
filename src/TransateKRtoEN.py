@@ -8408,10 +8408,10 @@ def main(log_callback=None, stop_callback=None):
         # ==========================
         # Batching mode selection
         # ==========================
-        batching_mode = getattr(config, 'BATCHING_MODE', 'aggressive')
+        batching_mode = getattr(config, 'BATCHING_MODE', 'direct')
         batch_group_size_cfg = max(1, int(getattr(config, 'BATCH_GROUP_SIZE', 3)))
         if batching_mode not in ('direct', 'conservative', 'aggressive'):
-            batching_mode = 'aggressive'
+            batching_mode = 'direct'
         # Backwards compatibility with CONSERVATIVE_BATCHING env
         if os.getenv('CONSERVATIVE_BATCHING', '0') == '1':
             batching_mode = 'conservative'
@@ -8423,7 +8423,7 @@ def main(log_callback=None, stop_callback=None):
             print(f"📦 Using direct batching: group size {batch_group_size}, parallel {config.BATCH_SIZE}")
         else:  # aggressive
             batch_group_size = batch_group_size_cfg  # not used for throttling, only for logging/summary grouping
-            print(f"⚡ Using AGGRESSIVE batching (default): keeps {config.BATCH_SIZE} parallel calls, auto-refills when any finishes")
+            print(f"⚡ Using AGGRESSIVE batching: keeps {config.BATCH_SIZE} parallel calls, auto-refills when any finishes")
         
         # Create merge groups if request merging is enabled
         if use_request_merging:

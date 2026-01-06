@@ -10560,12 +10560,12 @@ class MangaTranslationTab(QObject):
                         return var
                     except Exception:
                         return default
-                mode_val = 'aggressive'
+                mode_val = 'direct'
                 if hasattr(self.main_gui, 'batch_mode_var'):
-                    mode_val = str(_get_gui_val(self.main_gui.batch_mode_var, 'aggressive')).strip().lower() or 'aggressive'
+                    mode_val = str(_get_gui_val(self.main_gui.batch_mode_var, 'direct')).strip().lower() or 'direct'
                 else:
                     try:
-                        mode_val = str(self.main_gui.config.get('batching_mode', 'aggressive')).strip().lower()
+                        mode_val = str(self.main_gui.config.get('batching_mode', 'direct')).strip().lower()
                     except Exception:
                         pass
                 group_val = 3
@@ -10684,7 +10684,7 @@ class MangaTranslationTab(QObject):
                         return default
 
                 # Update environment variables and translator attributes
-                mode_val = str(_get_gui_val(self.main_gui.batch_mode_var, 'aggressive')).strip().lower() if hasattr(self.main_gui, 'batch_mode_var') else str(self.main_gui.config.get('batching_mode', 'aggressive')).strip().lower()
+                mode_val = str(_get_gui_val(self.main_gui.batch_mode_var, 'direct')).strip().lower() if hasattr(self.main_gui, 'batch_mode_var') else str(self.main_gui.config.get('batching_mode', 'direct')).strip().lower()
                 group_val = 3
                 try:
                     if hasattr(self.main_gui, 'batch_group_size_var'):

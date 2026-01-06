@@ -2886,7 +2886,7 @@ def main(log_callback=None, stop_callback=None):
     # Check for batch mode
     batch_enabled = os.getenv("BATCH_TRANSLATION", "0") == "1"
     batch_size = int(os.getenv("BATCH_SIZE", "5"))
-    batching_mode = os.getenv("BATCHING_MODE", "aggressive")
+    batching_mode = os.getenv("BATCHING_MODE", "direct")
     batch_group_size = int(os.getenv("BATCH_GROUP_SIZE", "3"))
 
     # Backward compatibility for CONSERVATIVE_BATCHING
