@@ -3127,6 +3127,69 @@ Recent translations to summarize:
             # Silently fail to avoid disrupting user's typing
             pass
     
+    def open_output_folder(self):
+        """Open the output folder that is expected to be created"""
+        import subprocess
+        
+        if not hasattr(self, 'selected_files') or not self.selected_files:
+             # Try to use self.file_path if set (single file legacy/other mode)
+             if hasattr(self, 'file_path') and self.file_path:
+                 files = [self.file_path]
+             else:
+                 QMessageBox.warning(self, "No File Selected", "Please select a file first.")
+                 return
+        else:
+            files = self.selected_files
+            
+        if not files:
+             QMessageBox.warning(self, "No File Selected", "Please select a file first.")
+             return
+
+        # Determine output directory
+        # Logic matching run_translation_direct / _process_image_file / _process_text_file
+        
+        # Check for batch image mode
+        image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
+        image_files = [f for f in files if os.path.splitext(f)[1].lower() in image_extensions]
+        
+        output_path = None
+        
+        if len(image_files) > 1 and len(image_files) == len(files):
+            # Batch image mode
+            parent_dir = os.path.dirname(files[0])
+            folder_name = os.path.basename(parent_dir) if parent_dir else "translated_images"
+            output_path = os.path.join(os.getcwd(), folder_name)
+        else:
+            # Single file or non-batch-image
+            # Use the first file
+            file_path = files[0]
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
+            output_path = os.path.join(os.getcwd(), base_name)
+            
+        # Try to open
+        if output_path:
+            if not os.path.exists(output_path):
+                 # Check if we should warn or open parent
+                 reply = QMessageBox.question(self, "Folder Not Found", 
+                                      f"The output folder '{os.path.basename(output_path)}' does not exist yet.\\n\\n"
+                                      f"Expected path: {output_path}\\n\\n"
+                                      "Do you want to open the parent directory instead?",
+                                      QMessageBox.Yes | QMessageBox.No)
+                 if reply == QMessageBox.Yes:
+                     output_path = os.path.dirname(output_path)
+                 else:
+                     return
+            
+            try:
+                if platform.system() == 'Windows':
+                    os.startfile(output_path)
+                elif platform.system() == 'Darwin':
+                    subprocess.call(['open', output_path])
+                else:
+                    subprocess.call(['xdg-open', output_path])
+            except Exception as e:
+                 QMessageBox.warning(self, "Error", f"Could not open folder: {e}")
+
     def _create_api_section(self):
         """Create API key section"""
         # API Key Label (row 8)
@@ -3280,6 +3343,12 @@ Recent translations to summarize:
             pass
             
         output_layout.addWidget(self.target_lang_combo)
+        
+        # Open Output Folder Button
+        self.open_folder_btn = QPushButton("Open Output Folder")
+        self.open_folder_btn.clicked.connect(self.open_output_folder)
+        self.open_folder_btn.setStyleSheet("margin-top: 5px;")
+        output_layout.addWidget(self.open_folder_btn)
         
         output_layout.addStretch()
         self.frame.addWidget(output_container, 9, 0, Qt.AlignTop)
