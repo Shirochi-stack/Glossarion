@@ -3180,8 +3180,8 @@ Recent translations to summarize:
             if not os.path.exists(output_path):
                  # Check if we should warn or open parent
                  reply = QMessageBox.question(self, "Folder Not Found", 
-                                      f"The output folder '{os.path.basename(output_path)}' does not exist yet.\\n\\n"
-                                      f"Expected path: {output_path}\\n\\n"
+                                      f"The output folder '{os.path.basename(output_path)}' does not exist yet.\n"
+                                      f"Expected path: {output_path}\n"
                                       "Do you want to open the parent directory instead?",
                                       QMessageBox.Yes | QMessageBox.No)
                  if reply == QMessageBox.Yes:
