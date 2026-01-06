@@ -4529,7 +4529,7 @@ def _create_processing_options_section(self, parent):
     
     # Standard extraction
     standard_rb = QRadioButton("Standard (BeautifulSoup)")
-    standard_rb.setToolTip("It retains all html tags and is best for format preservation")
+    standard_rb.setToolTip("It retains all html tags and is best for format preservation, but is very token inefficient.")
     try:
         if self.text_extraction_method_var == "standard":
             standard_rb.setChecked(True)
@@ -4554,7 +4554,7 @@ def _create_processing_options_section(self, parent):
     
     # Enhanced extraction
     enhanced_rb = QRadioButton("🚀 Enhanced (html2text)")
-    enhanced_rb.setToolTip("It strips out all html tags, and adds new html tags at the end. This results in a cleaner output, but sacrifices format preservation")
+    enhanced_rb.setToolTip("It strips out all html tags, and adds new html tags at the end.\nThis results in a cleaner output and is more token efficient, but sacrifices format preservation.")
     try:
         if self.text_extraction_method_var == "enhanced":
             enhanced_rb.setChecked(True)
