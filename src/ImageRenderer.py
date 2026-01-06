@@ -8172,7 +8172,13 @@ def _update_single_text_overlay(self, region_index: int, new_translation: str, u
                     filename = os.path.basename(current_image)
                     base_name = os.path.splitext(filename)[0]
                     parent_dir = os.path.dirname(current_image)
-                    output_dir = os.path.join(parent_dir, f"{base_name}_translated")
+                    
+                    override_dir = os.environ.get('OUTPUT_DIRECTORY')
+                    if override_dir:
+                        output_dir = os.path.join(override_dir, f"{base_name}_translated")
+                    else:
+                        output_dir = os.path.join(parent_dir, f"{base_name}_translated")
+                    
                     os.makedirs(output_dir, exist_ok=True)
                     output_path = os.path.join(output_dir, filename)
                     print(f"[DEBUG] Generated isolated output path: {output_path}")
@@ -8338,7 +8344,13 @@ def save_positions_and_rerender(self):
             filename = os.path.basename(current_image)
             base_name = os.path.splitext(filename)[0]
             parent_dir = os.path.dirname(current_image)
-            output_dir = os.path.join(parent_dir, f"{base_name}_translated")
+            
+            override_dir = os.environ.get('OUTPUT_DIRECTORY')
+            if override_dir:
+                output_dir = os.path.join(override_dir, f"{base_name}_translated")
+            else:
+                output_dir = os.path.join(parent_dir, f"{base_name}_translated")
+            
             os.makedirs(output_dir, exist_ok=True)
             output_path = os.path.join(output_dir, filename)
             print(f"[SAVE_POS] Generated isolated output path: {output_path}")
