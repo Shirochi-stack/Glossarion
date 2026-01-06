@@ -1107,6 +1107,7 @@ def _create_context_management_section(self, parent):
 
     # Include previous source text toggle (controls whether source-side history is reused)
     include_source_cb = self._create_styled_checkbox("Include previous source text in history/memory (Not Recommended)")
+    include_source_cb.setToolTip("Adds the raw source text to the summary request.\nThis is not recommended because the translated text is already included.\nEnabling this will negatively affect token effeciency.")
     try:
         include_source_cb.setChecked(bool(self.include_source_in_history_var))
     except Exception:
