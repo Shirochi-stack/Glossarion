@@ -3347,7 +3347,37 @@ Recent translations to summarize:
         # Open Output Folder Button
         self.open_folder_btn = QPushButton("Open Output Folder")
         self.open_folder_btn.clicked.connect(self.open_output_folder)
-        self.open_folder_btn.setStyleSheet("margin-top: 5px;")
+        self.open_folder_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3d3d3d;
+                color: white;
+                border: 1px solid #4a5568;
+                border-radius: 4px;
+                padding: 6px 12px;
+                margin-top: 8px;
+                font-weight: bold;
+                text-align: left;
+                padding-left: 10px;
+            }
+            QPushButton:hover {
+                background-color: #4d4d4d;
+                border-color: #5a9fd4;
+            }
+            QPushButton:pressed {
+                background-color: #2d2d2d;
+            }
+        """)
+        
+        # Add HiDPI icon - use base_dir to be safe
+        from PySide6.QtGui import QIcon
+        from PySide6.QtCore import QSize
+        ico_path = os.path.join(self.base_dir, 'Halgakos.ico')
+        if os.path.exists(ico_path):
+            self.open_folder_btn.setIcon(QIcon(ico_path))
+            self.open_folder_btn.setIconSize(QSize(24, 24))
+        else:
+            print(f"[WARNING] Halgakos.ico not found at {ico_path}")
+            
         output_layout.addWidget(self.open_folder_btn)
         
         output_layout.addStretch()
