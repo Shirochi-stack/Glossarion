@@ -997,6 +997,42 @@ def _create_danger_zone_section(self, parent):
             msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
             msg.setDefaultButton(QMessageBox.No)
             
+            # Apply styling to buttons
+            msg.setStyleSheet("""
+                QMessageBox {
+                    background-color: #2b2b2b;
+                    color: white;
+                }
+                QLabel {
+                    color: white;
+                }
+                QPushButton {
+                    min-width: 80px;
+                    padding: 5px 15px;
+                    border-radius: 3px;
+                    font-weight: bold;
+                }
+                QPushButton[text="&Yes"] {
+                    background-color: #dc3545;
+                    color: white;
+                    border: 1px solid #c82333;
+                }
+                QPushButton[text="&Yes"]:hover {
+                    background-color: #c82333;
+                }
+                QPushButton[text="&No"] {
+                    background-color: #6c757d;
+                    color: white;
+                    border: 1px solid #5a6268;
+                }
+                QPushButton[text="&No"]:hover {
+                    background-color: #5a6268;
+                }
+            """)
+            
+            # Center buttons
+            _center_messagebox_buttons(msg)
+            
             if msg.exec() == QMessageBox.Yes:
                 # Delete config.json
                 config_path = os.path.join(os.getcwd(), CONFIG_FILE)
