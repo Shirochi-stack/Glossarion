@@ -5030,12 +5030,20 @@ def _create_processing_options_section(self, parent):
         for lbl in (merge_count_label, default_merge_label,
                     retry_split_label, retry_split_edit):
             try:
+                if hasattr(lbl, "style"):
+                    lbl.style().unpolish(lbl)
+                    lbl.style().polish(lbl)
                 lbl.setStyleSheet("color: white;" if checked else "color: #606060;")
             except Exception:
                 pass
         _update_retry_split_state()
     request_merge_cb.toggled.disconnect(_on_request_merge_toggle)
     request_merge_cb.toggled.connect(_on_request_merge_toggle_with_split)
+    
+    # Initialize styling immediately (scheduled via QTimer to ensure widgets are ready)
+    from PySide6.QtCore import QTimer
+    QTimer.singleShot(0, lambda: _on_request_merge_toggle_with_split(request_merge_cb.isChecked()))
+    
     _update_retry_split_state()
     section_v.addWidget(extraction_box)
     

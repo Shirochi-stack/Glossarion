@@ -2902,7 +2902,7 @@ Recent translations to summarize:
         self.contextual_checkbox.stateChanged.connect(self._on_contextual_toggle)
         contextual_layout.addWidget(self.contextual_checkbox)
         
-        contextual_warning = QLabel("⚠️ May result in duplicate outputs")
+        contextual_warning = QLabel("⚠️ May result in malformed outputs")
         contextual_warning.setStyleSheet("color: #ff9800; font-size: 9pt; font-style: italic;")
         contextual_layout.addWidget(contextual_warning)
         contextual_layout.addStretch()
