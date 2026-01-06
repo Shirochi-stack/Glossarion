@@ -1855,32 +1855,6 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(btn_row)
     
     # Separator
-    sep3 = QFrame()
-    sep3.setFrameShape(QFrame.HLine)
-    sep3.setFrameShadow(QFrame.Sunken)
-    section_v.addWidget(sep3)
-    
-    
-    # Preserve Original Text on Failure
-    preserve_cb = self._create_styled_checkbox("Preserve Original Text on Failure")
-    try:
-        preserve_cb.setChecked(bool(self.preserve_original_text_var))
-    except Exception:
-        pass
-    def _on_preserve_toggle(checked):
-        try:
-            self.preserve_original_text_var = bool(checked)
-        except Exception:
-            pass
-    preserve_cb.toggled.connect(_on_preserve_toggle)
-    section_v.addWidget(preserve_cb)
-    
-    preserve_desc = QLabel("Return original untranslated text when translation fails.\n⚠️ May mix source language into translated output")
-    preserve_desc.setStyleSheet("color: gray; font-size: 10pt;")
-    preserve_desc.setContentsMargins(20, 5, 0, 10)
-    section_v.addWidget(preserve_desc)
-    
-    # Separator
     sep5 = QFrame()
     sep5.setFrameShape(QFrame.HLine)
     sep5.setFrameShadow(QFrame.Sunken)
@@ -1981,164 +1955,6 @@ def _create_response_handling_section(self, parent):
     sep6.setFrameShape(QFrame.HLine)
     sep6.setFrameShadow(QFrame.Sunken)
     section_v.addWidget(sep6)
-    
-    # Retry Duplicate
-    retry_duplicate_cb = self._create_styled_checkbox("Auto-retry Duplicate Content")
-    
-    duplicate_w = QWidget()
-    duplicate_h = QHBoxLayout(duplicate_w)
-    duplicate_h.setContentsMargins(20, 5, 0, 0)
-    
-    duplicate_label_1 = QLabel("Check last")
-    duplicate_h.addWidget(duplicate_label_1)
-    
-    duplicate_edit = QLineEdit()
-    duplicate_edit.setFixedWidth(40)
-    try:
-        duplicate_edit.setText(str(self.duplicate_lookback_var))
-    except Exception:
-        pass
-    def _on_duplicate_lookback_changed(text):
-        try:
-            self.duplicate_lookback_var = text
-        except Exception:
-            pass
-    duplicate_edit.textChanged.connect(_on_duplicate_lookback_changed)
-    duplicate_h.addWidget(duplicate_edit)
-    
-    duplicate_label_2 = QLabel("chapters")
-    duplicate_h.addWidget(duplicate_label_2)
-    duplicate_h.addStretch()
-    
-    duplicate_desc = QLabel("Detects when AI returns same content\nfor different chapters")
-    duplicate_desc.setContentsMargins(20, 5, 0, 10)
-
-    def _on_retry_duplicate_toggle(checked):
-        try:
-            self.retry_duplicate_var = bool(checked)
-            update_detection_visibility()
-            
-            # Update UI state
-            duplicate_edit.setEnabled(bool(checked))
-            duplicate_label_1.setEnabled(bool(checked))
-            duplicate_label_2.setEnabled(bool(checked))
-            duplicate_desc.setEnabled(bool(checked))
-            
-            # Update styles
-            if checked:
-                duplicate_label_1.setStyleSheet("color: white;")
-                duplicate_label_2.setStyleSheet("color: white;")
-                duplicate_desc.setStyleSheet("color: gray; font-size: 10pt;")
-                duplicate_edit.setStyleSheet("")
-            else:
-                duplicate_label_1.setStyleSheet("color: #606060;")
-                duplicate_label_2.setStyleSheet("color: #606060;")
-                duplicate_desc.setStyleSheet("color: #606060; font-size: 10pt;")
-        except Exception:
-            pass
-
-    try:
-        retry_duplicate_cb.setChecked(bool(self.retry_duplicate_var))
-    except Exception:
-        pass
-    retry_duplicate_cb.toggled.connect(_on_retry_duplicate_toggle)
-    
-    section_v.addWidget(retry_duplicate_cb)
-    section_v.addWidget(duplicate_w)
-    section_v.addWidget(duplicate_desc)
-    
-    # Container for detection-related options (to show/hide based on toggle)
-    self.detection_options_container = QWidget()
-    detection_options_v = QVBoxLayout(self.detection_options_container)
-    detection_options_v.setContentsMargins(0, 0, 0, 0)
-    
-    # Update thinking budget entry state based on initial toggle state
-    self.toggle_thinking_budget()
-    
-    # Function to show/hide detection options based on auto-retry toggle
-    def update_detection_visibility():
-        try:
-            if self.retry_duplicate_var:
-                self.detection_options_container.setVisible(True)
-            else:
-                self.detection_options_container.setVisible(False)
-        except Exception:
-            pass
-            
-    # Apply initial styling and visibility
-    _on_retry_duplicate_toggle(retry_duplicate_cb.isChecked())
-    
-    # Detection Method subsection (now inside the container)
-    method_label = QLabel("Detection Method:")
-    method_label.setStyleSheet("font-weight: bold; font-size: 10pt;")
-    method_label.setContentsMargins(20, 10, 0, 5)
-    detection_options_v.addWidget(method_label)
-    
-    methods = [
-        ("basic", "Basic (Fast) - Original 85% threshold, 1000 chars"),
-        ("ai-hunter", "AI Hunter - Multi-method semantic analysis"),
-        ("cascading", "Cascading - Basic first, then AI Hunter")
-    ]
-    
-    # Container for AI Hunter config (will be shown/hidden based on selection)
-    self.ai_hunter_container = QWidget()
-    ai_hunter_v = QVBoxLayout(self.ai_hunter_container)
-    ai_hunter_v.setContentsMargins(0, 0, 0, 0)
-    
-    # Function to update AI Hunter visibility based on detection mode
-    def update_ai_hunter_visibility(*args):
-        """Update AI Hunter section visibility based on selection"""
-        # Clear existing widgets
-        while ai_hunter_v.count():
-            child = ai_hunter_v.takeAt(0)
-            if child.widget():
-                child.widget().deleteLater()
-        
-        # Show AI Hunter config for both ai-hunter and cascading modes
-        try:
-            if self.duplicate_detection_mode_var in ['ai-hunter', 'cascading']:
-                self.create_ai_hunter_section(self.ai_hunter_container)
-        except Exception:
-            pass
-        
-        # Update status if label exists
-        if hasattr(self, 'ai_hunter_status_label'):
-            try:
-                self.ai_hunter_status_label.setText(self._get_ai_hunter_status_text())
-            except Exception:
-                pass
-    
-    # Create radio buttons (inside detection container)
-    detection_button_group = QButtonGroup(self.detection_options_container)
-    for value, text in methods:
-        rb = QRadioButton(text)
-        rb.setContentsMargins(40, 2, 0, 2)
-        try:
-            if self.duplicate_detection_mode_var == value:
-                rb.setChecked(True)
-        except Exception:
-            pass
-        def _make_rb_callback(val):
-            def _cb(checked):
-                if checked:
-                    try:
-                        self.duplicate_detection_mode_var = val
-                        update_ai_hunter_visibility()
-                    except Exception:
-                        pass
-            return _cb
-        rb.toggled.connect(_make_rb_callback(value))
-        detection_button_group.addButton(rb)
-        detection_options_v.addWidget(rb)
-    
-    # Pack the AI Hunter container
-    detection_options_v.addWidget(self.ai_hunter_container)
-    
-    section_v.addWidget(self.detection_options_container)
-    
-    # Initial visibility updates
-    update_detection_visibility()
-    update_ai_hunter_visibility()
     
     
     # HTTP Timeouts & Connection Pooling
@@ -2348,77 +2164,10 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(indefinite_desc)
 
     # Separator
-    sep_retry = QFrame()
-    sep_retry.setFrameShape(QFrame.HLine)
-    sep_retry.setFrameShadow(QFrame.Sunken)
-    section_v.addWidget(sep_retry)
-
-    # Retry Slow (Timeouts)
-    retry_slow_cb = self._create_styled_checkbox("Auto-retry Slow Processing (API Timeouts)")
-    retry_slow_cb.setContentsMargins(0, 5, 0, 0)
-    
-    timeout_w = QWidget()
-    timeout_h = QHBoxLayout(timeout_w)
-    timeout_h.setContentsMargins(20, 5, 0, 0)
-    
-    timeout_label_1 = QLabel("Timeout after")
-    timeout_h.addWidget(timeout_label_1)
-    
-    timeout_edit = QLineEdit()
-    timeout_edit.setFixedWidth(60)
-    try:
-        timeout_edit.setText(str(self.chunk_timeout_var))
-    except Exception:
-        pass
-    def _on_timeout_changed(text):
-        try:
-            self.chunk_timeout_var = text
-        except Exception:
-            pass
-    timeout_edit.textChanged.connect(_on_timeout_changed)
-    timeout_h.addWidget(timeout_edit)
-    
-    timeout_label_2 = QLabel("seconds")
-    timeout_h.addWidget(timeout_label_2)
-    timeout_h.addStretch()
-    
-    timeout_desc = QLabel("Adds API timeout logic to text/images chunks that take too long\nThis will also affect chapter extraction timeout")
-    timeout_desc.setContentsMargins(20, 0, 0, 5)
-    
-    def _on_retry_slow_toggle(checked):
-        try:
-            self.retry_timeout_var = bool(checked)
-            
-            # Update UI state
-            timeout_edit.setEnabled(bool(checked))
-            timeout_label_1.setEnabled(bool(checked))
-            timeout_label_2.setEnabled(bool(checked))
-            timeout_desc.setEnabled(bool(checked))
-
-            # Update styles
-            if checked:
-                timeout_label_1.setStyleSheet("color: white;")
-                timeout_label_2.setStyleSheet("color: white;")
-                timeout_desc.setStyleSheet("color: gray; font-size: 10pt;")
-            else:
-                timeout_label_1.setStyleSheet("color: #606060;")
-                timeout_label_2.setStyleSheet("color: #606060;")
-                timeout_desc.setStyleSheet("color: #606060; font-size: 10pt;")
-        except Exception:
-            pass
-
-    try:
-        retry_slow_cb.setChecked(bool(self.retry_timeout_var))
-    except Exception:
-        pass
-    retry_slow_cb.toggled.connect(_on_retry_slow_toggle)
-    
-    # Apply initial styling
-    _on_retry_slow_toggle(retry_slow_cb.isChecked())
-    
-    section_v.addWidget(retry_slow_cb)
-    section_v.addWidget(timeout_w)
-    section_v.addWidget(timeout_desc)
+    sep_retry_1 = QFrame()
+    sep_retry_1.setFrameShape(QFrame.HLine)
+    sep_retry_1.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep_retry_1)
 
     # Retry Truncated
     if not hasattr(self, 'truncation_retry_attempts_var'):
@@ -2505,6 +2254,268 @@ def _create_response_handling_section(self, parent):
     section_v.addWidget(retry_truncated_cb)
     section_v.addWidget(retry_frame_w)
     section_v.addWidget(retry_desc)
+    
+    # Separator
+    sep4 = QFrame()
+    sep4.setFrameShape(QFrame.HLine)
+    sep4.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep4)
+
+    # Retry Slow
+    retry_slow_cb = self._create_styled_checkbox("Auto-retry Slow Processing (API Timeouts)")
+    retry_slow_cb.setContentsMargins(0, 15, 0, 0)
+    
+    timeout_w = QWidget()
+    timeout_h = QHBoxLayout(timeout_w)
+    timeout_h.setContentsMargins(20, 5, 0, 0)
+    
+    timeout_label_1 = QLabel("Timeout after")
+    timeout_h.addWidget(timeout_label_1)
+    
+    timeout_edit = QLineEdit()
+    timeout_edit.setFixedWidth(60)
+    try:
+        timeout_edit.setText(str(self.chunk_timeout_var))
+    except Exception:
+        pass
+    def _on_timeout_changed(text):
+        try:
+            self.chunk_timeout_var = text
+        except Exception:
+            pass
+    timeout_edit.textChanged.connect(_on_timeout_changed)
+    timeout_h.addWidget(timeout_edit)
+    
+    timeout_label_2 = QLabel("seconds")
+    timeout_h.addWidget(timeout_label_2)
+    timeout_h.addStretch()
+    
+    timeout_desc = QLabel("Adds API timeout logic to text/images chunks that take too long\nThis will also affect chapter extraction timeout")
+    timeout_desc.setContentsMargins(20, 0, 0, 5)
+    
+    def _on_retry_slow_toggle(checked):
+        try:
+            self.retry_timeout_var = bool(checked)
+            
+            # Update UI state
+            timeout_edit.setEnabled(bool(checked))
+            timeout_label_1.setEnabled(bool(checked))
+            timeout_label_2.setEnabled(bool(checked))
+            timeout_desc.setEnabled(bool(checked))
+
+            # Update styles
+            if checked:
+                timeout_label_1.setStyleSheet("color: white;")
+                timeout_label_2.setStyleSheet("color: white;")
+                timeout_desc.setStyleSheet("color: gray; font-size: 10pt;")
+            else:
+                timeout_label_1.setStyleSheet("color: #606060;")
+                timeout_label_2.setStyleSheet("color: #606060;")
+                timeout_desc.setStyleSheet("color: #606060; font-size: 10pt;")
+        except Exception:
+            pass
+
+    try:
+        retry_slow_cb.setChecked(bool(self.retry_timeout_var))
+    except Exception:
+        pass
+    retry_slow_cb.toggled.connect(_on_retry_slow_toggle)
+    
+    # Apply initial styling
+    _on_retry_slow_toggle(retry_slow_cb.isChecked())
+    
+    section_v.addWidget(retry_slow_cb)
+    section_v.addWidget(timeout_w)
+    section_v.addWidget(timeout_desc)
+    
+    # Separator
+    sep7 = QFrame()
+    sep7.setFrameShape(QFrame.HLine)
+    sep7.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep7)
+
+    # Retry Duplicate
+    retry_duplicate_cb = self._create_styled_checkbox("Auto-retry Duplicate Content")
+    
+    duplicate_w = QWidget()
+    duplicate_h = QHBoxLayout(duplicate_w)
+    duplicate_h.setContentsMargins(20, 5, 0, 0)
+    
+    duplicate_label_1 = QLabel("Check last")
+    duplicate_h.addWidget(duplicate_label_1)
+    
+    duplicate_edit = QLineEdit()
+    duplicate_edit.setFixedWidth(40)
+    try:
+        duplicate_edit.setText(str(self.duplicate_lookback_var))
+    except Exception:
+        pass
+    def _on_duplicate_lookback_changed(text):
+        try:
+            self.duplicate_lookback_var = text
+        except Exception:
+            pass
+    duplicate_edit.textChanged.connect(_on_duplicate_lookback_changed)
+    duplicate_h.addWidget(duplicate_edit)
+    
+    duplicate_label_2 = QLabel("chapters")
+    duplicate_h.addWidget(duplicate_label_2)
+    duplicate_h.addStretch()
+    
+    duplicate_desc = QLabel("Detects when AI returns same content\nfor different chapters")
+    duplicate_desc.setContentsMargins(20, 5, 0, 10)
+
+    def _on_retry_duplicate_toggle(checked):
+        try:
+            self.retry_duplicate_var = bool(checked)
+            update_detection_visibility()
+            
+            # Update UI state
+            duplicate_edit.setEnabled(bool(checked))
+            duplicate_label_1.setEnabled(bool(checked))
+            duplicate_label_2.setEnabled(bool(checked))
+            duplicate_desc.setEnabled(bool(checked))
+            
+            # Update styles
+            if checked:
+                duplicate_label_1.setStyleSheet("color: white;")
+                duplicate_label_2.setStyleSheet("color: white;")
+                duplicate_desc.setStyleSheet("color: gray; font-size: 10pt;")
+                duplicate_edit.setStyleSheet("")
+            else:
+                duplicate_label_1.setStyleSheet("color: #606060;")
+                duplicate_label_2.setStyleSheet("color: #606060;")
+                duplicate_desc.setStyleSheet("color: #606060; font-size: 10pt;")
+        except Exception:
+            pass
+
+    try:
+        retry_duplicate_cb.setChecked(bool(self.retry_duplicate_var))
+    except Exception:
+        pass
+    retry_duplicate_cb.toggled.connect(_on_retry_duplicate_toggle)
+    
+    section_v.addWidget(retry_duplicate_cb)
+    section_v.addWidget(duplicate_w)
+    section_v.addWidget(duplicate_desc)
+    
+    # Container for detection-related options (to show/hide based on toggle)
+    self.detection_options_container = QWidget()
+    detection_options_v = QVBoxLayout(self.detection_options_container)
+    detection_options_v.setContentsMargins(0, 0, 0, 0)
+    
+    # Update thinking budget entry state based on initial toggle state
+    self.toggle_thinking_budget()
+    
+    # Function to show/hide detection options based on auto-retry toggle
+    def update_detection_visibility():
+        try:
+            if self.retry_duplicate_var:
+                self.detection_options_container.setVisible(True)
+            else:
+                self.detection_options_container.setVisible(False)
+        except Exception:
+            pass
+            
+    # Apply initial styling and visibility
+    _on_retry_duplicate_toggle(retry_duplicate_cb.isChecked())
+    
+    # Detection Method subsection (now inside the container)
+    method_label = QLabel("Detection Method:")
+    method_label.setStyleSheet("font-weight: bold; font-size: 10pt;")
+    method_label.setContentsMargins(20, 10, 0, 5)
+    detection_options_v.addWidget(method_label)
+    
+    methods = [
+        ("basic", "Basic (Fast) - Original 85% threshold, 1000 chars"),
+        ("ai-hunter", "AI Hunter - Multi-method semantic analysis"),
+        ("cascading", "Cascading - Basic first, then AI Hunter")
+    ]
+    
+    # Container for AI Hunter config (will be shown/hidden based on selection)
+    self.ai_hunter_container = QWidget()
+    ai_hunter_v = QVBoxLayout(self.ai_hunter_container)
+    ai_hunter_v.setContentsMargins(0, 0, 0, 0)
+    
+    # Function to update AI Hunter visibility based on detection mode
+    def update_ai_hunter_visibility(*args):
+        """Update AI Hunter section visibility based on selection"""
+        # Clear existing widgets
+        while ai_hunter_v.count():
+            child = ai_hunter_v.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+        
+        # Show AI Hunter config for both ai-hunter and cascading modes
+        try:
+            if self.duplicate_detection_mode_var in ['ai-hunter', 'cascading']:
+                self.create_ai_hunter_section(self.ai_hunter_container)
+        except Exception:
+            pass
+        
+        # Update status if label exists
+        if hasattr(self, 'ai_hunter_status_label'):
+            try:
+                self.ai_hunter_status_label.setText(self._get_ai_hunter_status_text())
+            except Exception:
+                pass
+    
+    # Create radio buttons (inside detection container)
+    detection_button_group = QButtonGroup(self.detection_options_container)
+    for value, text in methods:
+        rb = QRadioButton(text)
+        rb.setContentsMargins(40, 2, 0, 2)
+        try:
+            if self.duplicate_detection_mode_var == value:
+                rb.setChecked(True)
+        except Exception:
+            pass
+        def _make_rb_callback(val):
+            def _cb(checked):
+                if checked:
+                    try:
+                        self.duplicate_detection_mode_var = val
+                        update_ai_hunter_visibility()
+                    except Exception:
+                        pass
+            return _cb
+        rb.toggled.connect(_make_rb_callback(value))
+        detection_button_group.addButton(rb)
+        detection_options_v.addWidget(rb)
+    
+    # Pack the AI Hunter container
+    detection_options_v.addWidget(self.ai_hunter_container)
+    
+    section_v.addWidget(self.detection_options_container)
+    
+    # Initial visibility updates
+    update_detection_visibility()
+    update_ai_hunter_visibility()
+
+    # Separator
+    sep_preserve = QFrame()
+    sep_preserve.setFrameShape(QFrame.HLine)
+    sep_preserve.setFrameShadow(QFrame.Sunken)
+    section_v.addWidget(sep_preserve)
+
+    # Preserve Original Text on Failure
+    preserve_cb = self._create_styled_checkbox("Preserve Original Text on Failure")
+    try:
+        preserve_cb.setChecked(bool(self.preserve_original_text_var))
+    except Exception:
+        pass
+    def _on_preserve_toggle(checked):
+        try:
+            self.preserve_original_text_var = bool(checked)
+        except Exception:
+            pass
+    preserve_cb.toggled.connect(_on_preserve_toggle)
+    section_v.addWidget(preserve_cb)
+    
+    preserve_desc = QLabel("Return original untranslated text when translation fails.\n⚠️ May mix source language into translated output")
+    preserve_desc.setStyleSheet("color: gray; font-size: 10pt;")
+    preserve_desc.setContentsMargins(20, 5, 0, 10)
+    section_v.addWidget(preserve_desc)
     
     # Add Halgakos icon under the description (HiDPI-aware 90x90, centered)
     import os
