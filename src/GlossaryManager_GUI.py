@@ -1572,6 +1572,7 @@ CRITICAL EXTRACTION RULES:
             if hasattr(self, 'append_prompt_text'):
                 old_value = getattr(self, 'append_glossary_prompt', '<NOT SET>')
                 self.append_glossary_prompt = self.append_prompt_text.toPlainText().strip()
+                self.config['append_glossary_prompt'] = self.append_glossary_prompt
                 if debug_enabled:
                     print(f"🔍 [UPDATE] append_glossary_prompt: OLD='{old_value[:50]}...' NEW='{self.append_glossary_prompt[:50]}...' ({len(self.append_glossary_prompt)} chars)")
                 else:
