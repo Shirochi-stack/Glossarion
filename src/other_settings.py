@@ -1416,6 +1416,48 @@ def _create_context_management_section(self, parent):
     backup_desc.setStyleSheet("color: gray;")
     section_v.addWidget(backup_desc)
 
+    # Output Folder Override - NEW
+    section_v.addWidget(QLabel("Default Output Folder Override:"))
+    output_dir_row = QWidget()
+    output_dir_h = QHBoxLayout(output_dir_row)
+    output_dir_h.setContentsMargins(0, 0, 0, 0)
+    
+    self.output_dir_entry = QLineEdit()
+    self.output_dir_entry.setPlaceholderText("Leave empty for default (relative to source file)")
+    # Load current value
+    current_output_dir = self.config.get('output_directory', os.environ.get('OUTPUT_DIRECTORY', ''))
+    self.output_dir_entry.setText(current_output_dir)
+    
+    def _on_output_dir_changed(text):
+        try:
+            text = text.strip()
+            self.config['output_directory'] = text
+            if text:
+                os.environ['OUTPUT_DIRECTORY'] = text
+            else:
+                # Remove from env if empty to fallback to default behavior
+                if 'OUTPUT_DIRECTORY' in os.environ:
+                    del os.environ['OUTPUT_DIRECTORY']
+        except Exception:
+            pass
+            
+    self.output_dir_entry.textChanged.connect(_on_output_dir_changed)
+    output_dir_h.addWidget(self.output_dir_entry)
+    
+    def _browse_output_dir():
+        from PySide6.QtWidgets import QFileDialog
+        dir_path = QFileDialog.getExistingDirectory(self, "Select Output Folder")
+        if dir_path:
+            self.output_dir_entry.setText(dir_path)
+            
+    browse_btn = QPushButton("📂")
+    browse_btn.setToolTip("Browse for folder")
+    browse_btn.clicked.connect(_browse_output_dir)
+    browse_btn.setFixedWidth(40)
+    output_dir_h.addWidget(browse_btn)
+    
+    section_v.addWidget(output_dir_row)
+
     # Place the section at row 0, column 1 to match the original grid
     try:
         grid.addWidget(section_box, 0, 1)
