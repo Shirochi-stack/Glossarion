@@ -3345,7 +3345,7 @@ Recent translations to summarize:
         output_layout.addWidget(self.target_lang_combo)
         
         # Open Output Folder Button
-        self.open_folder_btn = QPushButton("Open Output Folder")
+        self.open_folder_btn = QPushButton("Open Output Folder 📁")
         self.open_folder_btn.clicked.connect(self.open_output_folder)
         self.open_folder_btn.setStyleSheet("""
             QPushButton {
