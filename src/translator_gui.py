@@ -1309,8 +1309,8 @@ Text to analyze:
                 "- Keep original Korean quotation marks (" ", ' ', 「」, 『』) as-is without converting to English quotes.\n"
                 "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 생 means 'life/living', 활 means 'active', 관 means 'hall/building' - together 생활관 means Dormitory. When you see [생활관], write [Dormitory]. Do not write [생활관] anywhere in your output - this is forbidden. Apply this rule to every single Asian character - convert them all to English.\n"
                 "- Use line breaks for proper formatting as expected of a novel.\n"
-                "- Preserve all <h1> tags or Markdown present.\n"
-                "{split_marker_instruction}"
+                "- Preserve all Markdown present.\n"
+                "{split_marker_instruction}\n"
                 "- Preserve any image tags.\n"
             ),
             "Japanese_html2text": (
@@ -1326,8 +1326,8 @@ Text to analyze:
                 "- Keep original Japanese quotation marks (「」 and 『』) as-is without converting to English quotes.\n"
                 "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory.\n"
                 "- Use line breaks for proper formatting as expected of a novel.\n"
-                "- Preserve all <h1> tags or Markdown present.\n"
-                "{split_marker_instruction}"
+                "- Preserve all Markdown present.\n"
+                "{split_marker_instruction}\n"
                 "- Preserve any image tags.\n"
             ),
             "Chinese_html2text": (
@@ -1343,8 +1343,8 @@ Text to analyze:
                 "- Keep original Chinese quotation marks (「」 for dialogue, 《》 for titles) as-is without converting to English quotes.\n"
                 "- Every Korean/Chinese/Japanese character must be converted to its English meaning. Examples: The character 生 means 'life/living', 活 means 'active', 館 means 'hall/building' - together 生活館 means Dormitory.\n"
                 "- Use line breaks for proper formatting as expected of a novel.\n"
-                "- Preserve all <h1> tags or Markdown present.\n"
-                "{split_marker_instruction}"
+                "- Preserve all Markdown present.\n"
+                "{split_marker_instruction}\n"
                 "- Preserve any image tags.\n"
             ),
             "Manga_JP": (
@@ -5763,7 +5763,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # Replace split marker instruction placeholder
             split_instr = ""
             if getattr(self, 'request_merging_enabled_var', False):
-                split_instr = "- CRITICAL Requirement: If you see any HTML tags containing 'SPLIT MARKER' (Example: <h1 id=\"split-1\">SPLIT MARKER: Do Not Remove This Tag</h1>), you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers.\n"
+                split_instr = "- CRITICAL Requirement: If you see any HTML tags containing 'SPLIT MARKER' (Example: <h1 id=\"split-1\">SPLIT MARKER: Do Not Remove This Tag</h1>), you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers."
             system_prompt = system_prompt.replace("{split_marker_instruction}", split_instr)
 
             # Check if we should append glossary to the prompt
@@ -6343,7 +6343,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # Replace split marker instruction placeholder
                 split_instr = ""
                 if getattr(self, 'request_merging_enabled_var', False):
-                    split_instr = "- CRITICAL Requirement: If you see any HTML tags containing 'SPLIT MARKER' (Example: <h1 id=\"split-1\">SPLIT MARKER: Do Not Remove This Tag</h1>), you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers.\n"
+                    split_instr = "- CRITICAL Requirement: If you see any HTML tags containing 'SPLIT MARKER' (Example: <h1 id=\"split-1\">SPLIT MARKER: Do Not Remove This Tag</h1>), you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers."
                 system_prompt = system_prompt.replace("{split_marker_instruction}", split_instr)
 
                 prompt_preview = system_prompt[:] if len(system_prompt) > 100 else system_prompt
