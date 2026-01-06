@@ -5763,7 +5763,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
             # Replace split marker instruction placeholder
             split_instr = ""
             if getattr(self, 'request_merging_enabled_var', False):
-                split_instr = "- CRITICAL: If you see any HTML tags containing 'SPLIT MARKER', you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers.\\n"
+                split_instr = "- CRITICAL Requirement: If you see any HTML tags containing 'SPLIT MARKER' (Example: <h1 id=\"split-1\">SPLIT MARKER: Do Not Remove This Tag</h1>), you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers.\n"
             system_prompt = system_prompt.replace("{split_marker_instruction}", split_instr)
 
             # Check if we should append glossary to the prompt
@@ -6343,7 +6343,7 @@ If you see multiple p-b cookies, use the one with the longest value."""
                 # Replace split marker instruction placeholder
                 split_instr = ""
                 if getattr(self, 'request_merging_enabled_var', False):
-                    split_instr = "- CRITICAL: If you see any HTML tags containing 'SPLIT MARKER', you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers.\\n"
+                    split_instr = "- CRITICAL Requirement: If you see any HTML tags containing 'SPLIT MARKER' (Example: <h1 id=\"split-1\">SPLIT MARKER: Do Not Remove This Tag</h1>), you MUST preserve them EXACTLY as they appear. Do not translate, modify, or remove these markers.\n"
                 system_prompt = system_prompt.replace("{split_marker_instruction}", split_instr)
 
                 prompt_preview = system_prompt[:] if len(system_prompt) > 100 else system_prompt
