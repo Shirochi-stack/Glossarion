@@ -277,6 +277,28 @@ class HistoryManager:
                 import traceback
                 print(f"   Traceback: {traceback.format_exc()}")
                 pass
+
+        # If raw_content_object contains a non-empty text part, clear duplicate assistant content
+        try:
+            ro = assistant_msg.get('_raw_content_object')
+            if ro:
+                parts = []
+                if hasattr(ro, 'parts'):
+                    parts = ro.parts or []
+                elif isinstance(ro, dict):
+                    parts = ro.get('parts', []) or []
+                has_text = False
+                for p in parts:
+                    if hasattr(p, 'text') and getattr(p, 'text', None):
+                        has_text = True
+                        break
+                    if isinstance(p, dict) and p.get('text'):
+                        has_text = True
+                        break
+                if has_text:
+                    assistant_msg['content'] = ""
+        except Exception:
+            pass
                 
         history.append(assistant_msg)
         

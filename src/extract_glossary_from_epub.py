@@ -1053,6 +1053,27 @@ def trim_context_history(history: List[Dict], limit: int, rolling_window: bool =
                     else:
                         # Keep raw object as-is if no parts structure
                         assistant_msg['_raw_content_object'] = raw_obj
+                # If raw_content_object already contains text, drop duplicate content field
+                try:
+                    has_text_part = False
+                    ro = assistant_msg.get('_raw_content_object')
+                    if ro:
+                        parts = []
+                        if hasattr(ro, 'parts'):
+                            parts = ro.parts or []
+                        elif isinstance(ro, dict):
+                            parts = ro.get('parts', []) or []
+                        for p in parts:
+                            if hasattr(p, 'text') and getattr(p, 'text', None):
+                                has_text_part = True
+                                break
+                            if isinstance(p, dict) and p.get('text'):
+                                has_text_part = True
+                                break
+                    if has_text_part:
+                        assistant_msg['content'] = ""
+                except Exception:
+                    pass
                 
                 result_messages.append(assistant_msg)
         
@@ -4199,6 +4220,25 @@ def main(log_callback=None, stop_callback=None):
                             # According to Google docs: "The `content` object automatically attaches 
                             # the required thought_signature behind the scenes"
                             # So we should store the raw_obj directly as it's the candidate.content object
+                            # If raw_obj already has text, clear duplicate content field
+                            try:
+                                has_text_part = False
+                                parts = []
+                                if hasattr(raw_obj, 'parts'):
+                                    parts = raw_obj.parts or []
+                                elif isinstance(raw_obj, dict):
+                                    parts = raw_obj.get('parts', []) or []
+                                for p in parts:
+                                    if hasattr(p, 'text') and getattr(p, 'text', None):
+                                        has_text_part = True
+                                        break
+                                    if isinstance(p, dict) and p.get('text'):
+                                        has_text_part = True
+                                        break
+                                if has_text_part:
+                                    assistant_entry['content'] = ""
+                            except Exception:
+                                pass
                             assistant_entry["_raw_content_object"] = raw_obj
                             print("📌 Preserving thought signature for context (stored raw Content object)")
                                     
