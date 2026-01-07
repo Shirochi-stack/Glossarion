@@ -2816,14 +2816,17 @@ Recent translations to summarize:
         profile_label = QLabel("Profile:")
         self.frame.addWidget(profile_label, 2, 0, Qt.AlignLeft)
         
-        # Profile combobox
+        # Profile combobox (keeps original grid position)
         self.profile_menu = QComboBox()
         self.profile_menu.setEditable(True)
         self.profile_menu.addItems(list(self.prompt_profiles.keys()))
         self.profile_menu.setCurrentText(self.profile_var)
         self.profile_menu.setMaximumWidth(380)
-        # Add custom styling with unicode arrow
+        # Add custom styling with unicode arrow and left padding for cog overlay
         self.profile_menu.setStyleSheet("""
+            QComboBox {
+                padding-left: 26px;
+            }
             QComboBox::down-arrow {
                 image: none;
                 width: 12px;
@@ -2834,7 +2837,47 @@ Recent translations to summarize:
         # Add unicode arrow using a label overlay
         self._add_combobox_arrow(self.profile_menu)
         self.frame.addWidget(self.profile_menu, 2, 1)
-        
+
+        # Manage Profiles (cog) button overlaid on the left inside the combo
+        self.profile_manage_btn = QToolButton(self.profile_menu)
+        self.profile_manage_btn.setText("⚙")
+        self.profile_manage_btn.setToolTip("Manage Profiles")
+        self.profile_manage_btn.setFixedSize(20, 20)
+        self.profile_manage_btn.setStyleSheet(
+            "QToolButton { "
+            "background-color: transparent; "
+            "border: none; "
+            "color: white; "
+            "}"
+            "QToolButton:hover { "
+            "background-color: transparent; "
+            "color: #5a9fd4; "
+            "}"
+            "QToolButton:pressed { "
+            "background-color: transparent; "
+            "color: #3a8ad6; "
+            "}"
+        )
+        self.profile_manage_btn.clicked.connect(self._open_profile_manager)
+
+        # Position cog inside combo without shifting layout
+        def _position_profile_cog():
+            try:
+                h = self.profile_menu.height()
+                btn_h = self.profile_manage_btn.height()
+                y = max(0, (h - btn_h) // 2)
+                self.profile_manage_btn.move(4, y)
+            except Exception:
+                pass
+
+        original_resize = self.profile_menu.resizeEvent
+        def _resize_with_cog(event):
+            original_resize(event)
+            _position_profile_cog()
+        self.profile_menu.resizeEvent = _resize_with_cog
+
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, _position_profile_cog)
         # Add context menu for profile reordering (right-click)
         self.profile_menu.setContextMenuPolicy(Qt.CustomContextMenu)
         self.profile_menu.customContextMenuRequested.connect(self._show_profile_context_menu)
