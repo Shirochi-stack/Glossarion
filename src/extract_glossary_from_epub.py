@@ -268,6 +268,58 @@ BOOK_TITLE_TRANSLATED = None
 BOOK_TITLE_PRESENT = False
 BOOK_TITLE_VALUE = None
 
+def _ensure_user_message(msgs: List[Dict], fallback_text: str) -> List[Dict]:
+    """
+    Guarantee at least one user message is present before sending to the API.
+    If missing, append a user message using the provided fallback text (chapter or chunk).
+    """
+    if any(m.get("role") == "user" for m in msgs):
+        return msgs
+    safe_text = fallback_text or ""
+    if not safe_text.strip():
+        print("⚠️ User prompt was empty or missing; inserting placeholder to avoid empty request")
+    else:
+        print("⚠️ User prompt missing from messages; auto-inserting chapter text as user message")
+    return msgs + [{"role": "user", "content": safe_text}]
+
+def _sanitize_messages_for_api(msgs: List[Dict], fallback_text: str) -> List[Dict]:
+    """
+    Prepare messages for API/payload: ensure a user message exists and drop non-serializable fields.
+    - Guarantees a user role using the provided fallback text.
+    - Removes _raw_content_object (often contains bytes/thought signatures) to keep payload JSON valid.
+    - Normalizes None content to empty string.
+    """
+    msgs = _ensure_user_message(msgs, fallback_text)
+    sanitized = []
+    for m in msgs:
+        m2 = dict(m)
+        raw_obj = m2.pop("_raw_content_object", None)
+
+        # If content is empty, try to recover text from raw content object parts
+        content = m2.get("content")
+        if (content is None or content == "") and raw_obj:
+            try:
+                parts = []
+                if hasattr(raw_obj, "parts"):
+                    parts = raw_obj.parts or []
+                elif isinstance(raw_obj, dict):
+                    parts = raw_obj.get("parts") or []
+                texts = []
+                for p in parts:
+                    if hasattr(p, "text") and getattr(p, "text", None):
+                        texts.append(getattr(p, "text"))
+                    elif isinstance(p, dict) and p.get("text"):
+                        texts.append(p.get("text"))
+                if texts:
+                    m2["content"] = "\n".join(texts)
+            except Exception:
+                pass
+
+        if m2.get("content") is None:
+            m2["content"] = ""
+        sanitized.append(m2)
+    return sanitized
+
 def _mark_book_title_from_csv(csv_text: str):
     """Detect existing book entry in CSV content and mark presence flag."""
     global BOOK_TITLE_PRESENT
@@ -1008,51 +1060,15 @@ def trim_context_history(history: List[Dict], limit: int, rolling_window: bool =
         
         result_messages = []
         
-        # Process history to extract only assistant messages with their thought signatures
+        # Process history to extract only assistant messages with their thought signatures and text intact
         for msg in history:
             if msg.get('role') == 'assistant':
                 # Create a copy of the message to preserve it
                 assistant_msg = {"role": "assistant", "content": msg.get("content", "")}
                 
-                # Preserve the raw content object with thought signatures if present
+                # Preserve the raw content object with thought signatures AND text (no filtering)
                 if '_raw_content_object' in msg:
-                    raw_obj = msg['_raw_content_object']
-                    
-                    # For glossary, we keep thought signatures but may filter text from parts
-                    # to avoid duplication with the content field
-                    if isinstance(raw_obj, dict) and 'parts' in raw_obj:
-                        # Check if this is a Vertex AI response
-                        is_vertex = raw_obj.get('_from_vertex', False)
-                        
-                        # For non-Vertex responses, filter out text field to avoid duplication
-                        # For Vertex AI, keep text since thinking is embedded in it
-                        if not is_vertex:
-                            filtered_parts = []
-                            for part in raw_obj.get('parts', []):
-                                if isinstance(part, dict):
-                                    filtered_part = {}
-                                    # Keep thought-related fields only
-                                    if 'thought' in part:
-                                        filtered_part['thought'] = part['thought']
-                                    if 'thought_signature' in part:
-                                        filtered_part['thought_signature'] = part['thought_signature']
-                                    # Only append if we have some fields
-                                    if filtered_part:
-                                        filtered_parts.append(filtered_part)
-                            
-                            # Only add _raw_content_object if we have thought signatures
-                            if filtered_parts:
-                                assistant_msg['_raw_content_object'] = {
-                                    'parts': filtered_parts,
-                                    'role': raw_obj.get('role', 'model'),
-                                    '_from_vertex': False
-                                }
-                        else:
-                            # For Vertex AI, keep the raw object as-is (with text)
-                            assistant_msg['_raw_content_object'] = raw_obj
-                    else:
-                        # Keep raw object as-is if no parts structure
-                        assistant_msg['_raw_content_object'] = raw_obj
+                    assistant_msg['_raw_content_object'] = msg['_raw_content_object']
                 # If raw_content_object already contains text, drop duplicate content field
                 try:
                     has_text_part = False
@@ -2249,6 +2265,8 @@ def process_single_chapter_api_call(idx: int, chap: str, msgs: List[Dict],
                                   stop_check_fn, chunk_timeout: int = None) -> Dict:
     """Process a single chapter API call with thread-safe payload handling"""
     
+    # Ensure the request always contains a user message and no non-serializable blobs
+    msgs = _sanitize_messages_for_api(msgs, chap)
     # APPLY INTERRUPTIBLE THREADING DELAY FIRST
     thread_delay = float(os.getenv("THREAD_SUBMISSION_DELAY_SECONDS", "0.5"))
     if thread_delay > 0:
@@ -2471,6 +2489,8 @@ def process_single_chapter_with_split(idx: int,
                 )
 
         print(f"🔄 Processing chunk {chunk_idx}/{total_chunks} of Chapter {idx+1}")
+        # Sanitize before delegating (guarantees user + no raw blobs in payload)
+        msgs = _sanitize_messages_for_api(msgs, chunk_text)
         result = process_single_chapter_api_call(idx, chunk_text, msgs, client, temp, mtoks, stop_check_fn, chunk_timeout)
         if result.get("data"):
             aggregated_data.extend(result["data"])
@@ -2531,6 +2551,7 @@ def process_merged_group_api_call(merge_group: list, msgs_builder_fn,
     # Build messages for merged content
     system_prompt, user_prompt = msgs_builder_fn(merged_content)
     msgs = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+    msgs = _sanitize_messages_for_api(msgs, merged_content)
     
     # Thread-safe payload directory
     thread_name = threading.current_thread().name
@@ -3830,10 +3851,11 @@ def main(log_callback=None, stop_callback=None):
                             
                             filtered_chunk_msgs.append(filtered_msg)
                         
-                        # API call for chunk with FILTERED messages
+                        # API call for chunk with FILTERED + SANITIZED messages
+                        send_msgs = _sanitize_messages_for_api(filtered_chunk_msgs, chunk_text)
                         try:
                             chunk_raw, chunk_finish_reason, chunk_raw_obj = send_with_interrupt(
-                                messages=filtered_chunk_msgs,  # Use filtered messages
+                                messages=send_msgs,  # Use sanitized messages
                                 client=client,
                                 temperature=temp,
                                 max_tokens=mtoks,
