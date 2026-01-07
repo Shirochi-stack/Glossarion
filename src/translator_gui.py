@@ -2835,6 +2835,10 @@ Recent translations to summarize:
         self._add_combobox_arrow(self.profile_menu)
         self.frame.addWidget(self.profile_menu, 2, 1)
         
+        # Add context menu for profile reordering (right-click)
+        self.profile_menu.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.profile_menu.customContextMenuRequested.connect(self._show_profile_context_menu)
+        
         # Connect signals for profile selection
         self.profile_menu.currentIndexChanged.connect(lambda: self.on_profile_select())
         self.profile_menu.lineEdit().returnPressed.connect(lambda: self.on_profile_select())
@@ -2862,6 +2866,102 @@ Recent translations to summarize:
         
         # Add the buttons widget spanning columns 2-3
         self.frame.addWidget(profile_buttons_widget, 2, 2, 1, 2)
+    
+    def _show_profile_context_menu(self, position):
+        """Show context menu for profile reordering."""
+        from PySide6.QtWidgets import QMenu
+        
+        # Get the current profile
+        current_profile = self.profile_menu.currentText()
+        if not current_profile or current_profile not in self.prompt_profiles:
+            return
+        
+        # Get all profile names
+        profile_names = list(self.prompt_profiles.keys())
+        current_index = profile_names.index(current_profile)
+        
+        # Create context menu
+        menu = QMenu(self.profile_menu)
+        
+        # Add move up action (disabled if already at top)
+        move_up_action = menu.addAction("↑ Move Up")
+        move_up_action.setEnabled(current_index > 0)
+        
+        # Add move down action (disabled if already at bottom)
+        move_down_action = menu.addAction("↓ Move Down")
+        move_down_action.setEnabled(current_index < len(profile_names) - 1)
+        
+        menu.addSeparator()
+        
+        # Add move to top action (disabled if already at top)
+        move_top_action = menu.addAction("⇈ Move to Top")
+        move_top_action.setEnabled(current_index > 0)
+        
+        # Add move to bottom action (disabled if already at bottom)
+        move_bottom_action = menu.addAction("⇊ Move to Bottom")
+        move_bottom_action.setEnabled(current_index < len(profile_names) - 1)
+        
+        # Show menu at cursor position
+        action = menu.exec(self.profile_menu.mapToGlobal(position))
+        
+        if not action:
+            return
+        
+        # Reorder profiles based on action
+        new_profiles = {}
+        
+        if action == move_up_action and current_index > 0:
+            # Swap with previous
+            for i, name in enumerate(profile_names):
+                if i == current_index - 1:
+                    new_profiles[current_profile] = self.prompt_profiles[current_profile]
+                elif i == current_index:
+                    new_profiles[profile_names[current_index - 1]] = self.prompt_profiles[profile_names[current_index - 1]]
+                else:
+                    new_profiles[name] = self.prompt_profiles[name]
+        
+        elif action == move_down_action and current_index < len(profile_names) - 1:
+            # Swap with next
+            for i, name in enumerate(profile_names):
+                if i == current_index:
+                    new_profiles[profile_names[current_index + 1]] = self.prompt_profiles[profile_names[current_index + 1]]
+                elif i == current_index + 1:
+                    new_profiles[current_profile] = self.prompt_profiles[current_profile]
+                else:
+                    new_profiles[name] = self.prompt_profiles[name]
+        
+        elif action == move_top_action and current_index > 0:
+            # Move to top
+            new_profiles[current_profile] = self.prompt_profiles[current_profile]
+            for name in profile_names:
+                if name != current_profile:
+                    new_profiles[name] = self.prompt_profiles[name]
+        
+        elif action == move_bottom_action and current_index < len(profile_names) - 1:
+            # Move to bottom
+            for name in profile_names:
+                if name != current_profile:
+                    new_profiles[name] = self.prompt_profiles[name]
+            new_profiles[current_profile] = self.prompt_profiles[current_profile]
+        
+        else:
+            return
+        
+        # Update profiles
+        self.prompt_profiles = new_profiles
+        self.config['prompt_profiles'] = new_profiles
+        
+        # Refresh combobox
+        self.profile_menu.blockSignals(True)
+        self.profile_menu.clear()
+        self.profile_menu.addItems(list(new_profiles.keys()))
+        self.profile_menu.setCurrentText(current_profile)
+        self.profile_menu.blockSignals(False)
+        
+        # Save changes
+        self.save_profiles()
+        
+        self.append_log(f"✓ Moved profile '{current_profile}'")
     
     def _create_settings_section(self):
         """Create all settings controls"""
