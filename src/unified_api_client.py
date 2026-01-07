@@ -6229,6 +6229,11 @@ class UnifiedClient:
                                     filtered_parts.append(part_copy)
                             
                             if filtered_parts:
+                                # If no text part remains, add one from message content for context
+                                has_text_part = any(isinstance(p, dict) and p.get('text') for p in filtered_parts)
+                                if (not has_text_part) and msg.get('content'):
+                                    filtered_parts.append({'text': msg.get('content')})
+
                                 # Save the filtered version
                                 cleaned_msg['_raw_content_object'] = {'parts': filtered_parts}
                                 if 'role' in raw_obj:
@@ -6269,6 +6274,11 @@ class UnifiedClient:
                                     if part_dict:
                                         serialized_obj['parts'].append(part_dict)
                                 if serialized_obj['parts']:  # Only save if there are parts after filtering
+                                    # Ensure a text part exists; if missing, add from message content
+                                    has_text_part = any(isinstance(p, dict) and p.get('text') for p in serialized_obj['parts'])
+                                    if (not has_text_part) and msg.get('content'):
+                                        serialized_obj['parts'].append({'text': msg.get('content')})
+
                                     if hasattr(raw_obj, 'role'):
                                         serialized_obj['role'] = raw_obj.role
                                     cleaned_msg['_raw_content_object'] = serialized_obj
@@ -10048,6 +10058,35 @@ class UnifiedClient:
                         # Keep usage_dict as None on failure
                         usage_dict = usage_dict if isinstance(usage_dict, dict) else None
                     
+                    # Ensure raw_content_object carries the text if parts lack it
+                    def _ensure_text_in_raw_obj(raw_obj, text_val):
+                        if not raw_obj or not text_val:
+                            return raw_obj
+                        try:
+                            # Content object
+                            if hasattr(raw_obj, 'parts'):
+                                has_text = False
+                                for p in raw_obj.parts or []:
+                                    t = getattr(p, 'text', None)
+                                    if t not in (None, ""):
+                                        has_text = True
+                                        break
+                                if not has_text:
+                                    from google.genai import types
+                                    raw_obj.parts.append(types.Part(text=text_val))
+                                return raw_obj
+                            # Dict form
+                            if isinstance(raw_obj, dict) and 'parts' in raw_obj:
+                                has_text = any(isinstance(p, dict) and p.get('text') not in (None, "") for p in raw_obj.get('parts', []))
+                                if not has_text:
+                                    raw_obj.setdefault('parts', []).append({'text': text_val})
+                                return raw_obj
+                        except Exception:
+                            return raw_obj
+                        return raw_obj
+
+                    raw_content_obj = _ensure_text_in_raw_obj(raw_content_obj, text_content)
+
                     # Return with the actual content populated
                     return UnifiedResponse(
                         content=text_content,  # Properly populated with the actual response text
