@@ -299,6 +299,9 @@ class HistoryManager:
                     assistant_msg['content'] = ""
         except Exception:
             pass
+        # If content is now empty, set to None so it gets omitted when serialized
+        if assistant_msg.get('content') == "":
+            assistant_msg['content'] = None
                 
         history.append(assistant_msg)
         
