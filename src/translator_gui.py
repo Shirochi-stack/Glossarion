@@ -2868,110 +2868,18 @@ Recent translations to summarize:
         self.frame.addWidget(profile_buttons_widget, 2, 2, 1, 2)
     
     def _show_profile_context_menu(self, position):
-        """Show context menu for profile reordering."""
+        """Show context menu for profile management."""
         from PySide6.QtWidgets import QMenu
         
-        # Get the current profile
-        current_profile = self.profile_menu.currentText()
-        if not current_profile or current_profile not in self.prompt_profiles:
-            return
-        
-        # Get all profile names
-        profile_names = list(self.prompt_profiles.keys())
-        current_index = profile_names.index(current_profile)
-        
-        # Create context menu
+        # Create simple context menu with just manage option
         menu = QMenu(self.profile_menu)
-        
-        # Add move up action (disabled if already at top)
-        move_up_action = menu.addAction("↑ Move Up")
-        move_up_action.setEnabled(current_index > 0)
-        
-        # Add move down action (disabled if already at bottom)
-        move_down_action = menu.addAction("↓ Move Down")
-        move_down_action.setEnabled(current_index < len(profile_names) - 1)
-        
-        menu.addSeparator()
-        
-        # Add move to top action (disabled if already at top)
-        move_top_action = menu.addAction("⇈ Move to Top")
-        move_top_action.setEnabled(current_index > 0)
-        
-        # Add move to bottom action (disabled if already at bottom)
-        move_bottom_action = menu.addAction("⇊ Move to Bottom")
-        move_bottom_action.setEnabled(current_index < len(profile_names) - 1)
-        
-        menu.addSeparator()
-        
-        # Add manage profiles dialog option
         manage_action = menu.addAction("⚙️ Manage Profiles...")
         
         # Show menu at cursor position
         action = menu.exec(self.profile_menu.mapToGlobal(position))
         
-        if not action:
-            return
-        
-        # Handle manage profiles dialog
         if action == manage_action:
             self._open_profile_manager()
-            return
-        
-        # Reorder profiles based on action
-        new_profiles = {}
-        
-        if action == move_up_action and current_index > 0:
-            # Swap with previous
-            for i, name in enumerate(profile_names):
-                if i == current_index - 1:
-                    new_profiles[current_profile] = self.prompt_profiles[current_profile]
-                elif i == current_index:
-                    new_profiles[profile_names[current_index - 1]] = self.prompt_profiles[profile_names[current_index - 1]]
-                else:
-                    new_profiles[name] = self.prompt_profiles[name]
-        
-        elif action == move_down_action and current_index < len(profile_names) - 1:
-            # Swap with next
-            for i, name in enumerate(profile_names):
-                if i == current_index:
-                    new_profiles[profile_names[current_index + 1]] = self.prompt_profiles[profile_names[current_index + 1]]
-                elif i == current_index + 1:
-                    new_profiles[current_profile] = self.prompt_profiles[current_profile]
-                else:
-                    new_profiles[name] = self.prompt_profiles[name]
-        
-        elif action == move_top_action and current_index > 0:
-            # Move to top
-            new_profiles[current_profile] = self.prompt_profiles[current_profile]
-            for name in profile_names:
-                if name != current_profile:
-                    new_profiles[name] = self.prompt_profiles[name]
-        
-        elif action == move_bottom_action and current_index < len(profile_names) - 1:
-            # Move to bottom
-            for name in profile_names:
-                if name != current_profile:
-                    new_profiles[name] = self.prompt_profiles[name]
-            new_profiles[current_profile] = self.prompt_profiles[current_profile]
-        
-        else:
-            return
-        
-        # Update profiles
-        self.prompt_profiles = new_profiles
-        self.config['prompt_profiles'] = new_profiles
-        
-        # Refresh combobox
-        self.profile_menu.blockSignals(True)
-        self.profile_menu.clear()
-        self.profile_menu.addItems(list(new_profiles.keys()))
-        self.profile_menu.setCurrentText(current_profile)
-        self.profile_menu.blockSignals(False)
-        
-        # Save changes
-        self.save_profiles()
-        
-        self.append_log(f"✓ Moved profile '{current_profile}'")
     
     def _open_profile_manager(self):
         """Open a dialog for managing profile order with drag-and-drop."""
@@ -2999,6 +2907,9 @@ Recent translations to summarize:
         instructions.setStyleSheet("font-weight: bold; margin-bottom: 10px;")
         layout.addWidget(instructions)
         
+        # Horizontal layout for list and buttons
+        content_layout = QHBoxLayout()
+        
         # List widget with drag-and-drop
         list_widget = QListWidget()
         list_widget.setDragDropMode(QListWidget.InternalMove)
@@ -3011,7 +2922,40 @@ Recent translations to summarize:
                 list_widget.setCurrentRow(i)
                 break
         
-        layout.addWidget(list_widget)
+        content_layout.addWidget(list_widget)
+        
+        # Vertical layout for reorder buttons
+        button_column = QVBoxLayout()
+        button_column.addStretch()
+        
+        # Move to Top button
+        move_top_btn = QPushButton("⇈ Top")
+        move_top_btn.setToolTip("Move selected profile to top")
+        move_top_btn.clicked.connect(lambda: self._move_profile_in_list(list_widget, 'top'))
+        button_column.addWidget(move_top_btn)
+        
+        # Move Up button
+        move_up_btn = QPushButton("↑ Up")
+        move_up_btn.setToolTip("Move selected profile up")
+        move_up_btn.clicked.connect(lambda: self._move_profile_in_list(list_widget, 'up'))
+        button_column.addWidget(move_up_btn)
+        
+        # Move Down button
+        move_down_btn = QPushButton("↓ Down")
+        move_down_btn.setToolTip("Move selected profile down")
+        move_down_btn.clicked.connect(lambda: self._move_profile_in_list(list_widget, 'down'))
+        button_column.addWidget(move_down_btn)
+        
+        # Move to Bottom button
+        move_bottom_btn = QPushButton("⇊ Bottom")
+        move_bottom_btn.setToolTip("Move selected profile to bottom")
+        move_bottom_btn.clicked.connect(lambda: self._move_profile_in_list(list_widget, 'bottom'))
+        button_column.addWidget(move_bottom_btn)
+        
+        button_column.addStretch()
+        
+        content_layout.addLayout(button_column)
+        layout.addLayout(content_layout)
         
         # Button layout
         button_layout = QHBoxLayout()
@@ -3031,6 +2975,30 @@ Recent translations to summarize:
         layout.addLayout(button_layout)
         
         dialog.exec()
+    
+    def _move_profile_in_list(self, list_widget, direction):
+        """Move the selected profile in the list."""
+        current_row = list_widget.currentRow()
+        if current_row < 0:
+            return
+        
+        item = list_widget.takeItem(current_row)
+        
+        if direction == 'up' and current_row > 0:
+            new_row = current_row - 1
+        elif direction == 'down' and current_row < list_widget.count():
+            new_row = current_row + 1
+        elif direction == 'top':
+            new_row = 0
+        elif direction == 'bottom':
+            new_row = list_widget.count()
+        else:
+            # Invalid move, put item back
+            list_widget.insertItem(current_row, item)
+            return
+        
+        list_widget.insertItem(new_row, item)
+        list_widget.setCurrentRow(new_row)
     
     def _save_profile_order(self, list_widget, dialog):
         """Save the new profile order from the list widget."""
