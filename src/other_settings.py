@@ -1003,6 +1003,12 @@ def _create_danger_zone_section(self, parent):
             if 'active_profile' in current_config:
                 keys_to_preserve['active_profile'] = current_config['active_profile']
             
+            # 10. Multi-Key and Fallback Key Toggle States
+            if 'use_multi_api_keys' in current_config:
+                keys_to_preserve['use_multi_api_keys'] = current_config['use_multi_api_keys']
+            if 'use_fallback_keys' in current_config:
+                keys_to_preserve['use_fallback_keys'] = current_config['use_fallback_keys']
+            
             # Show warning dialog
             msg = QMessageBox(getattr(self, '_other_settings_dialog', self))
             msg.setWindowTitle("Reset to Defaults")
@@ -1018,7 +1024,8 @@ def _create_danger_zone_section(self, parent):
                 "• Azure Document Intelligence Key & Endpoint\n"
                 "• Google Vision Credentials Path\n"
                 "• Selected Model\n"
-                "• Prompt Profiles & Active Profile\n\n"
+                "• Prompt Profiles & Active Profile\n"
+                "• Multi-Key & Fallback Key Mode Toggles\n\n"
                 "All other settings (history limits, custom endpoints, etc.) will be lost."
             )
             msg.setIcon(QMessageBox.Warning)
