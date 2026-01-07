@@ -70,6 +70,30 @@ class HistoryManager:
             import base64
             return {'_type': 'bytes', 'data': base64.b64encode(obj).decode('ascii')}
         elif isinstance(obj, dict):
+            # Special handling for raw_content_object-like dicts with parts
+            if 'parts' in obj and isinstance(obj.get('parts'), list):
+                new_parts = []
+                for p in obj.get('parts') or []:
+                    if p is None:
+                        continue
+                    # Drop empty text fields before serialization
+                    if isinstance(p, dict) and p.get('text') == "":
+                        p = {k: v for k, v in p.items() if k != 'text'}
+                    serialized_part = self._make_json_serializable(p)
+                    if isinstance(serialized_part, dict):
+                        # Remove empty text after serialization
+                        if serialized_part.get('text') == "":
+                            serialized_part.pop('text', None)
+                        # Drop empty dicts
+                        if not serialized_part:
+                            continue
+                    if serialized_part:
+                        new_parts.append(serialized_part)
+                cleaned = {k: self._make_json_serializable(v) for k, v in obj.items() if k != 'parts' and v is not None}
+                if new_parts:
+                    cleaned['parts'] = new_parts
+                return cleaned
+
             cleaned = {}
             for k, v in obj.items():
                 if v is None:
@@ -114,6 +138,9 @@ class HistoryManager:
                                 value = getattr(part, attr, None)
                                 if value is not None:
                                     part_dict[attr] = self._make_json_serializable(value)
+                        # Drop empty text fields
+                        if 'text' in part_dict and part_dict['text'] == "":
+                            part_dict.pop('text', None)
                         if part_dict:
                             parts.append(part_dict)
                     if parts:

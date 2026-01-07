@@ -1070,8 +1070,8 @@ def trim_context_history(history: List[Dict], limit: int, rolling_window: bool =
                             if isinstance(p, dict) and p.get('text'):
                                 has_text_part = True
                                 break
-                    if has_text_part:
-                        assistant_msg['content'] = ""
+                    if has_text_part and 'content' in assistant_msg and assistant_msg.get('content') == "":
+                        assistant_msg.pop('content', None)
                 except Exception:
                     pass
                 
@@ -3484,6 +3484,10 @@ def main(log_callback=None, stop_callback=None):
                     # Microsecond lock to prevent race conditions when saving history
                     time.sleep(0.000001)
                     with _history_lock:
+                        # Drop empty content field before serialization (batch)
+                        for msg in history:
+                            if msg.get("role") == "assistant" and msg.get("content") == "":
+                                msg["content"] = None
                         history_manager.save_history(history)
                         print(f"💾 Saved glossary history ({len(history)} messages)")
                 except Exception as e:
@@ -4248,6 +4252,9 @@ def main(log_callback=None, stop_callback=None):
                         # Microsecond lock to prevent race conditions when saving history
                         time.sleep(0.000001)
                         with _history_lock:
+                            # Drop empty content field before serialization
+                            if assistant_entry.get("content") == "":
+                                assistant_entry["content"] = None
                             history_manager.save_history(history)
                     
                     # Reset history when limit reached without rolling window
