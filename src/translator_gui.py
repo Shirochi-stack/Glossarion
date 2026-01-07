@@ -2937,13 +2937,19 @@ Recent translations to summarize:
             # Remove any redo states
             history_stack[history_index[0] + 1:] = []
             # Add current state
-            history_stack.append(self._get_list_order(list_widget))
-            history_index[0] = len(history_stack) - 1
-            update_undo_redo_buttons()
+            current_order = self._get_list_order(list_widget)
+            # Only save if order actually changed
+            if history_stack[history_index[0]] != current_order:
+                history_stack.append(current_order)
+                history_index[0] = len(history_stack) - 1
+                update_undo_redo_buttons()
         
         def update_undo_redo_buttons():
             undo_btn.setEnabled(history_index[0] > 0)
             redo_btn.setEnabled(history_index[0] < len(history_stack) - 1)
+        
+        # Connect model changed signal to track drag-and-drop reordering
+        list_widget.model().rowsMoved.connect(lambda: save_state())
         
         content_layout.addWidget(list_widget)
         
