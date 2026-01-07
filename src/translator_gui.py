@@ -2169,13 +2169,24 @@ Recent translations to summarize:
         # Profiles
         self.prompt_profiles = self.config.get('prompt_profiles', self.default_prompts.copy())
         
-        # Ensure Universal profile exists and is up to date (force add/update if missing or old)
-        if "Universal" in self.default_prompts:
-            if "Universal" not in self.prompt_profiles:
-                # Add if missing (inserted at start to be default)
-                new_profiles = {"Universal": self.default_prompts["Universal"]}
-                new_profiles.update(self.prompt_profiles)
-                self.prompt_profiles = new_profiles
+        # Ensure Universal profile and all extraction mode profiles exist and are up to date
+        # Define profiles that should always be included
+        always_include_profiles = [
+            "Universal",
+            "Korean_BeautifulSoup",
+            "Japanese_BeautifulSoup",
+            "Chinese_BeautifulSoup",
+            "Korean_html2text",
+            "Japanese_html2text",
+            "Chinese_html2text"
+        ]
+        
+        # Ensure all required profiles exist
+        for profile_name in always_include_profiles:
+            if profile_name in self.default_prompts:
+                if profile_name not in self.prompt_profiles:
+                    # Add if missing
+                    self.prompt_profiles[profile_name] = self.default_prompts[profile_name]
         
         active = self.config.get('active_profile', next(iter(self.prompt_profiles)))
         self.profile_var = active
@@ -5309,6 +5320,38 @@ If you see multiple p-b cookies, use the one with the longest value."""
     def run_translation_direct(self):
         """Run translation directly - handles multiple files and different file types"""
         try:
+            # AUTO-SWITCH PROFILE BASED ON EXTRACTION MODE
+            # Check if profile name contains BeautifulSoup or html2text
+            current_profile = self.profile_var
+            if current_profile:
+                profile_lower = current_profile.lower()
+                
+                # Check if profile indicates an extraction mode
+                if 'beautifulsoup' in profile_lower:
+                    # Switch to BeautifulSoup extraction mode
+                    if hasattr(self, 'text_extraction_method_var'):
+                        self.text_extraction_method_var = 'standard'
+                        self.append_log(f"🔄 Auto-switched to BeautifulSoup extraction (profile: {current_profile})")
+                elif 'html2text' in profile_lower:
+                    # Switch to html2text extraction mode  
+                    if hasattr(self, 'text_extraction_method_var'):
+                        self.text_extraction_method_var = 'enhanced'
+                        self.append_log(f"🔄 Auto-switched to html2text extraction (profile: {current_profile})")
+            
+            # AUTO-TOGGLE IMAGE TRANSLATION BASED ON PROFILE
+            # Toggle OFF for BeautifulSoup and html2text profiles
+            if current_profile:
+                profile_lower = current_profile.lower()
+                if 'beautifulsoup' in profile_lower or 'html2text' in profile_lower:
+                    if hasattr(self, 'enable_image_translation_var') and self.enable_image_translation_var:
+                        self.enable_image_translation_var = False
+                        self.append_log(f"📷 Auto-disabled image translation for {current_profile}")
+                # Toggle ON for OCR profiles
+                elif '_ocr' in profile_lower:
+                    if hasattr(self, 'enable_image_translation_var') and not self.enable_image_translation_var:
+                        self.enable_image_translation_var = True
+                        self.append_log(f"📷 Auto-enabled image translation for {current_profile}")
+            
             # Re-attach GUI logging handlers to reclaim logs from standalone header translation
             try:
                 self._attach_gui_logging_handlers()
