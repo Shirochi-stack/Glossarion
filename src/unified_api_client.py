@@ -9744,36 +9744,38 @@ class UnifiedClient:
                                 if hasattr(cand, 'finish_reason') and cand.finish_reason:
                                     finish_reason = str(cand.finish_reason)
                                 content_obj = getattr(cand, 'content', None)
-                                if content_obj and hasattr(content_obj, 'parts'):
-                                    for part in content_obj.parts:
-                                        if hasattr(part, 'text') and part.text:
-                                            text_parts.append(part.text)
-                                            if log_stream and not self._is_stop_requested():
-                                                frag = part.text.replace("\r", "")
-                                                # Use local line buffering to preserve structure
-                                                combined = "".join(log_buf) + frag
-                                                
-                                                # Inject newlines after HTML closing tags
-                                                temp_combined = combined
-                                                for tag in ['</h1>', '</h2>', '3>', '4>', '5>', '6>', '</p>']:
-                                                    if tag in ['3>', '4>', '5>', '6>']:
-                                                        tag = '</h' + tag[0] + '>'
-                                                        if tag not in combined: continue
-                                                
-                                                for tag in ['</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>']:
-                                                    temp_combined = temp_combined.replace(tag, tag + '\n')
-                                                
-                                                if "\n" in temp_combined:
-                                                    parts = temp_combined.split("\n")
-                                                    for p in parts[:-1]:
-                                                        print(p)
-                                                    log_buf = [parts[-1]]
-                                                else:
-                                                    log_buf.append(frag)
-                                                    # Flush if buffer gets too long (fallback)
-                                                    if len("".join(log_buf)) > 150:
-                                                        print("".join(log_buf), end="", flush=True)
-                                                        log_buf = []
+                                if content_obj:
+                                    parts = getattr(content_obj, 'parts', None)
+                                    if parts:
+                                        for part in parts:
+                                            if hasattr(part, 'text') and part.text:
+                                                text_parts.append(part.text)
+                                                if log_stream and not self._is_stop_requested():
+                                                    frag = part.text.replace("\r", "")
+                                                    # Use local line buffering to preserve structure
+                                                    combined = "".join(log_buf) + frag
+                                                    
+                                                    # Inject newlines after HTML closing tags
+                                                    temp_combined = combined
+                                                    for tag in ['</h1>', '</h2>', '3>', '4>', '5>', '6>', '</p>']:
+                                                        if tag in ['3>', '4>', '5>', '6>']:
+                                                            tag = '</h' + tag[0] + '>'
+                                                            if tag not in combined: continue
+                                                    
+                                                    for tag in ['</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>']:
+                                                        temp_combined = temp_combined.replace(tag, tag + '\n')
+                                                    
+                                                    if "\n" in temp_combined:
+                                                        parts = temp_combined.split("\n")
+                                                        for p in parts[:-1]:
+                                                            print(p)
+                                                        log_buf = [parts[-1]]
+                                                    else:
+                                                        log_buf.append(frag)
+                                                        # Flush if buffer gets too long (fallback)
+                                                        if len("".join(log_buf)) > 150:
+                                                            print("".join(log_buf), end="", flush=True)
+                                                            log_buf = []
                             if log_stream and not self._is_stop_requested():
                                 if log_buf:
                                     print("".join(log_buf))
@@ -10968,113 +10970,77 @@ class UnifiedClient:
                     
                     # Extract content with Gemini awareness (includes streaming aggregation)
                     if use_streaming:
-                        if log_stream and not self._is_stop_requested():
-                            log_buf = []  # Use a local buffer to detect line breaks
-                            text_parts = []
-                            finish_reason = 'stop'
-                            
-                            for event in resp:
-                                try:
-                                    frag_collected = False
-                                    # 1) Standard OpenAI stream chunk
-                                    ch = (getattr(event, "choices", None) or [None])[0]
-                                    if not ch and isinstance(event, dict):
-                                        # Fallback for dict-based events
-                                        choices = event.get("choices", [])
-                                        ch = choices[0] if choices else None
+                        text_parts = []
+                        log_buf = []  # Always define to avoid UnboundLocalError
+                        finish_reason = 'stop'
+                        
+                        for event in resp:
+                            try:
+                                frag_collected = False
+                                # 1) Standard OpenAI stream chunk
+                                ch = (getattr(event, "choices", None) or [None])[0]
+                                if not ch and isinstance(event, dict):
+                                    # Fallback for dict-based events
+                                    choices = event.get("choices", [])
+                                    ch = choices[0] if choices else None
 
-                                    if ch:
-                                        # Handle both object and dict access for delta
-                                        delta = None
-                                        if isinstance(ch, dict):
-                                            delta = ch.get("delta") or ch.get("message")
+                                if ch:
+                                    # Handle both object and dict access for delta
+                                    delta = None
+                                    if isinstance(ch, dict):
+                                        delta = ch.get("delta") or ch.get("message")
+                                    else:
+                                        delta = getattr(ch, "delta", None) or getattr(ch, "message", None)
+
+                                    if delta is not None:
+                                        # Handle both object and dict access for content
+                                        delta_content = None
+                                        if isinstance(delta, dict):
+                                            delta_content = delta.get("content")
                                         else:
-                                            delta = getattr(ch, "delta", None) or getattr(ch, "message", None)
+                                            delta_content = getattr(delta, "content", None)
 
-                                        if delta is not None:
-                                            # Handle both object and dict access for content
-                                            delta_content = None
-                                            if isinstance(delta, dict):
-                                                delta_content = delta.get("content")
-                                            else:
-                                                delta_content = getattr(delta, "content", None)
+                                        if isinstance(delta_content, list):
+                                            for part in delta_content:
+                                                if isinstance(part, dict) and part.get("type") == "text":
+                                                    frag = part.get("text", "")
+                                                elif hasattr(part, "type") and getattr(part, "type") == "text":
+                                                    frag = getattr(part, "text", "")
+                                                else:
+                                                    frag = None
+                                                if frag:
+                                                    frag_collected = True
+                                                    text_parts.append(frag)
+                                                    if log_stream and not self._is_stop_requested():
+                                                        # Process fragment for line breaks
+                                                        combined = "".join(log_buf) + frag
+                                                        
+                                                        # Inject newlines after HTML closing tags
+                                                        temp_combined = combined
+                                                        for tag in ['</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>']:
+                                                            temp_combined = temp_combined.replace(tag, tag + '\n')
+                                                        
+                                                        if "\n" in temp_combined:
+                                                            parts = temp_combined.split("\n")
+                                                            # Print all but the last part (which is incomplete)
+                                                            for part in parts[:-1]:
+                                                                print(part)
+                                                            # Keep the last part in buffer
+                                                            log_buf = [parts[-1]]
+                                                        else:
+                                                            log_buf.append(frag)
+                                                            # Optional: flush if buffer gets too long without newline
+                                                            if len("".join(log_buf)) > 150:
+                                                                print("".join(log_buf), end="", flush=True)
+                                                                log_buf = []
 
-                                            if isinstance(delta_content, list):
-                                                for part in delta_content:
-                                                    if isinstance(part, dict) and part.get("type") == "text":
-                                                        frag = part.get("text", "")
-                                                    elif hasattr(part, "type") and getattr(part, "type") == "text":
-                                                        frag = getattr(part, "text", "")
-                                                    else:
-                                                        frag = None
-                                                    if frag:
-                                                        frag_collected = True
-                                                        text_parts.append(frag)
-                                                        if log_stream and not self._is_stop_requested():
-                                                            # Process fragment for line breaks
-                                                            combined = "".join(log_buf) + frag
-                                                            
-                                                            # Inject newlines after HTML closing tags
-                                                            temp_combined = combined
-                                                            for tag in ['</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>']:
-                                                                temp_combined = temp_combined.replace(tag, tag + '\n')
-                                                            
-                                                            if "\n" in temp_combined:
-                                                                parts = temp_combined.split("\n")
-                                                                # Print all but the last part (which is incomplete)
-                                                                for part in parts[:-1]:
-                                                                    print(part)
-                                                                # Keep the last part in buffer
-                                                                log_buf = [parts[-1]]
-                                                            else:
-                                                                log_buf.append(frag)
-                                                                # Optional: flush if buffer gets too long without newline
-                                                                if len("".join(log_buf)) > 150:
-                                                                    print("".join(log_buf), end="", flush=True)
-                                                                    log_buf = []
-
-                                            elif delta_content:
-                                                frag = str(delta_content)
-                                                frag_collected = True
-                                                text_parts.append(frag)
-                                                if log_stream and not self._is_stop_requested():
-                                                    # Process fragment for line breaks
-                                                    combined = "".join(log_buf) + frag
-                                                    
-                                                    # Inject newlines after HTML closing tags
-                                                    temp_combined = combined
-                                                    for tag in ['</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>']:
-                                                        temp_combined = temp_combined.replace(tag, tag + '\n')
-                                                    
-                                                    if "\n" in temp_combined:
-                                                        parts = temp_combined.split("\n")
-                                                        # Print all complete lines
-                                                        for part in parts[:-1]:
-                                                            print(part)
-                                                        # Reset buffer with the remainder
-                                                        log_buf = [parts[-1]]
-                                                    else:
-                                                        log_buf.append(frag)
-                                                        # Flush if buffer is getting long to show progress
-                                                        if len("".join(log_buf)) > 150:
-                                                            print("".join(log_buf), end="", flush=True)
-                                                            log_buf = []
-
-                                        if getattr(ch, "finish_reason", None):
-                                            finish_reason = ch.finish_reason
-                                    # 2) Fallback: event has direct text/content fields (provider-specific)
-                                    if not frag_collected:
-                                        alt_frag = None
-                                        if hasattr(event, "text") and isinstance(event.text, str):
-                                            alt_frag = event.text
-                                        elif hasattr(event, "content") and isinstance(event.content, str):
-                                            alt_frag = event.content
-                                        elif isinstance(event, dict):
-                                            alt_frag = event.get("text") or event.get("content")
-                                        if alt_frag:
-                                            text_parts.append(alt_frag)
+                                        elif delta_content:
+                                            frag = str(delta_content)
+                                            frag_collected = True
+                                            text_parts.append(frag)
                                             if log_stream and not self._is_stop_requested():
-                                                combined = "".join(log_buf) + alt_frag
+                                                # Process fragment for line breaks
+                                                combined = "".join(log_buf) + frag
                                                 
                                                 # Inject newlines after HTML closing tags
                                                 temp_combined = combined
@@ -11083,23 +11049,58 @@ class UnifiedClient:
                                                 
                                                 if "\n" in temp_combined:
                                                     parts = temp_combined.split("\n")
+                                                    # Print all complete lines
                                                     for part in parts[:-1]:
                                                         print(part)
+                                                    # Reset buffer with the remainder
                                                     log_buf = [parts[-1]]
                                                 else:
-                                                    log_buf.append(alt_frag)
+                                                    log_buf.append(frag)
+                                                    # Flush if buffer is getting long to show progress
                                                     if len("".join(log_buf)) > 150:
                                                         print("".join(log_buf), end="", flush=True)
                                                         log_buf = []
-                                except Exception:
-                                    continue
-                            
-                            # Print any remaining buffer content at the end
-                            if log_buf and log_stream and not self._is_stop_requested():
-                                print("".join(log_buf))
-                            
-                            if log_stream and not self._is_stop_requested():
-                                print()  # final newline
+
+                                    if getattr(ch, "finish_reason", None):
+                                        finish_reason = ch.finish_reason
+                                # 2) Fallback: event has direct text/content fields (provider-specific)
+                                if not frag_collected:
+                                    alt_frag = None
+                                    if hasattr(event, "text") and isinstance(event.text, str):
+                                        alt_frag = event.text
+                                    elif hasattr(event, "content") and isinstance(event.content, str):
+                                        alt_frag = event.content
+                                    elif isinstance(event, dict):
+                                        alt_frag = event.get("text") or event.get("content")
+                                    if alt_frag:
+                                        text_parts.append(alt_frag)
+                                        if log_stream and not self._is_stop_requested():
+                                            combined = "".join(log_buf) + alt_frag
+                                            
+                                            # Inject newlines after HTML closing tags
+                                            temp_combined = combined
+                                            for tag in ['</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</p>']:
+                                                temp_combined = temp_combined.replace(tag, tag + '\n')
+                                            
+                                            if "\n" in temp_combined:
+                                                parts = temp_combined.split("\n")
+                                                for part in parts[:-1]:
+                                                    print(part)
+                                                log_buf = [parts[-1]]
+                                            else:
+                                                log_buf.append(alt_frag)
+                                                if len("".join(log_buf)) > 150:
+                                                    print("".join(log_buf), end="", flush=True)
+                                                    log_buf = []
+                            except Exception:
+                                continue
+                        
+                        # Print any remaining buffer content at the end
+                        if log_buf and log_stream and not self._is_stop_requested():
+                            print("".join(log_buf))
+                        
+                        if log_stream and not self._is_stop_requested():
+                            print()  # final newline
                         content = "".join(text_parts)
                         return UnifiedResponse(
                             content=content,
