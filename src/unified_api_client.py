@@ -6191,13 +6191,25 @@ class UnifiedClient:
                         # Preserve the structure for Gemini 3 models with thought signatures
                         # BUT filter out reasoning parts (thought: true)
                         if isinstance(raw_obj, dict) and 'parts' in raw_obj:
-                            # Filter out reasoning parts before saving
+                            # Filter out reasoning parts **except** ones carrying thought_signature
                             filtered_parts = []
                             for part in raw_obj.get('parts', []):
-                                if isinstance(part, dict) and part.get('thought', False) == True:
-                                    # Skip reasoning parts - don't save them
+                                if not isinstance(part, dict):
                                     continue
-                                filtered_parts.append(part)
+                                is_thought = part.get('thought', False) is True
+                                has_sig = (
+                                    ('thought_signature' in part and part['thought_signature'])
+                                    or ('thoughtSignature' in part and part['thoughtSignature'])
+                                )
+
+                                # Drop pure thought text to avoid leaking reasoning, but keep signature payloads
+                                if is_thought and not has_sig:
+                                    continue
+
+                                part_copy = part.copy()
+                                if is_thought:
+                                    part_copy.pop('text', None)  # keep signature only
+                                filtered_parts.append(part_copy)
                             
                             if filtered_parts:
                                 # Save the filtered version
@@ -6205,7 +6217,7 @@ class UnifiedClient:
                                 if 'role' in raw_obj:
                                     cleaned_msg['_raw_content_object']['role'] = raw_obj['role']
                             else:
-                                # All parts were reasoning, don't save raw object
+                                # All parts were reasoning-only with no signature; don't save raw object
                                 pass
                         elif hasattr(raw_obj, 'parts'):
                             # This is a Google SDK object, need to serialize it
@@ -6214,15 +6226,20 @@ class UnifiedClient:
                             serialized_obj = {'parts': []}
                             try:
                                 for part in raw_obj.parts:
-                                    # Skip reasoning parts when saving to payload
-                                    if hasattr(part, 'thought') and part.thought == True:
-                                        continue  # Don't save reasoning parts
+                                    is_thought = hasattr(part, 'thought') and part.thought is True
+                                    has_sig = (
+                                        hasattr(part, 'thought_signature') and bool(part.thought_signature)
+                                    )
+
+                                    # Keep thought_signature parts even if they are thought=True; strip thought text
+                                    if is_thought and not has_sig:
+                                        continue  # Drop pure reasoning parts
                                     
                                     part_dict = {}
                                     # CRITICAL: Save each field in the Part separately
                                     # Google's response has text and thought_signature in SEPARATE Parts
                                     # We must preserve this structure
-                                    if hasattr(part, 'text') and part.text:
+                                    if not is_thought and hasattr(part, 'text') and part.text:
                                         part_dict['text'] = part.text
                                     if hasattr(part, 'thought_signature') and part.thought_signature:
                                         # Serialize bytes as base64
@@ -9533,6 +9550,12 @@ class UnifiedClient:
                                                 # Handle thought_signature - CRITICAL for Gemini 3
                                                 if 'thought_signature' in part_data:
                                                     thought_sig = part_data['thought_signature']
+                                                elif 'thoughtSignature' in part_data:
+                                                    thought_sig = part_data['thoughtSignature']
+                                                else:
+                                                    thought_sig = None
+
+                                                if thought_sig is not None:
                                                     # Deserialize bytes if needed
                                                     if isinstance(thought_sig, dict) and thought_sig.get('_type') == 'bytes':
                                                         import base64
@@ -9541,7 +9564,6 @@ class UnifiedClient:
                                                         try:
                                                             sig_part = types.Part(thought_signature=thought_sig_bytes)
                                                             parts_to_send.append(sig_part)
-                                                            # print(f"   🧠 Added Part with thought_signature ({len(thought_sig_bytes)} bytes)")
                                                         except Exception as e:
                                                             print(f"   ❌ Failed to create Part with thought_signature: {e}")
                                                     else:
@@ -9842,9 +9864,17 @@ class UnifiedClient:
                                 else:
                                     print(f"   ✅ Thinking disabled")
                     
-                        # Extract text from the Gemini response - FIXED LOGIC HERE
+                    # Extract text from the Gemini response - FIXED LOGIC HERE
                     text_content = "" if not use_streaming else text_content
                     raw_content_obj = None
+                    # For streaming, capture the last candidate content for thought signatures
+                    if raw_content_obj is None and response is not None and hasattr(response, 'candidates') and response.candidates:
+                        try:
+                            cand0 = response.candidates[0]
+                            if hasattr(cand0, 'content') and cand0.content is not None:
+                                raw_content_obj = cand0.content
+                        except Exception:
+                            pass
                     image_data = None  # Store extracted image data
                     
                     # Try the simple .text property first (most common)
@@ -9857,6 +9887,14 @@ class UnifiedClient:
                                 print(f"   ✅ Extracted {len(text_content)} chars from response.text")
                         except Exception as e:
                             print(f"   ⚠️ Could not access response.text: {e}")
+                    # Capture raw content object if available (even when .text was used)
+                    if raw_content_obj is None and hasattr(response, 'candidates') and response.candidates:
+                        try:
+                            first_cand = response.candidates[0]
+                            if hasattr(first_cand, 'content') and first_cand.content is not None:
+                                raw_content_obj = first_cand.content
+                        except Exception:
+                            pass
                     
                     # If we still lack text, or we need an image but don't have one yet, walk candidates.
                     need_image = enable_image_output and image_data is None
