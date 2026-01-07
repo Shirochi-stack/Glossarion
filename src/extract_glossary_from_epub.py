@@ -3451,28 +3451,35 @@ def main(log_callback=None, stop_callback=None):
                                 
                                 # Add raw_obj directly (same as sequential mode)
                                 if raw_obj:
-                                    # According to Google docs: "The `content` object automatically attaches 
-                                    # the required thought_signature behind the scenes"
-                                    # The raw_obj is the candidate.content object from Vertex AI
-                                    # We store it directly - save_progress will serialize it
-                                    
-                                    # CRITICAL FIX: In batch mode, raw_obj may already be serialized to dict
-                                    # Check if this is from Vertex AI and mark it explicitly
-                                    api_type = os.getenv("API_TYPE", "gemini").lower()
-                                    if api_type == "vertex" and isinstance(raw_obj, dict) and 'parts' in raw_obj:
-                                        # Mark as Vertex AI so thought signatures are preserved correctly
-                                        raw_obj['_from_vertex'] = True
-                                    
-                                    assistant_entry["_raw_content_object"] = raw_obj
-                                    
-                                    # Check if thinking tags are present in the text
-                                    if hasattr(raw_obj, 'parts'):
-                                        for part in raw_obj.parts:
-                                            if hasattr(part, 'text') and part.text:
-                                                if '<thinking>' in part.text:
+                                    # Only keep if it contains a thought_signature
+                                    def _has_thought_sig(o):
+                                        try:
+                                            if hasattr(o, 'parts'):
+                                                for p in o.parts or []:
+                                                    if getattr(p, 'thought_signature', None):
+                                                        return True
+                                            if isinstance(o, dict):
+                                                if o.get('thought_signature'):
+                                                    return True
+                                                if 'parts' in o:
+                                                    for p in o.get('parts') or []:
+                                                        if isinstance(p, dict) and p.get('thought_signature'):
+                                                            return True
+                                        except Exception:
+                                            return False
+                                        return False
+                                    if _has_thought_sig(raw_obj):
+                                        api_type = os.getenv("API_TYPE", "gemini").lower()
+                                        if api_type == "vertex" and isinstance(raw_obj, dict) and 'parts' in raw_obj:
+                                            raw_obj['_from_vertex'] = True
+                                        assistant_entry["_raw_content_object"] = raw_obj
+                                        if hasattr(raw_obj, 'parts'):
+                                            for part in raw_obj.parts:
+                                                if hasattr(part, 'text') and part.text and '<thinking>' in part.text:
                                                     print(f"📌 Preserving thought signature for chapter {idx+1} (contains <thinking> tags)")
                                                     break
-                                    else:
+                                        else:
+                                            print(f"📌 Preserving raw content object for chapter {idx+1}")
                                         print(f"📌 Preserving raw content object for chapter {idx+1}")
                                 
                                 history.append(assistant_entry)
@@ -4243,8 +4250,26 @@ def main(log_callback=None, stop_callback=None):
                                     assistant_entry['content'] = ""
                             except Exception:
                                 pass
-                            assistant_entry["_raw_content_object"] = raw_obj
-                            print("📌 Preserving thought signature for context (stored raw Content object)")
+                                # Only keep raw_obj if it contains a thought_signature
+                                def _has_thought_sig(o):
+                                    try:
+                                        if hasattr(o, 'parts'):
+                                            for p in o.parts or []:
+                                                if getattr(p, 'thought_signature', None):
+                                                    return True
+                                        if isinstance(o, dict):
+                                            if o.get('thought_signature'):
+                                                return True
+                                            if 'parts' in o:
+                                                for p in o.get('parts') or []:
+                                                    if isinstance(p, dict) and p.get('thought_signature'):
+                                                        return True
+                                    except Exception:
+                                        return False
+                                    return False
+                                if _has_thought_sig(raw_obj):
+                                    assistant_entry["_raw_content_object"] = raw_obj
+                                    print("📌 Preserving thought signature for context (stored raw Content object)")
                                     
                             history.append(assistant_entry)
                         

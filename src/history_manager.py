@@ -187,6 +187,22 @@ class HistoryManager:
         """Save history atomically with file locking"""
         with self.lock:
             with self._file_lock(self.hist_path):
+                # Clean history: drop raw_content_object without thought_signature; drop empty content
+                cleaned_history = []
+                for msg in history:
+                    m = msg
+                    try:
+                        if isinstance(msg, dict):
+                            m = dict(msg)
+                            if m.get('role') == 'assistant':
+                                if '_raw_content_object' in m and not self._has_thought_signature(m['_raw_content_object']):
+                                    m.pop('_raw_content_object', None)
+                                if m.get('content') == "":
+                                    m['content'] = None
+                    except Exception:
+                        pass
+                    cleaned_history.append(m)
+                history = cleaned_history
                 # Ensure everything is serializable
                 safe_history = self._make_json_serializable(history)
                 
@@ -247,6 +263,24 @@ class HistoryManager:
         history.append({"role": "user", "content": user_content})
         
         assistant_msg = {"role": "assistant", "content": assistant_content}
+
+        def _has_thought_signature(obj) -> bool:
+            try:
+                if hasattr(obj, 'parts'):
+                    for p in obj.parts or []:
+                        if getattr(p, 'thought_signature', None):
+                            return True
+                if isinstance(obj, dict):
+                    if obj.get('thought_signature'):
+                        return True
+                    if 'parts' in obj:
+                        for p in obj.get('parts') or []:
+                            if isinstance(p, dict) and p.get('thought_signature'):
+                                return True
+                return False
+            except Exception:
+                return False
+
         if raw_assistant_object is not None:
             try:
                 # print(f"🔍 [HistoryManager] Attempting to save thought signature (Type: {type(raw_assistant_object)})")
@@ -304,6 +338,10 @@ class HistoryManager:
                 import traceback
                 print(f"   Traceback: {traceback.format_exc()}")
                 pass
+
+        # Drop raw_content_object if it lacks thought_signature
+        if '_raw_content_object' in assistant_msg and not _has_thought_signature(assistant_msg['_raw_content_object']):
+            assistant_msg.pop('_raw_content_object', None)
 
         # If raw_content_object contains a non-empty text part, clear duplicate assistant content
         try:
