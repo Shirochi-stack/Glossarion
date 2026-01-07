@@ -2170,7 +2170,7 @@ Recent translations to summarize:
         self.prompt_profiles = self.config.get('prompt_profiles', self.default_prompts.copy())
         
         # Ensure Universal profile and all extraction mode profiles exist and are up to date
-        # Define profiles that should always be included
+        # Define profiles that should always be included (in order of priority)
         always_include_profiles = [
             "Universal",
             "Korean_BeautifulSoup",
@@ -2181,12 +2181,23 @@ Recent translations to summarize:
             "Chinese_html2text"
         ]
         
-        # Ensure all required profiles exist
+        # Collect missing profiles that need to be added
+        missing_profiles = []
         for profile_name in always_include_profiles:
             if profile_name in self.default_prompts:
                 if profile_name not in self.prompt_profiles:
-                    # Add if missing
-                    self.prompt_profiles[profile_name] = self.default_prompts[profile_name]
+                    # Store missing profile name to add at the top
+                    missing_profiles.append(profile_name)
+        
+        # If there are missing profiles, add them at the top in the defined order
+        if missing_profiles:
+            # Create new ordered dict with missing profiles first (in their priority order), then existing ones
+            new_profiles = {}
+            for profile_name in missing_profiles:
+                new_profiles[profile_name] = self.default_prompts[profile_name]
+            # Add all existing profiles after the required ones
+            new_profiles.update(self.prompt_profiles)
+            self.prompt_profiles = new_profiles
         
         active = self.config.get('active_profile', next(iter(self.prompt_profiles)))
         self.profile_var = active

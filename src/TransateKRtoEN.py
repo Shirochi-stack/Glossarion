@@ -393,6 +393,15 @@ class TranslationConfig:
         # Synthetic header injection for merged requests (Split-the-Merge helper)
         self.SYNTHETIC_MERGE_HEADERS = os.getenv("SYNTHETIC_MERGE_HEADERS", "1") == "1"
         self.ENABLE_IMAGE_TRANSLATION = os.getenv("ENABLE_IMAGE_TRANSLATION", "1") == "1"
+        
+        # Auto-disable image translation for html2text and BeautifulSoup profiles
+        # These profiles are designed for text extraction and don't need image translation
+        if self.ENABLE_IMAGE_TRANSLATION and self.PROFILE_NAME:
+            profile_lower = self.PROFILE_NAME.lower()
+            if 'html2text' in profile_lower or 'beautifulsoup' in profile_lower:
+                self.ENABLE_IMAGE_TRANSLATION = False
+                print(f"ℹ️  Image translation disabled for {self.PROFILE_NAME} profile")
+        
         self.TRANSLATE_BOOK_TITLE = os.getenv("TRANSLATE_BOOK_TITLE", "1") == "1"
         self.DISABLE_ZERO_DETECTION = os.getenv("DISABLE_ZERO_DETECTION", "0") == "1"
         self.ENABLE_AUTO_GLOSSARY = os.getenv("ENABLE_AUTO_GLOSSARY", "0") == "1"
