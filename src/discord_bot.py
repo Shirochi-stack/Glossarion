@@ -1305,6 +1305,7 @@ async def translate(
         os.environ['SYSTEM_PROMPT'] = system_prompt
         os.environ['PROFILE_NAME'] = chosen_profile.lower() if chosen_profile else "universal"
         os.environ['OUTPUT_DIRECTORY'] = temp_dir
+        os.environ['ENABLE_THOUGHTS'] = '0'
         
         # Set translation parameters
         os.environ['BATCH_TRANSLATION'] = '1'

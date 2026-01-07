@@ -121,6 +121,9 @@ class GlossarionWeb:
             self.decrypted_config['api_call_delay'] = 0.5
         os.environ['SEND_INTERVAL_SECONDS'] = str(api_call_delay)
         print(f"🔧 Initialized API call delay: {api_call_delay}s")
+
+        # Always disable thought streaming for the web app
+        os.environ['ENABLE_THOUGHTS'] = '0'
         
         # Set batch translation settings
         if 'batch_translation' not in self.config:

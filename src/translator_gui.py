@@ -916,6 +916,7 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         self.enable_gemini_thinking_var = self.config.get('enable_gemini_thinking', True)
         self.thinking_budget_var = str(self.config.get('thinking_budget', '-1'))
         self.thinking_level_var = self.config.get('thinking_level', 'high')
+        self.enable_thoughts_var = self.config.get('enable_thoughts', False)
         # NEW: GPT/OpenRouter reasoning controls
         self.enable_gpt_thinking_var = self.config.get('enable_gpt_thinking', True)
         self.gpt_reasoning_tokens_var = str(self.config.get('gpt_reasoning_tokens', '2000'))
@@ -975,6 +976,8 @@ class TranslatorGUI(QAScannerMixin, RetranslationMixin, GlossaryManagerMixin, QM
         # Set GUI yield environment variable (disabled by default for maximum speed)
         os.environ['ENABLE_GUI_YIELD'] = '1' if self.enable_gui_yield_var else '0'
         print(f"⚡ GUI yield: {'ENABLED (responsive)' if self.enable_gui_yield_var else 'DISABLED (maximum speed)'}")
+        # Sync ENABLE_THOUGHTS env with config on startup
+        os.environ['ENABLE_THOUGHTS'] = '1' if self.enable_thoughts_var else '0'
         
         # Initialize the executor based on current settings
         try:
@@ -10523,6 +10526,7 @@ Important rules:
                 ('emergency_image_restore', ['emergency_image_restore_var'], False, bool),
                 ('retry_duplicate_bodies', ['retry_duplicate_var'], False, bool),
                 ('token_limit_disabled', ['token_limit_disabled'], False, bool),
+                ('enable_thoughts', ['enable_thoughts_var'], False, bool),
                 ('translation_history_rolling', ['rolling_checkbox', 'translation_history_rolling_var'], False, bool),
                 ('disable_epub_gallery', ['disable_epub_gallery_var'], False, bool),
                 ('disable_automatic_cover_creation', ['disable_automatic_cover_creation_var'], False, bool),
@@ -11256,6 +11260,7 @@ Important rules:
                 ('ENABLE_DEEPSEEK_THINKING', '1' if self.config.get('enable_deepseek_thinking', True) else '0'),
                 ('ENABLE_STREAMING', '1' if self.config.get('enable_streaming', True) else '0'),
                 ('ALLOW_BATCH_STREAM_LOGS', '1' if self.config.get('allow_batch_stream_logs', False) else '0'),
+                ('ENABLE_THOUGHTS', '1' if self.config.get('enable_thoughts', False) else '0'),
                 
                 # General settings
                 ('EXTRACTION_WORKERS', str(self.config.get('extraction_workers', 1)) if self.config.get('enable_parallel_extraction', False) else '1'),

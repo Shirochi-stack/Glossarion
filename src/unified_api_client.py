@@ -9649,9 +9649,13 @@ class UnifiedClient:
                         # Create thinking config separately
                         if is_gemini_3:
                             # Gemini 3.0 uses thinking_level
-                            # Set include_thoughts=True to preserve thought signatures (per Google docs)
+                            # include_thoughts controlled by ENABLE_THOUGHTS env (true/false/1/yes/on)
+                            def _bool_env(name: str, default: str = "false") -> bool:
+                                val = os.getenv(name, default)
+                                return str(val).strip().lower() in ("1", "true", "yes", "on")
+                            include_thoughts = _bool_env("ENABLE_THOUGHTS", "false")
                             thinking_config = types.ThinkingConfig(
-                                include_thoughts=True,  # REQUIRED for thought signature preservation
+                                include_thoughts=include_thoughts,
                                 thinking_level=thinking_level
                             )
                         else:

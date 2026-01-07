@@ -1683,6 +1683,33 @@ def _create_response_handling_section(self, parent):
     gemini_title = QLabel("Gemini Thinking Mode")
     gemini_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
     section_v.addWidget(gemini_title)
+    # Enable thoughts toggle (disabled by default)
+    if not hasattr(self, 'enable_thoughts_var'):
+        self.enable_thoughts_var = bool(
+            self.config.get(
+                'enable_thoughts',
+                str(os.environ.get('ENABLE_THOUGHTS', '0')) == '1'
+            )
+        )
+    thoughts_row = QWidget()
+    thoughts_h = QHBoxLayout(thoughts_row)
+    thoughts_h.setContentsMargins(20, 2, 0, 0)
+    enable_thoughts_cb = self._create_styled_checkbox("Enable thoughts (include model reasoning metadata)")
+    try:
+        enable_thoughts_cb.setChecked(bool(self.enable_thoughts_var))
+    except Exception:
+        enable_thoughts_cb.setChecked(False)
+    def _on_enable_thoughts_toggle(checked):
+        try:
+            self.enable_thoughts_var = bool(checked)
+            self.config['enable_thoughts'] = self.enable_thoughts_var
+            os.environ['ENABLE_THOUGHTS'] = '1' if checked else '0'
+        except Exception:
+            pass
+    enable_thoughts_cb.toggled.connect(_on_enable_thoughts_toggle)
+    thoughts_h.addWidget(enable_thoughts_cb)
+    thoughts_h.addStretch()
+    section_v.addWidget(thoughts_row)
     
     thinking_row_top = QWidget()
     thinking_h_top = QHBoxLayout(thinking_row_top)

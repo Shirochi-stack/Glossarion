@@ -3113,6 +3113,8 @@ class AsyncProcessingDialog:
             
         env_vars['TRANSLATION_TEMPERATURE'] = _text(getattr(self.gui, 'trans_temp', None), '0.3')
         env_vars['TRANSLATION_HISTORY_LIMIT'] = _text(getattr(self.gui, 'trans_history', None), '8')
+        # Explicitly disable thought streaming for async jobs
+        env_vars['ENABLE_THOUGHTS'] = '0'
         
         # API settings - handle both PySide6 and tkinter
         if hasattr(self.gui.delay_entry, 'get'):
