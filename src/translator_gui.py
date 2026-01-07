@@ -2901,10 +2901,20 @@ Recent translations to summarize:
         move_bottom_action = menu.addAction("⇊ Move to Bottom")
         move_bottom_action.setEnabled(current_index < len(profile_names) - 1)
         
+        menu.addSeparator()
+        
+        # Add manage profiles dialog option
+        manage_action = menu.addAction("⚙️ Manage Profiles...")
+        
         # Show menu at cursor position
         action = menu.exec(self.profile_menu.mapToGlobal(position))
         
         if not action:
+            return
+        
+        # Handle manage profiles dialog
+        if action == manage_action:
+            self._open_profile_manager()
             return
         
         # Reorder profiles based on action
@@ -2962,6 +2972,97 @@ Recent translations to summarize:
         self.save_profiles()
         
         self.append_log(f"✓ Moved profile '{current_profile}'")
+    
+    def _open_profile_manager(self):
+        """Open a dialog for managing profile order with drag-and-drop."""
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QListWidget, QPushButton, QLabel
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QIcon
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Manage Profiles")
+        dialog.setMinimumWidth(400)
+        dialog.setMinimumHeight(500)
+        
+        # Set icon
+        try:
+            icon_path = os.path.join(self.base_dir, 'Halgakos.ico')
+            if os.path.exists(icon_path):
+                dialog.setWindowIcon(QIcon(icon_path))
+        except:
+            pass
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Instructions
+        instructions = QLabel("Drag and drop profiles to reorder them:")
+        instructions.setStyleSheet("font-weight: bold; margin-bottom: 10px;")
+        layout.addWidget(instructions)
+        
+        # List widget with drag-and-drop
+        list_widget = QListWidget()
+        list_widget.setDragDropMode(QListWidget.InternalMove)
+        list_widget.addItems(list(self.prompt_profiles.keys()))
+        
+        # Select current profile
+        current_profile = self.profile_menu.currentText()
+        for i in range(list_widget.count()):
+            if list_widget.item(i).text() == current_profile:
+                list_widget.setCurrentRow(i)
+                break
+        
+        layout.addWidget(list_widget)
+        
+        # Button layout
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        
+        # Cancel button
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        button_layout.addWidget(cancel_btn)
+        
+        # Save button
+        save_btn = QPushButton("Save Order")
+        save_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
+        save_btn.clicked.connect(lambda: self._save_profile_order(list_widget, dialog))
+        button_layout.addWidget(save_btn)
+        
+        layout.addLayout(button_layout)
+        
+        dialog.exec()
+    
+    def _save_profile_order(self, list_widget, dialog):
+        """Save the new profile order from the list widget."""
+        # Get new order from list widget
+        new_order = []
+        for i in range(list_widget.count()):
+            new_order.append(list_widget.item(i).text())
+        
+        # Reorder profiles dictionary
+        new_profiles = {}
+        for name in new_order:
+            new_profiles[name] = self.prompt_profiles[name]
+        
+        # Update profiles
+        self.prompt_profiles = new_profiles
+        self.config['prompt_profiles'] = new_profiles
+        
+        # Get currently selected profile before refresh
+        current_profile = self.profile_menu.currentText()
+        
+        # Refresh combobox
+        self.profile_menu.blockSignals(True)
+        self.profile_menu.clear()
+        self.profile_menu.addItems(list(new_profiles.keys()))
+        self.profile_menu.setCurrentText(current_profile)
+        self.profile_menu.blockSignals(False)
+        
+        # Save changes
+        self.save_profiles()
+        
+        self.append_log("✓ Profile order updated")
+        dialog.accept()
     
     def _create_settings_section(self):
         """Create all settings controls"""
