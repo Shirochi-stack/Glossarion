@@ -948,7 +948,7 @@ def _create_danger_zone_section(self, parent):
     section_v.setContentsMargins(15, 15, 15, 15)
     section_v.setSpacing(10)
     
-    warning_lbl = QLabel("Reset all settings to default values. API keys will be preserved.")
+    warning_lbl = QLabel("Reset all settings to default values. API keys and profiles will be preserved.")
     warning_lbl.setStyleSheet("color: #ffa5a5; font-size: 10pt;")
     warning_lbl.setWordWrap(True)
     section_v.addWidget(warning_lbl)
@@ -997,13 +997,19 @@ def _create_danger_zone_section(self, parent):
             if 'google_cloud_credentials' in current_config:
                 keys_to_preserve['google_cloud_credentials'] = current_config['google_cloud_credentials']
             
+            # 9. Prompt Profiles
+            if 'prompt_profiles' in current_config:
+                keys_to_preserve['prompt_profiles'] = current_config['prompt_profiles']
+            if 'active_profile' in current_config:
+                keys_to_preserve['active_profile'] = current_config['active_profile']
+            
             # Show warning dialog
             msg = QMessageBox(getattr(self, '_other_settings_dialog', self))
             msg.setWindowTitle("Reset to Defaults")
             msg.setText("Are you sure you want to reset ALL settings to default values?")
             msg.setInformativeText(
                 "This will restart the application.\n\n"
-                "The following API keys will be PRESERVED:\n"
+                "The following will be PRESERVED:\n"
                 "• Main API Key\n"
                 "• Multi-API Keys\n"
                 "• Fallback Keys\n"
@@ -1011,8 +1017,9 @@ def _create_danger_zone_section(self, parent):
                 "• Azure Vision Key & Endpoint\n"
                 "• Azure Document Intelligence Key & Endpoint\n"
                 "• Google Vision Credentials Path\n"
-                "• Selected Model\n\n"
-                "All other settings (prompts, history limits, custom endpoints, etc.) will be lost."
+                "• Selected Model\n"
+                "• Prompt Profiles & Active Profile\n\n"
+                "All other settings (history limits, custom endpoints, etc.) will be lost."
             )
             msg.setIcon(QMessageBox.Warning)
             msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
