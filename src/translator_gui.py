@@ -2181,22 +2181,29 @@ Recent translations to summarize:
             "Chinese_html2text"
         ]
         
-        # Collect missing profiles that need to be added
-        missing_profiles = []
-        for profile_name in always_include_profiles:
-            if profile_name in self.default_prompts:
-                if profile_name not in self.prompt_profiles:
-                    # Store missing profile name to add at the top
-                    missing_profiles.append(profile_name)
-        
-        # If there are missing profiles, add them at the top in the defined order
-        if missing_profiles:
-            # Create new ordered dict with missing profiles first (in their priority order), then existing ones
+        # Add missing required profiles while preserving existing profile positions
+        if any(profile_name not in self.prompt_profiles 
+               for profile_name in always_include_profiles 
+               if profile_name in self.default_prompts):
+            
             new_profiles = {}
-            for profile_name in missing_profiles:
-                new_profiles[profile_name] = self.default_prompts[profile_name]
-            # Add all existing profiles after the required ones
-            new_profiles.update(self.prompt_profiles)
+            
+            # First pass: Add profiles from always_include_profiles in their priority order
+            # but only if they already exist in user's profiles (preserving their original position)
+            for profile_name in always_include_profiles:
+                if profile_name in self.default_prompts and profile_name in self.prompt_profiles:
+                    new_profiles[profile_name] = self.prompt_profiles[profile_name]
+            
+            # Second pass: Add any missing required profiles that weren't already in user's profiles
+            for profile_name in always_include_profiles:
+                if profile_name in self.default_prompts and profile_name not in self.prompt_profiles:
+                    new_profiles[profile_name] = self.default_prompts[profile_name]
+            
+            # Third pass: Add all other user profiles that aren't in the required list
+            for profile_name, profile_content in self.prompt_profiles.items():
+                if profile_name not in new_profiles:
+                    new_profiles[profile_name] = profile_content
+            
             self.prompt_profiles = new_profiles
         
         active = self.config.get('active_profile', next(iter(self.prompt_profiles)))
