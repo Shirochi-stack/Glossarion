@@ -70,9 +70,25 @@ class HistoryManager:
             import base64
             return {'_type': 'bytes', 'data': base64.b64encode(obj).decode('ascii')}
         elif isinstance(obj, dict):
-            return {k: self._make_json_serializable(v) for k, v in obj.items()}
+            cleaned = {}
+            for k, v in obj.items():
+                if v is None:
+                    continue  # drop nulls
+                serialized = self._make_json_serializable(v)
+                if serialized is None:
+                    continue
+                cleaned[k] = serialized
+            return cleaned
         elif isinstance(obj, list):
-            return [self._make_json_serializable(v) for v in obj]
+            cleaned_list = []
+            for v in obj:
+                if v is None:
+                    continue  # drop null entries
+                serialized = self._make_json_serializable(v)
+                if serialized is None:
+                    continue
+                cleaned_list.append(serialized)
+            return cleaned_list
         elif isinstance(obj, (str, int, float, bool, type(None))):
             # Primitive types are already serializable
             return obj
